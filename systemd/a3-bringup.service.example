@@ -1,0 +1,16 @@
+[Unit]
+Description=A3 arm ROS2 bringup (hardware + can bridge)
+After=network.target can-up.service
+Wants=can-up.service
+
+[Service]
+Type=simple
+User=cat
+WorkingDirectory=/home/cat/a3_arm_ws
+Environment=ROS_DOMAIN_ID=0
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash; source /home/cat/a3_arm_ws/install/setup.bash; ros2 launch a3_bringup a3_bringup.launch.py can0_name:=can0 use_power_sequence:=true use_teleop:=false use_rviz:=false'
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

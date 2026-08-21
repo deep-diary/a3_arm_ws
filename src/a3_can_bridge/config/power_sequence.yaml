@@ -1,0 +1,59 @@
+/**:
+  ros__parameters:
+    joy_topic: /joy
+    body_pose_topic: body_pose
+    cmd_vel_topic: cmd_vel
+    tx_topic: /can_tx_frames
+    gate_topic: /power_sequence/gate_open
+    state_topic: /power_sequence/state
+    command_topic: /power_sequence/command
+
+    can_tx_frames_qos_depth: 4000
+    motor_master_id: 253
+
+    # PS4: L1+R1 or Square long-press = start; L1+R1+Share = shutdown; Options = set_zero
+    # Circle/prone kept for API compatibility but unused for arm soft-home semantics
+    button_l1: 4
+    button_r1: 5
+    button_share: 8
+    button_circle: 1
+    button_square: 3
+    start_longpress_s: 1.0
+    shutdown_longpress_s: 1.0
+    prone_longpress_s: 0.8
+
+    track_body_pose_height: false
+    body_pose_stale_s: 2.0
+    track_z_clamp_min: -0.5
+    track_z_clamp_max: 0.5
+
+    timer_period_ms: 20
+    precheck_duration_s: 0.20
+    init_hold_duration_s: 0.35
+    # Arm: SoftStand/SoftProne durations kept short (no body-height ramp)
+    stand_duration_s: 0.50
+    prone_duration_s: 0.50
+    stand_z: 0.0
+    prone_z: 0.0
+
+    enable_remote_set_zero: true
+    button_option: 9
+    set_zero_longpress_s: 2.0
+    set_zero_event_topic: "/power_sequence/set_zero_event"
+    set_zero_repeat_count: 3
+    set_zero_repeat_interval_ms: 40
+
+    send_set_zero_in_startup: false
+    send_enable_in_startup: true
+    send_mit_zero_in_startup: true
+
+    enable_active_report_in_startup: true
+    enable_active_report_at_launch: true
+    active_report_boot_delay_s: 0.25
+    active_report_hz: 50.0
+    active_report_master_id: -1
+
+    init_kp: 80.0
+    init_kd: 2.0
+    init_velocity: 0.0
+    init_tau: 0.0

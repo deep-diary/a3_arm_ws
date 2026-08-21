@@ -1,0 +1,50 @@
+/**:
+  ros__parameters:
+    kp: 80.0
+    kd: 2.0
+    default_velocity: 0.0
+    default_tau_ff: 0.0
+    runtime_tune_topic: /mit_gains_cmd
+    tx_enable_can0: true
+    tx_enable_can1: false
+    enable_min_tx_refresh: true
+    min_tx_refresh_interval_s: 0.02
+    enable_max_tx_rate_limit: true
+    max_tx_rate_per_motor_hz: 200.0
+    can_tx_frames_qos_depth: 4000
+    enable_power_sequence_gate: true
+    power_sequence_gate_topic: /power_sequence/gate_open
+    publish_feedback_joint_states: true
+    feedback_joint_states_topic: /joint_states
+    feedback_joint_states_timer_hz: 50.0
+    publish_feedback_velocity_effort: true
+    feedback_joint_fill_nan: true
+    publish_motor_diagnostics: false
+    motor_diagnostics_topic: /diagnostics
+    enable_joint_tau_ff: false
+    gravity_ff_scale: 0.0
+    tau_ff_nominal_nm: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    enable_startup_smoothing: true
+    startup_smoothing_duration_s: 2.0
+    command_max_velocity_rad_s: 1.5
+    limit_velocity_only_during_smoothing: true
+    enable_mode_rising_smoothing: false
+    motor_enabled_mode_status: 2
+    enable_feedback_step_limit: false
+    feedback_step_limit_rad: 2.0
+    feedback_fresh_timeout_s: 0.30
+    use_joint_cmd_limits: true
+    joint_cmd_min_rad: [-2.79253, 0.0, -4.01426, -1.5708, -1.5708, -1.5708, -1.5708]
+    joint_cmd_max_rad: [2.79253, 3.66519, 0.0, 1.5708, 1.5708, 1.5708, 1.5708]
+    use_motor_domain_limits: true
+    derive_motor_limits_from_joint_cmd: true
+    joint_mit_min_rad: [-12.57, -12.57, -12.57, -12.57, -12.57, -12.57, -12.57]
+    joint_mit_max_rad: [12.57, 12.57, 12.57, 12.57, 12.57, 12.57, 12.57]
+    enable_rx_decode_log: true
+    prefer_joint_name_mapping: true
+    joint_signs: [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, 1.0]
+    expand_joint_offsets_from_mirror: false
+    joint_offset_hip_rad: 0.0
+    joint_offset_thigh_rad: 0.0
+    joint_offset_calf_rad: 0.0
+    joint_offsets_rad: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

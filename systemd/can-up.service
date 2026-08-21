@@ -1,0 +1,12 @@
+[Unit]
+Description=Bring up SocketCAN interfaces for A3 arm (RK3588)
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -lc 'for i in can0 can1; do ip link show "$i" >/dev/null 2>&1 || continue; ip link set "$i" down || true; ip link set "$i" type can bitrate 1000000 restart-ms 100; ip link set "$i" up; ip link set "$i" txqueuelen 1000 || true; done'
+
+[Install]
+WantedBy=multi-user.target

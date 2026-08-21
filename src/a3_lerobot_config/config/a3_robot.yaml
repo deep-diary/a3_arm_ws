@@ -1,0 +1,40 @@
+# LeRobot robot type stub for A3 (EDULITE structure, Lingzu motors)
+#
+# This is a configuration scaffold. Wire it into a Seeed/HF LeRobot fork after
+# the can bridge is stable on hardware. Observation/action dims = 7.
+
+robot:
+  type: a3_edulite
+  name: a3_arm
+  dof: 7
+  joint_names:
+    - L1_joint
+    - L2_joint
+    - L3_joint
+    - L4_joint
+    - L5_joint
+    - L6_joint
+    - L7_joint
+  # Motor IDs on SocketCAN can0
+  motor_ids: [1, 2, 3, 4, 5, 6, 7]
+  # Direction from EDULITE_A3 ros2_control xacro
+  joint_signs: [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, 1.0]
+  joint_limits_rad:
+    min: [-2.79253, 0.0, -4.01426, -1.5708, -1.5708, -1.5708, -1.5708]
+    max: [2.79253, 3.66519, 0.0, 1.5708, 1.5708, 1.5708, 1.5708]
+
+control:
+  # Prefer ROS2 bridge rather than MotorBridge on the RK3588 board
+  backend: ros2
+  joint_states_topic: /joint_states
+  joint_trajectory_topic: /a3/joint_trajectory
+  power_command_topic: /power_sequence/command
+  gate_topic: /power_sequence/gate_open
+
+cameras: []   # add wrist/base cams when hardware is ready
+
+calibration:
+  schema: a3_edulite_v1
+  notes: >
+    Run motor set_zero at mechanical home first (power_sequence set_zero),
+    then record LeRobot calibration offsets if needed.

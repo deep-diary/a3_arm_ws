@@ -1,0 +1,4 @@
+/**:
+  ros__parameters:
+    motor_ids_by_index: [1, 2, 3, 4, 5, 6, 7]
+    bus_by_index: [can0, can0, can0, can0, can0, can0, can0]
