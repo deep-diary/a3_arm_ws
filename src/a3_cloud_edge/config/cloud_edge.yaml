@@ -1,8 +1,11 @@
 /**:
   ros__parameters:
-    trajectory_topic: "/joint_group_effort_controller/joint_trajectory"
+    trajectory_topic: "/a3/planned_joint_trajectory"
+    output_trajectory_topic: "/joint_group_effort_controller/joint_trajectory"
     joint_states_topic: "/joint_states"
     joint_state_rate_hz: 50.0
+    gravity_ff_scale: 1.0
+    max_points: 32
     joint_names:
       - L1_joint
       - L2_joint

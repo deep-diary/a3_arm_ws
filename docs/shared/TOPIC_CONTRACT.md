@@ -8,7 +8,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 
 | 用途 | 类型 | 说明 |
 |------|------|------|
-| 轨迹命令 | `trajectory_msgs/JointTrajectory` | 含 `joint_names`、`points[]`（positions / velocities / effort + `time_from_start`） |
+| 轨迹命令 | `trajectory_msgs/JointTrajectory` | `joint_names`、`points[]`：`positions` 必填；`velocities` 由规划时间参数化填入（MoveIt TOTG）；`effort` 为开环重力补偿（Nm），与 `positions` 同一 URDF 关节系，**不**乘 `joint_signs`；另有 `time_from_start` |
 | 关节反馈 | `sensor_msgs/JointState` | position、velocity、effort（部分字段可为 NaN） |
 | 电源门控 | `std_msgs/Bool` | `true` 时允许轨迹执行 |
 | 电源命令 | `std_msgs/String` | `start` / `shutdown` / `set_zero` |
@@ -22,7 +22,8 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 
 | 话题 | 优先级 | 说明 |
 |------|--------|------|
-| `/joint_group_effort_controller/joint_trajectory` | 主 | `motor_protocol_node` 默认输入 |
+| `/joint_group_effort_controller/joint_trajectory` | 主 | 执行层默认输入（含 `effort` 重力补偿后） |
+| `/a3/planned_joint_trajectory` | 规划输出 | CloudEdge：MoveIt / 测试发布器 → 重力补偿节点 |
 | `/a3/joint_trajectory` | 桥接 | 测试与外部集成 |
 | `/rebotarm/joint_trajectory` | 桥接 | reBot 工具链输出 |
 

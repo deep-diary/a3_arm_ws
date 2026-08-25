@@ -22,8 +22,8 @@
 
 | ID | 需求 | 说明 |
 |----|------|------|
-| S1 | MoveIt 轨迹规划 | 碰撞检测、路径规划，输出 `JointTrajectory` |
-| S2 | 重力补偿（开环） | 规划阶段预计算 `effort`，写入轨迹点 |
+| S1 | MoveIt 轨迹规划 | 碰撞检测、路径规划，输出 `JointTrajectory`（含 `velocities`）；只 `plan` 不 `execute` | **implemented** |
+| S2 | 重力补偿（开环） | 规划阶段预计算 `effort=G(q)`，写入轨迹点 | **implemented** |
 | S3 | micro-ROS Agent | XRCE-DDS Agent，管理多 ESP32 Client |
 | S4 | 多臂 namespace | 每臂独立话题前缀，如 `/arm1/...` |
 | S5 | MCP 高层 API | 任务级接口（移动、抓取、归位等） |
@@ -124,6 +124,8 @@
 4. Mock client 重启后可重新建立 XRCE session
 5. **S11：** `traj_mode:=forward_dx delta_x_m:=0.10` 下发后，mock 日志含 `trajectory received`，ROS 2 侧 `joint_states` 从零位变化到 IK 目标附近（位置误差允许数厘米级，因 mock 只做关节插值、无真机）
 6. 同一 launch 以 `use_mock:=false` 启动时不拉起 Linux mock，仅 Agent + 轨迹发布，便于替换为 ESP32 Client
+7. **S1：** `use_moveit:=true` 时规划出一块 `JointTrajectory`（默认 TCP +X 0.10 m，失败可经 `ready`）；点含 `positions` 与非空 `velocities`；只发一次
+8. **S2：** 下发轨迹每个点 `effort.size == positions.size`；肩/肘 `|effort|` 明显非零；`gravity_ff_scale:=0` 时全 0
 
 完整真机验收（E 系列）见上文「验收标准」第 1–5 条。
 

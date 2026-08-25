@@ -37,15 +37,24 @@ source ~/a3_arm_ws/src/third_party/micro_ros_host/setup_microros.bash
 source ~/a3_arm_ws/install/setup.bash
 ```
 
+若 apt 未装 MoveIt（无 sudo 时），把 Humble 相关 deb 解压到工作区（不进 git）：
+
+```bash
+./src/a3_cloud_edge/scripts/setup_moveit_debs.sh
+source ~/a3_arm_ws/src/third_party/moveit_debs/setup.bash
+```
+
 ## 编译
 
 ```bash
 source /opt/ros/humble/setup.bash
 # 若已构建 micro_ros host：
 source ~/a3_arm_ws/src/third_party/micro_ros_host/setup_microros.bash
+# 若 MoveIt 来自 vendored debs：
+source ~/a3_arm_ws/src/third_party/moveit_debs/setup.bash
 
 cd ~/a3_arm_ws
-colcon build --symlink-install --packages-select a3_cloud_edge
+colcon build --symlink-install --packages-select a3_cloud_edge a3_moveit_config a3_description
 source install/setup.bash
 ```
 
@@ -57,30 +66,30 @@ colcon build --packages-select a3_cloud_edge --cmake-args -DBUILD_MICROROS_MOCK=
 
 ## 链路冒烟（推荐）
 
-默认发布「末端沿 `base_link` +X 前进 10 cm」的关节轨迹（`traj_mode:=forward_dx`），经 Agent 给 mock（模拟 ESP32），mock 插值后 50 Hz 回传 `/joint_states`。
+默认 **MoveIt 只规划**（TCP 沿 `base_link` +X 0.10 m）→ Pinocchio 写入 `effort` → Agent → mock。不经 ros2_control `execute`，也不走本机 SocketCAN。
 
 ```bash
 ros2 launch a3_cloud_edge cloud_edge_link_test.launch.py
-# 等价显式参数：
-# ros2 launch a3_cloud_edge cloud_edge_link_test.launch.py traj_mode:=forward_dx delta_x_m:=0.10
+# 显式：use_moveit:=true delta_x_m:=0.10
 ```
 
 另开终端验证：
 
 ```bash
-ros2 topic list
+ros2 topic echo /joint_group_effort_controller/joint_trajectory --once
+# 应有 velocities 与非空 effort
 ros2 topic hz /joint_states
-ros2 topic echo /joint_states --once
+ros2 topic echo /joint_states --once   # name 须为 L1_joint…
 ```
 
 **通过标准：**
 
-1. 可见 `/joint_states` 与 `/joint_group_effort_controller/joint_trajectory`
-2. `joint_states` 约 50 Hz
-3. 启动约 5 s 后测试轨迹发布；mock 日志含 `[mock] trajectory received`
-4. `joint_states.position` 从全零变化到目标关节角（非静止）
+1. 可见 `/joint_states`、`/a3/planned_joint_trajectory`、`/joint_group_effort_controller/joint_trajectory`
+2. 契约话题的点含 `velocities` 与 `effort`（肩/肘力矩非全 0）
+3. mock 日志含 `[mock] trajectory received`（点数 ≤ 32）
+4. `joint_states` 约 50 Hz，且 `position` 随轨迹变化
 
-正弦轨迹（旧冒烟）：`traj_mode:=sine`。
+不用 MoveIt、仅 PyKDL 位置轨迹：`use_moveit:=false traj_mode:=forward_dx`。正弦：`use_moveit:=false traj_mode:=sine`。关闭重力：`gravity_ff_scale:=0.0`（launch 里重力节点参数）。
 
 ### Mock → 真 ESP32 切换（同一套 ROS 2 节点）
 

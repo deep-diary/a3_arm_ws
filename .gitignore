@@ -39,3 +39,4 @@ id_ed25519
 # micro-ROS host build tree (~hundreds of MB, nested clones + install)
 # Copy via tar to RK3588 instead of committing; see docs/lessons_learned/LL-001
 src/third_party/micro_ros_host/
+src/third_party/moveit_debs/

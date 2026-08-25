@@ -133,7 +133,7 @@ def _duration(t_sec):
 class TrajectoryTestPublisher(Node):
     def __init__(self) -> None:
         super().__init__("trajectory_test_publisher")
-        self.declare_parameter("trajectory_topic", "/joint_group_effort_controller/joint_trajectory")
+        self.declare_parameter("trajectory_topic", "/a3/planned_joint_trajectory")
         self.declare_parameter("namespace_prefix", "")
         self.declare_parameter("delay_sec", 3.0)
         self.declare_parameter("duration_sec", 2.0)
