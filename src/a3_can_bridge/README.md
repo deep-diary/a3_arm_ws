@@ -18,3 +18,7 @@ IDs 1..7, joints L1_joint..L7_joint, signs from EDULITE_A3.
 ```bash
 IFACE=can0 MOTOR_IDS="1" bash $(ros2 pkg prefix a3_can_bridge)/share/a3_can_bridge/scripts/a3_motor_cansend.sh check
 ```
+
+## Documentation
+
+A3 Edge 主线 CAN 栈，架构见 [docs/edge/ARCHITECTURE.md](../../docs/edge/ARCHITECTURE.md)。

@@ -2,6 +2,18 @@
 
 ROS 2 workspace implementing: **EDULITE_A3 structure/URDF** + **reBot toolchain shell** + **trotbot RK3588/SocketCAN/MIT/PS4 platform**.
 
+## 两条产品线
+
+本工作区（**A3 Arm Platform**）支持两种部署形态，详见 [docs/README.md](docs/README.md)：
+
+| 产品线 | 代号 | 说明 | 状态 |
+|--------|------|------|------|
+| **A3 Edge** | `edge` | RK3588 + SocketCAN，ROS 2 全栈在板上（**主线**） | 当前生产/开发 |
+| **A3 CloudEdge** | `cloud_edge` | 内网服务器 + ESP32-S3 CAN 桥（薄边缘） | 规划/演进 |
+
+- Edge 架构：[docs/edge/ARCHITECTURE.md](docs/edge/ARCHITECTURE.md)
+- CloudEdge 架构：[docs/cloud_edge/ARCHITECTURE.md](docs/cloud_edge/ARCHITECTURE.md)
+
 ## Layout
 
 ```
@@ -15,7 +27,7 @@ a3_arm_ws/
     a3_lerobot_config/    # LeRobot robot-type scaffold
     third_party/          # junctions to ../a3_arm_vendor
   systemd/                # can-up + bringup examples
-  docs/
+  docs/                   # 双产品线文档（见 docs/README.md）
 a3_arm_vendor/            # cloned reBot software (sibling directory)
   reBotArm_control_py/
   reBotArmController_ROS2/
@@ -25,7 +37,7 @@ a3_arm_vendor/            # cloned reBot software (sibling directory)
 
 Use **WSL2 Ubuntu 22.04 + ROS 2 Humble** for mock/MoveIt before flashing the board:
 
-- Step-by-step for another agent or human: [`docs/WSL2_SETUP.md`](docs/WSL2_SETUP.md)
+- Step-by-step: [`docs/dev/WSL2_SETUP.md`](docs/dev/WSL2_SETUP.md)
 
 ## Build (on RK3588 / Ubuntu 22.04 + Humble)
 
@@ -38,10 +50,10 @@ colcon build --symlink-install --packages-select \
 source install/setup.bash
 ```
 
-## Run
+## Run (A3 Edge 主线)
 
 ```bash
-# 1) CAN up (see docs/PLATFORM_CAN.md)
+# 1) CAN up (see docs/edge/PLATFORM_CAN.md)
 sudo systemctl start can-up.service
 
 # 2) Hardware stack
@@ -50,6 +62,8 @@ ros2 launch a3_bringup a3_bringup.launch.py can0_name:=can0 use_teleop:=true use
 # 3) Optional: print reBot topic contract
 ros2 run a3_bringup rebot_remap_info
 ```
+
+Quick start checklist: [docs/edge/QUICKSTART.md](docs/edge/QUICKSTART.md)
 
 ## reBot software location
 
@@ -69,3 +83,4 @@ Wire reBot planning/teleop outputs through `a3_bringup/trajectory_bridge` into `
 - Soft limits in `a3_can_bridge/config/control_gains.yaml`
 - Trajectory blocked until `/power_sequence/gate_open` is true
 - PS4 Triangle or L1+R1+Share → shutdown
+- 完整安全原则：[docs/shared/SAFETY.md](docs/shared/SAFETY.md)
