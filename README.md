@@ -25,6 +25,7 @@ a3_arm_ws/
     a3_bringup/           # launch + trajectory bridge to reBot topics
     a3_teleop_ps4/        # PS4 start/shutdown/set_zero + joint jog
     a3_lerobot_config/    # LeRobot robot-type scaffold
+    a3_cloud_edge/        # CloudEdge: micro-ROS Agent launch + mock client
     third_party/          # junctions to ../a3_arm_vendor
   systemd/                # can-up + bringup examples
   docs/                   # 双产品线文档（见 docs/README.md）
@@ -46,7 +47,7 @@ source /opt/ros/humble/setup.bash
 cd ~/a3_arm_ws
 rosdep install --from-paths src --ignore-src -r -y
 colcon build --symlink-install --packages-select \
-  a3_description a3_can_bridge a3_bringup a3_teleop_ps4 a3_moveit_config a3_lerobot_config
+  a3_description a3_can_bridge a3_bringup a3_teleop_ps4 a3_moveit_config a3_lerobot_config a3_cloud_edge
 source install/setup.bash
 ```
 
@@ -64,6 +65,22 @@ ros2 run a3_bringup rebot_remap_info
 ```
 
 Quick start checklist: [docs/edge/QUICKSTART.md](docs/edge/QUICKSTART.md)
+
+## Run (A3 CloudEdge Linux 链路)
+
+```bash
+# 安装 Agent（一次性）
+sudo apt install ros-humble-micro-ros-agent
+
+# 构建 mock client 依赖（一次性，见 docs/cloud_edge/QUICKSTART.md）
+./src/a3_cloud_edge/scripts/setup_microros_host.sh
+source src/third_party/micro_ros_host/setup_microros.bash
+
+# 链路冒烟
+ros2 launch a3_cloud_edge cloud_edge_link_test.launch.py
+```
+
+详见 [docs/cloud_edge/QUICKSTART.md](docs/cloud_edge/QUICKSTART.md)。ESP32 固件在外部 [xiaozhi-esp32/deep-dog](https://github.com/deep-diary/xiaozhi-esp32) 仓库实现。
 
 ## reBot software location
 

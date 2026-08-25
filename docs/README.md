@@ -25,9 +25,14 @@
 
 **当前默认开发路径：** A3 Edge。CloudEdge 为演进支线，见 [cloud_edge/ROADMAP.md](cloud_edge/ROADMAP.md)。
 
+## 智能体入口
+
+跨仓职责、WSL/Windows 绝对路径、外置固件提示词模板见仓库根目录 **[AGENT.md](../AGENT.md)**（固件在 Windows、本仓库在 WSL 时必读）。
+
 ## 文档导航
 
 ```
+AGENT.md                      ← 智能体协作（仓库根）
 docs/
 ├── README.md                 ← 本页
 ├── shared/                   两线共用契约
@@ -42,7 +47,11 @@ docs/
 ├── cloud_edge/               A3 CloudEdge 支线
 │   ├── REQUIREMENTS.md
 │   ├── ARCHITECTURE.md
+│   ├── QUICKSTART.md
 │   └── ROADMAP.md
+├── lessons_learned/          踩坑备忘（换机参考）
+│   ├── README.md
+│   └── LL-*.md
 └── dev/
     └── WSL2_SETUP.md         开发环境（两线共用）
 ```
@@ -68,15 +77,18 @@ docs/
 
 | 文档 | 说明 |
 |------|------|
-| [cloud_edge/REQUIREMENTS.md](cloud_edge/REQUIREMENTS.md) | 云端薄边缘需求 |
+| [../AGENT.md](../AGENT.md) | 本仓 vs 外置固件职责、路径、阶段 A 提示词 |
+| [cloud_edge/REQUIREMENTS.md](cloud_edge/REQUIREMENTS.md) | 云端薄边缘需求（含 ESP32 阶段 A/B） |
 | [cloud_edge/ARCHITECTURE.md](cloud_edge/ARCHITECTURE.md) | 服务器 + ESP32 架构 |
 | [cloud_edge/ROADMAP.md](cloud_edge/ROADMAP.md) | 分阶段落地路线 |
+| [cloud_edge/QUICKSTART.md](cloud_edge/QUICKSTART.md) | Linux Agent + mock client 链路测试 |
 
 ### 开发环境
 
 | 文档 | 说明 |
 |------|------|
 | [dev/WSL2_SETUP.md](dev/WSL2_SETUP.md) | WSL2 + Humble mock/MoveIt 搭建 |
+| [lessons_learned/README.md](lessons_learned/README.md) | 踩坑与换机备忘索引 |
 
 ### 包内文档
 

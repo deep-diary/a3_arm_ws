@@ -110,13 +110,36 @@ sequenceDiagram
 | `a3_bringup/trajectory_bridge` | 使用 | 服务器侧可选 |
 | `a3_teleop_ps4` | 板载 | 可改为网络遥操作（慢速模式） |
 
-## 未来代码布局（规划）
+## 代码布局
 
 ```
-firmware/
-  cloud_edge/          # ESP32-S3 固件
 src/
-  a3_cloud_edge/       # 可选：服务器 Agent 桥接节点
+  a3_cloud_edge/       # Linux 端：Agent launch、mock client、测试轨迹发布
+```
+
+**ESP32-S3 固件（外置，不在本仓库）：**
+
+- 本地：`D:\working\dev\xiaozhi-esp32\main\boards\deep-dog`
+- 远程：[deep-diary/xiaozhi-esp32](https://github.com/deep-diary/xiaozhi-esp32)
+
+开发期可用本仓库 `microros_mock_client` 替代 ESP32，经同一 Agent 验证 XRCE 链路；真机就绪后替换 Client 即可。
+
+## Linux 链路验证架构
+
+```mermaid
+flowchart LR
+    subgraph a3_arm_ws [本仓库 Linux]
+        TestPub["trajectory_test_publisher"]
+        Agent["micro-ROS Agent"]
+        Mock["microros_mock_client"]
+        TestPub -->|"JointTrajectory"| Agent
+        Agent -->|"joint_states"| TestPub
+        Agent <-->|"XRCE UDP"| Mock
+    end
+    subgraph external [外置固件 后续]
+        ESP["deep-dog ESP32 Client"]
+    end
+    Agent -.-> ESP
 ```
 
 ## 与 A3 Edge 的差异

@@ -1,0 +1,13 @@
+/**:
+  ros__parameters:
+    trajectory_topic: "/joint_group_effort_controller/joint_trajectory"
+    joint_states_topic: "/joint_states"
+    joint_state_rate_hz: 50.0
+    joint_names:
+      - L1_joint
+      - L2_joint
+      - L3_joint
+      - L4_joint
+      - L5_joint
+      - L6_joint
+      - L7_joint

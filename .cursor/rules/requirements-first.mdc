@@ -1,0 +1,30 @@
+---
+description: 新功能实现前必须先更新需求文档
+alwaysApply: true
+---
+
+# 需求先行
+
+实现任何**新功能**前，必须先更新或新增需求文档，再写代码。
+
+## 文档落点
+
+| 范围 | 路径 |
+|------|------|
+| A3 Edge | `docs/edge/REQUIREMENTS.md` |
+| A3 CloudEdge | `docs/cloud_edge/REQUIREMENTS.md` |
+| 跨线契约 | `docs/shared/`（如 `TOPIC_CONTRACT.md`、`SAFETY.md`） |
+| 外置固件 | 外部仓库 `swrs/` + 本仓库 CloudEdge E 系列条目 |
+
+## 需求条目格式
+
+每条需求包含：**ID**（如 S7、E9）、**说明**、**验收标准**、**关联文档**。
+
+实现完成后在需求文档标注实现状态（如 `implemented`、`外置固件`）。
+
+## 工作流
+
+1. 在 `docs/<产品线>/REQUIREMENTS.md` 追加需求 ID 与验收标准
+2. 若涉及话题/安全契约，同步更新 `docs/shared/`
+3. 再创建或修改 `src/` 代码（固件在外部仓库时不改本仓库固件目录）
+4. 补充 `QUICKSTART` 或包内 `README` 中的验证步骤

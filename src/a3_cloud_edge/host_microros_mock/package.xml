@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>a3_microros_mock</name>
+  <version>0.1.0</version>
+  <description>micro-ROS mock client (rclc, built in host overlay)</description>
+  <maintainer email="dev@example.com">a3_arm</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rcl</depend>
+  <depend>rclc</depend>
+  <depend>trajectory_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>micro_ros_utilities</depend>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
