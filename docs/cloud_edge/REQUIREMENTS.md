@@ -29,9 +29,10 @@
 | S5 | MCP 高层 API | 任务级接口（移动、抓取、归位等） |
 | S6 | 关节状态汇聚 | 订阅各臂 `joint_states`，供规划与监控 |
 | S7 | Agent launch | `a3_cloud_edge` 提供 micro-ROS Agent launch（UDP 8888 可配置） | **implemented** |
-| S8 | 测试轨迹发布 | 按 [TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md) 发布 `JointTrajectory` | **implemented** |
+| S8 | 测试轨迹发布 | 按 [TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md) 发布 `JointTrajectory`（正弦 / 末端 +X Δx） | **implemented** |
 | S9 | Linux mock client | `microros_mock_client` 经 Agent 订阅轨迹、50 Hz 发布 `joint_states` | **implemented** |
 | S10 | 链路冒烟 launch | `cloud_edge_link_test.launch.py` 一键 Agent + Mock + 测试发布 | **implemented** |
+| S11 | 末端前进 Δx 链路验证 | 默认沿 `base_link` +X 前进 0.10 m；mock 插值反馈，ROS 2 能收到变化的 `joint_states`；`use_mock:=false` 可换成 ESP32 | **implemented** |
 
 ### ESP32-S3 侧（外置固件，见 [QUICKSTART.md](QUICKSTART.md)）
 
@@ -121,6 +122,8 @@
 2. `ros2 topic hz /joint_states` ≈ 50 Hz
 3. 测试轨迹发布后 `joint_states.position` 随时间变化
 4. Mock client 重启后可重新建立 XRCE session
+5. **S11：** `traj_mode:=forward_dx delta_x_m:=0.10` 下发后，mock 日志含 `trajectory received`，ROS 2 侧 `joint_states` 从零位变化到 IK 目标附近（位置误差允许数厘米级，因 mock 只做关节插值、无真机）
+6. 同一 launch 以 `use_mock:=false` 启动时不拉起 Linux mock，仅 Agent + 轨迹发布，便于替换为 ESP32 Client
 
 完整真机验收（E 系列）见上文「验收标准」第 1–5 条。
 

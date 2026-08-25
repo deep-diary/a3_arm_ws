@@ -11,6 +11,7 @@
   <depend>trajectory_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>micro_ros_utilities</depend>
+  <depend>rmw_microxrcedds</depend>
   <export>
     <build_type>ament_cmake</build_type>
   </export>

@@ -20,7 +20,16 @@ cd ~/a3_arm_ws
 ./src/a3_cloud_edge/scripts/setup_microros_host.sh
 ```
 
-成功后会在 `src/third_party/micro_ros_host/install` 生成 overlay。每次新终端需：
+**要不要重跑这个脚本？**
+
+| 情况 | 要不要跑 |
+|------|----------|
+| 本机还没有 `src/third_party/micro_ros_host/`（首次、换机、清过目录） | **必须跑**（首次可达十几分钟到数十分钟） |
+| Agent / host RMW / mock 二进制已在，只是新开终端做链路测试 | **不必重跑**，只 `source` overlay |
+| 改了 `host_microros_mock/` 源码 | 再跑一次即可（脚本会复制源码并重编 mock；不必重编 Agent） |
+| 只改了 `a3_cloud_edge` 的 launch / Python 测试节点 | `colcon build --packages-select a3_cloud_edge`，不必跑 setup |
+
+成功后会在 `src/third_party/micro_ros_host/` 生成 overlay。每次新终端需：
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -48,8 +57,12 @@ colcon build --packages-select a3_cloud_edge --cmake-args -DBUILD_MICROROS_MOCK=
 
 ## 链路冒烟（推荐）
 
+默认发布「末端沿 `base_link` +X 前进 10 cm」的关节轨迹（`traj_mode:=forward_dx`），经 Agent 给 mock（模拟 ESP32），mock 插值后 50 Hz 回传 `/joint_states`。
+
 ```bash
 ros2 launch a3_cloud_edge cloud_edge_link_test.launch.py
+# 等价显式参数：
+# ros2 launch a3_cloud_edge cloud_edge_link_test.launch.py traj_mode:=forward_dx delta_x_m:=0.10
 ```
 
 另开终端验证：
@@ -64,7 +77,24 @@ ros2 topic echo /joint_states --once
 
 1. 可见 `/joint_states` 与 `/joint_group_effort_controller/joint_trajectory`
 2. `joint_states` 约 50 Hz
-3. 启动后数秒，测试轨迹发布，`position` 字段随时间变化
+3. 启动约 5 s 后测试轨迹发布；mock 日志含 `[mock] trajectory received`
+4. `joint_states.position` 从全零变化到目标关节角（非静止）
+
+正弦轨迹（旧冒烟）：`traj_mode:=sine`。
+
+### Mock → 真 ESP32 切换（同一套 ROS 2 节点）
+
+Linux mock 与 ESP32 Client **订阅/发布同一对话题**。联测时停掉 mock、换上板端节点即可：
+
+```bash
+# 1) 只起 Agent + 轨迹发布（不启动 microros_mock_client）
+ros2 launch a3_cloud_edge cloud_edge_link_test.launch.py use_mock:=false
+
+# 2) ESP32 固件连接「可达的」Agent IP:8888（不要用 127.0.0.1）
+# 3) 确认 ros2 topic hz /joint_states ≈ 50 Hz 后来自板端
+```
+
+详见下文「外置 ESP32 固件对接」。
 
 ## 仅启动 Agent
 
@@ -108,8 +138,11 @@ ros2 launch a3_cloud_edge cloud_edge_demo.launch.py
 |------|------|
 | mock client 启动失败 | 确认已 `source` micro_ros host overlay |
 | 无 `joint_states` | 检查 Agent 是否运行；mock client 日志是否连上 127.0.0.1:8888 |
+| `joint_states` 关节名不是 `L1_joint` | 本机其它机器人占用同一 `ROS_DOMAIN_ID`（默认 0）。看 `name` 字段，或统一换 domain（Agent 与 ROS 2 须相同） |
+| `rclc_take` 刷屏 | XRCE 空 take 噪声，只要随后有 `[mock] trajectory received` 且 `joint_states` 在跟踪即可 |
 | `rclc_take` / 轨迹收不到 | 缩小 `JointTrajectory`（少点数、勿填 vel/effort）；mock 需预分配消息缓冲 |
-| `micro_ros_agent` 找不到 | `sudo apt install ros-humble-micro-ros-agent` |
+| `micro_ros_agent` 找不到 | `sudo apt install ros-humble-micro-ros-agent`，或再跑 setup 脚本 |
+| rosdep / sudo 要密码 | 脚本会把 `libasio-dev`、`libncurses-dev` 解压到 `src/third_party/micro_ros_host/deps/`，无需 sudo |
 | 端口占用 | `port:=8889` 并同步 mock client 的 `agent_port` 参数 |
 
 ## 关联文档

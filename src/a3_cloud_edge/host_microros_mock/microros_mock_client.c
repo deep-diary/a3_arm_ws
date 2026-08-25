@@ -1,10 +1,14 @@
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "rcl/rcl.h"
 #include "rclc/rclc.h"
 #include "rclc/executor.h"
+#include "rmw_microros/rmw_microros.h"
+#include "rosidl_runtime_c/string_functions.h"
 #include "sensor_msgs/msg/joint_state.h"
 #include "trajectory_msgs/msg/joint_trajectory.h"
 #include "micro_ros_utilities/type_utilities.h"
@@ -99,8 +103,14 @@ static void traj_callback(const void * msgin)
   rcl_clock_get_now(g_clock, &g_traj_start_ns);
   g_has_traj = true;
   printf(
-    "[mock] trajectory received: %zu points, duration=%.3fs, L1=%.4f\n",
-    g_traj.count, g_traj.times[g_traj.count - 1], g_traj.positions[0][0]);
+    "[mock] trajectory received: %zu points, duration=%.3fs, "
+    "start=[%.4f %.4f %.4f] end=[%.4f %.4f %.4f]\n",
+    g_traj.count,
+    g_traj.times[g_traj.count - 1],
+    g_traj.positions[0][0], g_traj.positions[0][1], g_traj.positions[0][2],
+    g_traj.positions[g_traj.count - 1][0],
+    g_traj.positions[g_traj.count - 1][1],
+    g_traj.positions[g_traj.count - 1][2]);
   fflush(stdout);
 }
 
@@ -109,11 +119,13 @@ static void timer_callback(rcl_timer_t * timer, int64_t last_call_time)
   (void)timer;
   (void)last_call_time;
 
+  rcl_time_point_value_t now_ns = 0;
+  rcl_clock_get_now(g_clock, &now_ns);
   if (g_has_traj) {
-    rcl_time_point_value_t now_ns = 0;
-    rcl_clock_get_now(g_clock, &now_ns);
     sample_at_time((now_ns - g_traj_start_ns) * 1e-9);
   }
+  g_js->header.stamp.sec = (int32_t)(now_ns / 1000000000LL);
+  g_js->header.stamp.nanosec = (uint32_t)(now_ns % 1000000000LL);
 
   (void)rcl_publish(g_pub, g_js, NULL);
 }
@@ -149,9 +161,44 @@ static bool allocate_trajectory_msg(trajectory_msgs__msg__JointTrajectory * msg)
 int main(int argc, const char * const * argv)
 {
   rcl_allocator_t allocator = rcl_get_default_allocator();
+
+  const char * agent_ip = getenv("XRCE_AGENT_IP");
+  const char * agent_port = getenv("XRCE_AGENT_PORT");
+  if (agent_ip == NULL || agent_ip[0] == '\0') {
+    agent_ip = "127.0.0.1";
+  }
+  if (agent_port == NULL || agent_port[0] == '\0') {
+    agent_port = "8888";
+  }
+
+  rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
+  RCCHECK(rcl_init_options_init(&init_options, allocator));
+  rmw_init_options_t * rmw_options = rcl_init_options_get_rmw_init_options(&init_options);
+  if (rmw_uros_options_set_udp_address(agent_ip, agent_port, rmw_options) != RMW_RET_OK) {
+    printf("[mock] rmw_uros_options_set_udp_address failed (%s:%s)\n", agent_ip, agent_port);
+    return 1;
+  }
+  printf("[mock] Agent %s:%s\n", agent_ip, agent_port);
+  fflush(stdout);
+
   rclc_support_t support;
-  RCCHECK(rclc_support_init(&support, argc, argv, &allocator));
+  RCCHECK(rclc_support_init_with_options(&support, argc, argv, &init_options, &allocator));
   g_clock = &support.clock;
+
+  {
+    int ping_tries = 0;
+    while (rmw_uros_ping_agent(1000, 1) != RMW_RET_OK) {
+      ++ping_tries;
+      if (ping_tries > 30) {
+        printf("[mock] Agent ping timeout\n");
+        return 1;
+      }
+      printf("[mock] waiting for Agent (%d)\n", ping_tries);
+      fflush(stdout);
+    }
+    printf("[mock] Agent ping ok\n");
+    fflush(stdout);
+  }
 
   rcl_node_t node;
   RCCHECK(rclc_node_init_default(&node, "microros_mock_client", "", &support));
