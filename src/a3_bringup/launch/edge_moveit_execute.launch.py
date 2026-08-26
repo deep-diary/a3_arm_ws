@@ -16,9 +16,9 @@ def generate_launch_description():
     use_gravity = LaunchConfiguration("use_gravity")
     use_ik = LaunchConfiguration("use_ik")
     run_demo = LaunchConfiguration("run_demo")
-    urdf = os.path.join(
-        get_package_share_directory("a3_description"), "urdf", "el_a3.urdf"
-    )
+    use_rviz = LaunchConfiguration("use_rviz")
+    desc_share = get_package_share_directory("a3_description")
+    urdf = os.path.join(desc_share, "urdf", "el_a3.urdf")
 
     with open(urdf, "r", encoding="utf-8") as f:
         robot_description = f.read()
@@ -29,6 +29,11 @@ def generate_launch_description():
             DeclareLaunchArgument("use_gravity", default_value="true"),
             DeclareLaunchArgument("use_ik", default_value="true"),
             DeclareLaunchArgument("run_demo", default_value="false"),
+            DeclareLaunchArgument(
+                "use_rviz",
+                default_value="false",
+                description="启动 RViz（el_a3_view.rviz）；无屏/脚本验收保持 false",
+            ),
             Node(
                 package="robot_state_publisher",
                 executable="robot_state_publisher",
@@ -75,6 +80,14 @@ def generate_launch_description():
                         condition=IfCondition(run_demo),
                     )
                 ],
+            ),
+            Node(
+                package="rviz2",
+                executable="rviz2",
+                name="rviz2",
+                arguments=["-d", os.path.join(desc_share, "config", "el_a3_view.rviz")],
+                condition=IfCondition(use_rviz),
+                output="screen",
             ),
         ]
     )

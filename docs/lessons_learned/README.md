@@ -11,10 +11,13 @@
 LL-NNN-short-slug.md
 ```
 
-模板见 [TEMPLATE.md](TEMPLATE.md)。
+模板见 [TEMPLATE.md](TEMPLATE.md)。智能体在**确认修复后**按仓库规则 `.cursor/rules/lessons-learned.mdc` 自动补条目并更新本表。
+
+写入时：现象写可检索的报错原文关键词；根因写「为什么」不是「改了哪一行」；正确做法必须是换机可执行的命令。
 
 ## 索引
 
 | ID | 标题 | 产品线 | 日期 |
 |----|------|--------|------|
 | [LL-001](LL-001-microros-host-setup.md) | micro-ROS Agent / host 构建慢、apt 不可用、XRCE 消息缓冲 | CloudEdge | 2026-08-25 |
+| [LL-002](LL-002-edge-sim-rviz-moveit-env.md) | Edge 仿真 RViz / MoveIt demo：HDMI、colcon overlay、缺包 | Edge | 2026-08-26 |

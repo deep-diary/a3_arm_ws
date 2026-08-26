@@ -6,9 +6,8 @@ Launches MoveIt motion planning interface (simulation mode)
 
 import os
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, RegisterEventHandler, TimerAction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction
 from launch.conditions import IfCondition
-from launch.event_handlers import OnProcessStart
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterValue
@@ -195,6 +194,30 @@ def generate_launch_description():
         ],
     )
 
+    # .rviz Window Geometry 只能写死宽高；真正最大化靠 wmctrl（无则静默跳过）
+    maximize_rviz = TimerAction(
+        period=4.0,
+        actions=[
+            ExecuteProcess(
+                cmd=[
+                    "bash",
+                    "-lc",
+                    (
+                        "command -v wmctrl >/dev/null 2>&1 || exit 0; "
+                        "for n in rviz2 RViz rviz; do "
+                        'wmctrl -r "$n" -b add,maximized_vert,maximized_horz && exit 0; '
+                        "done; "
+                        "wid=$(wmctrl -l | awk 'tolower($0) ~ /rviz/ {print $1; exit}'); "
+                        '[ -n "$wid" ] && wmctrl -i -r "$wid" '
+                        "-b add,maximized_vert,maximized_horz || true"
+                    ),
+                ],
+                output="log",
+            )
+        ],
+        condition=IfCondition(use_rviz),
+    )
+
     nodes = [
         static_tf_node,
         robot_state_publisher_node,
@@ -202,6 +225,7 @@ def generate_launch_description():
         delay_spawners,
         move_group_node,
         rviz_node,
+        maximize_rviz,
     ]
 
     return LaunchDescription(declared_arguments + nodes)

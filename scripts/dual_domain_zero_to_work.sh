@@ -4,6 +4,7 @@
 set -eo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONNOUSERSITE=1
 # shellcheck disable=SC1091
 set +u
 source /opt/ros/humble/setup.bash
@@ -28,7 +29,7 @@ trap cleanup EXIT
 echo "[dual] Edge DOMAIN=${EDGE_DOMAIN}, CloudEdge DOMAIN=${CE_DOMAIN}, duration=${DURATION}s"
 
 export ROS_DOMAIN_ID="${EDGE_DOMAIN}"
-ros2 launch a3_bringup edge_sim_wave_a.launch.py duration_s:="${DURATION}" \
+ros2 launch a3_bringup edge_sim_wave_a.launch.py duration_s:="${DURATION}" use_rviz:=false \
   >"${LOG_DIR}/edge.log" 2>&1 &
 PIDS+=($!)
 

@@ -2,7 +2,8 @@
 
 > **Status:** completed (simulation)  
 > **更新日期：** 2026-08-26  
-> **环境：** WSL2 · Ubuntu · ROS 2 Humble · **Pinocchio 4.0.0**（`ros-humble-pinocchio`）· 无真机 SocketCAN  
+> **环境：** LubanCat aarch64 · Ubuntu 22.04 · ROS 2 Humble · **Pinocchio 4.0.0**（`ros-humble-pinocchio`）· 无真机 SocketCAN  
+> **复跑：** 2026-08-26 `./scripts/verify_wave_a_sim.sh` 全绿（`PYTHONNOUSERSITE=1` 避开用户环境 NumPy 2）  
 > **依据：** [CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md) Wave A（C2/C1/C3）· [edge/REQUIREMENTS.md](../edge/REQUIREMENTS.md) F6–F8  
 > **一键复跑：** `./scripts/verify_wave_a_sim.sh`
 
@@ -25,7 +26,7 @@
 ## 3. 命令
 
 ```bash
-cd ~/dev/a3_arm_ws
+cd ~/a3_arm_ws
 source /opt/ros/humble/setup.bash && source install/setup.bash
 
 # 依赖（一次）：sudo apt install -y ros-humble-pinocchio
@@ -33,8 +34,8 @@ source /opt/ros/humble/setup.bash && source install/setup.bash
 # 全量验收
 ./scripts/verify_wave_a_sim.sh
 
-# 单链路 Edge
-ros2 launch a3_bringup edge_sim_wave_a.launch.py duration_s:=3.0
+# 单链路 Edge（接显示器加 use_rviz:=true）
+ros2 launch a3_bringup edge_sim_wave_a.launch.py duration_s:=3.0 use_rviz:=true
 
 # 双 domain（Edge=10, CloudEdge-style=20；均为 ROS_DOMAIN_ID）
 ./scripts/dual_domain_zero_to_work.sh

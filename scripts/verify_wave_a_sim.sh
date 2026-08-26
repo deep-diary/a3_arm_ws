@@ -3,6 +3,8 @@
 set -eo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# User pip NumPy 2.x breaks ros-humble-pinocchio (built vs NumPy 1.x).
+export PYTHONNOUSERSITE=1
 # shellcheck disable=SC1091
 set +u
 source /opt/ros/humble/setup.bash
@@ -19,10 +21,13 @@ pass() { echo "PASS: $*" | tee -a "${REPORT_SNIP}"; }
 fail() { echo "FAIL: $*" | tee -a "${REPORT_SNIP}"; exit 1; }
 
 echo "=== 0. Pinocchio import ==="
-python3 - <<'PY' | tee -a "${REPORT_SNIP}"
+if ! python3 - <<'PY' | tee -a "${REPORT_SNIP}"
 import pinocchio as pin
 print(f"pinocchio {pin.__version__} OK")
 PY
+then
+  fail "import pinocchio failed (need ros-humble-pinocchio; if NumPy 2 is in ~/.local, keep PYTHONNOUSERSITE=1)"
+fi
 
 DOMAIN=55
 export ROS_DOMAIN_ID="${DOMAIN}"
@@ -33,7 +38,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "=== 1. Edge sim launch (DOMAIN=${DOMAIN}) ==="
-ros2 launch a3_bringup edge_sim_wave_a.launch.py duration_s:=3.0 \
+ros2 launch a3_bringup edge_sim_wave_a.launch.py duration_s:=3.0 use_rviz:=false \
   >"${LOG_DIR}/verify_edge.log" 2>&1 &
 PIDS+=($!)
 

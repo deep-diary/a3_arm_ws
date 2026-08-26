@@ -173,13 +173,13 @@ CloudEdge mock（`a3_cloud_edge`）已按「收稀疏轨迹 + 本地按时间插
 | | A3 Edge 生产 | reBot 真机 | reBot 仿真 |
 |--|--------------|------------|------------|
 | 入口 | 话题 → `motor_protocol_node` | `FollowJointTrajectory` Action | ros2_control JTC |
-| 多点时间跟踪 | ❌ 只用 `points.front().positions` | ✅ 驱动内按时间推进 | ✅ JTC 样条插值 |
-| 证据 | [`motor_protocol_node.cpp`](../../src/a3_can_bridge/src/motor_protocol_node.cpp) `OnTrajectory` | `HardwareManager` / Action | `joint_trajectory_controller` |
+| 多点时间跟踪 | ✅ `trajectory_interpolator` 按 `time_from_start` 采样 | ✅ 驱动内按时间推进 | ✅ JTC 样条插值 |
+| 证据 | [`trajectory_interpolator.hpp`](../../src/a3_can_bridge/include/a3_can_bridge/trajectory_interpolator.hpp) + `OnTrajectory` | `HardwareManager` / Action | `joint_trajectory_controller` |
 
 ```mermaid
 flowchart LR
-  subgraph a3now [A3 Edge 现状]
-    P1[稀疏或单点轨迹] --> F["points.front() 一步到位"] --> CAN1[MIT]
+  subgraph a3now [A3 Edge]
+    P1[稀疏多点轨迹] --> F["trajectory_interpolator 按时间采样"] --> CAN1[MIT]
   end
   subgraph rebot [reBot 真机]
     P2[Action 多点] --> HM[按时间跟踪] --> CAN2[电机]
@@ -189,7 +189,7 @@ flowchart LR
   end
 ```
 
-**规划含义：** Wave A 的 **C2 是对齐 reBot 的硬前置**——没有整轨时间跟踪，C1 真机 MoveIt Execute 也无法正确跑多点规划结果。CAN「200 Hz」仅是发送限流，**不等于**已做轨迹插值。
+**规划含义（已落地）：** C2 整轨时间跟踪是对齐 reBot 的硬前置——没有它，C1 真机 MoveIt Execute 也无法正确跑多点规划结果。CAN「200 Hz」仅是发送限流，**不等于**已做轨迹插值。仿真验收：`./scripts/verify_wave_a_sim.sh`。
 
 ### L3 — 模型与运动学（MoveIt IK vs Pinocchio）
 

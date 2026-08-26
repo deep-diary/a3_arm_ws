@@ -7,10 +7,12 @@
 
 ```bash
 source /opt/ros/humble/setup.bash
-source ~/dev/a3_arm_ws/install/setup.bash
+source ~/a3_arm_ws/install/setup.bash
+
+./scripts/verify_wave_b_sim.sh   # 推荐全量
 
 # 统一执行栈 + 画矩形 demo
-ros2 launch a3_bringup edge_moveit_execute.launch.py use_sim:=true run_demo:=true
+ros2 launch a3_bringup edge_moveit_execute.launch.py use_sim:=true run_demo:=true use_rviz:=true
 
 # FollowJointTrajectory（另开终端，栈已起）
 ros2 action send_goal /arm_controller/follow_joint_trajectory \
