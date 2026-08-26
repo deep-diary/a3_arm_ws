@@ -68,11 +68,31 @@ class SimExecutor(Node):
         if not msg.points:
             self.get_logger().warn("Empty trajectory ignored")
             return
+
+        streaming = len(msg.points) == 1 and len(msg.joint_names) <= 6
+
         with self._lock:
+            if streaming:
+                if self._traj is not None and len(self._traj.points) > 1 and self._traj_start is not None:
+                    elapsed = (self.get_clock().now() - self._traj_start).nanoseconds * 1e-9
+                    _pos, _vel, _eff, finished = sample_joint_trajectory(
+                        self._traj, elapsed, self._interp_method
+                    )
+                    if not finished:
+                        return
+                names = list(msg.joint_names)
+                pos = list(msg.points[0].positions)
+                self._positions = self._map_to_fixed(names, pos)
+                if msg.points[0].velocities:
+                    self._velocities = self._map_to_fixed(
+                        names, list(msg.points[0].velocities)
+                    )
+                self._traj = None
+                self._traj_start = None
+                return
+
             self._traj = msg
             self._traj_start = self.get_clock().now()
-            # Apply t=0 immediately so a one-shot partial traj (e.g. L7 gripper)
-            # is not lost if a 50 Hz Servo command replaces `_traj` before the timer.
             pos, vel, _eff, _fin = sample_joint_trajectory(
                 msg, 0.0, self._interp_method
             )

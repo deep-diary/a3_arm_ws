@@ -53,11 +53,9 @@ class Ps4Mapper(Node):
         self._exec = ActionExecutor(self, twist_frame=twist_frame)
         self._exec.speed_scale = float(mapping.get("speed_normal", 0.35))
         self._joy: Optional[Joy] = None
-        self._joy_ticks = 0
-        self._input_armed = False
-        self._warmup_ticks = int(mapping.get("joy_warmup_ticks", 30))
-        self._dpad_arm_ticks = int(mapping.get("dpad_arm_ticks", 15))
-        self._dpad_calm_ticks = 0
+        self._joy_received_at = 0.0
+        self._joy_alive_ticks = 0
+        self._joy_alive_threshold = int(mapping.get("joy_alive_ticks", 25))
         self._extra: Dict[str, float] = {}
         deadman_cfg = mapping.get("deadman") or {}
         self._deadman_enabled = bool(deadman_cfg.get("enabled", True))
@@ -69,6 +67,7 @@ class Ps4Mapper(Node):
             self.get_logger().info("deadman disabled — axes active without L1")
         self._auto_servo = bool(self.get_parameter("auto_start_servo").value)
         self._gyro_scale = float(self.get_parameter("gyro_scale").value)
+        self._servo_started = False
 
         self.create_subscription(
             Joy, str(self.get_parameter("joy_topic").value), self._on_joy, 10
@@ -79,7 +78,6 @@ class Ps4Mapper(Node):
         rate = float(self.get_parameter("rate_hz").value)
         self._dt = 1.0 / max(rate, 1.0)
         self.create_timer(self._dt, self._on_timer)
-        self.create_timer(1.0, self._on_servo_retry)
         self.get_logger().info(
             f"ps4_mapper ready mapping={self.get_parameter('mapping_file').value} "
             f"twist_frame={twist_frame}"
@@ -87,6 +85,7 @@ class Ps4Mapper(Node):
 
     def _on_joy(self, msg: Joy) -> None:
         self._joy = msg
+        self._joy_received_at = self.get_clock().now().nanoseconds * 1e-9
 
     def _on_imu(self, msg: Imu) -> None:
         s = max(self._gyro_scale, 1e-3)
@@ -98,32 +97,28 @@ class Ps4Mapper(Node):
         self._extra["touch_x"] = _clamp(float(msg.x))
         self._extra["touch_y"] = _clamp(float(msg.y))
 
-    def _on_servo_retry(self) -> None:
-        if self._auto_servo:
-            self._exec.try_start_servo()
+    def _joy_ready(self) -> bool:
+        return self._joy is not None and self._joy_alive_ticks >= self._joy_alive_threshold
+
+    def _maybe_start_servo(self) -> None:
+        if not self._auto_servo or self._servo_started or not self._joy_ready():
+            return
+        if self._exec.try_start_servo():
+            self._servo_started = True
+            self.get_logger().info("servo started after joy became ready")
 
     def _on_timer(self) -> None:
-        if self._joy is None:
-            return
-        self._joy_ticks += 1
-        joy = self._joy
-        if not self._input_armed:
-            if self._joy_ticks < self._warmup_ticks:
-                return
-            if self._dpad_centered(joy):
-                self._dpad_calm_ticks += 1
-            else:
-                self._dpad_calm_ticks = 0
-                self._edges.reset()
-            if self._dpad_calm_ticks < self._dpad_arm_ticks:
-                return
-            self._input_armed = True
-            self._edges.reset()
-            self.get_logger().info(
-                f"joy input armed after {self._joy_ticks} ticks "
-                f"(warmup={self._warmup_ticks}, dpad_calm={self._dpad_arm_ticks})"
-            )
         now = self.get_clock().now().nanoseconds * 1e-9
+        if self._joy is None or (now - self._joy_received_at) > 1.0:
+            self._joy_alive_ticks = 0
+            return
+
+        self._joy_alive_ticks += 1
+        if not self._joy_ready():
+            return
+
+        self._maybe_start_servo()
+        joy = self._joy
         deadman_pressed = self._layout.button(joy, self._deadman_name)
         motion_allowed = (not self._deadman_enabled) or deadman_pressed
         self._exec.tick_begin()
@@ -177,13 +172,6 @@ class Ps4Mapper(Node):
                 self._exec.apply_discrete(str(spec.get("fn")), kwargs)
 
         self._exec.tick_end(now, motion_allowed and not pose_block, self._dt)
-
-    def _dpad_centered(self, joy: Joy) -> bool:
-        th = 0.35
-        for axis in ("dpad_x", "dpad_y"):
-            if abs(self._layout.axis_raw(joy, axis)) > th:
-                return False
-        return True
 
 
 def _clamp(v: float) -> float:

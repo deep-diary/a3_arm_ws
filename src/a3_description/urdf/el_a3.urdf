@@ -256,110 +256,36 @@
     <child link="end_effector"/>
   </joint>
 
-  <!-- Joint L7 + mimic parallel fingers (L7=0 open, L7=pi/2 closed) -->
+  <!-- Joint L7 (EL05 Motor 7 - Gripper, separate kinematic branch) -->
   <joint name="L7_joint" type="revolute">
     <origin xyz="0 0 -0.074" rpy="0 0 0"/>
     <parent link="l5_l6_urdf_asm"/>
     <child link="gripper_link"/>
     <axis xyz="0 0 1"/>
-    <limit effort="6.0" velocity="50" lower="0" upper="1.5708"/>
+    <limit effort="6.0" velocity="50" lower="-1.5708" upper="1.5708"/>
     <dynamics damping="0.05" friction="0.05"/>
   </joint>
 
   <link name="gripper_link">
     <inertial>
-      <mass value="0.01"/>
+      <mass value="0.05"/>
       <origin xyz="0 0 0"/>
-      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
-    </inertial>
-  </link>
-
-  <link name="gripper_palm_link">
-    <inertial>
-      <mass value="0.02"/>
-      <origin xyz="0 0 0"/>
-      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+      <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
     </inertial>
     <visual>
-      <origin xyz="0 0 -0.0755" rpy="3.14159 0 0"/>
+      <origin xyz="0 0 -0.0015" rpy="3.14159 0 0"/>
       <geometry>
-        <box size="0.028 0.012 0.018"/>
-      </geometry>
-      <material name="dark_brown"/>
-    </visual>
-    <collision>
-      <origin xyz="0 0 -0.0755" rpy="3.14159 0 0"/>
-      <geometry>
-        <box size="0.028 0.012 0.018"/>
-      </geometry>
-    </collision>
-  </link>
-
-  <joint name="gripper_palm_joint" type="fixed">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <parent link="l5_l6_urdf_asm"/>
-    <child link="gripper_palm_link"/>
-  </joint>
-
-  <link name="left_finger_link">
-    <inertial>
-      <mass value="0.015"/>
-      <origin xyz="0 0 0"/>
-      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
-    </inertial>
-    <visual>
-      <origin xyz="0 0 -0.0755" rpy="3.14159 0 0"/>
-      <geometry>
-        <box size="0.010 0.014 0.038"/>
+        <mesh filename="package://a3_description/meshes/jaw.stl"/>
       </geometry>
       <material name="orange"/>
     </visual>
     <collision>
-      <origin xyz="0 0 -0.0755" rpy="3.14159 0 0"/>
+      <origin xyz="0 0 -0.0015" rpy="3.14159 0 0"/>
       <geometry>
-        <box size="0.010 0.014 0.038"/>
+        <mesh filename="package://a3_description/meshes/jaw.stl"/>
       </geometry>
     </collision>
   </link>
-
-  <joint name="left_finger_joint" type="prismatic">
-    <origin xyz="0 0.022 0" rpy="0 0 0"/>
-    <parent link="l5_l6_urdf_asm"/>
-    <child link="left_finger_link"/>
-    <axis xyz="0 -1 0"/>
-    <limit effort="20" velocity="0.05" lower="0" upper="0.022"/>
-    <mimic joint="L7_joint" multiplier="0.01401" offset="0"/>
-  </joint>
-
-  <link name="right_finger_link">
-    <inertial>
-      <mass value="0.015"/>
-      <origin xyz="0 0 0"/>
-      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
-    </inertial>
-    <visual>
-      <origin xyz="0 0 -0.0755" rpy="3.14159 0 0"/>
-      <geometry>
-        <box size="0.010 0.014 0.038"/>
-      </geometry>
-      <material name="orange"/>
-    </visual>
-    <collision>
-      <origin xyz="0 0 -0.0755" rpy="3.14159 0 0"/>
-      <geometry>
-        <box size="0.010 0.014 0.038"/>
-      </geometry>
-    </collision>
-  </link>
-
-  <joint name="right_finger_joint" type="prismatic">
-    <origin xyz="0 -0.022 0" rpy="0 0 0"/>
-    <parent link="l5_l6_urdf_asm"/>
-    <child link="right_finger_link"/>
-    <axis xyz="0 1 0"/>
-    <limit effort="20" velocity="0.05" lower="0" upper="0.022"/>
-    <mimic joint="L7_joint" multiplier="0.01401" offset="0"/>
-  </joint>
 
   <!-- ros2_control (mock hardware for visualization) -->
   <ros2_control name="RsA3System" type="system">

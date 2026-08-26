@@ -10,15 +10,15 @@ speed_normal: 1.0
 # Twist 参考系（ps4_mapper 参数 twist_frame 可覆盖）
 twist_frame: base_link
 
-# 手柄连上后 D-pad 轴常抖动，需预热 + 十字键回中再接受姿态切换
-joy_warmup_ticks: 30
-dpad_arm_ticks: 15
+# 收到 /joy 并稳定约 0.5s 后才开始映射（无手柄时不发任何指令）
+joy_alive_ticks: 25
 
 axes:
   # 右摇杆：基座系左右 / 上下
   right_x:
     fn: servo_lin_y
     kind: analog_n11
+    invert: true
   right_y:
     fn: servo_lin_z
     kind: analog_n11

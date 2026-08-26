@@ -26,8 +26,8 @@ JOINTS = [
     "L6_joint",
     "L7_joint",
 ]
-GRIPPER_OPEN = 0.0
-GRIPPER_CLOSE = 1.5708
+GRIPPER_OPEN = 1.5708
+GRIPPER_CLOSE = 0.0
 L6_MIN = -1.5708
 L6_MAX = 1.5708
 
@@ -105,6 +105,11 @@ class ActionExecutor:
         self._pose_busy_until = 0.0
         self._pending_pose: Optional[str] = None
         self._pending_since = 0.0
+        self._last_goto_pose: Optional[str] = None
+        self._last_goto_time = 0.0
+        self._goto_min_interval = float(
+            node.declare_parameter("named_pose_min_interval_s", 3.0).value
+        )
         self._stopped = False
         self._servo_started = False
 
@@ -267,8 +272,12 @@ class ActionExecutor:
         now = self._n.get_clock().now().nanoseconds * 1e-9
         if self._pending_pose is not None or now < self._pose_busy_until:
             return
+        if now - self._last_goto_time < self._goto_min_interval:
+            return
         self._pending_pose = name
         self._pending_since = now
+        self._last_goto_pose = name
+        self._last_goto_time = now
         self._servo_pause()
         self._publish_twist(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         self._n.get_logger().info(f"goto_named_pose queued: {name}")
@@ -334,16 +343,16 @@ class ActionExecutor:
 
     def set_joint_L6(self, v: float) -> None:
         v = max(0.0, min(1.0, float(v)))
-        if v < 0.02:
+        if v < 0.08:
             return
         q = L6_MIN + v * (L6_MAX - L6_MIN)
         self._publish_single_joint("L6_joint", q, "_last_l6_sent")
 
     def set_joint_L7(self, v: float) -> None:
         v = max(0.0, min(1.0, float(v)))
-        if v < 0.02:
+        if v < 0.08:
             return
-        q = GRIPPER_OPEN + v * (GRIPPER_CLOSE - GRIPPER_OPEN)
+        q = GRIPPER_CLOSE + v * (GRIPPER_OPEN - GRIPPER_CLOSE)
         self._gripper = q
         dbg = Float32()
         dbg.data = v

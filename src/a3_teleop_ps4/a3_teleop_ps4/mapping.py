@@ -38,6 +38,10 @@ class Ds4Layout:
         self.virtual_buttons: Dict[str, Dict[str, Any]] = dict(
             cfg.get("virtual_buttons") or {}
         )
+        self._virt_held: Dict[str, bool] = {}
+
+    def reset_virtual_buttons(self) -> None:
+        self._virt_held.clear()
 
     def axis_raw(self, joy: Joy, name: str, extra: Optional[Dict[str, float]] = None) -> float:
         if extra and name in extra:
@@ -77,13 +81,27 @@ class Ds4Layout:
         spec = self.virtual_buttons[name]
         axis = str(spec.get("axis", ""))
         v = self.axis_raw(joy, axis)
-        th = float(spec.get("threshold", 0.5))
+        th_on = float(spec.get("threshold", 0.5))
+        th_off = float(spec.get("release_threshold", abs(th_on) * 0.6))
         op = str(spec.get("op", "gt"))
+        held = self._virt_held.get(name, False)
         if op == "lt":
-            return v < th
-        if op == "abs_gt":
-            return abs(v) > abs(th)
-        return v > th
+            if not held and v < th_on:
+                held = True
+            elif held and v > -th_off:
+                held = False
+        elif op == "abs_gt":
+            if not held and abs(v) > abs(th_on):
+                held = True
+            elif held and abs(v) < abs(th_off):
+                held = False
+        else:
+            if not held and v > th_on:
+                held = True
+            elif held and v < th_off:
+                held = False
+        self._virt_held[name] = held
+        return held
 
 
 def analog_01_from_axis(
