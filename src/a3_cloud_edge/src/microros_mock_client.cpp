@@ -118,21 +118,36 @@ private:
     const auto & p1 = points[idx + 1];
     const double t0 = duration_to_sec(p0.time_from_start);
     const double t1 = duration_to_sec(p1.time_from_start);
-    const double alpha = (t1 > t0) ? (elapsed - t0) / (t1 - t0) : 0.0;
-
-    interpolate_fields(p0, p1, alpha);
+    const double dt = t1 - t0;
+    const double u = (dt > 1e-12) ? (elapsed - t0) / dt : 0.0;
+    interpolate_fields(p0, p1, u, dt);
   }
 
   void apply_point(const trajectory_msgs::msg::JointTrajectoryPoint & pt)
   {
-  interpolate_fields(pt, pt, 0.0);
+    interpolate_fields(pt, pt, 0.0, 1.0);
+  }
+
+  static double at_or(const std::vector<double> & v, size_t i, double fb = 0.0)
+  {
+    return i < v.size() ? v[i] : fb;
   }
 
   void interpolate_fields(
     const trajectory_msgs::msg::JointTrajectoryPoint & p0,
     const trajectory_msgs::msg::JointTrajectoryPoint & p1,
-    double alpha)
+    double u,
+    double dt)
   {
+    const bool has_v = !p0.velocities.empty() && !p1.velocities.empty();
+    const bool has_a = !p0.accelerations.empty() && !p1.accelerations.empty();
+    const char * method = "linear";
+    if (has_v && has_a) {
+      method = "quintic";
+    } else if (has_v) {
+      method = "cubic";
+    }
+
     const auto & names = active_traj_.joint_names;
     for (size_t i = 0; i < joint_names_.size(); ++i) {
       size_t src = i;
@@ -143,17 +158,55 @@ private:
         }
         src = static_cast<size_t>(std::distance(names.begin(), it));
       }
-
-      auto lerp = [&](const std::vector<double> & a, const std::vector<double> & b, double & out) {
-        if (src < a.size() && src < b.size()) {
-          out = a[src] + alpha * (b[src] - a[src]);
-        } else if (src < a.size()) {
-          out = a[src];
-        }
-      };
-
-      lerp(p0.positions, p1.positions, positions_[i]);
-      lerp(p0.velocities, p1.velocities, velocities_[i]);
+      const double qp0 = at_or(p0.positions, src);
+      const double qp1 = at_or(p1.positions, src, qp0);
+      const double v0 = at_or(p0.velocities, src);
+      const double v1 = at_or(p1.velocities, src);
+      const double a0 = at_or(p0.accelerations, src);
+      const double a1 = at_or(p1.accelerations, src);
+      double p = qp0;
+      double v = 0.0;
+      const double uu = std::clamp(u, 0.0, 1.0);
+      if (std::string(method) == "linear" || dt <= 1e-12) {
+        p = qp0 + uu * (qp1 - qp0);
+        v = (dt > 1e-12) ? (qp1 - qp0) / dt : 0.0;
+      } else if (std::string(method) == "cubic") {
+        const double u2 = uu * uu;
+        const double u3 = u2 * uu;
+        const double h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
+        const double h10 = u3 - 2.0 * u2 + uu;
+        const double h01 = -2.0 * u3 + 3.0 * u2;
+        const double h11 = u3 - u2;
+        p = h00 * qp0 + h10 * (dt * v0) + h01 * qp1 + h11 * (dt * v1);
+        const double dh00 = 6.0 * u2 - 6.0 * uu;
+        const double dh10 = 3.0 * u2 - 4.0 * uu + 1.0;
+        const double dh01 = -6.0 * u2 + 6.0 * uu;
+        const double dh11 = 3.0 * u2 - 2.0 * uu;
+        v = (dh00 * qp0 + dh10 * (dt * v0) + dh01 * qp1 + dh11 * (dt * v1)) / dt;
+      } else {
+        const double u2 = uu * uu;
+        const double u3 = u2 * uu;
+        const double u4 = u3 * uu;
+        const double u5 = u4 * uu;
+        const double h0 = 1.0 - 10.0 * u3 + 15.0 * u4 - 6.0 * u5;
+        const double h1 = uu - 6.0 * u3 + 8.0 * u4 - 3.0 * u5;
+        const double h2 = 0.5 * u2 - 1.5 * u3 + 1.5 * u4 - 0.5 * u5;
+        const double h3 = 0.5 * u3 - u4 + 0.5 * u5;
+        const double h4 = -4.0 * u3 + 7.0 * u4 - 3.0 * u5;
+        const double h5 = 10.0 * u3 - 15.0 * u4 + 6.0 * u5;
+        p = h0 * qp0 + h1 * (dt * v0) + h2 * (dt * dt * a0) +
+          h3 * (dt * dt * a1) + h4 * (dt * v1) + h5 * qp1;
+        const double dh0 = -30.0 * u2 + 60.0 * u3 - 30.0 * u4;
+        const double dh1 = 1.0 - 18.0 * u2 + 32.0 * u3 - 15.0 * u4;
+        const double dh2 = uu - 4.5 * u2 + 6.0 * u3 - 2.5 * u4;
+        const double dh3 = 1.5 * u2 - 4.0 * u3 + 2.5 * u4;
+        const double dh4 = -12.0 * u2 + 28.0 * u3 - 15.0 * u4;
+        const double dh5 = 30.0 * u2 - 60.0 * u3 + 30.0 * u4;
+        v = (dh0 * qp0 + dh1 * (dt * v0) + dh2 * (dt * dt * a0) +
+          dh3 * (dt * dt * a1) + dh4 * (dt * v1) + dh5 * qp1) / dt;
+      }
+      positions_[i] = p;
+      velocities_[i] = v;
     }
   }
 

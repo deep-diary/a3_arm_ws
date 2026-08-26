@@ -21,6 +21,7 @@
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_msgs/msg/u_int8_multi_array.hpp"
+#include "std_srvs/srv/trigger.hpp"
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
 #include "a3_can_bridge/arm_mapper.hpp"
 #include "a3_can_bridge/frame_codec.hpp"
@@ -35,6 +36,7 @@ using sensor_msgs::msg::JointState;
 using std_msgs::msg::Bool;
 using std_msgs::msg::String;
 using std_msgs::msg::UInt8MultiArray;
+using std_srvs::srv::Trigger;
 
 namespace a3_can_bridge
 {
@@ -215,6 +217,13 @@ public:
       "enable_trajectory_interpolation", true);
     trajectory_interp_rate_hz_ = this->declare_parameter<double>(
       "trajectory_interp_rate_hz", 200.0);
+    traj_interp_method_ = ParseTrajInterpMethod(
+      this->declare_parameter<std::string>("trajectory_interpolation_method", "auto"));
+    zero_torque_kp_ = this->declare_parameter<double>("zero_torque_kp", 0.0);
+    zero_torque_kd_ = this->declare_parameter<double>("zero_torque_kd", 1.0);
+    control_mode_topic_ = this->declare_parameter<std::string>(
+      "control_mode_topic", "/a3/control_mode");
+    zero_torque_active_ = false;
 
     traj_sub_ = this->create_subscription<JointTrajectory>(
       "/joint_group_effort_controller/joint_trajectory", rclcpp::SensorDataQoS(),
@@ -240,6 +249,54 @@ public:
       enable_gravity_compensation_ ? 1 : 0,
       gravity_compensation_topic_.c_str(),
       gravity_ff_scale_);
+
+    control_mode_pub_ = this->create_publisher<String>(control_mode_topic_, 10);
+    control_mode_sub_ = this->create_subscription<String>(
+      control_mode_topic_, 10,
+      [this](const String::SharedPtr msg) {
+        if (!msg) {
+          return;
+        }
+        last_control_mode_ = msg->data;
+      });
+    zero_torque_start_srv_ = this->create_service<Trigger>(
+      "/a3/zero_torque/start",
+      [this](const std::shared_ptr<Trigger::Request>, std::shared_ptr<Trigger::Response> resp) {
+        if (last_control_mode_ == "TRAJ_RUNNING" || last_control_mode_ == "SERVO") {
+          resp->success = false;
+          resp->message = "rejected: mode=" + last_control_mode_;
+          return;
+        }
+        if (!zero_torque_active_) {
+          saved_kp_can0_ = runtime_kp_can0_;
+          saved_kp_can1_ = runtime_kp_can1_;
+          saved_kd_can0_ = runtime_kd_can0_;
+          saved_kd_can1_ = runtime_kd_can1_;
+        }
+        runtime_kp_can0_ = Clamp(zero_torque_kp_, ProtocolCodec::kKpMin, ProtocolCodec::kKpMax);
+        runtime_kp_can1_ = runtime_kp_can0_;
+        runtime_kd_can0_ = Clamp(zero_torque_kd_, ProtocolCodec::kKdMin, ProtocolCodec::kKdMax);
+        runtime_kd_can1_ = runtime_kd_can0_;
+        zero_torque_active_ = true;
+        enable_gravity_compensation_ = true;
+        PublishControlMode("ZERO_TORQUE");
+        resp->success = true;
+        resp->message = "ZERO_TORQUE on (soft kp + gravity FF)";
+      });
+    zero_torque_stop_srv_ = this->create_service<Trigger>(
+      "/a3/zero_torque/stop",
+      [this](const std::shared_ptr<Trigger::Request>, std::shared_ptr<Trigger::Response> resp) {
+        if (zero_torque_active_) {
+          runtime_kp_can0_ = saved_kp_can0_;
+          runtime_kp_can1_ = saved_kp_can1_;
+          runtime_kd_can0_ = saved_kd_can0_;
+          runtime_kd_can1_ = saved_kd_can1_;
+          zero_torque_active_ = false;
+          PublishControlMode("IDLE");
+        }
+        resp->success = true;
+        resp->message = "ZERO_TORQUE off";
+      });
 
     if (enable_trajectory_interpolation_ && trajectory_interp_rate_hz_ > 1e-3) {
       const int64_t period_ns = static_cast<int64_t>(1e9 / trajectory_interp_rate_hz_);
@@ -478,6 +535,12 @@ private:
         "Ignore trajectory: power gate closed");
       return;
     }
+    if (zero_torque_active_ || last_control_mode_ == "SERVO") {
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *this->get_clock(), 2000,
+        "Ignore trajectory: mode zero_torque/SERVO");
+      return;
+    }
 
     if (enable_trajectory_interpolation_) {
       std::lock_guard<std::mutex> lock(traj_mutex_);
@@ -526,7 +589,9 @@ private:
     std::vector<double> velocities;
     std::vector<double> effort;
     bool finished = false;
-    if (!SampleJointTrajectory(traj_copy, elapsed, positions, velocities, effort, finished)) {
+    if (!SampleJointTrajectory(
+        traj_copy, elapsed, positions, velocities, effort, finished, traj_interp_method_))
+    {
       return;
     }
 
@@ -782,6 +847,24 @@ private:
     RCLCPP_WARN(this->get_logger(), "Power sequence gate changed: gate_open=%d", power_gate_open_ ? 1 : 0);
     if (!power_gate_open_) {
       last_tx_pub_stamp_ns_.fill(0);
+      if (zero_torque_active_) {
+        runtime_kp_can0_ = saved_kp_can0_;
+        runtime_kp_can1_ = saved_kp_can1_;
+        runtime_kd_can0_ = saved_kd_can0_;
+        runtime_kd_can1_ = saved_kd_can1_;
+        zero_torque_active_ = false;
+        PublishControlMode("IDLE");
+      }
+    }
+  }
+
+  void PublishControlMode(const std::string & mode)
+  {
+    last_control_mode_ = mode;
+    String out;
+    out.data = mode;
+    if (control_mode_pub_) {
+      control_mode_pub_->publish(out);
     }
   }
 
@@ -1367,6 +1450,16 @@ private:
 
   bool enable_trajectory_interpolation_{true};
   double trajectory_interp_rate_hz_{200.0};
+  TrajInterpMethod traj_interp_method_{TrajInterpMethod::Auto};
+  bool zero_torque_active_{false};
+  double zero_torque_kp_{0.0};
+  double zero_torque_kd_{1.0};
+  double saved_kp_can0_{30.0};
+  double saved_kp_can1_{30.0};
+  double saved_kd_can0_{1.5};
+  double saved_kd_can1_{1.5};
+  std::string control_mode_topic_;
+  std::string last_control_mode_{"IDLE"};
   std::mutex traj_mutex_;
   JointTrajectory active_traj_;
   rclcpp::Time traj_start_{0, 0, RCL_ROS_TIME};
@@ -1377,6 +1470,10 @@ private:
   rclcpp::Subscription<String>::SharedPtr tune_sub_;
   rclcpp::Subscription<Bool>::SharedPtr gate_sub_;
   rclcpp::Subscription<JointState>::SharedPtr gravity_sub_;
+  rclcpp::Subscription<String>::SharedPtr control_mode_sub_;
+  rclcpp::Publisher<String>::SharedPtr control_mode_pub_;
+  rclcpp::Service<Trigger>::SharedPtr zero_torque_start_srv_;
+  rclcpp::Service<Trigger>::SharedPtr zero_torque_stop_srv_;
   rclcpp::Publisher<UInt8MultiArray>::SharedPtr tx_pub_;
   rclcpp::Publisher<String>::SharedPtr feedback_pub_;
   rclcpp::Publisher<JointState>::SharedPtr feedback_joint_states_pub_;

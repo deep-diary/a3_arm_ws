@@ -7,59 +7,10 @@ import threading
 from typing import List, Optional
 
 import rclpy
+from a3_bringup.trajectory_spline import sample_joint_trajectory
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-
-
-def _duration_to_sec(d) -> float:
-    return float(d.sec) + float(d.nanosec) * 1e-9
-
-
-def sample_joint_trajectory(
-    traj: JointTrajectory, elapsed_s: float
-) -> tuple[List[float], List[float], List[float], bool]:
-    """Linear interpolate positions/velocities/effort. Returns (pos, vel, eff, finished)."""
-    points = traj.points
-    if not points:
-        return [], [], [], True
-
-    t_end = _duration_to_sec(points[-1].time_from_start)
-    if elapsed_s >= t_end:
-        pt = points[-1]
-        return list(pt.positions), list(pt.velocities), list(pt.effort), True
-
-    idx = 0
-    while idx + 1 < len(points) and elapsed_s > _duration_to_sec(
-        points[idx + 1].time_from_start
-    ):
-        idx += 1
-
-    if idx + 1 >= len(points):
-        pt = points[-1]
-        return list(pt.positions), list(pt.velocities), list(pt.effort), True
-
-    p0 = points[idx]
-    p1 = points[idx + 1]
-    t0 = _duration_to_sec(p0.time_from_start)
-    t1 = _duration_to_sec(p1.time_from_start)
-    alpha = (elapsed_s - t0) / (t1 - t0) if t1 > t0 else 0.0
-
-    def lerp(a: List[float], b: List[float]) -> List[float]:
-        n = max(len(a), len(b))
-        out = []
-        for i in range(n):
-            va = a[i] if i < len(a) else 0.0
-            vb = b[i] if i < len(b) else va
-            out.append(va + alpha * (vb - va))
-        return out
-
-    return (
-        lerp(list(p0.positions), list(p1.positions)),
-        lerp(list(p0.velocities), list(p1.velocities)),
-        lerp(list(p0.effort), list(p1.effort)),
-        False,
-    )
+from trajectory_msgs.msg import JointTrajectory
 
 
 class SimExecutor(Node):
@@ -70,6 +21,7 @@ class SimExecutor(Node):
         )
         self.declare_parameter("joint_states_topic", "/joint_states")
         self.declare_parameter("rate_hz", 50.0)
+        self.declare_parameter("trajectory_interpolation_method", "auto")
         self.declare_parameter(
             "joint_names",
             [
@@ -85,6 +37,9 @@ class SimExecutor(Node):
 
         self._joint_names: List[str] = list(
             self.get_parameter("joint_names").get_parameter_value().string_array_value
+        )
+        self._interp_method = str(
+            self.get_parameter("trajectory_interpolation_method").value
         )
         self._positions = [0.0] * len(self._joint_names)
         self._velocities = [0.0] * len(self._joint_names)
@@ -105,7 +60,8 @@ class SimExecutor(Node):
         self._timer = self.create_timer(period, self._on_timer)
 
         self.get_logger().info(
-            f"a3_sim_executor ready: sub={traj_topic} pub={js_topic} @ {rate_hz} Hz"
+            f"a3_sim_executor ready: sub={traj_topic} pub={js_topic} @ {rate_hz} Hz "
+            f"interp={self._interp_method}"
         )
 
     def _on_traj(self, msg: JointTrajectory) -> None:
@@ -137,7 +93,9 @@ class SimExecutor(Node):
         with self._lock:
             if self._traj is not None and self._traj_start is not None:
                 elapsed = (self.get_clock().now() - self._traj_start).nanoseconds * 1e-9
-                pos, vel, eff, finished = sample_joint_trajectory(self._traj, elapsed)
+                pos, vel, eff, finished = sample_joint_trajectory(
+                    self._traj, elapsed, self._interp_method
+                )
                 names = list(self._traj.joint_names)
                 self._positions = self._map_to_fixed(names, pos)
                 if vel:

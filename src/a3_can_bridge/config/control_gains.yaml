@@ -36,6 +36,10 @@
     gravity_joint_scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     enable_trajectory_interpolation: true
     trajectory_interp_rate_hz: 200.0
+    trajectory_interpolation_method: auto
+    zero_torque_kp: 0.0
+    zero_torque_kd: 1.0
+    control_mode_topic: /a3/control_mode
     enable_startup_smoothing: true
     startup_smoothing_duration_s: 2.0
     command_max_velocity_rad_s: 1.5

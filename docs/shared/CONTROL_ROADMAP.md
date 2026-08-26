@@ -303,18 +303,20 @@ flowchart LR
 | MIT 真机执行 | ✅ | ✅ | — 已齐 | — |
 | 电源门控 / 安全启停 | ✅ | ✅ | — 已齐 | — |
 | 轨迹时间插值 / 整轨跟踪 | ✅ | ✅ | Wave A **已齐（仿真+代码）** | C2 / F6 |
-| `FollowJointTrajectory` 或等价 | ✅ Action | ⚠️ 话题桥 + 仿真执行 | Wave A 部分 | C1/C2 |
+| `FollowJointTrajectory` 或等价 | ✅ Action | ✅ Action Server + 话题桥 | Wave B **F10** | C1 |
 | MoveIt Plan（mock） | ✅ | ✅ | — 已齐 | — |
-| MoveIt Execute / zero→work | ✅ | ✅ 仿真 | Wave A **仿真已齐**；真机板测 | C1 / F7 |
+| MoveIt Execute / zero→work | ✅ | ✅ 仿真 | Wave A **仿真已齐**；统一 launch **F11** | C1 / F7/F11 |
 | 重力补偿服务 | ✅ | ✅ `/a3/gravity_compensation/*` | Wave A **仿真已齐** | C3 / F8 |
 | Pinocchio 全关节 `g(q)` | ✅ | ✅ | Wave A **已齐** | C3 |
-| 轨迹↔重力模式互锁 | ✅ | ✅ `/a3/control_mode` | Wave A **仿真已齐** | C3 |
-| 应用 demo（画方/抓取级） | ✅ | ❌ | Wave A 扩展 | C1 |
+| 轨迹↔重力模式互锁 | ✅ | ✅ `/a3/control_mode` | Wave A **仿真已齐**；扩展 ZERO_TORQUE/SERVO | C3/C5/C4 |
+| 应用 demo（画方/抓取级） | ✅ | ⚠️ 画矩形 demo | Wave B **F11** | C1 |
 | ros2_control 仿真 | ✅ | ✅ | — 已齐 | — |
 | ros2_control 真机 HAL | ❌ | ❌ | Wave B 可选 | C7 |
-| MoveIt Servo | ❌ | ❌ | Wave B | C4 |
+| MoveIt Servo | ❌ | ✅ F14 launch | Wave B | C4 |
 | PS4 / 关节 jog | ※ | ✅ | A3 已超 | — |
-| 零力矩明确模式 | ⚠️ | ❌ | Wave B | C5 |
+| 零力矩明确模式 | ⚠️ | ✅ F13 | Wave B | C5 |
+| 笛卡尔 MoveToPose/IK | ✅ | ✅ F12 | Wave B | C1 |
+| 样条插值（JTC 语义） | ✅ JTC | ✅ F15 | Wave B / C2 增强 | F15 |
 | 主从示教 | 🔜 | ❌ | Wave B | C6 |
 | 末端六维力 / 导纳 | ❌ | ❌ | 硬件后 | C8 |
 | 诊断 / Safe Park | ※ | ❌ | Wave B 可选 | 参考社区 |
@@ -325,7 +327,9 @@ flowchart LR
 - [reBotArmController_ROS2](https://github.com/Seeed-Projects/reBotArmController_ROS2)
 - [reBotArm_control_py](https://github.com/vectorBH6/reBotArm_control_py)（及 Seeed 同名仓库）
 
-本仓库通过 `a3_arm_vendor` / `trajectory_bridge` 对接 reBot 壳层话题。
+本仓库通过 `a3_arm_vendor` / `trajectory_bridge` 对接 reBot 壳层话题；**F10** 补齐 `/arm_controller/follow_joint_trajectory` Action（话题桥 alone 不足以支撑 MoveIt Execute）。
+
+**话题桥 vs Action：** `trajectory_bridge` 只转发 `JointTrajectory` 话题；MoveIt 默认需要 FJT Action Server 的 goal/feedback/result。统一真机体验还需 **F11** `edge_moveit_execute.launch`（move_group + 执行层同图），对标 reBot `hardware.launch`。
 
 ### 3.3 一句话对比
 
@@ -372,9 +376,9 @@ flowchart TD
 |----|------|
 | **对齐点** | reBot 真机「整轨按时间执行」；CloudEdge ESP32 插值语义 |
 | **目标** | 多点 `JointTrajectory` 按 `time_from_start` 插值，向 CAN 平滑下发（约 200 Hz 采样，受现有限流约束） |
-| **做法** | `trajectory_interpolator.hpp`：航点间 **线性** lerp（非 JTC 三次/五次样条）；`motor_protocol` / CloudEdge mock 同语义 |
-| **与 reBot** | reBot **仿真**多走 `joint_trajectory_controller` 样条（仅 pos→线性；+v→三次；+a→五次）；真机为驱动内时间跟踪，**实现≠本仓线性** |
-| **Edge / CloudEdge** | Edge：板端必须做。CloudEdge：服务器保持稀疏下发，插值留在 ESP32（本项主要改 Edge；语义与 mock/P2 对齐） |
+| **做法** | `trajectory_interpolator.hpp`：JTC 兼容 **auto 样条**（仅 pos→线性；+v→三次；+a→五次；effort 线性）；参数可强制 `linear` |
+| **与 reBot** | 采样语义对齐 `joint_trajectory_controller` spline；仍由 `motor_protocol` 执行（不嵌完整 JTC 节点） |
+| **Edge / CloudEdge** | Edge：板端必须做。CloudEdge：mock/ESP32 对齐同一采样规则；服务器保持稀疏下发 |
 | **主要包** | `a3_can_bridge` |
 | **验收** | 多点轨迹无首点阶跃；时长与 `time_from_start` 一致；gate 关闭仍拒绝 |
 | **下一步规划提示** | 需求建议 ID 草案：`F6` 轨迹时间跟踪（正式编号以 REQUIREMENTS 为准） |

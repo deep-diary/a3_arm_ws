@@ -87,6 +87,7 @@ class GravityTorqueNode(Node):
         self._enabled = bool(self.get_parameter("enabled").value)
         self._q = np.zeros(n, dtype=np.float64)
         self._mode = "IDLE"  # IDLE | TRAJ_RUNNING | GRAVITY_COMP
+        self._external_mode = "IDLE"
         self._traj_end_time: Optional[rclpy.time.Time] = None
 
         self._inertia = self._load_inertia()
@@ -107,6 +108,7 @@ class GravityTorqueNode(Node):
         )
         self._pub = self.create_publisher(JointState, gt_topic, 10)
         self._mode_pub = self.create_publisher(String, mode_topic, 10)
+        self.create_subscription(String, mode_topic, self._on_external_mode, 10)
         self._srv_start = self.create_service(
             Trigger, "/a3/gravity_compensation/start", self._on_start
         )
@@ -210,6 +212,10 @@ class GravityTorqueNode(Node):
                 self.get_logger().warn(f"Skip calibrated inertia {key}: {exc}")
         self.get_logger().info(f"Applied calibrated inertia to {applied} links")
 
+    def _on_external_mode(self, msg: String) -> None:
+        if msg.data in ("ZERO_TORQUE", "SERVO", "IDLE", "TRAJ_RUNNING", "GRAVITY_COMP"):
+            self._external_mode = msg.data
+
     def _set_mode(self, mode: str) -> None:
         if mode == self._mode:
             return
@@ -220,9 +226,13 @@ class GravityTorqueNode(Node):
         self.get_logger().info(f"control_mode → {mode}")
 
     def _on_start(self, _req, resp):
-        if self._mode == "TRAJ_RUNNING":
+        if self._mode == "TRAJ_RUNNING" or self._external_mode in (
+            "ZERO_TORQUE",
+            "SERVO",
+            "TRAJ_RUNNING",
+        ):
             resp.success = False
-            resp.message = "rejected: TRAJ_RUNNING (wait for trajectory to finish)"
+            resp.message = f"rejected: mode={self._mode}/{self._external_mode}"
             return resp
         self._enabled = True
         self._set_mode("GRAVITY_COMP")
@@ -308,7 +318,14 @@ class GravityTorqueNode(Node):
 
         mode_msg = String()
         mode_msg.data = self._mode
-        self._mode_pub.publish(mode_msg)
+        # Do not overwrite ZERO_TORQUE / SERVO owned by motor_protocol / servo bridge
+        if self._mode in ("GRAVITY_COMP", "TRAJ_RUNNING", "IDLE"):
+            # Skip IDLE publish if external mode is active (last heard)
+            if self._mode != "IDLE" or self._external_mode not in (
+                "ZERO_TORQUE",
+                "SERVO",
+            ):
+                self._mode_pub.publish(mode_msg)
 
         if not self._enabled:
             return

@@ -12,6 +12,22 @@ A3 Edge 与 A3 CloudEdge 共同遵守的安全设计原则。具体参数以配�
 4. **断连保护：** 控制链路中断时，设备端必须在超时后 disable 或保持安全状态。
 5. **总线互斥：** 同一 CAN 总线上不得同时运行多套电机控制工具（如 MotorBridge 与 `a3_can_bridge`）。
 
+## 控制模式互锁
+
+话题：`/a3/control_mode`（`std_msgs/String`）
+
+| 模式 | 含义 | 允许 |
+|------|------|------|
+| `IDLE` | 空闲 | 可进轨迹 / 重力 / 零力矩 / Servo |
+| `TRAJ_RUNNING` | 轨迹执行中 | 拒绝重力启动、零力矩、Servo |
+| `GRAVITY_COMP` | 重力补偿开启 | 新轨迹应退出重力；拒绝零力矩/Servo |
+| `ZERO_TORQUE` | 软阻抗拖动（低 kp + 重力 FF） | 拒绝轨迹 Action / Servo |
+| `SERVO` | MoveIt Servo | 拒绝轨迹 Action / 零力矩 |
+
+- gate 关闭时：强制退出运动相关模式，禁止新轨迹
+- Servo：`incoming_command_timeout` 超时后应回 `IDLE` 并停止下发
+- 零力矩 ≠ 纯 `tau=0`：默认同重力前馈叠加，退出时恢复原 `kp`/`kd`
+
 ## 轨迹门控（gate）
 
 - 话题：`/power_sequence/gate_open`（`std_msgs/Bool`）

@@ -1,0 +1,7 @@
+geometry_msgs/PoseStamped pose
+float64[] seed_positions
+---
+bool success
+string message
+string[] joint_names
+float64[] joint_positions

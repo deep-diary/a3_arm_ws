@@ -27,6 +27,16 @@
 
    **官方重力方向（EDULITE）：** Pinocchio `τ_g` 在 URDF 关节系；发 MIT 时再乘 `joint_signs=[-1,+1,-1,+1,-1,+1,+1]`（只乘一次）。
 
+8. **Wave B 仿真（样条 / FJT / IK / 零力矩 / Servo）：**
+   ```bash
+   # 统一栈 + 画矩形
+   ros2 launch a3_bringup edge_moveit_execute.launch.py use_sim:=true run_demo:=true
+   # Servo（需 ros-humble-moveit-servo）
+   ros2 launch a3_bringup servo.launch.py
+   ```
+   细节：[dev/WAVE_B_SIM_NOTES.md](../dev/WAVE_B_SIM_NOTES.md)  
+   插值参数：`trajectory_interpolation_method:=auto`（线性/三次/五次按航点字段）
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
