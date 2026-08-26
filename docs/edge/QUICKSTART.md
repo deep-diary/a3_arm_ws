@@ -55,13 +55,14 @@
     # 另开终端：摇遍轴/键，核对索引后写入 src/a3_teleop_ps4/config/ds4_linux.yaml
 
     export DISPLAY=:0
+    # 重复 launch 前先清僵尸进程：pkill -f 'edge_teleop|a3_sim_executor|ps4_mapper|servo_node'
     ros2 launch a3_bringup edge_teleop_sim.launch.py use_rviz:=true
     # 默认 mapping:=simple（无 L1 组合键）；恢复 L1 死人开关：mapping:=default
     ```
-    - **simple（默认）**：右摇杆左右/上下；左摇杆 Y 前后；R2 夹爪；Square/Circle 开/合夹爪
+    - **simple（默认）**：右摇杆基座系左右/上下；左摇杆 Y 前后；L2→L6、R2→L7；Square/Circle 夹爪开/合
     - D-pad 上/下/左/右：`work` / `zero` / `home` / `ready`；Cross 急停
-    - Cross：立即停；改映射只编 `config/mappings/default.yaml`
-    - 真机：`a3_bringup.launch.py use_teleop:=true` 起同一 mapper；笛卡尔还需另开 `servo.launch.py`（本轮仿真先验）
+    - 改映射只编 `config/mappings/*.yaml`；轴序校准见 `ds4_linux.yaml`
+    - 真机：`a3_bringup.launch.py use_teleop:=true mapping:=default` 起 mapper；笛卡尔还需另开 `servo.launch.py`（板测待办）
 
 ## 相关文档
 

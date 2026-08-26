@@ -27,7 +27,7 @@ A3 Edge 与 A3 CloudEdge 共同遵守的安全设计原则。具体参数以配�
 - gate 关闭时：强制退出运动相关模式，禁止新轨迹
 - Servo：`incoming_command_timeout` 超时后应回 `IDLE` 并停止下发
 - 零力矩 ≠ 纯 `tau=0`：默认同重力前馈叠加，退出时恢复原 `kp`/`kd`
-- **手柄死人开关：** PS4 **L1 按住** 才允许非零 Servo Twist 与夹爪模拟量（R2）；松开立即发零速度。D-pad 命名姿态与电源长按不要求 L1。Cross → `stop_motion`。
+- **手柄死人开关：** 生产映射 `mapping:=default` 时，PS4 **L1 按住** 才允许非零 Servo Twist 与 R2 夹爪模拟量；松开立即发零速度。仿真默认 `mapping:=simple` **关闭** L1 死人开关（见 `config/mappings/simple.yaml`）。D-pad 命名姿态与电源长按不要求 L1。Cross → `stop_motion`。
 
 ## 轨迹门控（gate）
 

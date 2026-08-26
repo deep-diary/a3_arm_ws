@@ -16,6 +16,7 @@
 | 重力 start/stop | PASS | Pinocchio backend |
 | 零力矩 start/stop | PASS | `motor_protocol`（`tx_enable_can0/1:=false`）服务响应 |
 | MoveIt Servo | PASS | `servo.launch.py` + 带 `now()` stamp 的 Twist |
+| PS4 笛卡尔遥操作（F16） | PARTIAL | `edge_teleop_sim.launch.py` 一体 launch；无手柄门控/Servo 仲裁已验；手柄轴向板测待办 |
 | Wave A 回归 | PASS | `./scripts/verify_wave_a_sim.sh` 全绿 |
 
 ## 关键命令
@@ -27,6 +28,7 @@ source /opt/ros/humble/setup.bash && source ~/a3_arm_ws/install/setup.bash
 # 或手动：
 ros2 launch a3_bringup edge_moveit_execute.launch.py use_sim:=true use_gravity:=true use_rviz:=true
 ros2 launch a3_bringup servo.launch.py   # 另需 start_servo + 有效 stamp
+ros2 launch a3_bringup edge_teleop_sim.launch.py use_rviz:=true   # F16 一体仿真
 ```
 
 详见 [WAVE_B_SIM_NOTES.md](WAVE_B_SIM_NOTES.md)。

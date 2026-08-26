@@ -238,6 +238,7 @@ reBot 同样是：**MoveIt 做规划 IK + Pinocchio 做重力补偿**。A3 对�
 | **验收** | 连续笛卡尔运动；奇异附近可降速或停 |
 | **常见坑** | 配置存在但未接入 launch；与轨迹模式未仲裁 |
 | **规划位置** | reBot 官方亦弱；属 A3 **Wave B** 差异化（C4），可在对齐后再做 |
+| **A3 现状（2026-08）** | **仿真已集成**：F14 `servo.launch.py` + F16 `edge_teleop_sim.launch.py`（Servo + `ps4_mapper` + `sim_executor` 同图）；Servo 6 关节流与 D-pad 多点轨迹在 `sim_executor` 仲裁；无 `/joy` 时不发令。**真机**：`use_teleop:=true` 仅接 mapper，Servo 与 CAN 执行层仍须分 launch 板测 |
 
 ### L7 — 动力学与示教
 
@@ -277,7 +278,7 @@ flowchart LR
     end
 
     subgraph a3Pos [A3 Edge 约位]
-        A["仿真 Wave A 已齐 L2+L5+L7 / 真机 Plan 与拖动板测中 / L6·L8 弱"]
+        A["仿真 Wave A 已齐 / L6 仿真 Servo+PS4 已集成 / 真机 Plan·Servo 板测中 / L8 弱"]
     end
 ```
 
@@ -289,7 +290,7 @@ flowchart LR
 | L3 模型/FK·IK | ✅ | ✅ MoveIt IK + Pinocchio 动力学 | ✅ MoveIt kinematics + **Pinocchio `g(q)`** |
 | L4 规划 | ✅ | ✅ MoveIt demo | ✅ MoveIt demo（mock） |
 | L5 真机 Plan+Execute | ✅ | ✅ `hardware.launch` | ✅ 仿真 `zero→work`；真机统一 launch 板测中 |
-| L6 Servo | ✅ | ❌ | ❌ 仅有未集成配置 |
+| L6 Servo | ✅ | ❌ | ⚠️ 仿真 F14+F16 已集成；真机 CAN 待验 |
 | L7 重力补偿/示教 | ✅ | ✅ Pinocchio 服务 | ✅ 仿真 Pinocchio + 模式互锁；真机拖动板测中 |
 | L8 力控柔顺 | ✅（末端 F/T） | ❌ | ❌ |
 
@@ -312,8 +313,9 @@ flowchart LR
 | 应用 demo（画方/抓取级） | ✅ | ⚠️ 画矩形 demo | Wave B **F11** | C1 |
 | ros2_control 仿真 | ✅ | ✅ | — 已齐 | — |
 | ros2_control 真机 HAL | ❌ | ❌ | Wave B 可选 | C7 |
-| MoveIt Servo | ❌ | ✅ F14 launch | Wave B | C4 |
-| PS4 / 关节 jog | ※ | ✅ | A3 已超 | — |
+| MoveIt Servo | ❌ | ✅ F14 + F16 仿真一体 launch | Wave B **仿真已齐** | C4 |
+| PS4 笛卡尔遥操作 | ※ 社区 fork | ✅ F16 YAML 映射 | Wave B **仿真已齐** | C4 |
+| PS4 / 电源·关节 jog | ※ | ✅ F3 | A3 已超 | — |
 | 零力矩明确模式 | ⚠️ | ✅ F13 | Wave B | C5 |
 | 笛卡尔 MoveToPose/IK | ✅ | ✅ F12 | Wave B | C1 |
 | 样条插值（JTC 语义） | ✅ JTC | ✅ F15 | Wave B / C2 增强 | F15 |
@@ -336,7 +338,7 @@ flowchart LR
 | 项目 | 强项 | 对齐前主要缺口 |
 |------|------|----------------|
 | **reBot 生态** | 真机 MoveIt 闭环、重力补偿、双机型 SDK、demo | Servo、力控、官方真机遥操作、ros2_control 真机 HAL |
-| **A3 Edge** | C++ 低延迟 CAN、电源门控、PS4、**仿真 Wave A（插值+Pinocchio 重力）** | 真机 MoveIt 统一 launch、真机重力拖动入环、画方级 demo |
+| **A3 Edge** | C++ 低延迟 CAN、电源门控、PS4、**仿真 Wave A（插值+Pinocchio 重力）**、**仿真 L6 Servo+PS4（F14/F16）** | 真机 MoveIt 统一 launch、真机 Servo 入环、真机重力拖动入环、画方级 demo |
 
 ---
 
@@ -431,6 +433,8 @@ flowchart TD
 | **做法** | 集成 [`servo_config.yaml`](../../src/a3_moveit_config/config/servo_config.yaml)；与轨迹/重力模式仲裁 |
 | **与 ros2_control** | 旁路期可用「Servo 输出 → 话题」桥；C7 后可挂标准接口 |
 | **验收** | 连续笛卡尔运动；可回安全态 |
+| **需求 ID** | F14（Servo 节点 + `/a3/control_mode` 桥）、F16（PS4 YAML 映射 + `edge_teleop_sim.launch.py`） |
+| **仿真 DoD（2026-08）** | [x] F14 Twist → 关节连续运动；超时停机<br>[x] F16 一体 launch（Servo + joy + mapper + sim_executor）<br>[x] Servo 单点流 vs 命名姿态多点轨迹仲裁（`sim_executor`）<br>[x] 无 `/joy` 时不发轨迹/Servo 令<br>[ ] 手柄板测：摇杆轴向、D-pad 姿态、R2/L7 夹爪<br>[ ] 真机：`servo` + `a3_bringup use_teleop` + CAN 执行层贯通 |
 
 #### C5 — 零力矩控制器（P2）
 
