@@ -160,4 +160,5 @@ ros2 launch a3_cloud_edge cloud_edge_demo.launch.py
 - [REQUIREMENTS.md](REQUIREMENTS.md)
 - [ARCHITECTURE.md](ARCHITECTURE.md)
 - [ROADMAP.md](ROADMAP.md)
+- [../dev/WAVE_A_SIM_TEST_REPORT.md](../dev/WAVE_A_SIM_TEST_REPORT.md)（与 Edge 双 domain 仿真对照）
 - [../lessons_learned/LL-001-microros-host-setup.md](../lessons_learned/LL-001-microros-host-setup.md)（构建慢 / apt 无 Agent / XRCE 缓冲）

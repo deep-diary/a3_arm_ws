@@ -10,6 +10,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
 
@@ -40,6 +41,7 @@ ament_target_dependencies(motor_protocol_node
   diagnostic_msgs
   sensor_msgs
   std_msgs
+  std_srvs
   trajectory_msgs
 )
 

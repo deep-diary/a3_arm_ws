@@ -8,12 +8,16 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 
 | 用途 | 类型 | 说明 |
 |------|------|------|
-| 轨迹命令 | `trajectory_msgs/JointTrajectory` | `joint_names`、`points[]`：`positions` 必填；`velocities` 由规划时间参数化填入（MoveIt TOTG）；`effort` 为开环重力补偿（Nm），与 `positions` 同一 URDF 关节系，**不**乘 `joint_signs`；另有 `time_from_start` |
+| 轨迹命令 | `trajectory_msgs/JointTrajectory` | `joint_names`、`points[]`：`positions` 必填；`velocities` 由规划时间参数化填入（MoveIt TOTG）；`accelerations` 可选（执行层五次插值）；`effort` 为开环重力补偿（Nm），与 `positions` 同一 URDF 关节系，**不**乘 `joint_signs`；另有 `time_from_start` |
+| 轨迹执行 Action | `control_msgs/action/FollowJointTrajectory` | MoveIt Execute / 标准控制器入口 |
 | 关节反馈 | `sensor_msgs/JointState` | position、velocity、effort（部分字段可为 NaN） |
 | 电源门控 | `std_msgs/Bool` | `true` 时允许轨迹执行 |
 | 电源命令 | `std_msgs/String` | `start` / `shutdown` / `set_zero` |
 | 电源状态 | `std_msgs/String` | 电源序列当前状态（可选订阅） |
-
+| 控制模式 | `std_msgs/String` | `IDLE` / `TRAJ_RUNNING` / `GRAVITY_COMP` / `ZERO_TORQUE` / `SERVO` |
+| 笛卡尔 IK | `a3_msgs/srv/MoveToPoseIK` | 位姿 → 关节解 |
+| 笛卡尔运动 | `a3_msgs/action/MoveToPose` | IK + 轨迹执行 |
+| Servo 速度 | `geometry_msgs/TwistStamped` | MoveIt Servo 输入 |
 ## 标准话题（单臂，无 namespace）
 
 ### 轨迹输入（订阅侧 / 执行层监听）
@@ -28,6 +32,27 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/rebotarm/joint_trajectory` | 桥接 | reBot 工具链输出 |
 
 `a3_bringup/trajectory_bridge` 将上述话题统一转发到 `/joint_group_effort_controller/joint_trajectory`。
+
+### FollowJointTrajectory Action（执行层）
+
+| Action | 说明 |
+|--------|------|
+| `/arm_controller/follow_joint_trajectory` | `a3_bringup` FJT Server → 转发轨迹话题；MoveIt `moveit_controllers.yaml` 默认指向此处 |
+
+话题桥 **不等于** Action：仅转发 `JointTrajectory` 话题，无 goal/feedback/result。真机 MoveIt Execute 需要本 Action。
+
+### 控制模式与高级服务
+
+| 接口 | 类型 | 说明 |
+|------|------|------|
+| `/a3/control_mode` | `std_msgs/String` | 模式互锁广播 |
+| `/a3/gravity_compensation/start\|stop` | `std_srvs/Trigger` | 重力补偿 |
+| `/a3/zero_torque/start\|stop` | `std_srvs/Trigger` | 零力矩/拖动（软 kp + 重力 FF） |
+| `/a3/move_to_pose_ik` | `a3_msgs/srv/MoveToPoseIK` | 仅 IK |
+| `/a3/move_to_pose` | `a3_msgs/action/MoveToPose` | IK + 执行 |
+| `/a3/gravity_torque` | `sensor_msgs/JointState` | URDF 系重力力矩（effort） |
+
+**插值语义（执行层）：** 仅 positions → 线性；+velocities → 三次；+accelerations → 五次；effort 始终线性（JTC 对齐）。参数 `trajectory_interpolation_method`（默认 `auto`）。
 
 ### 关节状态（发布侧）
 

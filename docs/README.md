@@ -38,7 +38,8 @@ docs/
 ├── shared/                   两线共用契约
 │   ├── ROBOT_MODEL.md
 │   ├── TOPIC_CONTRACT.md
-│   └── SAFETY.md
+│   ├── SAFETY.md
+│   └── CONTROL_ROADMAP.md    控制功能开发路线（非 AI）
 ├── edge/                     A3 Edge 主线
 │   ├── REQUIREMENTS.md
 │   ├── ARCHITECTURE.md
@@ -63,6 +64,7 @@ docs/
 | [shared/ROBOT_MODEL.md](shared/ROBOT_MODEL.md) | 7 关节模型、电机类型、CAN ID 映射 |
 | [shared/TOPIC_CONTRACT.md](shared/TOPIC_CONTRACT.md) | 轨迹输入、关节状态、电源门控 ROS 契约 |
 | [shared/SAFETY.md](shared/SAFETY.md) | 软限位、gate、急停、断连策略原则 |
+| [shared/CONTROL_ROADMAP.md](shared/CONTROL_ROADMAP.md) | 控制功能分层路线（L0–L8）、reBot/A3 对比、Edge C1–C8 |
 
 ### A3 Edge（主线）
 
@@ -88,6 +90,7 @@ docs/
 | 文档 | 说明 |
 |------|------|
 | [dev/WSL2_SETUP.md](dev/WSL2_SETUP.md) | WSL2 + Humble mock/MoveIt 搭建 |
+| [dev/WAVE_A_SIM_TEST_REPORT.md](dev/WAVE_A_SIM_TEST_REPORT.md) | Wave A 双链路仿真验收（zero→work） |
 | [lessons_learned/README.md](lessons_learned/README.md) | 踩坑与换机备忘索引 |
 
 ### 包内文档

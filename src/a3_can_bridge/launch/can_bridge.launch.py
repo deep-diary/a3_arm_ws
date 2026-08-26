@@ -17,6 +17,7 @@ def generate_launch_description():
     bridge_file = LaunchConfiguration("bridge_file")
     power_sequence_file = LaunchConfiguration("power_sequence_file")
     use_power_sequence = LaunchConfiguration("use_power_sequence")
+    enable_gravity_compensation = LaunchConfiguration("enable_gravity_compensation")
 
     declare_can0 = DeclareLaunchArgument(
         "can0_name", default_value="can0", description="SocketCAN interface name for front legs"
@@ -44,6 +45,11 @@ def generate_launch_description():
         default_value="true",
         description="是否启用遥控上下电状态机节点 power_sequence_node",
     )
+    declare_enable_gravity = DeclareLaunchArgument(
+        "enable_gravity_compensation",
+        default_value="false",
+        description="将 Pinocchio 重力力矩写入 MIT tau 前馈（需 /a3/gravity_torque）",
+    )
 
     can_transport = Node(
         package="a3_can_bridge",
@@ -64,7 +70,10 @@ def generate_launch_description():
         output="screen",
         parameters=[
             gains_file,
-            {"enable_power_sequence_gate": use_power_sequence},
+            {
+                "enable_power_sequence_gate": use_power_sequence,
+                "enable_gravity_compensation": enable_gravity_compensation,
+            },
         ],
     )
 
@@ -85,6 +94,7 @@ def generate_launch_description():
             declare_bridge,
             declare_power_sequence_file,
             declare_use_power_sequence,
+            declare_enable_gravity,
             can_transport,
             motor_protocol,
             power_sequence,

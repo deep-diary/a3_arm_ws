@@ -119,6 +119,7 @@ a3_bringup.launch.py
 - [QUICKSTART.md](QUICKSTART.md)
 - [PLATFORM_CAN.md](PLATFORM_CAN.md)
 - [shared/SAFETY.md](../shared/SAFETY.md)
+- [shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md) — 控制功能分层与 C1–C8 落地建议
 
 ## 源码路径
 

@@ -1,0 +1,9 @@
+geometry_msgs/PoseStamped target
+float64 duration_s
+float64[] seed_positions
+---
+bool success
+string message
+---
+float64[] joint_positions
+string status
