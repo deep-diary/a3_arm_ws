@@ -1,23 +1,39 @@
 # A3 Arm Platform — Agent 协作指南
 
 > **读者：** 在本仓库或外置固件仓库工作的编码智能体 / 开发者  
-> **目的：** 分清「本仓库 vs 固件仓库」职责，避免在错误工作区改代码。
+> **目的：** 分清「本仓库 vs 固件仓库」职责，避免在错误工作区改代码；快速定位对标开源项目。
+
+本仓库同时承载两条产品线：**A3 Edge（主线，RK3588）** 与 **A3 CloudEdge（支线，ESP32）**。下文 §1–4 偏 CloudEdge 跨仓固件；Edge 控制对标见 [docs/shared/CONTROL_ROADMAP.md](docs/shared/CONTROL_ROADMAP.md)。
+
+## 0. 参考开源项目（检索入口）
+
+| 用途 | 仓库 | 说明 |
+|------|------|------|
+| URDF / MoveIt 起点 | [RobStride/EDULITE_A3](https://github.com/RobStride/EDULITE_A3) | `a3_description` / `a3_moveit_config` 来源；重力方向约定 |
+| 硬件参考 | [Seeed-Projects/reBot-DevArm](https://github.com/Seeed-Projects/reBot-DevArm) | 硬件仓；控制软件不在此 |
+| ROS2 控制壳 | [Seeed-Projects/reBotArmController_ROS2](https://github.com/Seeed-Projects/reBotArmController_ROS2) | MoveIt、FJT Action、demo；仿真走 JTC 样条 |
+| Python/Pinocchio | [vectorBH6/reBotArm_control_py](https://github.com/vectorBH6/reBotArm_control_py) | 重力补偿 / IK 参考实现 |
+| CloudEdge 固件 | [deep-diary/xiaozhi-esp32](https://github.com/deep-diary/xiaozhi-esp32) | 板级 `main/boards/deep-dog/` |
+| micro-ROS 组件 | [micro-ROS/micro_ros_espidf_component](https://github.com/micro-ROS/micro_ros_espidf_component) | ESP-IDF **Humble**（勿用 rolling） |
+| Wiki | [Seeed reBot RS](https://wiki.seeedstudio.com/rebot_arm_b601_rs_ros2_integration/) · [hub](https://wiki.seeedstudio.com/robotics_page/) | 官方联调 |
+
+更完整表格见根目录 [README.md](README.md)。
 
 ## 1. 仓库边界（必读）
 
 | 仓库 | 路径 / 位置 | 负责内容 | 不负责 |
 |------|-------------|----------|--------|
-| **本仓库** `a3_arm_ws` | WSL Linux（见 §3） | 需求文档、话题/安全契约、ROS 2 服务器侧（Agent launch、mock client、算法栈） | ESP32 固件源码 |
+| **本仓库** `a3_arm_ws` | WSL Linux（见 §3） | 双产品线文档与契约；Edge 全栈 ROS；CloudEdge 服务器侧（Agent / mock） | ESP32 固件源码 |
 | **外置固件** `xiaozhi-esp32` | 通常在 **Windows** 本机另一工作区 | ESP32-S3 micro-ROS Client、`deep-dog` 板级、CAN/电机固件 | 在本仓库内新建完整 ROS 工作区 |
 
 **固件远程：** https://github.com/deep-diary/xiaozhi-esp32 — 板级 `main/boards/deep-dog/`
 
 **工作流（需求先行）：**
 
-1. 先在本仓库 `docs/cloud_edge/REQUIREMENTS.md` 写清需求 ID 与验收标准  
-2. 契约变更同步 `docs/shared/`（`TOPIC_CONTRACT.md`、`SAFETY.md` 等）  
+1. Edge 新功能 → `docs/edge/REQUIREMENTS.md`；CloudEdge → `docs/cloud_edge/REQUIREMENTS.md`  
+2. 契约变更同步 `docs/shared/`（`TOPIC_CONTRACT.md`、`SAFETY.md`、必要时 `CONTROL_ROADMAP.md`）  
 3. **固件实现只在外置仓库进行**  
-4. 联调步骤回填本仓库 `docs/cloud_edge/QUICKSTART.md`
+4. 联调步骤回填对应 `QUICKSTART.md`
 
 若智能体当前打开的是固件仓库：默认**只读参考**本仓库文档；不要把 `a3_arm_ws` 源码树复制进固件工程。若需求条目尚未写入本仓库，先输出需求草案，等确认后再写固件代码。
 
@@ -144,16 +160,21 @@ CAN 发送、200 Hz 插值、断连 disable 电机、gate、软限位、急停 G
 
 ## 5. 本仓库 Agent 检查清单
 
-- [ ] 新功能是否先更新了对应 `docs/*/REQUIREMENTS.md`？
+- [ ] 新功能是否先更新了对应 `docs/*/REQUIREMENTS.md`？（Edge 主线勿只改 cloud_edge）
 - [ ] 话题/安全是否需改 `docs/shared/`？
+- [ ] 控制能力对标是否查阅 [docs/shared/CONTROL_ROADMAP.md](docs/shared/CONTROL_ROADMAP.md)？
 - [ ] 若任务是 ESP32 固件：是否应转到外置仓库，而不是在本仓库写 `.c`/`.cpp` 固件？
-- [ ] CloudEdge 联调文档是否需更新 `docs/cloud_edge/QUICKSTART.md`？
+- [ ] 联调文档是否需更新对应 `QUICKSTART.md`？
 
 ## 6. 文档索引
 
 | 文档 | 用途 |
 |------|------|
+| [README.md](README.md) | 工作区入口 + 开源参考表 |
 | [docs/README.md](docs/README.md) | 产品线与文档树 |
+| [docs/shared/CONTROL_ROADMAP.md](docs/shared/CONTROL_ROADMAP.md) | Edge 控制对标 reBot（L0–L8 / Wave A·B） |
+| [docs/edge/REQUIREMENTS.md](docs/edge/REQUIREMENTS.md) | Edge 需求（主线） |
+| [docs/edge/QUICKSTART.md](docs/edge/QUICKSTART.md) | Edge 真机 / Wave A 仿真 |
 | [docs/cloud_edge/REQUIREMENTS.md](docs/cloud_edge/REQUIREMENTS.md) | CloudEdge 需求（含阶段 A） |
 | [docs/cloud_edge/QUICKSTART.md](docs/cloud_edge/QUICKSTART.md) | Agent / mock / 真机切换 |
 | [docs/shared/TOPIC_CONTRACT.md](docs/shared/TOPIC_CONTRACT.md) | 话题与关节名 |

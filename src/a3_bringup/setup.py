@@ -25,6 +25,9 @@ setup(
         "console_scripts": [
             "trajectory_bridge = a3_bringup.trajectory_bridge:main",
             "rebot_remap_info = a3_bringup.rebot_remap_info:main",
+            "sim_executor = a3_bringup.sim_executor:main",
+            "zero_to_work_publisher = a3_bringup.zero_to_work_publisher:main",
+            "gravity_torque_node = a3_bringup.gravity_torque_node:main",
         ],
     },
 )

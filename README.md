@@ -82,18 +82,23 @@ ros2 launch a3_cloud_edge cloud_edge_link_test.launch.py
 
 详见 [docs/cloud_edge/QUICKSTART.md](docs/cloud_edge/QUICKSTART.md)。ESP32 固件在外部 [xiaozhi-esp32/deep-dog](https://github.com/deep-diary/xiaozhi-esp32) 仓库实现。
 
-## reBot software location
+## 参考开源项目（检索入口）
 
-Local `reBot-DevArm` is **hardware only**. Software clones live in `d:\working\dev\a3_arm_vendor`:
+| 用途 | 仓库 / 链接 | 本仓库关系 |
+|------|-------------|------------|
+| **结构 / URDF / MoveIt 起点** | [RobStride/EDULITE_A3](https://github.com/RobStride/EDULITE_A3) | `a3_description`、`a3_moveit_config` 来源；重力方向约定同源 |
+| **硬件参考（无控制栈）** | [Seeed-Projects/reBot-DevArm](https://github.com/Seeed-Projects/reBot-DevArm) | 对标硬件；软件不在此仓 |
+| **ROS2 + MoveIt 壳层** | [Seeed-Projects/reBotArmController_ROS2](https://github.com/Seeed-Projects/reBotArmController_ROS2) | 话题/Action/demo；经 `trajectory_bridge` 对接 |
+| **Python / Pinocchio 控制** | [vectorBH6/reBotArm_control_py](https://github.com/vectorBH6/reBotArm_control_py) | 重力补偿、IK 参考；本地可放 `a3_arm_vendor/` |
+| **RK3588 / SocketCAN / MIT / PS4** | 内部 trotbot 派生 → `a3_can_bridge`、`a3_teleop_ps4` | Edge 生产执行层 |
+| **PC 台架 MotorBridge** | [motorbridge.seeedstudio.com](https://motorbridge.seeedstudio.com) | 仅台架；**勿与** `a3_can_bridge` 同占 `can0` |
+| **CloudEdge ESP32 固件** | [deep-diary/xiaozhi-esp32](https://github.com/deep-diary/xiaozhi-esp32)（`deep-dog`） | 外置仓；见 [AGENT.md](AGENT.md) |
+| **micro-ROS ESP-IDF** | [micro-ROS/micro_ros_espidf_component](https://github.com/micro-ROS/micro_ros_espidf_component) | CloudEdge 固件依赖（Humble） |
+| Wiki | [Seeed robotics hub](https://wiki.seeedstudio.com/robotics_page/) · [B601-RS](https://wiki.seeedstudio.com/rebot_arm_b601_rs_ros2_integration/) | 官方联调说明 |
 
-| Component | Repo |
-|-----------|------|
-| Python / Pinocchio | https://github.com/vectorBH6/reBotArm_control_py |
-| ROS2 + MoveIt shell | https://github.com/Seeed-Projects/reBotArmController_ROS2 |
-| MotorBridge (PC bench) | https://motorbridge.seeedstudio.com |
-| Wiki hub | https://wiki.seeedstudio.com/robotics_page/ |
+**控制能力对标与缺口：** [docs/shared/CONTROL_ROADMAP.md](docs/shared/CONTROL_ROADMAP.md)（Wave A/B、插值/重力/MoveIt）。
 
-Wire reBot planning/teleop outputs through `a3_bringup/trajectory_bridge` into `a3_can_bridge`. Do not use MotorBridge realtime on the same `can0` as the bridge.
+本地 `reBot-DevArm` 仅为硬件参考。软件克隆建议放兄弟目录 `a3_arm_vendor/`。reBot 规划/遥操作经 `a3_bringup/trajectory_bridge` → `a3_can_bridge`。
 
 ## Safety
 

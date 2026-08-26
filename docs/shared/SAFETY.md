@@ -70,3 +70,9 @@ ESP32 固件必须实现：
 - 云端以 200 Hz 闭环力控替代边缘实时环
 - 将急停、看门狗仅放在服务器侧
 - MotorBridge 与 `a3_can_bridge` 同时占用 `can0`
+
+## 关联文档
+
+- [CONTROL_ROADMAP.md](CONTROL_ROADMAP.md) — 控制栈分层（含 L8 力控前置与 Edge C8）
+- [TOPIC_CONTRACT.md](TOPIC_CONTRACT.md)
+- [edge/ARCHITECTURE.md](../edge/ARCHITECTURE.md)

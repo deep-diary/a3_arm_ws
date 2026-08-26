@@ -1,0 +1,28 @@
+# EL-A3 named joint poses (rad). Shared by MoveIt SRDF and non-MoveIt scripts.
+# L7 gripper defaults to close (0) unless overridden.
+
+joint_names:
+  - L1_joint
+  - L2_joint
+  - L3_joint
+  - L4_joint
+  - L5_joint
+  - L6_joint
+  - L7_joint
+
+poses:
+  # Power-on / mechanical zero
+  zero:
+    positions: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+  # Legacy half-raised (EDULITE SRDF home)
+  home:
+    positions: [0.0, 0.785, -0.785, 0.0, 0.0, 0.0, 0.0]
+
+  # Legacy ready
+  ready:
+    positions: [0.0, 0.785, -1.57, 0.0, 0.785, 0.0, 0.0]
+
+  # Target work pose: L2=51 deg, L3=-57 deg (operator screenshot)
+  work:
+    positions: [0.0, 0.8901179, -0.9948377, 0.0, 0.0, 0.0, 0.0]

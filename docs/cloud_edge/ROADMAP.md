@@ -98,4 +98,5 @@
 - [REQUIREMENTS.md](REQUIREMENTS.md)
 - [ARCHITECTURE.md](ARCHITECTURE.md)
 - [edge/ARCHITECTURE.md](../edge/ARCHITECTURE.md)
+- [shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md) — Edge 控制能力路线（插值/重力补偿与本文 P2 等交叉）
 - [文档索引](../README.md)

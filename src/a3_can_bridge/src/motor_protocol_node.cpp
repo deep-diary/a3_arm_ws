@@ -5,6 +5,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -24,6 +25,7 @@
 #include "a3_can_bridge/arm_mapper.hpp"
 #include "a3_can_bridge/frame_codec.hpp"
 #include "a3_can_bridge/protocol_codec.hpp"
+#include "a3_can_bridge/trajectory_interpolator.hpp"
 
 using diagnostic_msgs::msg::DiagnosticArray;
 using diagnostic_msgs::msg::DiagnosticStatus;
@@ -120,9 +122,20 @@ public:
     publish_motor_diagnostics_ = this->declare_parameter<bool>("publish_motor_diagnostics", false);
     motor_diagnostics_topic_ = this->declare_parameter<std::string>("motor_diagnostics_topic", "/diagnostics");
     enable_joint_tau_ff_ = this->declare_parameter<bool>("enable_joint_tau_ff", false);
-    gravity_ff_scale_ = this->declare_parameter<double>("gravity_ff_scale", 0.5);
+    gravity_ff_scale_ = this->declare_parameter<double>("gravity_ff_scale", 1.0);
     tau_ff_nominal_nm_ = this->declare_parameter<std::vector<double>>(
       "tau_ff_nominal_nm", std::vector<double>(kNumArmJoints, 0.0));
+    // Pinocchio gravity feedforward (EDULITE-aligned): URDF-frame τ_g * joint_signs → MIT tau
+    enable_gravity_compensation_ = this->declare_parameter<bool>(
+      "enable_gravity_compensation", false);
+    gravity_apply_joint_signs_ = this->declare_parameter<bool>(
+      "gravity_apply_joint_signs", true);
+    gravity_compensation_topic_ = this->declare_parameter<std::string>(
+      "gravity_compensation_topic", "/a3/gravity_torque");
+    gravity_fresh_timeout_s_ = this->declare_parameter<double>(
+      "gravity_fresh_timeout_s", 0.5);
+    gravity_joint_scale_ = this->declare_parameter<std::vector<double>>(
+      "gravity_joint_scale", std::vector<double>(kNumArmJoints, 1.0));
     use_joint_cmd_limits_ = this->declare_parameter<bool>("use_joint_cmd_limits", true);
     joint_cmd_min_rad_ = this->declare_parameter<std::vector<double>>(
       "joint_cmd_min_rad", std::vector<double>(kNumArmJoints, -3.14));
@@ -183,13 +196,25 @@ public:
       joint_offsets_rad_ = std::vector<double>(kNumArmJoints, 0.0);
     }
     if (tau_ff_nominal_nm_.size() != kNumArmJoints) {
-      RCLCPP_WARN(this->get_logger(), "tau_ff_nominal_nm size != 12, padding/truncating.");
+      RCLCPP_WARN(this->get_logger(), "tau_ff_nominal_nm size != %zu, padding/truncating.", kNumArmJoints);
       tau_ff_nominal_nm_.resize(kNumArmJoints, 0.0);
     }
+    if (gravity_joint_scale_.size() != kNumArmJoints) {
+      RCLCPP_WARN(this->get_logger(), "gravity_joint_scale size mismatch, reset to 1.0");
+      gravity_joint_scale_ = std::vector<double>(kNumArmJoints, 1.0);
+    }
+    gravity_tau_urdf_.fill(0.0);
+    has_gravity_sample_ = false;
+    last_gravity_stamp_ns_ = 0;
 
     publish_mit_mapped_ = this->declare_parameter<bool>("publish_mit_mapped_positions", true);
     mit_mapped_topic_ = this->declare_parameter<std::string>(
       "mit_mapped_positions_topic", "/mit_motor_position_rad");
+
+    enable_trajectory_interpolation_ = this->declare_parameter<bool>(
+      "enable_trajectory_interpolation", true);
+    trajectory_interp_rate_hz_ = this->declare_parameter<double>(
+      "trajectory_interp_rate_hz", 200.0);
 
     traj_sub_ = this->create_subscription<JointTrajectory>(
       "/joint_group_effort_controller/joint_trajectory", rclcpp::SensorDataQoS(),
@@ -204,6 +229,30 @@ public:
       gate_sub_ = this->create_subscription<Bool>(
         power_sequence_gate_topic_, 10,
         std::bind(&MotorProtocolNode::OnPowerGate, this, std::placeholders::_1));
+    }
+
+    gravity_sub_ = this->create_subscription<JointState>(
+      gravity_compensation_topic_, rclcpp::SensorDataQoS(),
+      std::bind(&MotorProtocolNode::OnGravityTorque, this, std::placeholders::_1));
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Gravity FF: enable=%d topic=%s scale=%.3f (URDF τ_g × joint_signs → MIT; EDULITE-aligned)",
+      enable_gravity_compensation_ ? 1 : 0,
+      gravity_compensation_topic_.c_str(),
+      gravity_ff_scale_);
+
+    if (enable_trajectory_interpolation_ && trajectory_interp_rate_hz_ > 1e-3) {
+      const int64_t period_ns = static_cast<int64_t>(1e9 / trajectory_interp_rate_hz_);
+      traj_interp_timer_ = this->create_wall_timer(
+        std::chrono::nanoseconds(period_ns),
+        std::bind(&MotorProtocolNode::OnTrajectoryInterpTimer, this));
+      RCLCPP_INFO(
+        this->get_logger(),
+        "Trajectory time interpolation enabled @ %.1f Hz", trajectory_interp_rate_hz_);
+    } else {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "Trajectory time interpolation DISABLED (legacy first-point mode)");
     }
 
     const int can_tx_qos_depth = this->declare_parameter<int>("can_tx_frames_qos_depth", 4000);
@@ -315,6 +364,26 @@ private:
         enable_joint_tau_ff_ = p.as_bool();
         RCLCPP_WARN(
           this->get_logger(), "Runtime param: enable_joint_tau_ff=%d", enable_joint_tau_ff_ ? 1 : 0);
+      } else if (name == "enable_gravity_compensation") {
+        if (p.get_type() != rclcpp::ParameterType::PARAMETER_BOOL) {
+          out.successful = false;
+          out.reason = "enable_gravity_compensation must be bool";
+          return out;
+        }
+        enable_gravity_compensation_ = p.as_bool();
+        RCLCPP_WARN(
+          this->get_logger(), "Runtime param: enable_gravity_compensation=%d",
+          enable_gravity_compensation_ ? 1 : 0);
+      } else if (name == "gravity_apply_joint_signs") {
+        if (p.get_type() != rclcpp::ParameterType::PARAMETER_BOOL) {
+          out.successful = false;
+          out.reason = "gravity_apply_joint_signs must be bool";
+          return out;
+        }
+        gravity_apply_joint_signs_ = p.as_bool();
+        RCLCPP_WARN(
+          this->get_logger(), "Runtime param: gravity_apply_joint_signs=%d",
+          gravity_apply_joint_signs_ ? 1 : 0);
       } else if (name == "gravity_ff_scale") {
         if (p.get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE) {
           out.successful = false;
@@ -332,14 +401,64 @@ private:
         const auto v = p.as_double_array();
         if (v.size() != kNumArmJoints) {
           out.successful = false;
-          out.reason = "tau_ff_nominal_nm must have 12 elements";
+          out.reason = "tau_ff_nominal_nm must have 7 elements";
           return out;
         }
         tau_ff_nominal_nm_.assign(v.begin(), v.end());
-        RCLCPP_WARN(this->get_logger(), "Runtime param: tau_ff_nominal_nm updated (12 doubles)");
+        RCLCPP_WARN(this->get_logger(), "Runtime param: tau_ff_nominal_nm updated (7 doubles)");
+      } else if (name == "gravity_joint_scale") {
+        if (p.get_type() != rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY) {
+          out.successful = false;
+          out.reason = "gravity_joint_scale must be double[]";
+          return out;
+        }
+        const auto v = p.as_double_array();
+        if (v.size() != kNumArmJoints) {
+          out.successful = false;
+          out.reason = "gravity_joint_scale must have 7 elements";
+          return out;
+        }
+        gravity_joint_scale_.assign(v.begin(), v.end());
+        RCLCPP_WARN(this->get_logger(), "Runtime param: gravity_joint_scale updated");
       }
     }
     return out;
+  }
+
+  void OnGravityTorque(const JointState::SharedPtr msg)
+  {
+    if (msg->effort.empty()) {
+      return;
+    }
+    // Prefer named mapping (L1_joint..); fall back to index order.
+    std::array<double, kNumArmJoints> tau{};
+    tau.fill(0.0);
+    bool any = false;
+    if (!msg->name.empty()) {
+      for (size_t i = 0; i < msg->name.size() && i < msg->effort.size(); ++i) {
+        const auto & name = msg->name[i];
+        for (size_t j = 0; j < DogMapper::kChampJointNames.size(); ++j) {
+          if (name == DogMapper::kChampJointNames[j]) {
+            tau[j] = msg->effort[i];
+            any = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!any) {
+      const size_t n = std::min(msg->effort.size(), kNumArmJoints);
+      for (size_t i = 0; i < n; ++i) {
+        tau[i] = msg->effort[i];
+      }
+      any = n > 0;
+    }
+    if (!any) {
+      return;
+    }
+    gravity_tau_urdf_ = tau;
+    has_gravity_sample_ = true;
+    last_gravity_stamp_ns_ = this->now().nanoseconds();
   }
 
   void OnTrajectory(const JointTrajectory::SharedPtr msg)
@@ -352,7 +471,77 @@ private:
       return;
     }
 
-    const auto & positions = msg->points.front().positions;
+    if (enable_power_sequence_gate_ && !power_gate_open_) {
+      ++skip_power_gate_window_;
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *this->get_clock(), 2000,
+        "Ignore trajectory: power gate closed");
+      return;
+    }
+
+    if (enable_trajectory_interpolation_) {
+      std::lock_guard<std::mutex> lock(traj_mutex_);
+      active_traj_ = *msg;
+      traj_start_ = this->now();
+      has_active_traj_ = true;
+      RCLCPP_INFO_THROTTLE(
+        this->get_logger(), *this->get_clock(), 1000,
+        "Trajectory buffered for interpolation: %zu points, %zu joints",
+        active_traj_.points.size(), active_traj_.joint_names.size());
+      return;
+    }
+
+    // Legacy: first-point only
+    ApplyPositionTargets(msg->points.front().positions, msg->joint_names);
+  }
+
+  void OnTrajectoryInterpTimer()
+  {
+    if (!enable_trajectory_interpolation_) {
+      return;
+    }
+
+    JointTrajectory traj_copy;
+    rclcpp::Time start;
+    bool has = false;
+    {
+      std::lock_guard<std::mutex> lock(traj_mutex_);
+      if (!has_active_traj_) {
+        return;
+      }
+      traj_copy = active_traj_;
+      start = traj_start_;
+      has = true;
+    }
+    if (!has) {
+      return;
+    }
+
+    if (enable_power_sequence_gate_ && !power_gate_open_) {
+      return;
+    }
+
+    const double elapsed = (this->now() - start).seconds();
+    std::vector<double> positions;
+    std::vector<double> velocities;
+    std::vector<double> effort;
+    bool finished = false;
+    if (!SampleJointTrajectory(traj_copy, elapsed, positions, velocities, effort, finished)) {
+      return;
+    }
+
+    ApplyPositionTargets(positions, traj_copy.joint_names);
+
+    if (finished) {
+      std::lock_guard<std::mutex> lock(traj_mutex_);
+      has_active_traj_ = false;
+    }
+  }
+
+  void ApplyPositionTargets(
+    const std::vector<double> & positions,
+    const std::vector<std::string> & joint_names)
+  {
     traj_joint_count_window_ += std::min(positions.size(), DogMapper::kTemporaryIndexMap.size());
     uint32_t front_count = 0;
     uint32_t rear_count = 0;
@@ -361,28 +550,42 @@ private:
     std::array<double, DogMapper::kTemporaryIndexMap.size()> mapped_rad{};
     mapped_rad.fill(std::numeric_limits<double>::quiet_NaN());
 
-    // 强制固定索引映射，保证每个周期尽量覆盖 12 个电机，避免名称映射分支造成分布不均。
-    const size_t count = std::min(positions.size(), DogMapper::kTemporaryIndexMap.size());
-    if (count < DogMapper::kTemporaryIndexMap.size()) {
-      RCLCPP_WARN_THROTTLE(
-        this->get_logger(), *this->get_clock(), 2000,
-        "Trajectory positions size=%zu (<kNumArmJoints), use last target for missing joints", positions.size());
-    }
+    const bool use_names = prefer_joint_name_mapping_ && !joint_names.empty();
+
     for (size_t i = 0; i < DogMapper::kTemporaryIndexMap.size(); ++i) {
       const auto route = DogMapper::GetRouteByTrajectoryIndex(i);
       if (!route.has_value()) {
         continue;
       }
+
       double target = 0.0;
-      if (i < count) {
-        target = positions[i];
-        latest_input_champ_rad_[i] = target;
-        has_latest_input_[i] = true;
-      } else if (has_latest_input_[i]) {
-        target = latest_input_champ_rad_[i];
-      } else {
+      bool got = false;
+      if (use_names) {
+        const char * jn = DogMapper::kChampJointNames[i];
+        for (size_t j = 0; j < joint_names.size(); ++j) {
+          if (joint_names[j] == jn && j < positions.size()) {
+            target = positions[j];
+            got = true;
+            break;
+          }
+        }
+      }
+      if (!got) {
+        if (i < positions.size()) {
+          target = positions[i];
+          got = true;
+        } else if (has_latest_input_[i]) {
+          target = latest_input_champ_rad_[i];
+          got = true;
+        }
+      }
+      if (!got) {
         continue;
       }
+
+      latest_input_champ_rad_[i] = target;
+      has_latest_input_[i] = true;
+
       if (enable_power_sequence_gate_ && !power_gate_open_) {
         ++skip_power_gate_window_;
         continue;
@@ -406,17 +609,6 @@ private:
       this->get_logger(), *this->get_clock(), 1000,
       "MIT publish: total=%zu front(can0)=%u rear(can1)=%u kp=%.2f kd=%.2f v=%.2f tau=%.2f",
       total_sent, front_count, rear_count, runtime_kp_can0_, runtime_kd_can0_, default_velocity_, runtime_tau_can0_);
-    const size_t joint_total = joint_cmd_clamp_count_total_ + joint_cmd_no_clamp_count_total_;
-    const size_t motor_total = motor_cmd_clamp_count_total_ + motor_cmd_no_clamp_count_total_;
-    const double joint_clamp_ratio = joint_total > 0 ?
-      (100.0 * static_cast<double>(joint_cmd_clamp_count_total_) / static_cast<double>(joint_total)) : 0.0;
-    const double motor_clamp_ratio = motor_total > 0 ?
-      (100.0 * static_cast<double>(motor_cmd_clamp_count_total_) / static_cast<double>(motor_total)) : 0.0;
-    RCLCPP_INFO_THROTTLE(
-      this->get_logger(), *this->get_clock(), 1000,
-      "Command clamp stats(total): CHAMP=%zu/%zu(%.2f%%) MIT=%zu/%zu(%.2f%%)",
-      joint_cmd_clamp_count_total_, joint_total, joint_clamp_ratio,
-      motor_cmd_clamp_count_total_, motor_total, motor_clamp_ratio);
   }
 
   void SendMitFrame(
@@ -800,14 +992,36 @@ private:
     feedback_joint_states_pub_->publish(js);
   }
 
-  double ComputeMitTorqueFf(size_t idx, bool is_front) const
+  double ComputeMitTorqueFf(size_t idx, bool is_front)
   {
     const double bus_tau = is_front ? runtime_tau_can0_ : runtime_tau_can1_;
-    if (!enable_joint_tau_ff_) {
-      return Clamp(bus_tau, ProtocolCodec::kTMin, ProtocolCodec::kTMax);
+    double tau = bus_tau;
+
+    // Legacy static nominal (Nm, already in MIT/motor frame). Independent of live gravity.
+    if (enable_joint_tau_ff_) {
+      const double nominal = idx < tau_ff_nominal_nm_.size() ? tau_ff_nominal_nm_[idx] : 0.0;
+      tau += gravity_ff_scale_ * nominal;
     }
-    const double nominal = idx < tau_ff_nominal_nm_.size() ? tau_ff_nominal_nm_[idx] : 0.0;
-    const double tau = bus_tau + gravity_ff_scale_ * nominal;
+
+    // Live Pinocchio gravity (EDULITE): τ_mit = τ_g_urdf * joint_signs (apply once).
+    // /a3/gravity_torque.effort is URDF-frame when gravity_torque_node joint_direction=1.
+    if (enable_gravity_compensation_ && has_gravity_sample_ && idx < kNumArmJoints) {
+      const int64_t age_ns = this->now().nanoseconds() - last_gravity_stamp_ns_;
+      const double age_s = static_cast<double>(age_ns) * 1e-9;
+      if (age_s <= gravity_fresh_timeout_s_) {
+        const double sign =
+          gravity_apply_joint_signs_ && idx < joint_signs_.size() ? joint_signs_[idx] : 1.0;
+        const double jscale =
+          idx < gravity_joint_scale_.size() ? gravity_joint_scale_[idx] : 1.0;
+        tau += gravity_ff_scale_ * jscale * sign * gravity_tau_urdf_[idx];
+      } else {
+        RCLCPP_WARN_THROTTLE(
+          this->get_logger(), *this->get_clock(), 2000,
+          "Gravity FF skipped: sample age %.3fs > timeout %.3fs",
+          age_s, gravity_fresh_timeout_s_);
+      }
+    }
+
     return Clamp(tau, ProtocolCodec::kTMin, ProtocolCodec::kTMax);
   }
 
@@ -1063,8 +1277,16 @@ private:
   bool publish_motor_diagnostics_{false};
   std::string motor_diagnostics_topic_;
   bool enable_joint_tau_ff_{false};
-  double gravity_ff_scale_{0.5};
+  bool enable_gravity_compensation_{false};
+  bool gravity_apply_joint_signs_{true};
+  double gravity_ff_scale_{1.0};
+  double gravity_fresh_timeout_s_{0.5};
+  std::string gravity_compensation_topic_;
   std::vector<double> tau_ff_nominal_nm_;
+  std::vector<double> gravity_joint_scale_;
+  std::array<double, kNumArmJoints> gravity_tau_urdf_{};
+  bool has_gravity_sample_{false};
+  int64_t last_gravity_stamp_ns_{0};
   bool use_joint_cmd_limits_{true};
   std::vector<double> joint_cmd_min_rad_;
   std::vector<double> joint_cmd_max_rad_;
@@ -1143,10 +1365,18 @@ private:
   size_t skip_bus_disabled_window_{0};
   size_t skip_power_gate_window_{0};
 
+  bool enable_trajectory_interpolation_{true};
+  double trajectory_interp_rate_hz_{200.0};
+  std::mutex traj_mutex_;
+  JointTrajectory active_traj_;
+  rclcpp::Time traj_start_{0, 0, RCL_ROS_TIME};
+  bool has_active_traj_{false};
+
   rclcpp::Subscription<JointTrajectory>::SharedPtr traj_sub_;
   rclcpp::Subscription<UInt8MultiArray>::SharedPtr rx_sub_;
   rclcpp::Subscription<String>::SharedPtr tune_sub_;
   rclcpp::Subscription<Bool>::SharedPtr gate_sub_;
+  rclcpp::Subscription<JointState>::SharedPtr gravity_sub_;
   rclcpp::Publisher<UInt8MultiArray>::SharedPtr tx_pub_;
   rclcpp::Publisher<String>::SharedPtr feedback_pub_;
   rclcpp::Publisher<JointState>::SharedPtr feedback_joint_states_pub_;
@@ -1155,6 +1385,7 @@ private:
   rclcpp::TimerBase::SharedPtr feedback_js_timer_;
   rclcpp::TimerBase::SharedPtr tx_refresh_timer_;
   rclcpp::TimerBase::SharedPtr tx_stats_timer_;
+  rclcpp::TimerBase::SharedPtr traj_interp_timer_;
 };
 
 }  // namespace a3_can_bridge

@@ -21,9 +21,21 @@
     feedback_joint_fill_nan: true
     publish_motor_diagnostics: false
     motor_diagnostics_topic: /diagnostics
+    # Static nominal FF (legacy). Prefer enable_gravity_compensation + /a3/gravity_torque.
     enable_joint_tau_ff: false
-    gravity_ff_scale: 0.0
     tau_ff_nominal_nm: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # Live Pinocchio gravity → MIT tau (EDULITE): τ_mit = scale * signs * τ_g_urdf
+    # Official joint directions (DEFAULT_JOINT_DIRECTIONS / joint_signs):
+    #   L1:-1 L2:+1 L3:-1 L4:+1 L5:-1 L6:+1 L7:+1
+    # Apply signs ONCE here; do not also multiply in gravity_torque_node (keep its joint_direction=1).
+    enable_gravity_compensation: false
+    gravity_compensation_topic: /a3/gravity_torque
+    gravity_apply_joint_signs: true
+    gravity_ff_scale: 1.0
+    gravity_fresh_timeout_s: 0.5
+    gravity_joint_scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    enable_trajectory_interpolation: true
+    trajectory_interp_rate_hz: 200.0
     enable_startup_smoothing: true
     startup_smoothing_duration_s: 2.0
     command_max_velocity_rad_s: 1.5

@@ -27,6 +27,18 @@
 
 reBot 工具链可能使用 `joint1`..`joint7`；`a3_bringup/trajectory_bridge` 会自动映射为 `L{n}_joint`。
 
+## 命名姿态
+
+配置：[named_poses.yaml](../../src/a3_description/config/named_poses.yaml)、MoveIt [el_a3.srdf](../../src/a3_moveit_config/config/el_a3.srdf)。
+
+| 名称 | 含义 | 备注 |
+|------|------|------|
+| `zero` | 上电 / 机械零（全 0） | 仿真与真机默认起点 |
+| `work` | 目标工作位 | L2≈51°, L3≈-57°；Wave A 验收路径 `zero`→`work` |
+| `home` | 半抬起（EDULITE 遗留） | L2=L3=±45° |
+| `ready` | 另一就绪姿态（遗留） | 含 L5 抬腕 |
+| `open` / `close` | 夹爪 | 仅 gripper 组 |
+
 ## 电机与 CAN
 
 - **协议：** MIT 阻抗/力控模式（CAN 帧编解码见 `a3_can_bridge`）

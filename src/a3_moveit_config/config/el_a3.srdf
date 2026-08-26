@@ -43,6 +43,16 @@ EL-A3 Robot Arm SRDF (Semantic Robot Description Format)
         <joint name="L6_joint" value="0"/>
     </group_state>
 
+    <!-- Target work pose (desktop): L2=51 deg, L3=-57 deg (screenshot reference) -->
+    <group_state name="work" group="arm">
+        <joint name="L1_joint" value="0"/>
+        <joint name="L2_joint" value="0.8901179"/>
+        <joint name="L3_joint" value="-0.9948377"/>
+        <joint name="L4_joint" value="0"/>
+        <joint name="L5_joint" value="0"/>
+        <joint name="L6_joint" value="0"/>
+    </group_state>
+
     <group_state name="open" group="gripper">
         <joint name="L7_joint" value="1.5708"/>
     </group_state>

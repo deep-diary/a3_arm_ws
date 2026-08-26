@@ -20,6 +20,7 @@ def generate_launch_description():
     use_rviz = LaunchConfiguration("use_rviz")
     use_teleop = LaunchConfiguration("use_teleop")
     use_power_sequence = LaunchConfiguration("use_power_sequence")
+    use_gravity_compensation = LaunchConfiguration("use_gravity_compensation")
     can0_name = LaunchConfiguration("can0_name")
 
     xacro_file = os.path.join(desc_share, "urdf", "el_a3.urdf.xacro")
@@ -47,6 +48,7 @@ def generate_launch_description():
         launch_arguments={
             "can0_name": can0_name,
             "use_power_sequence": use_power_sequence,
+            "enable_gravity_compensation": use_gravity_compensation,
         }.items(),
     )
 
@@ -55,6 +57,15 @@ def generate_launch_description():
         executable="trajectory_bridge",
         name="a3_trajectory_bridge",
         output="screen",
+    )
+
+    gravity = Node(
+        package="a3_bringup",
+        executable="gravity_torque_node",
+        name="a3_gravity_torque",
+        output="screen",
+        parameters=[{"enabled": True}],
+        condition=IfCondition(use_gravity_compensation),
     )
 
     teleop = IncludeLaunchDescription(
@@ -81,10 +92,16 @@ def generate_launch_description():
         DeclareLaunchArgument("use_rviz", default_value="false"),
         DeclareLaunchArgument("use_teleop", default_value="true"),
         DeclareLaunchArgument("use_power_sequence", default_value="true"),
+        DeclareLaunchArgument(
+            "use_gravity_compensation",
+            default_value="false",
+            description="启动 gravity_torque_node 并打开 motor_protocol 重力 MIT 前馈",
+        ),
         DeclareLaunchArgument("can0_name", default_value="can0"),
         rsp,
         can_bridge,
         traj_bridge,
+        gravity,
         teleop,
         rviz,
     ])
