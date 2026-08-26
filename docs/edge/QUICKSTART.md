@@ -10,7 +10,7 @@
 3. `ros2 launch a3_bringup a3_bringup.launch.py`
    - 重力补偿 MIT 前馈（默认关）：`use_gravity_compensation:=true`
    - 或运行时：`ros2 param set /motor_protocol_node enable_gravity_compensation true`
-4. PS4: Square long-press = start; Options = set_zero; Triangle = shutdown
+4. PS4 电源：Square 长按 = start；Options 长按 = set_zero；Triangle = shutdown。笛卡尔/夹爪见第 10 节。
 5. Send test trajectory:
    ```bash
    ros2 topic pub --once /a3/joint_trajectory trajectory_msgs/msg/JointTrajectory "{joint_names: [L1_joint,L2_joint,L3_joint,L4_joint,L5_joint,L6_joint,L7_joint], points: [{positions: [0,0.5,-0.5,0,0,0,0], time_from_start: {sec: 2}}]}"
@@ -47,6 +47,21 @@
    ros2 launch a3_moveit_config demo.launch.py use_rviz:=true
    ```
    Interact → 拖末端球 → 面板 **Plan** / **Execute**。橙色半透明 = 目标模；Scene Robot = `/joint_states` 实际模。不发 CAN。
+
+10. **PS4 映射遥操作（仿真，F16）：**
+    ```bash
+    ls /dev/input/js*                    # 确认手柄节点
+    ros2 launch a3_teleop_ps4 ps4_teleop.launch.py dump:=true
+    # 另开终端：摇遍轴/键，核对索引后写入 src/a3_teleop_ps4/config/ds4_linux.yaml
+
+    export DISPLAY=:0
+    ros2 launch a3_bringup edge_teleop_sim.launch.py use_rviz:=true
+    # 默认 mapping:=simple（无 L1 组合键）；恢复 L1 死人开关：mapping:=default
+    ```
+    - **simple（默认）**：右摇杆左右/上下；左摇杆 Y 前后；R2 夹爪；Square/Circle 开/合夹爪
+    - D-pad 上/下/左/右：`work` / `zero` / `home` / `ready`；Cross 急停
+    - Cross：立即停；改映射只编 `config/mappings/default.yaml`
+    - 真机：`a3_bringup.launch.py use_teleop:=true` 起同一 mapper；笛卡尔还需另开 `servo.launch.py`（本轮仿真先验）
 
 ## 相关文档
 

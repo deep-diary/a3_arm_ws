@@ -71,6 +71,15 @@ class SimExecutor(Node):
         with self._lock:
             self._traj = msg
             self._traj_start = self.get_clock().now()
+            # Apply t=0 immediately so a one-shot partial traj (e.g. L7 gripper)
+            # is not lost if a 50 Hz Servo command replaces `_traj` before the timer.
+            pos, vel, _eff, _fin = sample_joint_trajectory(
+                msg, 0.0, self._interp_method
+            )
+            names = list(msg.joint_names)
+            self._positions = self._map_to_fixed(names, pos)
+            if vel:
+                self._velocities = self._map_to_fixed(names, vel)
         self.get_logger().info(
             f"Trajectory received: {len(msg.points)} points, {len(msg.joint_names)} joints"
         )
@@ -120,9 +129,12 @@ def main() -> None:
     node = SimExecutor()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

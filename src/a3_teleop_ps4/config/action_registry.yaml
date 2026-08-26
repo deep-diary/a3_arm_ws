@@ -1,0 +1,122 @@
+# Action function catalog. Bindings in mappings/*.yaml must use these names.
+# discrete: no runtime argument (kwargs frozen at bind time)
+# analog_01: float in [0, 1]
+# analog_n11: float in [-1, 1]
+
+functions:
+  goto_named_pose:
+    kind: discrete
+    kwargs: {name: string}
+    description: Interpolate current joints to named pose (zero/work/home/ready)
+
+  power_start:
+    kind: discrete
+    description: Publish /power_sequence/command start
+
+  power_shutdown:
+    kind: discrete
+    description: Publish /power_sequence/command shutdown
+
+  power_set_zero:
+    kind: discrete
+    description: Publish /power_sequence/command set_zero
+
+  stop_motion:
+    kind: discrete
+    description: Zero Twist and abort named-pose motion
+
+  servo_start:
+    kind: discrete
+    description: Call /servo_node/start_servo
+
+  gripper_open:
+    kind: discrete
+    description: L7 to open (1.5708 rad)
+
+  gripper_close:
+    kind: discrete
+    description: L7 to close (0)
+
+  gripper_toggle:
+    kind: discrete
+    description: Toggle L7 between close and open
+
+  set_speed_slow:
+    kind: discrete
+    description: Linear/angular scale 0.25
+
+  set_speed_normal:
+    kind: discrete
+    description: Linear/angular scale 1.0
+
+  zero_torque_start:
+    kind: discrete
+    description: Call /a3/zero_torque/start (no-op if service missing)
+
+  zero_torque_stop:
+    kind: discrete
+    description: Call /a3/zero_torque/stop
+
+  set_gripper:
+    kind: analog_01
+    description: q_L7 = v * 1.5708 rad (legacy alias)
+
+  set_joint_L6:
+    kind: analog_01
+    description: L6 position from trigger 0..1 maps joint lower..upper
+
+  set_joint_L7:
+    kind: analog_01
+    description: L7 gripper position from trigger 0 closed .. 1 open
+
+  set_speed_scale:
+    kind: analog_01
+    description: Override current speed multiplier
+
+  servo_lin_x:
+    kind: analog_n11
+    description: End-effector linear X (forward/back)
+
+  servo_lin_y:
+    kind: analog_n11
+    description: End-effector linear Y (left/right)
+
+  servo_lin_z:
+    kind: analog_n11
+    description: End-effector linear Z (up/down)
+
+  servo_ang_x:
+    kind: analog_n11
+    description: End-effector roll
+
+  servo_ang_y:
+    kind: analog_n11
+    description: End-effector pitch
+
+  servo_ang_z:
+    kind: analog_n11
+    description: End-effector yaw
+
+  joint_jog_L1:
+    kind: analog_n11
+    description: Legacy incremental jog L1 (unbound by default)
+
+  joint_jog_L2:
+    kind: analog_n11
+    description: Legacy incremental jog L2
+
+  joint_jog_L3:
+    kind: analog_n11
+    description: Legacy incremental jog L3
+
+  joint_jog_L4:
+    kind: analog_n11
+    description: Legacy incremental jog L4
+
+  joint_jog_L5:
+    kind: analog_n11
+    description: Legacy incremental jog L5
+
+  joint_jog_L6:
+    kind: analog_n11
+    description: Legacy incremental jog L6

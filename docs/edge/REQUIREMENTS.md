@@ -29,12 +29,12 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - 支持 `start` / `shutdown` / `set_zero` 命令
 - gate 未打开时拒绝轨迹执行
 
-### F3 — PS4 遥操作
+### F3 — PS4 遥操作（电源）
 
 - Square 长按：启动电源序列
 - Triangle / L1+R1+Share：shutdown
 - Options 长按：set_zero
-- 关节 jog（见 `a3_teleop_ps4`）
+- 笛卡尔 Servo / 夹爪 / 命名姿态映射见 **F16**；旧关节 jog 节点 `ps4_arm_teleop` 保留但不默认启动
 
 ### F4 — reBot / MoveIt 集成
 
@@ -151,6 +151,19 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** CONTROL_ROADMAP C4
 - **状态：** `implemented`（`servo.launch.py` + mode bridge；依赖 `moveit_servo`）
 
+### F16 — PS4 映射遥操作（笛卡尔 + 夹爪）
+
+- **说明：** YAML 将手柄轴映射到带归一化参数的函数（`analog_01` / `analog_n11`），按键映射到无参动作；默认：D-pad 到命名姿态、R2 控夹爪、双摇杆走 MoveIt Servo。L1 为死人开关。
+- **验收标准：**
+  1. `joy_dump` 能打印当前手柄全部 `axes[]` / `buttons[]`；轴序写入 `ds4_linux.yaml` 后映射生效
+  2. 改 `config/mappings/default.yaml` 即可换绑，不必改 Python
+  3. 仿真 `edge_teleop_sim.launch.py`：L1+右摇杆末端左右/上下，L1+左摇杆上下为前后；松杆停止
+  4. L1+R2：夹爪 0→闭合、1→张开（`L7` 0…1.5708 rad）
+  5. D-pad 上/下/左/右分别到 `work` / `zero` / `home` / `ready`
+  6. Cross 立即停；Square/Triangle/Options 长按电源语义与 F3 一致
+- **关联：** [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)；[shared/SAFETY.md](../shared/SAFETY.md)；`a3_teleop_ps4`
+- **状态：** `implemented`（仿真路径；真机 CAN 经 `a3_bringup.launch.py use_teleop:=true` 接同一 mapper，Servo 需另开）
+
 ## 非功能需求
 
 | 指标 | 要求 |
@@ -186,6 +199,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 6. MoveIt demo 可规划（mock 或真机模式）
 7. F6–F9：Wave A 见 [dev/WAVE_A_SIM_TEST_REPORT.md](../dev/WAVE_A_SIM_TEST_REPORT.md)
 8. F10–F15：见 QUICKSTART Wave B / [dev/WAVE_B_SIM_NOTES.md](../dev/WAVE_B_SIM_NOTES.md) / [dev/WAVE_B_SIM_TEST_REPORT.md](../dev/WAVE_B_SIM_TEST_REPORT.md)
+9. F16：`ros2 launch a3_bringup edge_teleop_sim.launch.py use_rviz:=true`；先 `joy_dump` 核对轴序
 
 ## 关联文档
 

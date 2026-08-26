@@ -76,6 +76,7 @@ def generate_launch_description():
                 "ps4_teleop.launch.py",
             )
         ),
+        launch_arguments={"auto_start_servo": "false"}.items(),
         condition=IfCondition(use_teleop),
     )
 

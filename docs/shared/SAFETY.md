@@ -27,6 +27,7 @@ A3 Edge 与 A3 CloudEdge 共同遵守的安全设计原则。具体参数以配�
 - gate 关闭时：强制退出运动相关模式，禁止新轨迹
 - Servo：`incoming_command_timeout` 超时后应回 `IDLE` 并停止下发
 - 零力矩 ≠ 纯 `tau=0`：默认同重力前馈叠加，退出时恢复原 `kp`/`kd`
+- **手柄死人开关：** PS4 **L1 按住** 才允许非零 Servo Twist 与夹爪模拟量（R2）；松开立即发零速度。D-pad 命名姿态与电源长按不要求 L1。Cross → `stop_motion`。
 
 ## 轨迹门控（gate）
 
@@ -59,6 +60,8 @@ A3 Edge 与 A3 CloudEdge 共同遵守的安全设计原则。具体参数以配�
 | 启动 | PS4 Square 长按 / `start` | `/power_sequence/command` |
 | 关机 | PS4 Triangle / L1+R1+Share | `shutdown` |
 | 调零 | PS4 Options 长按 | `set_zero` |
+| Servo / 夹爪模拟量 | PS4 **L1 按住** + 摇杆 / R2 | Twist / L7 轨迹 |
+| 立即停 | PS4 Cross | 零 Twist，中止命名姿态 |
 
 CloudEdge 须在 ESP32 固件中实现等效逻辑；网络侧 `shutdown` 命令可作为补充，**不能**作为唯一安全手段。
 

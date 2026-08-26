@@ -1,0 +1,64 @@
+# 单键/单轴直测映射：无 L1 死人开关。
+# 笛卡尔速度在 base_link 系（相对基座前后/左右/上下），比 end_effector 系更直观。
+# 用法：ros2 launch a3_bringup edge_teleop_sim.launch.py mapping:=simple use_rviz:=true
+
+deadman:
+  enabled: false
+
+speed_normal: 1.0
+
+# Twist 参考系（ps4_mapper 参数 twist_frame 可覆盖）
+twist_frame: base_link
+
+# 手柄连上后 D-pad 轴常抖动，需预热 + 十字键回中再接受姿态切换
+joy_warmup_ticks: 30
+dpad_arm_ticks: 15
+
+axes:
+  # 右摇杆：基座系左右 / 上下
+  right_x:
+    fn: servo_lin_y
+    kind: analog_n11
+  right_y:
+    fn: servo_lin_z
+    kind: analog_n11
+  # 左摇杆 Y：基座系前后
+  left_y:
+    fn: servo_lin_x
+    kind: analog_n11
+  # L2 → 第 6 关节 L6；R2 → 第 7 关节 L7（夹爪）
+  l2:
+    fn: set_joint_L6
+    kind: analog_01
+    source: trigger
+  r2:
+    fn: set_joint_L7
+    kind: analog_01
+    source: trigger
+
+buttons:
+  dpad_up:
+    fn: goto_named_pose
+    kwargs: {name: work}
+    edge: rising
+  dpad_down:
+    fn: goto_named_pose
+    kwargs: {name: zero}
+    edge: rising
+  dpad_left:
+    fn: goto_named_pose
+    kwargs: {name: home}
+    edge: rising
+  dpad_right:
+    fn: goto_named_pose
+    kwargs: {name: ready}
+    edge: rising
+  cross:
+    fn: stop_motion
+    edge: rising
+  circle:
+    fn: gripper_close
+    edge: rising
+  square:
+    fn: gripper_open
+    edge: rising

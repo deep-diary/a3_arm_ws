@@ -1,0 +1,76 @@
+# Default PS4 → A3 mapping. Change this file to rebind; no code change needed.
+# Source names: buttons/axes keys from ds4_linux.yaml, plus virtual_buttons.
+
+deadman:
+  enabled: true
+  button: l1
+  applies_to: [analog_01, analog_n11]
+
+# Default speed when R1 is not held.
+speed_normal: 0.35
+speed_boost: 1.0
+
+axes:
+  r2:
+    fn: set_gripper
+    kind: analog_01
+    source: trigger
+  right_x:
+    fn: servo_lin_y
+    kind: analog_n11
+  right_y:
+    fn: servo_lin_z
+    kind: analog_n11
+  left_y:
+    fn: servo_lin_x
+    kind: analog_n11
+  left_x:
+    fn: servo_ang_z
+    kind: analog_n11
+  # Optional HID extras (enable after ds4_hid_node is up):
+  # gyro_yaw:
+  #   fn: servo_ang_z
+  #   kind: analog_n11
+  # touch_x:
+  #   fn: servo_lin_y
+  #   kind: analog_n11
+
+buttons:
+  dpad_up:
+    fn: goto_named_pose
+    kwargs: {name: work}
+    edge: rising
+  dpad_down:
+    fn: goto_named_pose
+    kwargs: {name: zero}
+    edge: rising
+  dpad_left:
+    fn: goto_named_pose
+    kwargs: {name: home}
+    edge: rising
+  dpad_right:
+    fn: goto_named_pose
+    kwargs: {name: ready}
+    edge: rising
+  cross:
+    fn: stop_motion
+    edge: rising
+  square:
+    fn: power_start
+    edge: longpress
+    hold_s: 1.0
+  triangle:
+    fn: power_shutdown
+    edge: longpress
+    hold_s: 1.0
+  options:
+    fn: power_set_zero
+    edge: longpress
+    hold_s: 2.0
+
+held:
+  r1:
+    fn: set_speed_scale
+    kind: analog_01
+    pressed: 1.0
+    released: 0.35

@@ -18,6 +18,10 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | 笛卡尔 IK | `a3_msgs/srv/MoveToPoseIK` | 位姿 → 关节解 |
 | 笛卡尔运动 | `a3_msgs/action/MoveToPose` | IK + 轨迹执行 |
 | Servo 速度 | `geometry_msgs/TwistStamped` | MoveIt Servo 输入 |
+| 手柄 | `sensor_msgs/Joy` | `joy_node` 轴/按键 |
+| 命名姿态 | `std_msgs/String` | `zero` / `work` / `home` / `ready` |
+| 夹爪开合 | `std_msgs/Float32` | 0 闭合 … 1 张开 |
+| DS4 IMU | `sensor_msgs/Imu` | 可选 hidraw（陀螺/加速度） |
 ## 标准话题（单臂，无 namespace）
 
 ### 轨迹输入（订阅侧 / 执行层监听）
@@ -51,6 +55,11 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/move_to_pose_ik` | `a3_msgs/srv/MoveToPoseIK` | 仅 IK |
 | `/a3/move_to_pose` | `a3_msgs/action/MoveToPose` | IK + 执行 |
 | `/a3/gravity_torque` | `sensor_msgs/JointState` | URDF 系重力力矩（effort） |
+| `/a3/goto_named_pose` | `std_msgs/String` | 命名姿态（`zero`/`work`/`home`/`ready`） |
+| `/a3/gripper_cmd` | `std_msgs/Float32` | 夹爪归一化 0–1（调试；手柄 R2 亦走此语义） |
+| `/joy` | `sensor_msgs/Joy` | PS4 轴与按键 |
+| `/a3/ds4/imu` | `sensor_msgs/Imu` | 可选 DualShock 4 HID 惯性 |
+| `/a3/ds4/battery` | `std_msgs/Float32` | 可选电量 0–1 |
 
 **插值语义（执行层）：** 仅 positions → 线性；+velocities → 三次；+accelerations → 五次；effort 始终线性（JTC 对齐）。参数 `trajectory_interpolation_method`（默认 `auto`）。
 
