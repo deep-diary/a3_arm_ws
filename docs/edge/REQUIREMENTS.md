@@ -176,6 +176,39 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** [shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md) L0；`a3_can_bridge`
 - **状态：** `implemented`（编解码 + 服务；真机板测待办）
 
+### F18 — ROS2→MQTT 遥测上报与 Web 实时展示（跨仓）
+
+- **说明：** 在 RK3588 上新增 `a3_mqtt_bridge` 包，订阅 A3 应用话题（精选白名单，YAML 可配），把每条消息展平为 `points`，经 MQTT（EMQX `192.168.3.73`）上报 `deep-trace/HOME-DEMO/RK3588/{device/info,device/status,telemetry}`。deep-trace 前端（外部仓库 `deep-trace`，分支 `rk3588`）以静态 seed 预置 `rk3588` 设备，详情页展示系统信息 + ROS 节点卡片 + 话题/信号两级下拉 + 带 dataZoom 缩放的实时曲线；预留 MQTT `cmd` 下行骨架用于后续双向交互。
+- **验收标准：**
+  1. 起 bridge 后 `mosquitto_sub -h 192.168.3.73 -t 'deep-trace/HOME-DEMO/RK3588/#' -v` 能观察到 `device/info`、`device/status`、`telemetry`
+  2. `telemetry` 载荷 `points` 键与设备 YAML `points` 对齐，`ts` 为 ISO8601
+  3. 浏览器 `/homes/HOME-DEMO/devices` 可见 `rk3588` 设备；详情页系统信息卡有值、节点卡片在线
+  4. 选 `motor_protocol_node → /joint_states → pos_L1..L7` 曲线实时刷新且可 dataZoom 缩放
+  5. bridge 断连可重连；`device/info` 以 retained 发布，重启后前端仍可取到板级信息
+- **关联：** [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)；外部前端仓库 `deep-trace`（本机 `/home/cat/deep-trace`，分支 `rk3588`）
+- **状态：** `in progress`
+
+### F19 — 总线扫描服务（通信类型 0 范围探测）
+
+- **说明：** 在 `motor_protocol_node` 暴露 `/a3/motor/scan` 服务，对 `[id_min, id_max]` 内每个 CAN_ID 发送通信类型 0 获取设备 ID 探测帧（只发不等，对齐固件 `sendGetDeviceIdProbes`）。应答帧（cmd=0 且 bit0-7=0xFE，motor_id=bit8-15，data 为 8 字节大端 MCU UID）经 `OnRxFrame` 解析后发布到 `/a3/motor/device_id`，用于验证机械臂 7 关节电机是否全部在线、以及 `SET_CAN_ID` 改号后复核。
+- **验收标准：**
+  1. `ros2 service call /a3/motor/scan "{id_min: 1, id_max: 127, bus: 0}"` 返回 `sent=127`
+  2. 扫描期间 `ros2 topic echo /a3/motor/device_id` 能列出总线在线电机的 motor_id 与 UID
+  3. 配合 `SET_CAN_ID` 改号后重新扫描，在线 ID 列表随之变化
+- **关联：** [shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md) L0；`a3_can_bridge`
+- **状态：** `implemented`（服务 + 编解码；真机板测见 F17）
+
+### F20 — Web 端 3D 机械臂实时渲染（跨仓）
+
+- **说明：** 在 deep-trace 前端（外部仓库 `/home/cat/deep-trace`，分支 `rk3588`）的 RK3588 设备详情页新增 3D 机械臂视图：浏览器加载 `src/a3_description/urdf/el_a3.urdf`（含 8 个 `.stl` mesh），复用 F18 已打通的 MQTT `telemetry` 中 `points.pos_L1..L7`（弧度）实时驱动 `L1_joint..L7_joint`。渲染用 `three` + `urdf-loader`（不兼容时回退 `@gkjohnson/urdf-loader`）；MQTT 复用 `useRk3588Mqtt`，不新建连接。
+- **验收标准：**
+  1. rk3588 详情页加载 `el_a3.urdf` 后 3D 模型正确渲染（含 mesh 与关节层级）
+  2. 起 `a3_mqtt_bridge` 后订阅 `telemetry`，7 关节随 `pos_L1..L7` 实时转动（单位一致，无需换算）
+  3. 断连重连后 3D 视图恢复跟随（复用 `useRk3588Mqtt` 的重连逻辑）
+  4. 页面卸载时正确释放 `three` renderer 与 `requestAnimationFrame`，无内存泄漏告警
+- **关联：** [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)；[shared/ROBOT_MODEL.md](../shared/ROBOT_MODEL.md)；外部前端仓库 `deep-trace`（分支 `rk3588`）
+- **状态：** `in progress`
+
 ## 非功能需求
 
 | 指标 | 要求 |
@@ -191,19 +224,19 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 
 - RK3588 开发板（已验证 LubanCat-4-V1）
 - CAN 收发器（40PIN TX/RX 或板载 CAN）
-- Device tree overlay 启用 `can0`（可选 `can1`..`can3` 多臂）
+- Device tree overlay 启用 `can2-m0`（注册为 `can1`，板载收发器，控臂总线）；可选 `can0-m0` 及多臂 `can1`..`can3`
 - 7× MIT 协议电机，ID 1..7，主机 ID 0xFD
 
 ## 边界与不做事项
 
 - 不在 WSL2 上调试板载 SocketCAN 真电机
-- 不与 MotorBridge 同时占用同一 `can0`
+- 不与 MotorBridge 同时占用同一 `can1`
 - 不把 Windows 编译产物直接部署到 ARM 板
 - CloudEdge 薄边缘形态不在本产品线范围
 
 ## 验收标准
 
-1. `can-up.service` 启动后 `can0` 为 UP，1 Mbps
+1. `can-up.service` 启动后 `can1` 为 UP，1 Mbps
 2. `ros2 launch a3_bringup a3_bringup.launch.py` 无致命错误
 3. PS4 启动后 `/power_sequence/gate_open` 为 `true`
 4. 测试轨迹（见 [QUICKSTART.md](QUICKSTART.md)）在 2 s 内完成运动

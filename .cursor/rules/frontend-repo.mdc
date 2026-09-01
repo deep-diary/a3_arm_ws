@@ -1,0 +1,14 @@
+---
+description: 前端/后端 Web 展示代码在外部仓库 deep-trace，不在本仓；改前端须切 rk3588 分支
+alwaysApply: true
+---
+
+# 外部前端仓库 deep-trace
+
+A3 Edge 的 Web 展示（设备列表 / 详情 / 实时曲线）代码在**外部仓库 `/home/cat/deep-trace`**，不是本仓子目录。涉及前端（Vue3）、后端（Django）、设备 YAML 的改动都去那里做。
+
+- 分支：`rk3588`（`cd /home/cat/deep-trace && git checkout rk3588`）
+- 本仓只放 ROS 侧 `a3_mqtt_bridge` 与契约文档
+- MQTT 话题前缀 `deep-trace/HOME-DEMO/RK3588/...`；信号 code 两侧对齐（本仓 `bridge.yaml` ↔ deep-trace `HOME-DEMO.RK3588.yaml`）
+
+完整路径与契约见本仓根目录 `AGENT.md` §7。

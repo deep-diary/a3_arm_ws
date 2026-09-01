@@ -34,7 +34,7 @@ flowchart TB
     end
 
     subgraph hardware [硬件]
-        CAN["SocketCAN can0"]
+        CAN["SocketCAN can1"]
         Motors["7x MIT 电机"]
     end
 

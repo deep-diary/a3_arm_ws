@@ -1,0 +1,7 @@
+# 总线扫描：对 [id_min, id_max] 内每个 CAN_ID 发送通信类型 0 探测帧（只发不等）
+uint8 id_min            # 起始电机 CAN_ID（默认 1）
+uint8 id_max            # 结束电机 CAN_ID（默认 127）
+uint8 bus               # 0=can0（默认），1=can1
+---
+bool success
+string message          # 例如 "sent 127 probes [1..127] on can0"

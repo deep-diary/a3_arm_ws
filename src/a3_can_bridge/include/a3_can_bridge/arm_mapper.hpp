@@ -29,13 +29,13 @@ public:
   }};
 
   static constexpr std::array<MotorRoute, 7> kTemporaryIndexMap{{
-    {0, 1, CanBus::CAN0, "L1"},
-    {1, 2, CanBus::CAN0, "L2"},
-    {2, 3, CanBus::CAN0, "L3"},
-    {3, 4, CanBus::CAN0, "L4"},
-    {4, 5, CanBus::CAN0, "L5"},
-    {5, 6, CanBus::CAN0, "L6"},
-    {6, 7, CanBus::CAN0, "L7_gripper"},
+    {0, 1, CanBus::CAN1, "L1"},
+    {1, 2, CanBus::CAN1, "L2"},
+    {2, 3, CanBus::CAN1, "L3"},
+    {3, 4, CanBus::CAN1, "L4"},
+    {4, 5, CanBus::CAN1, "L5"},
+    {5, 6, CanBus::CAN1, "L6"},
+    {6, 7, CanBus::CAN1, "L7_gripper"},
   }};
 
   static std::optional<MotorRoute> GetRouteByTrajectoryIndex(size_t idx)

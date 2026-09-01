@@ -54,6 +54,7 @@
 
 - **CRLF：** Windows/Cursor 写入的 `*.sh` 会出现 `/usr/bin/env: 'bash\r'` 或 `case $- in\r`。仓库 `.gitattributes` 约束 `*.sh` → LF。
 - **Pinocchio：** `ros-humble-pinocchio` 对系统 NumPy 1.x；`~/.local` 的 NumPy 2.x 会崩。Wave 脚本与 `a3_shell_env.sh` 设 `PYTHONNOUSERSITE=1`。
+- **`pip --user` 新依赖被 `PYTHONNOUSERSITE=1` 连坐屏蔽：** 该变量为隔离 `~/.local` NumPy 而设，会一并屏蔽其它 `pip install --user` 的包。ROS 节点里 `import paho.mqtt.client` 报 `ModuleNotFoundError: No module named 'paho'`（`a3_mqtt_bridge` 首见）。
 - **wmctrl：** `.rviz` 只能写死窗口宽高；真正最大化要 `wmctrl`。没装时 launch 里的 maximize 步骤静默跳过。
 
 ## 正确做法 / 规避
@@ -89,6 +90,13 @@
 5. **换机 / 重编后若 `setup.bash` 又链上 micro-ROS：** 用 `local_setup.bash` 或 `a3_shell_env.sh`；干净重建时先只 `source /opt/ros/humble/setup.bash` 再 `colcon build`。
 
 6. **脚本换行：** `sed -i 's/\r$//' scripts/*.sh`；`bash -n scripts/a3_shell_env.sh`。
+
+7. **新增纯 Python 节点依赖（不涉 NumPy/pinocchio）用 `pip install --user` 时**，在该节点 launch 里解除屏蔽：
+   ```python
+   from launch.actions import SetEnvironmentVariable
+   SetEnvironmentVariable("PYTHONNOUSERSITE", "")
+   ```
+   或直接装系统包（不受该变量影响）：`sudo apt install -y python3-paho-mqtt`。
 
 ## 相关路径
 

@@ -21,6 +21,7 @@ set(srv_files
   "srv/MotorCommand.srv"
   "srv/SetCanId.srv"
   "srv/SetMotorParam.srv"
+  "srv/MotorScan.srv"
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}

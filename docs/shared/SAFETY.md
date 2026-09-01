@@ -88,7 +88,7 @@ ESP32 固件必须实现：
 - 在 gate 未打开时发送运动轨迹
 - 云端以 200 Hz 闭环力控替代边缘实时环
 - 将急停、看门狗仅放在服务器侧
-- MotorBridge 与 `a3_can_bridge` 同时占用 `can0`
+- MotorBridge 与 `a3_can_bridge` 同时占用 `can1`
 
 ## 关联文档
 

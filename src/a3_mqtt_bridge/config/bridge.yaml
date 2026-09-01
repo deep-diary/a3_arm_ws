@@ -1,0 +1,70 @@
+# a3_mqtt_bridge 白名单与展平配置
+# 需求：docs/edge/REQUIREMENTS.md F18
+# 信号命名（points key）须与 deep-trace 设备 YAML points[].code 一致。
+
+mqtt:
+  host: 192.168.3.73
+  port: 1883
+  topic_prefix: deep-trace/HOME-DEMO/RK3588
+  client_id_prefix: a3-rk3588
+  # username: ""
+  # password: ""
+
+device:
+  home_code: HOME-DEMO
+  work_unit_code: RK3588
+  program: rk3588
+  name: RK3588 机械臂
+
+status_interval_sec: 1.0
+info_interval_sec: 10.0
+
+# flatten:
+#   joint_state — sensor_msgs/JointState：fields×joints 展平为 prefix_L{1..7}
+#   scalar      — 单字段消息：fields 映射到 names
+topics:
+  - topic: /joint_states
+    node: motor_protocol_node
+    type: sensor_msgs/msg/JointState
+    qos: best_effort
+    flatten: joint_state
+    fields: [position, velocity, effort]
+    prefixes: [pos, vel, eff]
+    joints: [L1_joint, L2_joint, L3_joint, L4_joint, L5_joint, L6_joint, L7_joint]
+
+  - topic: /a3/gravity_torque
+    node: gravity_torque_node
+    type: sensor_msgs/msg/JointState
+    qos: best_effort
+    flatten: joint_state
+    fields: [effort]
+    prefixes: [tau_g]
+    joints: [L1_joint, L2_joint, L3_joint, L4_joint, L5_joint, L6_joint, L7_joint]
+
+  - topic: /a3/control_mode
+    node: motor_protocol_node
+    type: std_msgs/msg/String
+    flatten: scalar
+    fields: [data]
+    names: [control_mode]
+
+  - topic: /power_sequence/gate_open
+    node: power_sequence_node
+    type: std_msgs/msg/Bool
+    flatten: scalar
+    fields: [data]
+    names: [gate_open]
+
+  - topic: /power_sequence/state
+    node: power_sequence_node
+    type: std_msgs/msg/String
+    flatten: scalar
+    fields: [data]
+    names: [power_state]
+
+  - topic: /motor_feedback
+    node: motor_protocol_node
+    type: std_msgs/msg/String
+    flatten: scalar
+    fields: [data]
+    names: [motor_feedback]

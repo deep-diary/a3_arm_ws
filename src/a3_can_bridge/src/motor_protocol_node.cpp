@@ -30,6 +30,7 @@
 #include "a3_can_bridge/srv/motor_command.hpp"
 #include "a3_can_bridge/srv/set_can_id.hpp"
 #include "a3_can_bridge/srv/set_motor_param.hpp"
+#include "a3_can_bridge/srv/motor_scan.hpp"
 
 using diagnostic_msgs::msg::DiagnosticArray;
 using diagnostic_msgs::msg::DiagnosticStatus;
@@ -43,6 +44,7 @@ using std_srvs::srv::Trigger;
 using a3_can_bridge::srv::MotorCommand;
 using a3_can_bridge::srv::SetCanId;
 using a3_can_bridge::srv::SetMotorParam;
+using a3_can_bridge::srv::MotorScan;
 
 namespace a3_can_bridge
 {
@@ -333,6 +335,13 @@ public:
         HandleSetParamService(req, resp);
       });
 
+    scan_srv_ = this->create_service<MotorScan>(
+      "/a3/motor/scan",
+      [this](const std::shared_ptr<MotorScan::Request> req,
+             std::shared_ptr<MotorScan::Response> resp) {
+        HandleScanService(req, resp);
+      });
+
     if (enable_trajectory_interpolation_ && trajectory_interp_rate_hz_ > 1e-3) {
       const int64_t period_ns = static_cast<int64_t>(1e9 / trajectory_interp_rate_hz_);
       traj_interp_timer_ = this->create_wall_timer(
@@ -387,8 +396,7 @@ public:
 
     RCLCPP_WARN(
       this->get_logger(),
-      "P1 temporary mapping enabled: positions[0..11] -> IDs [11,12,13,21,22,23,51,52,53,61,62,63], "
-      "front legs on can0, rear legs on can1.");
+      "A3 arm mapping enabled: 7 joints L1..L7 -> motor IDs [1,2,3,4,5,6,7], all on can1.");
     RCLCPP_INFO(
       this->get_logger(),
       "Runtime MIT tuning topic: %s (example: 'scope=all kp=25 kd=1.8 tau=0.3' or 'scope=rear tau=0.6' or 'reset=1')",
@@ -915,7 +923,7 @@ private:
     if (const auto route = GetRouteByMotorId(motor_id); route.has_value()) {
       return route->bus;
     }
-    return CanBus::CAN0;
+    return CanBus::CAN1;
   }
 
   static void FormatMcuUidHex(uint64_t uid, char * out, size_t out_len)
@@ -1016,6 +1024,33 @@ private:
       BusForMotorId(req->motor_id), req->motor_id, req->param_id, req->value));
     resp->success = true;
     resp->message = "ok";
+  }
+
+  void HandleScanService(
+    const std::shared_ptr<MotorScan::Request> & req,
+    const std::shared_ptr<MotorScan::Response> & resp)
+  {
+    uint8_t id_min = req->id_min == 0 ? 1 : req->id_min;
+    uint8_t id_max = req->id_max == 0 ? 127 : req->id_max;
+    if (id_max > 127) {
+      id_max = 127;
+    }
+    if (id_min > id_max) {
+      resp->success = false;
+      resp->message = "id_min > id_max";
+      return;
+    }
+    const CanBus bus = (req->bus == 1) ? CanBus::CAN1 : CanBus::CAN0;
+    uint32_t sent = 0;
+    for (uint32_t mid = id_min; mid <= id_max; ++mid) {
+      PublishFrame(ProtocolCodec::BuildGetDeviceIdProbeFrame(bus, static_cast<uint8_t>(mid)));
+      ++sent;
+    }
+    resp->success = true;
+    resp->message = "sent " + std::to_string(sent) + " probes [" +
+      std::to_string(static_cast<int>(id_min)) + ".." +
+      std::to_string(static_cast<int>(id_max)) + "] on " +
+      (bus == CanBus::CAN0 ? "can0" : "can1");
   }
 
   void PublishDeviceId(const DeviceIdResponse & rsp)
@@ -1671,6 +1706,7 @@ private:
   rclcpp::Service<MotorCommand>::SharedPtr request_version_srv_;
   rclcpp::Service<SetCanId>::SharedPtr set_can_id_srv_;
   rclcpp::Service<SetMotorParam>::SharedPtr set_param_srv_;
+  rclcpp::Service<MotorScan>::SharedPtr scan_srv_;
   rclcpp::Publisher<UInt8MultiArray>::SharedPtr tx_pub_;
   rclcpp::Publisher<String>::SharedPtr feedback_pub_;
   rclcpp::Publisher<String>::SharedPtr device_id_pub_;

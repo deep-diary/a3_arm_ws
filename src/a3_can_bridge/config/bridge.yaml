@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
     can0_name: can0
-    # Arm uses a single bus; can1 kept for API compatibility with can_transport_node
+    # Arm uses can1 (RK3588 CAN2 controller, on-board transceiver); can0 kept for API compatibility
     can1_name: can1
     can_tx_frames_qos_depth: 4000
     rx_poll_ms: 2

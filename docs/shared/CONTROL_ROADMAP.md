@@ -129,7 +129,7 @@ SystemInterface 插件  ← 唯一碰 CAN/MIT 的地方
 | **能力** | CAN/USB 链路、MIT 帧编解码、单电机使能与反馈解析 |
 | **常见组件** | SocketCAN、`cansend`、MotorBridge、板级 overlay |
 | **验收** | 指定 ID 电机可 enable；反馈角度/力矩可读；与另一套工具不抢总线 |
-| **常见坑** | MotorBridge 与自研驱动同时占 `can0`；WSL2 无法调试板载 SocketCAN |
+| **常见坑** | MotorBridge 与自研驱动同时占 `can1`；WSL2 无法调试板载 SocketCAN |
 
 ### L1 — 关节级运动
 

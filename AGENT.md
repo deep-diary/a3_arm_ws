@@ -181,3 +181,64 @@ CAN 发送、200 Hz 插值、断连 disable 电机、gate、软限位、急停 G
 | [docs/shared/SAFETY.md](docs/shared/SAFETY.md) | 安全契约 |
 | [docs/dev/WSL2_SETUP.md](docs/dev/WSL2_SETUP.md) | WSL 环境 |
 | [.cursor/rules/requirements-first.mdc](.cursor/rules/requirements-first.mdc) | 需求先行规则 |
+
+## 7. 外部前端仓库 deep-trace（Web 展示）
+
+A3 Edge 遥测 Web 展示的前端/后端代码在**外部仓库 `deep-trace`**，与本仓并列，**非本仓子目录**。
+
+| 项 | 值 |
+|----|----|
+| 路径 | `/home/cat/deep-trace` |
+| 分支 | `rk3588`（跟踪 `origin/rk3588`；与 master 同源于 `0e9b339`） |
+| 切换 | `cd /home/cat/deep-trace && git checkout rk3588` |
+| 技术栈 | 前端 Vue3 + Element Plus + ECharts；后端 Django + DRF；边缘 Python |
+
+**职责分工：**
+
+- 本仓 `a3_arm_ws`：ROS 侧 `src/a3_mqtt_bridge`（ROS2→MQTT 遥测上报，需求 [F18](docs/edge/REQUIREMENTS.md)）
+- deep-trace：后端设备 seed / ingest + 前端设备详情页实时曲线
+
+**MQTT 契约（EMQX `192.168.3.73`，TCP 1883 / WS 8083）：**
+
+| 话题 | 方向 | 说明 |
+|------|------|------|
+| `deep-trace/HOME-DEMO/RK3588/device/info` | 发布（retained） | 板级信息 + 节点/话题/信号目录 |
+| `deep-trace/HOME-DEMO/RK3588/device/status` | 发布（~1 Hz） | 心跳 + CPU/内存/温度 + 运行中节点 |
+| `deep-trace/HOME-DEMO/RK3588/telemetry` | 发布 | 展平后的 `points`（key 与设备 YAML `points[].code` 一致） |
+| `deep-trace/HOME-DEMO/RK3588/cmd` | 订阅（预留） | 双向交互骨架 |
+
+**deep-trace 关键文件：**
+
+| 文件 | 说明 |
+|------|------|
+| `edge/device_firmware/rk3588/config/HOME-DEMO.RK3588.yaml` | 设备契约（program/nodes/points/topics/mqtt） |
+| `backend/config/seed/homes/HOME-DEMO.json` | 工位 `RK3588`（seed） |
+| `backend/metadata/device_loader.py` | `rk3588/config` 目录 + `nodes` 透传 |
+| `frontend/src/config/deviceRegistry.js` | 注册 `rk3588` program |
+| `frontend/src/views/iot/components/Rk3588HubPanel.vue` | 系统信息 + 节点卡片 + 两级下拉 + 缩放曲线 |
+| `frontend/src/composables/useRk3588Mqtt.js` | 订阅 info/status/telemetry |
+| `docs/requirements/features/iot/modules/ros-device-telemetry.md` | 需求 REQ-IOT-310 |
+
+**联调顺序：** 先 `cd /home/cat/deep-trace/backend && python manage.py load_device_config`（合入 YAML），再起 `a3_mqtt_bridge`，浏览器打开 `/homes/HOME-DEMO/devices` → RK3588。信号 code 两侧必须一致：本仓 `bridge.yaml` ↔ deep-trace `HOME-DEMO.RK3588.yaml` 的 `points[].code`。
+
+**环境准备（RK3588 板实测，Django 6 需 Python 3.12+，系统默认 3.10/3.11）：**
+
+```bash
+# 后端（端口 8001）
+cd /home/cat/deep-trace/backend
+uv python install 3.13                      # uv 装独立 Python，免 sudo
+uv venv --python 3.13 .venv && source .venv/bin/activate
+uv pip install -r requirements.txt
+cp .env.example .env                        # 按需改 MQTT_HOST=192.168.3.73 MQTT_PORT=1883
+python manage.py migrate
+python manage.py load_line_config
+python manage.py load_device_config         # 工位不存在的 YAML 已改为跳过(warning)，不再中断
+python manage.py runserver 0.0.0.0:8001
+
+# 前端（端口 5173）
+cd /home/cat/deep-trace/frontend
+npm install
+npm run dev -- --host                        # Network http://192.168.3.78:5173
+```
+
+演示账号 `wangwu / demo123`；详情页 `/device/HOME-DEMO/RK3588`。

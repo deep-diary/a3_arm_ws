@@ -44,7 +44,7 @@ reBot 工具链可能使用 `joint1`..`joint7`；`a3_bringup/trajectory_bridge` 
 - **协议：** MIT 阻抗/力控模式（CAN 帧编解码见 `a3_can_bridge`）
 - **主机 CAN ID：** `0xFD`（253）
 - **电机 ID：** 1..7，对应关节 1..7
-- **默认总线：** 单臂 `can0`，1 Mbps
+- **默认总线：** 单臂 `can1`（RK3588 CAN2 控制器，板载收发器），1 Mbps
 
 配置文件：
 
@@ -54,7 +54,7 @@ reBot 工具链可能使用 `joint1`..`joint7`；`a3_bringup/trajectory_bridge` 
 ```yaml
 # motor_map.yaml 摘要
 motor_ids_by_index: [1, 2, 3, 4, 5, 6, 7]
-bus_by_index: [can0, can0, can0, can0, can0, can0, can0]
+bus_by_index: [can1, can1, can1, can1, can1, can1, can1]
 ```
 
 腕部电机类型因臂而异（见 [multi_arm_config.yaml](../../src/a3_description/config/multi_arm_config.yaml)）：

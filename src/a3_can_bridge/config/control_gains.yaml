@@ -5,8 +5,8 @@
     default_velocity: 0.0
     default_tau_ff: 0.0
     runtime_tune_topic: /mit_gains_cmd
-    tx_enable_can0: true
-    tx_enable_can1: false
+    tx_enable_can0: false
+    tx_enable_can1: true
     enable_min_tx_refresh: true
     min_tx_refresh_interval_s: 0.02
     enable_max_tx_rate_limit: true
