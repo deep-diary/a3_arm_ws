@@ -13,8 +13,19 @@ find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
 
 include_directories(include)
+
+set(srv_files
+  "srv/MotorCommand.srv"
+  "srv/SetCanId.srv"
+  "srv/SetMotorParam.srv"
+)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  ${srv_files}
+)
 
 add_library(socketcan_driver
   src/socketcan_driver.cpp
@@ -36,6 +47,8 @@ ament_target_dependencies(can_transport_node
 add_executable(motor_protocol_node
   src/motor_protocol_node.cpp
 )
+rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(motor_protocol_node "${cpp_typesupport_target}")
 ament_target_dependencies(motor_protocol_node
   rclcpp
   diagnostic_msgs

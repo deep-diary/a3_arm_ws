@@ -1,0 +1,6 @@
+# 通用电机命令：覆盖 get_device_id / enable / reset / set_zero / request_version
+uint8 motor_id            # 目标电机 CAN_ID；0 = 广播到映射内全部电机
+uint8 command             # 0=get_device_id 1=enable 2=reset 3=set_zero 4=request_version
+---
+bool success
+string message

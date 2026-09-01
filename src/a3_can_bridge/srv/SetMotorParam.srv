@@ -1,0 +1,7 @@
+# 设置电机参数（通信类型 18，通用 float）
+uint8 motor_id            # 目标电机 CAN_ID（1~127）
+uint16 param_id           # 参数索引（如 0x7005 运行模式、0x7026 上报周期）
+float32 value             # 参数值（float 小端写入 data[4..7]）
+---
+bool success
+string message

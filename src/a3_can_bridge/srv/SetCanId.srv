@@ -1,0 +1,6 @@
+# 设置电机 CAN_ID（通信类型 7，立即生效）
+uint8 current_id          # 电机当前 CAN_ID（1~127）
+uint8 new_id              # 目标新 CAN_ID（1~127）
+---
+bool success
+string message

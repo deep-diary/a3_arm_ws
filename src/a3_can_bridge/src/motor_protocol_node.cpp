@@ -27,6 +27,9 @@
 #include "a3_can_bridge/frame_codec.hpp"
 #include "a3_can_bridge/protocol_codec.hpp"
 #include "a3_can_bridge/trajectory_interpolator.hpp"
+#include "a3_can_bridge/srv/motor_command.hpp"
+#include "a3_can_bridge/srv/set_can_id.hpp"
+#include "a3_can_bridge/srv/set_motor_param.hpp"
 
 using diagnostic_msgs::msg::DiagnosticArray;
 using diagnostic_msgs::msg::DiagnosticStatus;
@@ -37,6 +40,9 @@ using std_msgs::msg::Bool;
 using std_msgs::msg::String;
 using std_msgs::msg::UInt8MultiArray;
 using std_srvs::srv::Trigger;
+using a3_can_bridge::srv::MotorCommand;
+using a3_can_bridge::srv::SetCanId;
+using a3_can_bridge::srv::SetMotorParam;
 
 namespace a3_can_bridge
 {
@@ -298,6 +304,35 @@ public:
         resp->message = "ZERO_TORQUE off";
       });
 
+    // EL05 电机协议命令服务（F17）：enable/reset/set_zero/get_device_id/request_version 共用 MotorCommand
+    auto make_cmd_srv = [this](const std::string & name, uint8_t command) {
+        return this->create_service<MotorCommand>(
+          name,
+          [this, command](const std::shared_ptr<MotorCommand::Request> req,
+                          std::shared_ptr<MotorCommand::Response> resp) {
+            HandleMotorCommandService(req, resp, command);
+          });
+      };
+    enable_srv_ = make_cmd_srv("/a3/motor/enable", 1);
+    reset_srv_ = make_cmd_srv("/a3/motor/reset", 2);
+    set_zero_srv_ = make_cmd_srv("/a3/motor/set_zero", 3);
+    get_device_id_srv_ = make_cmd_srv("/a3/motor/get_device_id", 0);
+    request_version_srv_ = make_cmd_srv("/a3/motor/request_version", 4);
+
+    set_can_id_srv_ = this->create_service<SetCanId>(
+      "/a3/motor/set_can_id",
+      [this](const std::shared_ptr<SetCanId::Request> req,
+             std::shared_ptr<SetCanId::Response> resp) {
+        HandleSetCanIdService(req, resp);
+      });
+
+    set_param_srv_ = this->create_service<SetMotorParam>(
+      "/a3/motor/set_param",
+      [this](const std::shared_ptr<SetMotorParam::Request> req,
+             std::shared_ptr<SetMotorParam::Response> resp) {
+        HandleSetParamService(req, resp);
+      });
+
     if (enable_trajectory_interpolation_ && trajectory_interp_rate_hz_ > 1e-3) {
       const int64_t period_ns = static_cast<int64_t>(1e9 / trajectory_interp_rate_hz_);
       traj_interp_timer_ = this->create_wall_timer(
@@ -317,6 +352,8 @@ public:
     qos_can_tx.reliable();
     tx_pub_ = this->create_publisher<UInt8MultiArray>("/can_tx_frames", qos_can_tx);
     feedback_pub_ = this->create_publisher<String>("/motor_feedback", 50);
+    device_id_pub_ = this->create_publisher<String>("/a3/motor/device_id", 10);
+    version_pub_ = this->create_publisher<String>("/a3/motor/version", 10);
     if (publish_feedback_joint_states_) {
       feedback_joint_states_pub_ = this->create_publisher<JointState>(
         feedback_joint_states_topic_, rclcpp::SensorDataQoS());
@@ -868,14 +905,165 @@ private:
     }
   }
 
+  void PublishFrame(const CanFrameMessage & frame)
+  {
+    tx_pub_->publish(FrameCodec::Pack(frame));
+  }
+
+  static CanBus BusForMotorId(uint8_t motor_id)
+  {
+    if (const auto route = GetRouteByMotorId(motor_id); route.has_value()) {
+      return route->bus;
+    }
+    return CanBus::CAN0;
+  }
+
+  static void FormatMcuUidHex(uint64_t uid, char * out, size_t out_len)
+  {
+    if (out == nullptr || out_len < 17) {
+      return;
+    }
+    static const char kHex[] = "0123456789ABCDEF";
+    for (int i = 0; i < 8; ++i) {
+      const uint8_t b = static_cast<uint8_t>(uid >> (56 - i * 8));
+      out[i * 2] = kHex[b >> 4];
+      out[i * 2 + 1] = kHex[b & 0x0F];
+    }
+    out[16] = '\0';
+  }
+
+  void HandleMotorCommandService(
+    const std::shared_ptr<MotorCommand::Request> & req,
+    const std::shared_ptr<MotorCommand::Response> & resp,
+    uint8_t command)
+  {
+    if (req->motor_id > 127) {
+      resp->success = false;
+      resp->message = "motor_id must be 0..127";
+      return;
+    }
+    std::vector<uint8_t> ids;
+    if (req->motor_id == 0) {
+      ids.reserve(DogMapper::kTemporaryIndexMap.size());
+      for (const auto & route : DogMapper::kTemporaryIndexMap) {
+        ids.push_back(route.motor_id);
+      }
+    } else {
+      ids.push_back(req->motor_id);
+    }
+
+    size_t sent = 0;
+    for (const uint8_t mid : ids) {
+      const CanBus bus = BusForMotorId(mid);
+      CanFrameMessage frame;
+      switch (command) {
+        case 0:
+          frame = ProtocolCodec::BuildGetDeviceIdProbeFrame(bus, mid);
+          break;
+        case 1:
+          frame = ProtocolCodec::BuildEnableFrame(bus, mid);
+          break;
+        case 2:
+          frame = ProtocolCodec::BuildResetFrame(bus, mid);
+          break;
+        case 3:
+          frame = ProtocolCodec::BuildSetZeroFrame(bus, mid);
+          break;
+        case 4:
+          frame = ProtocolCodec::BuildRequestVersionFrame(bus, mid);
+          break;
+        default:
+          continue;
+      }
+      PublishFrame(frame);
+      ++sent;
+    }
+
+    if (sent == 0) {
+      resp->success = false;
+      resp->message = "unknown command";
+      return;
+    }
+    resp->success = true;
+    resp->message = "ok (" + std::to_string(sent) + " frame(s))";
+  }
+
+  void HandleSetCanIdService(
+    const std::shared_ptr<SetCanId::Request> & req,
+    const std::shared_ptr<SetCanId::Response> & resp)
+  {
+    if (req->current_id == 0 || req->current_id > 127 || req->new_id == 0 || req->new_id > 127) {
+      resp->success = false;
+      resp->message = "current_id/new_id must be 1..127";
+      return;
+    }
+    PublishFrame(ProtocolCodec::BuildSetCanIdFrame(
+      BusForMotorId(req->current_id), req->current_id, req->new_id));
+    resp->success = true;
+    resp->message = "ok";
+  }
+
+  void HandleSetParamService(
+    const std::shared_ptr<SetMotorParam::Request> & req,
+    const std::shared_ptr<SetMotorParam::Response> & resp)
+  {
+    if (req->motor_id == 0 || req->motor_id > 127) {
+      resp->success = false;
+      resp->message = "motor_id must be 1..127";
+      return;
+    }
+    PublishFrame(ProtocolCodec::BuildSetParamFrame(
+      BusForMotorId(req->motor_id), req->motor_id, req->param_id, req->value));
+    resp->success = true;
+    resp->message = "ok";
+  }
+
+  void PublishDeviceId(const DeviceIdResponse & rsp)
+  {
+    char uid[17];
+    FormatMcuUidHex(rsp.mcu_uid, uid, sizeof(uid));
+    std::ostringstream oss;
+    oss << "motor=" << static_cast<int>(rsp.motor_id) << " uid=" << uid;
+    String out;
+    out.data = oss.str();
+    if (device_id_pub_) {
+      device_id_pub_->publish(out);
+    }
+    RCLCPP_INFO(this->get_logger(), "Device ID response: %s", out.data.c_str());
+  }
+
+  void PublishSoftwareVersion(const CanFrameMessage & frame)
+  {
+    const uint8_t motor_id = static_cast<uint8_t>((frame.can_id >> 8) & 0xFF);
+    const std::string version = ProtocolCodec::DecodeVersionString(frame);
+    std::ostringstream oss;
+    oss << "motor=" << static_cast<int>(motor_id) << " version=" << version;
+    String out;
+    out.data = oss.str();
+    if (version_pub_) {
+      version_pub_->publish(out);
+    }
+    RCLCPP_INFO(this->get_logger(), "Software version response: %s", out.data.c_str());
+  }
+
   void OnRxFrame(const UInt8MultiArray::SharedPtr msg)
   {
     const auto frame = FrameCodec::Unpack(*msg);
     if (!frame.has_value()) {
       return;
     }
+    const CanFrameMessage & can = frame.value();
 
-    const auto feedback = ProtocolCodec::DecodeFeedback(frame.value());
+    if (const auto rsp = ProtocolCodec::DecodeDeviceIdResponse(can); rsp.has_value()) {
+      PublishDeviceId(rsp.value());
+      return;
+    }
+    if (ProtocolCodec::IsSoftwareVersionResponse(can)) {
+      PublishSoftwareVersion(can);
+      return;
+    }
+
+    const auto feedback = ProtocolCodec::DecodeFeedback(can);
     if (!feedback.has_value()) {
       return;
     }
@@ -1223,8 +1411,10 @@ private:
 
   void RebuildMotorLimitTable()
   {
+    const size_t n = std::min<size_t>(
+      kNumArmJoints, runtime_joint_mit_min_rad_.size());
     if (!derive_motor_limits_from_joint_cmd_) {
-      for (size_t i = 0; i < 12; ++i) {
+      for (size_t i = 0; i < n; ++i) {
         const double lo = std::min(joint_mit_min_rad_[i], joint_mit_max_rad_[i]);
         const double hi = std::max(joint_mit_min_rad_[i], joint_mit_max_rad_[i]);
         runtime_joint_mit_min_rad_[i] = lo;
@@ -1233,7 +1423,7 @@ private:
       return;
     }
 
-    for (size_t i = 0; i < 12; ++i) {
+    for (size_t i = 0; i < n; ++i) {
       const double a = joint_signs_[i] * joint_cmd_min_rad_[i] + joint_offsets_rad_[i];
       const double b = joint_signs_[i] * joint_cmd_max_rad_[i] + joint_offsets_rad_[i];
       runtime_joint_mit_min_rad_[i] = std::min(a, b);
@@ -1474,8 +1664,17 @@ private:
   rclcpp::Publisher<String>::SharedPtr control_mode_pub_;
   rclcpp::Service<Trigger>::SharedPtr zero_torque_start_srv_;
   rclcpp::Service<Trigger>::SharedPtr zero_torque_stop_srv_;
+  rclcpp::Service<MotorCommand>::SharedPtr enable_srv_;
+  rclcpp::Service<MotorCommand>::SharedPtr reset_srv_;
+  rclcpp::Service<MotorCommand>::SharedPtr set_zero_srv_;
+  rclcpp::Service<MotorCommand>::SharedPtr get_device_id_srv_;
+  rclcpp::Service<MotorCommand>::SharedPtr request_version_srv_;
+  rclcpp::Service<SetCanId>::SharedPtr set_can_id_srv_;
+  rclcpp::Service<SetMotorParam>::SharedPtr set_param_srv_;
   rclcpp::Publisher<UInt8MultiArray>::SharedPtr tx_pub_;
   rclcpp::Publisher<String>::SharedPtr feedback_pub_;
+  rclcpp::Publisher<String>::SharedPtr device_id_pub_;
+  rclcpp::Publisher<String>::SharedPtr version_pub_;
   rclcpp::Publisher<JointState>::SharedPtr feedback_joint_states_pub_;
   rclcpp::Publisher<DiagnosticArray>::SharedPtr diagnostics_pub_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr on_set_params_handle_;

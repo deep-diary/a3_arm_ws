@@ -41,4 +41,18 @@ struct MotorFeedback
   std::string source_bus{"can0"};
 };
 
+/// 通信类型 0 应答：获取设备 ID（bit0-7=0xFE，bit8-15=motor_id，data 8 字节大端 MCU UID）
+struct DeviceIdResponse
+{
+  uint8_t motor_id{0};
+  uint64_t mcu_uid{0};
+};
+
+/// 软件版本应答（类型 2/24，data 00 C4 56 + 四段版本号）
+struct SoftwareVersion
+{
+  uint8_t motor_id{0};
+  std::string version;
+};
+
 }  // namespace a3_can_bridge
