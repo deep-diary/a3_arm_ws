@@ -93,6 +93,21 @@
     - 运动命令在 `ZERO_TORQUE`/`SERVO`/`GRAVITY_COMP` 时被拒；`require_gate:=true` 时还需 gate 打开。
     - 前端控制：`a3_mqtt_bridge` 订阅 MQTT `.../cmd`（`{"op":"goto","args":{"pose":"work"}}` 等），回发 `.../cmd_result`。
 
+12. **单电机分层回归测试套件（F22，can1 / ID7 空载）：**
+    ```bash
+    # 前置：can1 接 1 个空载电机（CAN_ID=7），24V 供电；EMQX 192.168.3.73 可达
+    ./scripts/a3_test/a3_test.sh env        # 环境自检（can1 / EMQX / ROS / paho）
+    ./scripts/a3_test/a3_test.sh hw         # 真机底层：scan/设零/使能/小角度运动/零力矩/失能
+    ./scripts/a3_test/a3_test.sh telemetry  # MQTT 上行：转动电机，断言 pos_L7 变化
+    ./scripts/a3_test/a3_test.sh mqtt_cmd   # MQTT 下行：mock 编排层，10 个 op 全链路
+    ./scripts/a3_test/a3_test.sh servo      # 仿真：MoveIt Servo 六方向直线 jog
+    ./scripts/a3_test/a3_test.sh web        # 启动 deep-trace 网页，人工确认曲线/3D（操作清单）
+    ./scripts/a3_test/a3_test.sh all        # 顺序跑 env→hw→telemetry→mqtt_cmd→servo
+    ```
+    - 真机直连底层 `/a3/motor/*`（`motor_id:=7`），**不**走 `/a3/arm/init`（需 7 电机齐全）；脚本以 `use_power_sequence:=false` 起 can_bridge。
+    - 所有真机运动经安全限幅（目标 ≤0.30 rad、时长 ≥2.5 s），结束自动失能；零力矩步骤需人工在旁。
+    - 详见 [`scripts/a3_test/README.md`](../../scripts/a3_test/README.md)。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

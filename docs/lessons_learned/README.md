@@ -24,3 +24,5 @@ LL-NNN-short-slug.md
 | [LL-003](LL-003-arm-trotbot-port-leftovers.md) | trotbot→arm 移植遗留：限位表越界把目标 clamp 成 0、脚本 CRLF 报 pipefail | Edge | 2026-09-01 |
 | [LL-004](LL-004-lubancat-can0-can1-physical.md) | LubanCat-4-V1 CAN 物理口：软件 can0 无收发器、can1（芯片 CAN2）才能直连电机 | Edge | 2026-09-01 |
 | [LL-005](LL-005-humble-timer-qos-python-node.md) | Humble Python 节点：create_timer 无 oneshot；/joint_states 需 best-effort 订阅 | Edge | 2026-09-02 |
+| [LL-006](LL-006-test-proc-cleanup-domain-isolation.md) | 测试脚本后台 ros2 launch 需 setsid 整组清理；mock 用独立 ROS_DOMAIN_ID 隔离；pkill -f 防自匹配 | Edge | 2026-09-02 |
+| [LL-007](LL-007-servo-zero-pose-ik-singularity.md) | MoveIt Servo 在全零位（L2/L3 限位边界+奇异）IK 失败 -31，需先预定位到 home 非奇异位再 jog | Edge | 2026-09-02 |
