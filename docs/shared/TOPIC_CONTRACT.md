@@ -106,6 +106,39 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 |------|------|------|
 | `/a3/arm_status` | `a3_msgs/msg/ArmStatus` | 聚合状态快照（`state` + `mode` + 7 关节位置 + 时间戳），默认 10 Hz，作为前端唯一状态入口 |
 
+### MQTT 下行指令与回执（a3_mqtt_bridge ↔ Web，需求 F23）
+
+桥接节点 `a3_mqtt_bridge` 订阅 `<prefix>/cmd`（`prefix = deep-trace/HOME-DEMO/RK3588`），按白名单 op 调用上节 `/a3/arm/*` 服务，并把结果回发到 `<prefix>/cmd_result`。指令通道为浏览器 mqtt.js 直连 EMQX（WS 8083），Django 后端不经手。
+
+下行 `cmd`（JSON，QoS 建议 1）：
+
+```json
+{ "op": "goto", "args": { "pose": "home" } }
+```
+
+| op | args | 对应服务 |
+|----|------|----------|
+| `init` | `{}` | `/a3/arm/init`（Trigger） |
+| `enable` | `{}` | `/a3/arm/enable` |
+| `disable` | `{}` | `/a3/arm/disable` |
+| `goto` | `{"pose": "zero\|home\|ready\|work"}` | `/a3/arm/goto_named_pose`（`pose_name=args.pose`） |
+| `teach_start` | `{}` | `/a3/arm/start_teach` |
+| `teach_stop` | `{}` | `/a3/arm/stop_teach` |
+| `save` | `{"name": "<轨迹名>"}` | `/a3/arm/save_trajectory`（`name=args.name`） |
+| `playback` | `{"name": "<轨迹名>"}` | `/a3/arm/playback` |
+| `enter_ai` | `{}` | `/a3/arm/enter_ai` |
+| `exit_ai` | `{}` | `/a3/arm/exit_ai` |
+
+回执 `cmd_result`（JSON）：
+
+```json
+{ "op": "goto", "ok": true, "message": "goto home done", "ts": "2026-09-02T13:30:00+08:00" }
+```
+
+- `op`：回显指令 op；`ok`：服务 `success`（未知 op / 服务不可用 / 调用异常均为 `false`）；`message`：服务返回文本或错误原因（如 `init` 的 `n/7`）；`ts`：本地 ISO8601 时间戳。
+- 未知 op 不抛异常，回 `ok=false, message="unknown op ..."`；服务未就绪回 `ok=false, message="<op> service unavailable"`。
+- `/a3/arm_status` 经 `bridge.yaml` 的 `scalar` 展平上报为 telemetry `points.arm_state`（=`state`）、`points.arm_mode`（=`mode`）、`points.arm_message`（=`message`），前端据此渲染状态，不另开话题。
+
 ### 状态机与仲裁
 
 - 状态：`IDLE → INIT → READY`；`READY ↔ TRAJ / SERVO / TEACH / AI`；`READY → FAULT`。

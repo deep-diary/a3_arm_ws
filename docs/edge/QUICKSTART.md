@@ -108,6 +108,19 @@
     - 所有真机运动经安全限幅（目标 ≤0.30 rad、时长 ≥2.5 s），结束自动失能；零力矩步骤需人工在旁。
     - 详见 [`scripts/a3_test/README.md`](../../scripts/a3_test/README.md)。
 
+13. **Web 端机械臂控制面板（F23，跨仓 deep-trace）：**
+    浏览器经 MQTT 直连 EMQX 下发机械臂指令，无需 Django 经手；编排状态实时回显。
+    ```bash
+    # 设备侧：起编排节点 + MQTT 桥接（bridge.yaml 已含 /a3/arm_status 展平）
+    ros2 launch a3_arm_controller arm_controller.launch.py
+    ros2 launch a3_mqtt_bridge bridge.launch.py
+    ```
+    - 前端（外部仓 `/home/cat/deep-trace`，分支 `rk3588`）：RK3588 详情页 → 「机械臂编排节点」(`a3_arm_controller`) 卡片 → 点击展开控制面板。
+    - 面板含状态区（`arm_state`/`arm_mode`/`arm_message`，随 `/a3/arm_status` 刷新）、10 个动作按钮（初始化/使能/失能/示教起止/保存/回放/goto/进入退出 AI）、操作消息列表。
+    - 所有动作 **二次确认** 后才下发 `.../cmd`（`{"op","args"}`），回执 `.../cmd_result`（`{op,ok,message,ts}`）以 toast + 消息列表反馈；MQTT 未连接时按钮禁用。op↔服务映射见 [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)。
+    - 改设备 YAML 后须在 deep-trace 后端 `python manage.py load_device_config` 合入 `edge_config`。
+    - 单电机现状下 `init`/`goto` 等会如实回 `ok=false`（message 带 `n/7` 等原因），失败信息显示在面板，正好验证回执链路；真机完整动作需 7 电机齐全。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

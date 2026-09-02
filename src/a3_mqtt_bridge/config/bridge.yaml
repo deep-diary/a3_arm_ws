@@ -68,3 +68,12 @@ topics:
     flatten: scalar
     fields: [data]
     names: [motor_feedback]
+
+  # /a3/arm_status（a3_arm_controller 编排层聚合状态，需求 F21/F23）
+  # scalar 展平：state/mode/message -> arm_state/arm_mode/arm_message（前端控制面板状态）
+  - topic: /a3/arm_status
+    node: a3_arm_controller
+    type: a3_msgs/msg/ArmStatus
+    flatten: scalar
+    fields: [state, mode, message]
+    names: [arm_state, arm_mode, arm_message]
