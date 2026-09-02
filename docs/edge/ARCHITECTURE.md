@@ -16,6 +16,7 @@ A3 Edge 将完整 ROS 2 控制栈部署在 RK3588 板载 Linux 上，通过 Sock
 | 3. Description | `a3_description`、`a3_moveit_config` | URDF、MoveIt、ros2_control |
 | 4. Shell | `a3_arm_vendor` + `trajectory_bridge` | reBot 规划/遥操作话题桥接 |
 | 5. HMI | `a3_teleop_ps4` | PS4 电源序列（F3）、YAML 笛卡尔 Servo + 夹爪 + 命名姿态（F16） |
+| 6. Orchestration | `a3_arm_controller` | 状态机/初始化闭环/示教/状态聚合/模式仲裁/对外门面（F21） |
 
 ## 数据流
 
@@ -25,6 +26,10 @@ flowchart TB
         MoveIt["MoveIt / reBot"]
         PS4["a3_teleop_ps4"]
         TrajBridge["trajectory_bridge"]
+    end
+
+    subgraph orchestration [编排层]
+        ArmCtrl["a3_arm_controller"]
     end
 
     subgraph execution [a3_can_bridge]
@@ -40,6 +45,9 @@ flowchart TB
 
     MoveIt --> TrajBridge
     PS4 --> PowerSeq
+    ArmCtrl -->|"enable/reset/set_zero"| MotorProto
+    ArmCtrl -->|"zero_torque start/stop"| MotorProto
+    ArmCtrl -->|"observe gate/state"| PowerSeq
     TrajBridge -->|"JointTrajectory"| MotorProto
     PowerSeq -->|"gate_open"| MotorProto
     PowerSeq --> CanTransport
@@ -48,6 +56,8 @@ flowchart TB
     Motors --> CAN --> CanTransport
     CanTransport --> MotorProto
     MotorProto -->|"joint_states 50Hz"| MoveIt
+    MotorProto -->|"joint_states"| ArmCtrl
+    ArmCtrl -->|"arm_status"| MoveIt
 ```
 
 ## 包依赖
@@ -59,6 +69,7 @@ flowchart TB
 | `a3_can_bridge` | CAN 传输、MIT 编解码、电源序列 |
 | `a3_bringup` | 全栈 launch、`trajectory_bridge` |
 | `a3_teleop_ps4` | PS4 遥操作（电源 F3、YAML 映射 F16） |
+| `a3_arm_controller` | 机械臂编排层（生命周期/示教/状态聚合/仲裁，F21） |
 | `a3_lerobot_config` | LeRobot 集成脚手架 |
 
 ### Launch 链
@@ -73,6 +84,7 @@ a3_bringup.launch.py
 │   ├── motor_protocol_node
 │   └── power_sequence_node（可选）
 ├── trajectory_bridge
+├── a3_arm_controller（编排层，另起 `arm_controller.launch.py`，可选叠加）
 ├── ps4_teleop.launch.py（可选，`use_teleop:=true`）
 ├── edge_teleop_sim.launch.py（仿真：Servo + mapper + sim_executor + 可选 RViz）
 └── rviz（可选）

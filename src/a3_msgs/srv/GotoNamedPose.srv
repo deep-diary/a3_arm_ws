@@ -1,0 +1,5 @@
+# 运行到命名预设点（zero/home/ready/work）
+string pose_name
+---
+bool success
+string message

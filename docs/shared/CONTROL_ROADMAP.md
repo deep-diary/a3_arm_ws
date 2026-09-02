@@ -517,6 +517,13 @@ Edge 非功能目标：板内控制环延迟 &lt; 10 ms（见 edge REQUIREMENTS�
 - 轨迹 / 关节 / 门控：[TOPIC_CONTRACT.md](TOPIC_CONTRACT.md)  
 - 门控、急停、断连、力控边界：[SAFETY.md](SAFETY.md)
 
+### 5.5 编排层（a3_arm_controller）
+
+- **定位：** 薄编排门面（需求 [F21](../edge/REQUIREMENTS.md)），只做状态机、生命周期闭环、示教编排、状态聚合与模式仲裁；**不**替代 `a3_can_bridge`（CAN/插值）、`power_sequence_node`（电源状态机）、MoveIt（规划）。
+- **与 MoveIt 关系：** 不冲突。MoveIt 负责规划，编排层负责「谁能动、何时动、状态是什么」。MoveIt Execute 仍走 `/arm_controller/follow_joint_trajectory`，编排层只做入口裁决。
+- **仲裁：** 运动命令在 `ZERO_TORQUE`/`SERVO`/`GRAVITY_COMP` 或 gate 关闭时拒绝，收拢了原本分散在 `motor_protocol_node` 与 `follow_joint_trajectory_action` 的判断逻辑。
+- **AI/LeRobot：** `AI` 模式 + `/a3/arm_status` 状态流 + 示教录制，即 LeRobot 数据采集/回放底座（见第 6 章）。
+
 ---
 
 ## 6. 下一阶段：AI 赋能（占位）
@@ -530,7 +537,7 @@ Edge 非功能目标：板内控制环延迟 &lt; 10 ms（见 edge REQUIREMENTS�
 | VLA / 端到端策略 | 未开始 | 依赖稳定轨迹接口与数据管线 |
 | MCP 任务编排 | CloudEdge 规划 | 见 cloud_edge REQUIREMENTS / ROADMAP |
 
-建议单独文档（例如 `docs/shared/AI_ROADMAP.md`）在控制对齐后再写。
+AI 赋能已单独成文：[AI_ROADMAP.md](AI_ROADMAP.md)（A0–A5 分层 + reBot AI 功能清单 + 理想栈 vs reBot vs A3 矩阵 + Step 1 复刻 / Step 2 自研两步路线）。
 
 ---
 

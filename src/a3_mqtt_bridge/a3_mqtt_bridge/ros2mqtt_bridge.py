@@ -16,6 +16,7 @@ See docs/edge/REQUIREMENTS.md F18 and config/bridge.yaml.
 import importlib
 import json
 import os
+import queue
 import socket
 import time
 import uuid
@@ -25,6 +26,9 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from std_srvs.srv import Trigger
+
+from a3_msgs.srv import GotoNamedPose, PlaybackTrajectory, SaveTrajectory
 
 
 def _load_msg_class(type_str: str):
@@ -138,6 +142,7 @@ class Ros2MqttBridge(Node):
         self.topic_status = f"{self.topic_prefix}/device/status"
         self.topic_telemetry = f"{self.topic_prefix}/telemetry"
         self.topic_cmd = f"{self.topic_prefix}/cmd"
+        self.topic_cmd_result = f"{self.topic_prefix}/cmd_result"
 
         self.topics_rules = config.get("topics", [])
         status_interval = float(config.get("status_interval_sec", 1.0))
@@ -147,11 +152,15 @@ class Ros2MqttBridge(Node):
         self._mqtt_connected = False
         self._catalog = self._build_catalog()
 
+        self._cmd_queue: "queue.Queue[dict]" = queue.Queue()
+        self._cmd_clients = self._setup_cmd_clients()
+
         self._setup_mqtt()
         self._setup_subscriptions()
 
         self.create_timer(status_interval, self._publish_status)
         self.create_timer(info_interval, self._publish_info)
+        self.create_timer(0.05, self._drain_cmds)
 
         self.get_logger().info(
             f"bridge up: {self.topic_prefix} -> {self.host}:{self.port} "
@@ -203,7 +212,7 @@ class Ros2MqttBridge(Node):
         def on_message(client, userdata, msg):
             topic = getattr(msg, "topic", "")
             if topic == self.topic_cmd:
-                self.get_logger().info(f"cmd received: {msg.payload!r} (stub, not yet handled)")
+                self._enqueue_cmd(msg.payload)
 
         self._mqtt.on_connect = on_connect
         self._mqtt.on_disconnect = on_disconnect
@@ -226,6 +235,92 @@ class Ros2MqttBridge(Node):
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warning(f"publish failed {topic}: {exc}")
             return False
+
+    # ------------------------------------------------------------- downlink
+
+    def _setup_cmd_clients(self) -> dict:
+        """op -> (client, request_factory)。白名单仅限编排层服务。"""
+        return {
+            "init": (self.create_client(Trigger, "/a3/arm/init"), Trigger.Request),
+            "enable": (self.create_client(Trigger, "/a3/arm/enable"), Trigger.Request),
+            "disable": (self.create_client(Trigger, "/a3/arm/disable"), Trigger.Request),
+            "goto": (
+                self.create_client(GotoNamedPose, "/a3/arm/goto_named_pose"),
+                GotoNamedPose.Request,
+            ),
+            "teach_start": (
+                self.create_client(Trigger, "/a3/arm/start_teach"),
+                Trigger.Request,
+            ),
+            "teach_stop": (self.create_client(Trigger, "/a3/arm/stop_teach"), Trigger.Request),
+            "save": (
+                self.create_client(SaveTrajectory, "/a3/arm/save_trajectory"),
+                SaveTrajectory.Request,
+            ),
+            "playback": (
+                self.create_client(PlaybackTrajectory, "/a3/arm/playback"),
+                PlaybackTrajectory.Request,
+            ),
+            "enter_ai": (self.create_client(Trigger, "/a3/arm/enter_ai"), Trigger.Request),
+            "exit_ai": (self.create_client(Trigger, "/a3/arm/exit_ai"), Trigger.Request),
+        }
+
+    def _enqueue_cmd(self, payload) -> None:
+        try:
+            data = json.loads(payload.decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warning(f"cmd ignored (invalid json): {exc}")
+            return
+        if not isinstance(data, dict) or "op" not in data:
+            self.get_logger().warning("cmd ignored (missing op)")
+            return
+        op = str(data["op"]).strip()
+        if op not in self._cmd_clients:
+            self.get_logger().warning(f"cmd ignored (unknown op {op!r})")
+            self._publish_cmd_result(op, False, f"unknown op {op!r}")
+            return
+        self._cmd_queue.put({"op": op, "args": data.get("args") or {}})
+
+    def _drain_cmds(self) -> None:
+        while True:
+            try:
+                cmd = self._cmd_queue.get_nowait()
+            except queue.Empty:
+                return
+            self._dispatch_cmd(cmd["op"], cmd["args"])
+
+    def _dispatch_cmd(self, op: str, args: dict) -> None:
+        client, req_factory = self._cmd_clients[op]
+        req = req_factory()
+        if op == "goto":
+            req.pose_name = str(args.get("pose") or args.get("pose_name") or "")
+        elif op in ("save", "playback"):
+            req.name = str(args.get("name") or "")
+        if not client.service_is_ready():
+            self._publish_cmd_result(op, False, f"{op} service unavailable")
+            return
+        future = client.call_async(req)
+        if future is None:
+            self._publish_cmd_result(op, False, f"{op} rejected")
+            return
+        future.add_done_callback(lambda f, o=op: self._on_cmd_done(f, o))
+
+    def _on_cmd_done(self, future, op: str) -> None:
+        ok = False
+        message = "error"
+        try:
+            resp = future.result()
+            ok = bool(resp.success)
+            message = resp.message
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc)
+        self._publish_cmd_result(op, ok, message)
+
+    def _publish_cmd_result(self, op: str, ok: bool, message: str) -> None:
+        self._publish(
+            self.topic_cmd_result,
+            {"op": op, "ok": ok, "message": message, "ts": _now_iso()},
+        )
 
     # ------------------------------------------------------------- catalog
 

@@ -174,6 +174,18 @@ public:
     power_sequence_gate_topic_ = this->declare_parameter<std::string>("power_sequence_gate_topic", "/power_sequence/gate_open");
     tx_enable_can0_ = this->declare_parameter<bool>("tx_enable_can0", true);
     tx_enable_can1_ = this->declare_parameter<bool>("tx_enable_can1", true);
+
+    const std::string arm_bus_str = this->declare_parameter<std::string>("arm_bus", "can1");
+    CanBus parsed_bus = CanBus::CAN1;
+    if (ArmMapper::ParseArmBus(arm_bus_str, &parsed_bus)) {
+      ArmMapper::SetArmBus(parsed_bus);
+      RCLCPP_INFO(this->get_logger(), "arm_bus=%s", arm_bus_str.c_str());
+    } else {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "invalid arm_bus='%s' (expect can0/can1); keeping default can1",
+        arm_bus_str.c_str());
+    }
     enable_min_tx_refresh_ = this->declare_parameter<bool>("enable_min_tx_refresh", true);
     min_tx_refresh_interval_s_ = this->declare_parameter<double>("min_tx_refresh_interval_s", 0.02);
     enable_max_tx_rate_limit_ = this->declare_parameter<bool>("enable_max_tx_rate_limit", true);
@@ -396,7 +408,8 @@ public:
 
     RCLCPP_WARN(
       this->get_logger(),
-      "A3 arm mapping enabled: 7 joints L1..L7 -> motor IDs [1,2,3,4,5,6,7], all on can1.");
+      "A3 arm mapping enabled: 7 joints L1..L7 -> motor IDs [1,2,3,4,5,6,7], all on %s.",
+      (ArmMapper::ArmBus() == CanBus::CAN0) ? "can0" : "can1");
     RCLCPP_INFO(
       this->get_logger(),
       "Runtime MIT tuning topic: %s (example: 'scope=all kp=25 kd=1.8 tau=0.3' or 'scope=rear tau=0.6' or 'reset=1')",
@@ -748,7 +761,7 @@ private:
       (*mapped_out)[idx] = mapped_position;
     }
 
-    const bool is_front = (route.bus == CanBus::CAN0);
+    const bool is_front = (ArmMapper::ArmBus() == CanBus::CAN0);
     if ((is_front && !tx_enable_can0_) || (!is_front && !tx_enable_can1_)) {
       ++skip_bus_disabled_window_;
       return;
@@ -758,7 +771,7 @@ private:
     const double use_tau = ComputeMitTorqueFf(idx, is_front);
 
     const auto frame = ProtocolCodec::BuildMitControlFrame(
-      route.bus,
+      ArmMapper::ArmBus(),
       route.motor_id,
       static_cast<float>(mapped_position),
       static_cast<float>(default_velocity_),
@@ -769,7 +782,7 @@ private:
     auto packed = FrameCodec::Pack(frame);
     tx_pub_->publish(packed);
     ++tx_traj_total_window_;
-    if (route.bus == CanBus::CAN0) {
+    if (ArmMapper::ArmBus() == CanBus::CAN0) {
       ++front_count;
       ++tx_traj_can0_window_;
     } else {
@@ -813,7 +826,7 @@ private:
       if (last_tx_pub_stamp_ns_[idx] > 0 && (now_ns - last_tx_pub_stamp_ns_[idx]) < refresh_ns) {
         continue;
       }
-      const bool is_front = (route.bus == CanBus::CAN0);
+      const bool is_front = (ArmMapper::ArmBus() == CanBus::CAN0);
       if ((is_front && !tx_enable_can0_) || (!is_front && !tx_enable_can1_)) {
         continue;
       }
@@ -827,7 +840,7 @@ private:
       const double use_kd = is_front ? runtime_kd_can0_ : runtime_kd_can1_;
       const double use_tau = ComputeMitTorqueFf(idx, is_front);
       const auto frame = ProtocolCodec::BuildMitControlFrame(
-        route.bus,
+        ArmMapper::ArmBus(),
         route.motor_id,
         static_cast<float>(mapped_position),
         static_cast<float>(default_velocity_),
@@ -920,10 +933,8 @@ private:
 
   static CanBus BusForMotorId(uint8_t motor_id)
   {
-    if (const auto route = GetRouteByMotorId(motor_id); route.has_value()) {
-      return route->bus;
-    }
-    return CanBus::CAN1;
+    (void)motor_id;
+    return ArmMapper::ArmBus();
   }
 
   static void FormatMcuUidHex(uint64_t uid, char * out, size_t out_len)

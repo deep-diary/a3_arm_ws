@@ -1,0 +1,5 @@
+# 读取本地轨迹文件并回放
+string name
+---
+bool success
+string message

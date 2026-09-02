@@ -47,6 +47,8 @@ IFACE=can1 MOTOR_IDS="1" bash src/a3_can_bridge/scripts/a3_motor_cansend.sh mit
 
 Motor IDs for A3: **1..7** (host master `0xFD`).
 
+The arm bus is selected by `arm_bus` in [`config/motor_map.yaml`](../../src/a3_can_bridge/config/motor_map.yaml) (default `can1`). To switch the arm to `can0`, change that one value and restart the stack — no recompile needed.
+
 ## 4. Notes
 
 - `can-up.service` cannot create missing interfaces; overlays must succeed first.

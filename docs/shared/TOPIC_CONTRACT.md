@@ -81,6 +81,36 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 
 配置见 [power_sequence.yaml](../../src/a3_can_bridge/config/power_sequence.yaml)。
 
+## 机械臂编排（a3_arm_controller）
+
+统一对外交互门面（需求 [F21](../edge/REQUIREMENTS.md)），底层复用 `/a3/motor/*`、`/power_sequence/*`、`/arm_controller/follow_joint_trajectory`、`/servo_node/*`、`/a3/zero_torque/*`、`/a3/gravity_compensation/*`，自身只做状态机、生命周期、示教与模式仲裁。
+
+### 服务
+
+| 服务 | 类型 | 说明 |
+|------|------|------|
+| `/a3/arm/init` | `std_srvs/Trigger` | 设零 → 异步确认 7 电机到位 → 使能；`message` 携带 `n/7` |
+| `/a3/arm/enable` | `std_srvs/Trigger` | 使能 7 电机，状态 → `READY` |
+| `/a3/arm/disable` | `std_srvs/Trigger` | 失能 7 电机，状态 → `IDLE` |
+| `/a3/arm/goto_named_pose` | `a3_msgs/srv/GotoNamedPose` | `pose_name` 按 `named_poses.yaml` 插值下发 |
+| `/a3/arm/start_teach` | `std_srvs/Trigger` | 切零力矩拖动 + 开始记录 |
+| `/a3/arm/stop_teach` | `std_srvs/Trigger` | 停止记录 + 退出拖动 |
+| `/a3/arm/save_trajectory` | `a3_msgs/srv/SaveTrajectory` | `name` → 保存为本地轨迹文件 |
+| `/a3/arm/playback` | `a3_msgs/srv/PlaybackTrajectory` | `name` → 读取并回放 |
+| `/a3/arm/enter_ai` | `std_srvs/Trigger` | 状态 → `AI`（LeRobot 采集/回放） |
+| `/a3/arm/exit_ai` | `std_srvs/Trigger` | 状态 → `READY` |
+
+### 话题
+
+| 话题 | 类型 | 说明 |
+|------|------|------|
+| `/a3/arm_status` | `a3_msgs/msg/ArmStatus` | 聚合状态快照（`state` + `mode` + 7 关节位置 + 时间戳），默认 10 Hz，作为前端唯一状态入口 |
+
+### 状态机与仲裁
+
+- 状态：`IDLE → INIT → READY`；`READY ↔ TRAJ / SERVO / TEACH / AI`；`READY → FAULT`。
+- 运动类命令（`goto_named_pose` / `playback`）在 `mode ∈ {ZERO_TORQUE, SERVO, GRAVITY_COMP}` 或 gate 关闭（`require_gate:=true` 时）拒绝。
+
 ## 关节名
 
 轨迹与 `JointState` 中的 `joint_names` 必须使用：

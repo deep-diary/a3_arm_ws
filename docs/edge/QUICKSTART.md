@@ -64,6 +64,35 @@
     - 改映射只编 `config/mappings/*.yaml`；轴序校准见 `ds4_linux.yaml`
     - 真机：`a3_bringup.launch.py use_teleop:=true mapping:=default` 起 mapper；笛卡尔还需另开 `servo.launch.py`（板测待办）
 
+11. **机械臂编排节点（F21，a3_arm_controller）：**
+    ```bash
+    # 先起底层执行栈（真机），编排层独立启动：
+    ros2 launch a3_bringup a3_bringup.launch.py
+    ros2 launch a3_arm_controller arm_controller.launch.py
+
+    # 初始化（设零 + 确认 7 电机到位 + 使能）：
+    ros2 service call /a3/arm/init std_srvs/srv/Trigger
+    # 使能 / 失能：
+    ros2 service call /a3/arm/enable std_srvs/srv/Trigger
+    ros2 service call /a3/arm/disable std_srvs/srv/Trigger
+    # 运行到预设点（zero/home/ready/work）：
+    ros2 service call /a3/arm/goto_named_pose a3_msgs/srv/GotoNamedPose "{pose_name: work}"
+    # 状态聚合（唯一状态入口）：
+    ros2 topic echo /a3/arm_status
+    # 示教（拖动）→ 保存 → 回放：
+    ros2 service call /a3/arm/start_teach std_srvs/srv/Trigger
+    # ...手动拖动机械臂...
+    ros2 service call /a3/arm/stop_teach std_srvs/srv/Trigger
+    ros2 service call /a3/arm/save_trajectory a3_msgs/srv/SaveTrajectory "{name: demo}"
+    ros2 service call /a3/arm/playback a3_msgs/srv/PlaybackTrajectory "{name: demo}"
+    # AI 模式（LeRobot 采集/回放）：
+    ros2 service call /a3/arm/enter_ai std_srvs/srv/Trigger
+    ros2 service call /a3/arm/exit_ai std_srvs/srv/Trigger
+    ```
+    - 编排层复用 `/a3/motor/{set_zero,enable,reset}`、`/a3/zero_torque/*`、`/joint_states`，自身不做 CAN/插值/规划。
+    - 运动命令在 `ZERO_TORQUE`/`SERVO`/`GRAVITY_COMP` 时被拒；`require_gate:=true` 时还需 gate 打开。
+    - 前端控制：`a3_mqtt_bridge` 订阅 MQTT `.../cmd`（`{"op":"goto","args":{"pose":"work"}}` 等），回发 `.../cmd_result`。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

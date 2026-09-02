@@ -10,6 +10,10 @@ find_package(action_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/MoveToPoseIK.srv"
+  "srv/GotoNamedPose.srv"
+  "srv/SaveTrajectory.srv"
+  "srv/PlaybackTrajectory.srv"
+  "msg/ArmStatus.msg"
   "action/MoveToPose.action"
   DEPENDENCIES geometry_msgs std_msgs builtin_interfaces action_msgs
 )

@@ -39,7 +39,8 @@ docs/
 │   ├── ROBOT_MODEL.md
 │   ├── TOPIC_CONTRACT.md
 │   ├── SAFETY.md
-│   └── CONTROL_ROADMAP.md    控制功能开发路线（非 AI）
+│   ├── CONTROL_ROADMAP.md    控制功能开发路线
+│   └── AI_ROADMAP.md         AI 功能开发路线
 ├── edge/                     A3 Edge 主线
 │   ├── REQUIREMENTS.md
 │   ├── ARCHITECTURE.md
@@ -65,6 +66,7 @@ docs/
 | [shared/TOPIC_CONTRACT.md](shared/TOPIC_CONTRACT.md) | 轨迹输入、关节状态、电源门控 ROS 契约 |
 | [shared/SAFETY.md](shared/SAFETY.md) | 软限位、gate、急停、断连策略原则 |
 | [shared/CONTROL_ROADMAP.md](shared/CONTROL_ROADMAP.md) | 控制功能分层路线（L0–L8）、reBot/A3 对比、Edge C1–C8 |
+| [shared/AI_ROADMAP.md](shared/AI_ROADMAP.md) | AI 赋能分层路线（A0–A5）、reBot AI 功能清单、复刻/自研两步路线 |
 
 ### A3 Edge（主线）
 

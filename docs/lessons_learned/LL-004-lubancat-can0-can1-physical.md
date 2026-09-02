@@ -35,9 +35,7 @@ ip -details link show can0 can1   # 看 parentdev fea50000.can(CAN0) vs fea70000
 cansend can1 0000FD07#0000000000000000 && candump -tz can1
 ```
 
-3. 控臂默认总线必须与物理口一致。走 `can1` 时需同时改：
-   - `arm_mapper.hpp` 的 `kTemporaryIndexMap` 总线字段 → `CanBus::CAN1`
-   - `config/control_gains.yaml` 反转 `tx_enable_can0: false` / `tx_enable_can1: true`（否则 `can1` 帧被丢弃，电机不动）
+3. 控臂默认总线必须与物理口一致。当前已收敛为单一配置点：改 `config/motor_map.yaml` 的 `arm_bus`（`can0` 或 `can1`）并重启栈即可，无需重编译，也无需再改代码或 `tx_enable`。
 
 4. 若坚持用 `can0`，需在 40pin 的 CAN0 TX/RX 外接 TTL↔CAN 收发器模块（如 TJA1050），否则无法与差分电机通信。
 
@@ -45,4 +43,4 @@ cansend can1 0000FD07#0000000000000000 && candump -tz can1
 
 - `docs/edge/PLATFORM_CAN.md`
 - `src/a3_can_bridge/include/a3_can_bridge/arm_mapper.hpp`
-- `src/a3_can_bridge/config/control_gains.yaml`
+- `src/a3_can_bridge/config/motor_map.yaml`（`arm_bus` 单一开关）

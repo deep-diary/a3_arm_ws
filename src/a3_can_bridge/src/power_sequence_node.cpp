@@ -90,6 +90,19 @@ public:
     button_square_ = this->declare_parameter<int>("button_square", 3);
 
     motor_master_id_ = this->declare_parameter<int>("motor_master_id", 253);
+
+    const std::string arm_bus_str = this->declare_parameter<std::string>("arm_bus", "can1");
+    CanBus parsed_bus = CanBus::CAN1;
+    if (ArmMapper::ParseArmBus(arm_bus_str, &parsed_bus)) {
+      ArmMapper::SetArmBus(parsed_bus);
+      RCLCPP_INFO(this->get_logger(), "arm_bus=%s", arm_bus_str.c_str());
+    } else {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "invalid arm_bus='%s' (expect can0/can1); keeping default can1",
+        arm_bus_str.c_str());
+    }
+
     init_kp_ = this->declare_parameter<double>("init_kp", 20.0);
     init_kd_ = this->declare_parameter<double>("init_kd", 1.5);
     init_velocity_ = this->declare_parameter<double>("init_velocity", 0.0);
@@ -587,7 +600,7 @@ private:
     const uint8_t p_lo = static_cast<uint8_t>(kParamEpScanTime & 0xFF);
     const uint8_t p_hi = static_cast<uint8_t>((kParamEpScanTime >> 8) & 0xFF);
     for (const auto & route : DogMapper::kTemporaryIndexMap) {
-      CanFrameMessage frame = BuildCmdFrame(route.bus, route.motor_id, kCmdSetParam, motor_master_id_);
+      CanFrameMessage frame = BuildCmdFrame(ArmMapper::ArmBus(), route.motor_id, kCmdSetParam, motor_master_id_);
       frame.data[0] = p_lo;
       frame.data[1] = p_hi;
       frame.data[2] = 0;
@@ -605,7 +618,7 @@ private:
     static constexpr std::array<uint8_t, 6> kReportPrefix{0x01, 0x02, 0x03, 0x04, 0x05, 0x06};
     const int rmaster = ReportMasterForCanId();
     for (const auto & route : DogMapper::kTemporaryIndexMap) {
-      CanFrameMessage frame = BuildCmdFrame(route.bus, route.motor_id, kCommActiveReport, rmaster);
+      CanFrameMessage frame = BuildCmdFrame(ArmMapper::ArmBus(), route.motor_id, kCommActiveReport, rmaster);
       for (size_t i = 0; i < kReportPrefix.size(); ++i) {
         frame.data[i] = kReportPrefix[i];
       }
@@ -662,7 +675,7 @@ private:
   void SendSetZeroAll()
   {
     for (const auto & route : DogMapper::kTemporaryIndexMap) {
-      CanFrameMessage frame = BuildCmdFrame(route.bus, route.motor_id, kCmdSetZero, motor_master_id_);
+      CanFrameMessage frame = BuildCmdFrame(ArmMapper::ArmBus(), route.motor_id, kCmdSetZero, motor_master_id_);
       frame.data[0] = 0x01;
       tx_pub_->publish(FrameCodec::Pack(frame));
     }
@@ -671,7 +684,7 @@ private:
   void SendCmdAll(uint8_t cmd)
   {
     for (const auto & route : DogMapper::kTemporaryIndexMap) {
-      tx_pub_->publish(FrameCodec::Pack(BuildCmdFrame(route.bus, route.motor_id, cmd, motor_master_id_)));
+      tx_pub_->publish(FrameCodec::Pack(BuildCmdFrame(ArmMapper::ArmBus(), route.motor_id, cmd, motor_master_id_)));
     }
   }
 
@@ -679,7 +692,7 @@ private:
   {
     for (const auto & route : DogMapper::kTemporaryIndexMap) {
       auto frame = ProtocolCodec::BuildMitControlFrame(
-        route.bus,
+        ArmMapper::ArmBus(),
         route.motor_id,
         0.0f,
         static_cast<float>(init_velocity_),

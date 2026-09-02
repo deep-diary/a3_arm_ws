@@ -15,6 +15,7 @@ def generate_launch_description():
     can1_name = LaunchConfiguration("can1_name")
     gains_file = LaunchConfiguration("gains_file")
     bridge_file = LaunchConfiguration("bridge_file")
+    motor_map_file = LaunchConfiguration("motor_map_file")
     power_sequence_file = LaunchConfiguration("power_sequence_file")
     use_power_sequence = LaunchConfiguration("use_power_sequence")
     enable_gravity_compensation = LaunchConfiguration("enable_gravity_compensation")
@@ -34,6 +35,11 @@ def generate_launch_description():
         "bridge_file",
         default_value=PathJoinSubstitution([bridge_package, "config", "bridge.yaml"]),
         description="SocketCAN transport parameters",
+    )
+    declare_motor_map = DeclareLaunchArgument(
+        "motor_map_file",
+        default_value=PathJoinSubstitution([bridge_package, "config", "motor_map.yaml"]),
+        description="Motor ID / arm_bus mapping",
     )
     declare_power_sequence_file = DeclareLaunchArgument(
         "power_sequence_file",
@@ -70,6 +76,7 @@ def generate_launch_description():
         output="screen",
         parameters=[
             gains_file,
+            motor_map_file,
             {
                 "enable_power_sequence_gate": use_power_sequence,
                 "enable_gravity_compensation": enable_gravity_compensation,
@@ -82,7 +89,7 @@ def generate_launch_description():
         executable="power_sequence_node",
         name="power_sequence_node",
         output="screen",
-        parameters=[power_sequence_file],
+        parameters=[power_sequence_file, motor_map_file],
         condition=IfCondition(use_power_sequence),
     )
 
@@ -92,6 +99,7 @@ def generate_launch_description():
             declare_can1,
             declare_gains,
             declare_bridge,
+            declare_motor_map,
             declare_power_sequence_file,
             declare_use_power_sequence,
             declare_enable_gravity,

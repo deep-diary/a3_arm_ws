@@ -1,0 +1,21 @@
+/**:
+  ros__parameters:
+    joint_names: [L1_joint, L2_joint, L3_joint, L4_joint, L5_joint, L6_joint, L7_joint]
+    joint_states_topic: /joint_states
+    control_mode_topic: /a3/control_mode
+    arm_status_topic: /a3/arm_status
+    gate_topic: /power_sequence/gate_open
+    power_state_topic: /power_sequence/state
+    traj_topic: /joint_group_effort_controller/joint_trajectory
+
+    status_hz: 10.0
+    init_zero_tol_rad: 0.05
+    init_timeout_s: 5.0
+    # 运动命令是否要求 gate_open（仿真/无电源序列时设 false）
+    require_gate: false
+
+    goto_duration_s: 3.0
+    goto_waypoints: 21
+
+    trajectories_dir: "~/.a3/trajectories"
+    named_poses_pkg: a3_description

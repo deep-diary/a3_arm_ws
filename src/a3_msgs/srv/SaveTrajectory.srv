@@ -1,0 +1,6 @@
+# 把当前示教录制的轨迹保存到本地文件
+string name
+---
+bool success
+string message
+string path
