@@ -251,6 +251,69 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（cmd/cmd_result JSON 契约）；F18（MQTT 遥测桥）、F20（Web 3D）、F21（编排节点）、F22（分层测试）；外部前端仓库 `deep-trace`（分支 `rk3588`，`useRk3588Mqtt.js` / `ArmControlPanel.vue` / `Rk3588HubPanel.vue` / `HOME-DEMO.RK3588.yaml`）
 - **状态：** `implemented`
 
+### F24 — 夹爪握力配置与安全限幅
+
+- **说明：** 第 7 电机（L7 夹爪）新增独立握力参数配置，控制「手抓不能抓太紧」。新增 `a3_gripper_controller/config/gripper_config.yaml`：最大握力硬上限 `max_grasp_torque_nm`（出厂不可越界）、默认目标力与弱/中/强档位 `torque_presets_nm`、夹爪力矩方向符号 `gripper_torque_sign`（真机标定，把「夹紧阻力」校正为正）、PI 参数（`force_kp`/`force_ki`/积分限幅/位置增量速率限幅）、位置/速率限幅、接触判定阈值、抓取/看门狗超时。节点启动（电机使能）时经现有 `/a3/motor/set_param` 服务（`motor_id=7`，`param_id=0x700B` 力矩限制）把固件级力矩上限写入电机，形成「固件硬限 + 节点软件 clamp」双保险。参数支持 YAML 默认值与运行时 web/服务下发：下发值一律校验 `≤ max_grasp_torque_nm` 且在 MIT 力矩量程（±6 Nm）内，越界拒绝；通过后落盘 `data/gripper_overrides.yaml`，重启自动加载。
+- **验收标准：**
+  1. `gripper_config.yaml` 含上述全部参数且注释标明单位与典型取值；缺 key 时节点用内置安全默认值启动并告警
+  2. 调用配置服务把最大握力设为合法值：返回成功，落盘文件更新，重启节点后值保留
+  3. 下发超过 `max_grasp_torque_nm` 或超过 ±6 Nm 的值：服务返回失败且不改变当前配置
+  4. 电机使能流程中 `/a3/motor/set_param`（ID7, 0x700B）被调用且值与配置一致；服务失败时节点不上报就绪并报错
+  5. 弱/中/强三档目标力均 ≤ 硬上限；不修改 L1–L6 的任何增益/限位配置
+- **关联：** [shared/SAFETY.md](../shared/SAFETY.md)（夹爪力控安全段）；[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)；`a3_gripper_controller/config/gripper_config.yaml`；F17（`/a3/motor/set_param`）；F26（配置服务/MQTT）
+- **状态：** `implemented`（仿真闭环验证；真机 0x700B 写入与力矩方向标定板测中）
+
+### F25 — 夹爪自适应力控（PI 力外环 + 位置内环）
+
+- **说明：** 新增独立 Python 包 `a3_gripper_controller`（节点 `gripper_controller_node`，50 Hz 力外环，不改动 C++ CAN 核心的实时路径）。四种模式：`POSITION`（现有开合语义，订阅 `/a3/gripper_cmd` 的 0–1 归一化并映射 0–1.5708 rad，补齐「有发布无执行」缺口）、`FORCE`（力控抓取）、`RELEASE`（张开到安全位）、`STOP`（停止力环并保持）。FORCE 模式：以设定握力 `tau_target` 为目标，读 `/joint_states` 的 `eff_L7`（经 `gripper_torque_sign` 校正方向）作为反馈，PI 调节器输出**位置增量**——力矩不足（夹得不够紧）则向闭合方向累加位置目标，力矩超了则回退；积分限幅、位置增量变化率限幅、位置目标钳位在 L7 软限位内。位置目标经现有 L7 单关节 `JointTrajectory` 通道下发（与 PS4 `set_joint_L7` 同路径），电机内置位置环顶住物体，接触力即被维持在设定值，从而自适应抓取软硬不同物体。接触/抓稳判定：位置停滞且力矩进入目标带（±10%）并维持 `settle_s` → 状态 `GRASPED`。安全：抓取超时、反馈看门狗超时（`feedback_fresh_timeout_s` 内无新 `eff_L7`）、瞬时力矩超硬限 → 立即停止积分、回退/停机并置 `FAULT`。力环全程在 Edge 本地，不依赖云端。
+- **验收标准：**
+  1. POSITION 模式：`/a3/gripper_cmd` 发 0/1，L7 运动到 0/1.5708 rad（容差 0.05 rad）；PS4 开合行为不回归
+  2. FORCE 模式空载：夹爪闭合到机械限位后力矩收敛不超目标，进入 `GRASPED` 或超时安全停止，无冲击声
+  3. FORCE 模式软物体（海绵）与硬阻挡（手指/木块）两种负载下，弱/中/强档位的稳态 `eff_L7` 均收敛到目标 ±10%
+  4. 抓取过程中突然抽出/塞入物体：力矩随动调整，不超硬限；目标带内维持 `settle_s` 后上报 `GRASPED`
+  5. 反馈超时（停发 `/joint_states`）≤ 看门狗时限内进入 `FAULT` 且停止下发；人为造成瞬时超硬限立即停机回退
+  6. 力控期间 L7 位置目标不越过 `joint_cmd` 软限位；退出 FORCE 时恢复夹爪专用 kp/kd 之外不影响 L1–L6
+- **关联：** [shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)（关节层 MIT 力控，非 L8 末端六维力）；[shared/SAFETY.md](../shared/SAFETY.md)；F24（参数）、F26（接口）；`a3_gripper_controller`
+- **状态：** `implemented`（仿真软/硬物体闭环 ±10% 且 GRASPED、超力/看门狗 FAULT 均通过；真机物体抓取板测中）
+
+### F26 — 夹爪服务/话题契约与 MQTT 桥接
+
+- **说明：** 为夹爪力控定义对外接口并打通 web 下行。`a3_msgs` 新增：`srv/GripperCommand.srv`（`mode`：position/force/release/stop，`position` 0–1，`torque_nm` 目标握力，`timeout_s`）、`srv/GripperSetConfig.srv`（`max_torque_nm` 等键值，含校验结果）、`msg/GripperStatus.msg`（模式、目标/实际力矩、位置、接触/抓稳标志、错误码、时间戳）。状态话题 `/a3/gripper_status`（`a3_msgs/msg/GripperStatus`，默认 10 Hz，力控期间 50 Hz）。`a3_mqtt_bridge`：`bridge.yaml` 新增 `/a3/gripper_status` 的 scalar 展平（`grip_state`/`grip_mode`/`grip_target_torque`/`grip_actual_torque`/`grip_position`/`grip_contact`/`grip_error`）；cmd 白名单新增 4 个 op：`gripper_grasp`（带 torque/档位）、`gripper_release`、`gripper_stop`、`gripper_set_max_torque`（带 value），均映射到上述服务并回 `cmd_result`。模式互锁：`gripper_controller_node` 订阅 `/a3/control_mode` 与 `/power_sequence/gate_open`，gate 关闭或臂处于 `TRAJ_RUNNING`/`SERVO`/`ZERO_TORQUE`/`GRAVITY_COMP` 时拒绝 FORCE 启动（POSITION 开合随臂轨迹互锁规则一致）；力控运行时臂侧轨迹/Servo 启动须先终止夹爪力环。
+- **验收标准：**
+  1. `colcon build --packages-select a3_msgs a3_gripper_controller a3_mqtt_bridge` 通过；服务/消息可 `ros2 interface show`
+  2. `ros2 service call /a3/gripper/command` 各模式返回 `success` 且 `/a3/gripper_status` 随之变化；非法力矩/互锁状态返回 `success=false` 并带 `message`
+  3. MQTT `cmd` 下发 4 个 gripper op 均收到 `cmd_result.ok=true`；未知参数/越界值 `ok=false` 且服务端未执行
+  4. telemetry 中 `points.grip_state/grip_target_torque/grip_actual_torque/grip_contact` 随力控过程实时变化
+  5. gate 关闭或 `control_mode=SERVO` 时 `gripper_grasp` 被拒；力控中启动臂轨迹则力环先安全停止
+- **关联：** [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（gripper 话题/服务/MQTT op/points）；[shared/SAFETY.md](../shared/SAFETY.md)（互锁表 `GRIPPER_FORCE`）；F21（编排/互锁风格）、F23（cmd 白名单模式）；`a3_msgs`、`a3_mqtt_bridge`
+- **状态：** `implemented`（服务/消息/桥接编译通过；MQTT 4 op 回执与 `grip_*` telemetry 端到端验证通过）
+
+### F27 — Web 端夹爪控制面板（MQTT 下行 UI，跨仓）
+
+- **说明：** 在 deep-trace 前端（外部仓库 `/home/cat/deep-trace`，分支 `rk3588`）RK3588 详情页新增夹爪卡片 `GripperPanel.vue`。设备 YAML `HOME-DEMO.RK3588.yaml` 增加 gripper 节点（话题 `/a3/gripper_status`）、topics（含 `cmd_result`）、points（`grip_state`/`grip_target_torque`/`grip_actual_torque`/`grip_position`/`grip_contact`）与 4 个 cmd op 契约，Django 侧仅 `load_device_config` 合入 YAML，不经手指令。UI：握力档位（弱/中/强）单选 + 目标力滑块（标注硬上限，超限本地拦截不下发）、最大握力设置（输入框 + 二次确认）、抓取/释放/停止按钮（动作类 `ElMessageBox` 二次确认，MQTT 未连接时禁用）、实时握力曲线（复用 telemetry `grip_actual_torque`/`eff_L7`）与状态指示（`GRASPED` 绿/`FAULT` 红/力控中蓝）、`cmd_result` 回执 toast + 消息列表。复用 `useRk3588Mqtt` 同一连接，不新建 MQTT。
+- **验收标准：**
+  1. 设备 YAML 含 gripper 节点/topics/points/cmd；`GET /auth/my-lines` 的 edge 配置体现；前端信号 code 与 `bridge.yaml` 完全一致
+  2. RK3588 页出现夹爪卡片：档位切换、滑块、最大握力设置、抓取/释放/停止按钮齐备
+  3. 滑块/输入超过硬上限时本地提示且不下发；抓取/释放/停止点击后弹二次确认
+  4. 下发后订阅 `cmd_result`：成功 toast、失败标红；消息列表保留最近约 20 条
+  5. 握力曲线随 `grip_actual_torque` 实时刷新；`GRASPED`/`FAULT` 状态颜色正确；MQTT 断连时所有控件禁用
+  6. 回归 F23 机械臂控制面板 10 op 不受影响
+- **关联：** F18/F23（MQTT 通道与面板模式）、F26（op/points 契约）；外部前端仓库 `deep-trace`（分支 `rk3588`，`GripperPanel.vue` / `HOME-DEMO.RK3588.yaml` / `useRk3588Mqtt.js`）
+- **状态：** `implemented`（前端 `GripperPanel.vue` + YAML 契约已合入 `rk3588` 分支且 `vite build` 通过；需 `load_device_config` 合入并浏览器联调）
+
+### F28 — 夹爪力控真机回归测试
+
+- **说明：** 在 F22 的 can1 / ID7 单电机最小硬件基座上，新增 `scripts/a3_test/` 的 `gripper` 子命令（`hw_gripper_test.py`），覆盖力控全链路安全验收。沿用 F22 安全限幅（运动前使能、结束必失能、小步运动）。测试项：(a) 配置下发与落盘（合法/越界）；(b) 固件硬限写入（ID7, 0x700B）确认；(c) POSITION 开合；(d) 力控阶跃——空载/软阻挡（海绵）/硬阻挡（手指或木块）下弱中强档位力矩收敛 ±10% 与 `GRASPED`；(e) 超力保护——设小目标 + 硬阻挡，固件/软件双限均不超硬限；(f) 看门狗——停止 `/joint_states` 后 ≤ 时限进 `FAULT`；(g) MQTT gripper op 回执与 `grip_*` 遥测同步；(h) 互锁——gate 关闭/SERVO 模式下力控被拒。
+- **验收标准：**
+  1. `./scripts/a3_test/a3_test.sh gripper` 可独立重复运行，输出各子项 PASS/FAIL 汇总，非零退出码表示失败
+  2. 力控阶跃项：三种负载 × 三档位共 9 组，稳态力矩在目标 ±10% 内，无报警无冲击
+  3. 超力保护项：全过程 `eff_L7` 不超过硬上限（留 10% 测量余量断言）
+  4. 看门狗项：反馈中断后 ≤ `feedback_fresh_timeout_s + 1` 个周期进 `FAULT` 且无新 CAN 指令
+  5. 配置项：越界值被拒、合法值落盘且重启保留；MQTT 项 4 op 回执契约一致
+  6. 测试结束电机失能、gate 状态复原
+- **关联：** [QUICKSTART.md](QUICKSTART.md)（夹爪力控验证节）；F22（测试基座/安全限幅）；F24/F25/F26；[shared/SAFETY.md](../shared/SAFETY.md)
+- **状态：** `implemented`（`./scripts/a3_test/a3_test.sh gripper` 仿真闭环 12 项 PASS；真机 `A3_GRIPPER_TEST_MODE=hw` 服务/安全检查就绪，力控阶跃需人工放海绵/硬阻挡板测）
+
 ## 非功能需求
 
 | 指标 | 要求 |

@@ -766,8 +766,10 @@ private:
       ++skip_bus_disabled_window_;
       return;
     }
-    const double use_kp = is_front ? runtime_kp_can0_ : runtime_kp_can1_;
-    const double use_kd = is_front ? runtime_kd_can0_ : runtime_kd_can1_;
+    const double bus_kp = is_front ? runtime_kp_can0_ : runtime_kp_can1_;
+    const double bus_kd = is_front ? runtime_kd_can0_ : runtime_kd_can1_;
+    const double use_kp = ResolveKp(static_cast<int>(route.motor_id), bus_kp);
+    const double use_kd = ResolveKd(static_cast<int>(route.motor_id), bus_kd);
     const double use_tau = ComputeMitTorqueFf(idx, is_front);
 
     const auto frame = ProtocolCodec::BuildMitControlFrame(
@@ -836,8 +838,10 @@ private:
       if (!std::isfinite(mapped_position)) {
         continue;
       }
-      const double use_kp = is_front ? runtime_kp_can0_ : runtime_kp_can1_;
-      const double use_kd = is_front ? runtime_kd_can0_ : runtime_kd_can1_;
+      const double bus_kp = is_front ? runtime_kp_can0_ : runtime_kp_can1_;
+      const double bus_kd = is_front ? runtime_kd_can0_ : runtime_kd_can1_;
+      const double use_kp = ResolveKp(static_cast<int>(route.motor_id), bus_kp);
+      const double use_kd = ResolveKd(static_cast<int>(route.motor_id), bus_kd);
       const double use_tau = ComputeMitTorqueFf(idx, is_front);
       const auto frame = ProtocolCodec::BuildMitControlFrame(
         ArmMapper::ArmBus(),
@@ -1368,6 +1372,29 @@ private:
     runtime_kd_can1_ = runtime_kd_can0_;
     runtime_tau_can0_ = Clamp(default_tau_ff_, ProtocolCodec::kTMin, ProtocolCodec::kTMax);
     runtime_tau_can1_ = runtime_tau_can0_;
+    motor_kp_override_enabled_.fill(false);
+    motor_kd_override_enabled_.fill(false);
+  }
+
+  // Per-motor 覆盖优先于总线级 kp/kd（夹爪 L7 力控等单电机软增益场景）
+  double ResolveKp(int motor_id, double bus_kp) const
+  {
+    if (motor_id >= 0 && static_cast<size_t>(motor_id) < motor_kp_override_enabled_.size() &&
+      motor_kp_override_enabled_[static_cast<size_t>(motor_id)])
+    {
+      return motor_kp_override_[static_cast<size_t>(motor_id)];
+    }
+    return bus_kp;
+  }
+
+  double ResolveKd(int motor_id, double bus_kd) const
+  {
+    if (motor_id >= 0 && static_cast<size_t>(motor_id) < motor_kd_override_enabled_.size() &&
+      motor_kd_override_enabled_[static_cast<size_t>(motor_id)])
+    {
+      return motor_kd_override_[static_cast<size_t>(motor_id)];
+    }
+    return bus_kd;
   }
 
   static double Clamp(double v, double lo, double hi)
@@ -1516,6 +1543,7 @@ private:
     double new_kp = 0.0;
     double new_kd = 0.0;
     double new_tau = 0.0;
+    int motor_id = -1;  // >=0 时 kp/kd 作用于单电机（per-motor 覆盖，如 L7 夹爪力控）
 
     const auto tokens = SplitTokens(msg->data);
     for (const auto & token : tokens) {
@@ -1530,6 +1558,17 @@ private:
       }
       if (key == "reset") {
         do_reset = ParseBool(value);
+        continue;
+      }
+      if (key == "motor" || key == "motor_id") {
+        try {
+          const int parsed = std::stoi(value);
+          if (parsed >= 1 && parsed < 256) {
+            motor_id = parsed;
+          }
+        } catch (const std::exception &) {
+          RCLCPP_WARN(this->get_logger(), "Ignore invalid motor id token: %s", token.c_str());
+        }
         continue;
       }
       try {
@@ -1565,22 +1604,39 @@ private:
       }
     };
 
-    if (has_kp) {
-      apply_scoped(runtime_kp_can0_, runtime_kp_can1_, new_kp);
+    if (motor_id >= 0) {
+      // Per-motor 覆盖（忽略 scope/tau；夹爪力控等单电机软增益场景）
+      const size_t mi = static_cast<size_t>(motor_id);
+      if (has_kp) {
+        motor_kp_override_[mi] = new_kp;
+        motor_kp_override_enabled_[mi] = true;
+      }
+      if (has_kd) {
+        motor_kd_override_[mi] = new_kd;
+        motor_kd_override_enabled_[mi] = true;
+      }
+      RCLCPP_WARN(
+        this->get_logger(),
+        "MIT tune per-motor applied: raw='%s' | motor=%d kp=%.2f kd=%.2f",
+        msg->data.c_str(), motor_id,
+        has_kp ? new_kp : -1.0, has_kd ? new_kd : -1.0);
+    } else {
+      if (has_kp) {
+        apply_scoped(runtime_kp_can0_, runtime_kp_can1_, new_kp);
+      }
+      if (has_kd) {
+        apply_scoped(runtime_kd_can0_, runtime_kd_can1_, new_kd);
+      }
+      if (has_tau) {
+        apply_scoped(runtime_tau_can0_, runtime_tau_can1_, new_tau);
+      }
+      RCLCPP_WARN(
+        this->get_logger(),
+        "MIT tune applied: raw='%s' | can0(kp=%.2f,kd=%.2f,tau=%.2f) can1(kp=%.2f,kd=%.2f,tau=%.2f)",
+        msg->data.c_str(),
+        runtime_kp_can0_, runtime_kd_can0_, runtime_tau_can0_,
+        runtime_kp_can1_, runtime_kd_can1_, runtime_tau_can1_);
     }
-    if (has_kd) {
-      apply_scoped(runtime_kd_can0_, runtime_kd_can1_, new_kd);
-    }
-    if (has_tau) {
-      apply_scoped(runtime_tau_can0_, runtime_tau_can1_, new_tau);
-    }
-
-    RCLCPP_WARN(
-      this->get_logger(),
-      "MIT tune applied: raw='%s' | can0(kp=%.2f,kd=%.2f,tau=%.2f) can1(kp=%.2f,kd=%.2f,tau=%.2f)",
-      msg->data.c_str(),
-      runtime_kp_can0_, runtime_kd_can0_, runtime_tau_can0_,
-      runtime_kp_can1_, runtime_kd_can1_, runtime_tau_can1_);
   }
 
   double kp_{30.0};
@@ -1668,6 +1724,11 @@ private:
   double runtime_kp_can1_{30.0};
   double runtime_kd_can1_{1.5};
   double runtime_tau_can1_{0.0};
+  // Per-motor kp/kd 覆盖（/mit_gains_cmd 带 motor=<id> 时作用于单电机，如 L7 夹爪力控用软增益）
+  std::array<bool, 256> motor_kp_override_enabled_{};
+  std::array<double, 256> motor_kp_override_{};
+  std::array<bool, 256> motor_kd_override_enabled_{};
+  std::array<double, 256> motor_kd_override_{};
   size_t joint_cmd_clamp_count_total_{0};
   size_t joint_cmd_no_clamp_count_total_{0};
   size_t motor_cmd_clamp_count_total_{0};

@@ -52,6 +52,7 @@
 | E9 | micro-ROS Client（板级） | xiaozhi-esp32 `deep-dog` + `micro_ros_espidf_component`（Humble） | 见阶段 A |
 | E10 | 200 Hz 轨迹插值 + TWAI CAN MIT | 复用 `motor/`、`trajectory/` | pending（阶段 B） |
 | E11 | 断连看门狗 → disable 电机 | 固件本地，&lt; 500 ms | pending（阶段 B） |
+| E12 | 夹爪力控（L7）固件移植 | PI 力外环 + 位置内环在 ESP32 本地（读 L7 力矩反馈调位置目标），握力硬限写电机 `0x700B`；目标握力/档位/最大握力由服务器下发，力环不上云；语义对齐 Edge F24–F26 | planned（外置固件，见 [SAFETY.md](../shared/SAFETY.md)） |
 
 ### 阶段 A — micro-ROS 链路冒烟（当前优先）
 

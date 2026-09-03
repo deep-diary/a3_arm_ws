@@ -1,0 +1,70 @@
+/**:
+  ros__parameters:
+    # ===== 话题 / 接口 =====
+    joint_states_topic: /joint_states
+    control_mode_topic: /a3/control_mode
+    gate_topic: /power_sequence/gate_open
+    gripper_cmd_topic: /a3/gripper_cmd
+    gripper_status_topic: /a3/gripper_status
+    traj_topic: /joint_group_effort_controller/joint_trajectory
+    gains_cmd_topic: /mit_gains_cmd
+    set_param_service: /a3/motor/set_param
+
+    gripper_joint_name: L7_joint
+    gripper_joint_index: 6
+    gripper_motor_id: 7
+    # 电机固件力矩限制参数索引（0x700B）
+    torque_limit_param_id: 28683
+
+    # ===== 握力参数（F24）=====
+    # 出厂硬上限：任何下发目标/最大握力不得超过此值（且在 MIT ±6 Nm 量程内）
+    max_grasp_torque_nm: 2.0
+    # 默认目标握力与弱/中/强档位（均须 <= max_grasp_torque_nm）
+    default_target_torque_nm: 0.6
+    torque_preset_weak_nm: 0.3
+    torque_preset_medium_nm: 0.6
+    torque_preset_strong_nm: 1.0
+    # 夹爪力矩方向校正：把「夹紧阻力」校正为正（真机标定，取 +1 或 -1）
+    gripper_torque_sign: 1.0
+
+    # ===== PI 力外环（F25）=====
+    # 两阶段：接触前恒速软闭合（不积分）；接触后 PI 调节，e = target - measured
+    # 接触后：e>0 力不足 → dq/dt=-(kp*e+ki*∫e) 继续闭合；e<0 超力 → 按 kp 回退，绝不继续夹
+    force_kp: 0.5          # rad/s/Nm
+    force_ki: 0.6          # rad/s^2/Nm
+    integral_limit_nm: 0.5 # 积分项限幅（Nm），防饱和猛夹
+    max_close_speed_rad_s: 0.3
+    max_open_speed_rad_s: 0.6
+    # 接触检测阈值 = max(contact_detect_min_nm, contact_detect_ratio * 目标力)
+    contact_detect_ratio: 0.35
+    contact_detect_min_nm: 0.1
+    # 力控期间 L7 专用位置环增益（较软，经 /mit_gains_cmd motor=7 下发）
+    force_mode_kp: 20.0
+    force_mode_kd: 1.0
+    position_mode_kp: 80.0
+    position_mode_kd: 2.0
+
+    # ===== 行程 / 位置限幅 =====
+    gripper_open_rad: 1.5708
+    gripper_close_rad: 0.0
+    release_position: 1.0   # release 模式张开到的归一化位置（0..1）
+
+    # ===== 接触判定 / 超时 / 看门狗 =====
+    force_band_ratio: 0.10  # 进入目标带 ±10%
+    settle_s: 0.3           # 力矩在带内维持该时长 → GRASPED
+    grasp_timeout_s: 5.0
+    feedback_fresh_timeout_s: 0.30
+    # 实测力矩瞬时超过 max_grasp_torque_nm * 该系数 → 超硬限 FAULT
+    overtorque_ratio: 1.0
+
+    # ===== 状态发布 =====
+    status_hz: 10.0
+    force_status_hz: 50.0
+
+    # ===== 安全 / 互锁 =====
+    # 力控是否要求 gate_open（仿真/无电源序列时设 false）
+    require_gate: false
+    # 电机使能时是否把固件力矩限制（0x700B）写入 ID7
+    apply_firmware_torque_limit: true
+    # 运行时下发参数落盘目录（重启加载）
+    overrides_dir: "~/.a3/gripper"

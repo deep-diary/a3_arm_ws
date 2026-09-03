@@ -1,0 +1,9 @@
+# 夹爪握力参数下发（需求 F24/F26）
+# 当前支持 key：max_torque_nm（最大握力硬上限内的可调上限）
+string key
+float64 value
+---
+bool success
+string message
+# 实际生效的值（被拒绝时为当前值）
+float64 applied_value

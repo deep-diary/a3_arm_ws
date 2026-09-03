@@ -77,3 +77,12 @@ topics:
     flatten: scalar
     fields: [state, mode, message]
     names: [arm_state, arm_mode, arm_message]
+
+  # /a3/gripper_status（a3_gripper_controller 夹爪力控状态，需求 F26/F27）
+  # scalar 展平：力控状态/目标与实测力矩/位置/接触/错误码 -> grip_*（前端夹爪面板）
+  - topic: /a3/gripper_status
+    node: gripper_controller_node
+    type: a3_msgs/msg/GripperStatus
+    flatten: scalar
+    fields: [state, mode, target_torque_nm, actual_torque_nm, position, contact, error_code]
+    names: [grip_state, grip_mode, grip_target_torque, grip_actual_torque, grip_position, grip_contact, grip_error]

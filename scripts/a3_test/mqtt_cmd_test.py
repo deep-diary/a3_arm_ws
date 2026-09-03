@@ -2,7 +2,7 @@
 """阶段二：MQTT 指令下行测试。
 
 前置：mock_arm_services.py 与 a3_mqtt_bridge 已在运行。
-经 EMQX 向 .../cmd 下发 10 个白名单 op + 1 个未知 op，
+经 EMQX 向 .../cmd 下发白名单 op（10 个编排层 + 4 个夹爪力控）+ 1 个未知 op，
 订阅 .../cmd_result，断言桥接路由到正确服务、参数透传正确、未知 op 被拒。
 本脚本不依赖 rclpy（mock 是独立进程），纯 paho。
 """
@@ -27,6 +27,12 @@ CASES = [
     ("playback", {"name": "demo"}, "name=demo"),
     ("enter_ai", {}, "enter_ai"),
     ("exit_ai", {}, "exit_ai"),
+    # 夹爪力控 op（F26）：路由到 /a3/gripper/* 并透传参数
+    ("gripper_grasp", {"preset": "medium"}, "mode=force"),
+    ("gripper_grasp", {"torque": 0.5}, "tau=0.50"),
+    ("gripper_release", {}, "mode=release"),
+    ("gripper_stop", {}, "mode=stop"),
+    ("gripper_set_max_torque", {"value": 1.2}, "max_torque_nm=1.20"),
 ]
 
 

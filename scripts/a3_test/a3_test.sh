@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # A3 机械臂单电机分层回归测试套件（F22）统一入口。
-# 用法: ./a3_test.sh {env|hw|telemetry|mqtt_cmd|servo|web|all}
+# 用法: ./a3_test.sh {env|hw|telemetry|mqtt_cmd|servo|gripper|web|all}
 #
 # 真机阶段默认 can1 / CAN_ID=7 / L7_joint，空载、24V 锂电池供电。
 # 所有真机运动经 safety_limits.py 限幅，结束自动失能。
@@ -79,7 +79,7 @@ stage_env() {
     echo "[PASS] paho-mqtt 可导入（~/.local）"; else
     echo "[WARN] paho-mqtt 不可用（MQTT 阶段需要；可 pip install --user paho-mqtt）"; fi
 
-  for p in a3_can_bridge a3_mqtt_bridge a3_bringup a3_msgs; do
+  for p in a3_can_bridge a3_mqtt_bridge a3_bringup a3_msgs a3_gripper_controller; do
     if [ -d "$WS/install/$p" ]; then echo "[PASS] 包已构建: $p"; else
       echo "[FAIL] 包未构建: $p（colcon build --packages-select $p）"; fail=1; fi
   done
@@ -140,6 +140,23 @@ stage_servo() {
   return $rc
 }
 
+# ---- 阶段五：夹爪力控（F28）----
+# 默认 sim：脚本自起 gripper_controller + 假「电机+物体」植物做闭环断言，
+# 不碰 CAN，任意机器可跑（独立 ROS_DOMAIN_ID=77）。
+# 真机：A3_GRIPPER_TEST_MODE=hw 时仅做服务/配置/开合安全检查（力控阶跃需人工放负载）。
+stage_gripper() {
+  log "阶段五 夹爪力控回归 (F28, 模式=${A3_GRIPPER_TEST_MODE:-sim})"
+  if [ "${A3_GRIPPER_TEST_MODE:-sim}" = "hw" ]; then
+    bg ros2 launch a3_can_bridge can_bridge.launch.py use_power_sequence:=false
+    bg ros2 launch a3_gripper_controller gripper_controller.launch.py require_gate:=false
+    wait_service "/a3/gripper/command" 30 || { echo "[FAIL] gripper 服务未就绪"; return 1; }
+    sleep 4
+    python3 "$DIR/hw_gripper_test.py"
+  else
+    python3 "$DIR/hw_gripper_test.py" --sim
+  fi
+}
+
 # ---- 网页人工确认 ----
 stage_web() {
   log "网页人工确认：启动真机遥测栈，保持运行"
@@ -177,17 +194,19 @@ case "${1:-}" in
   telemetry) stage_telemetry ;;
   mqtt_cmd)  stage_mqtt_cmd ;;
   servo)     stage_servo ;;
+  gripper)   stage_gripper ;;
   web)       stage_web ;;
   all)
     stage_env || exit 1
+    stage_gripper;   r0=$?; cleanup_stage
     stage_hw;        r1=$?; cleanup_stage
     stage_telemetry; r2=$?; cleanup_stage
     stage_mqtt_cmd;  r3=$?; cleanup_stage
     stage_servo;     r4=$?; cleanup_stage
-    log "汇总: hw=$r1 telemetry=$r2 mqtt_cmd=$r3 servo=$r4 (0=PASS)"
-    [ $((r1+r2+r3+r4)) -eq 0 ] ;;
+    log "汇总: gripper=$r0 hw=$r1 telemetry=$r2 mqtt_cmd=$r3 servo=$r4 (0=PASS)"
+    [ $((r0+r1+r2+r3+r4)) -eq 0 ] ;;
   *)
     grep '^#' "$0" | head -n 6
-    echo "用法: $0 {env|hw|telemetry|mqtt_cmd|servo|web|all}"
+    echo "用法: $0 {env|hw|telemetry|mqtt_cmd|servo|gripper|web|all}"
     exit 2 ;;
 esac

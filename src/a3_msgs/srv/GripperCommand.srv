@@ -1,0 +1,18 @@
+# 夹爪命令（需求 F25/F26）
+# mode：position（按 position 开合）/ force（按 torque_nm 或 preset 力控抓取）/ release（张开）/ stop（停止力环）
+string mode
+
+# position 模式：归一化开合 0（闭合）.. 1（张开）
+float64 position
+
+# force 模式：目标握力 Nm；>0 时优先于 preset；<=0 且 preset 为空时用配置默认值
+float64 torque_nm
+
+# force 模式：握力档位 weak / medium / strong（留空则用 torque_nm 或默认值）
+string preset
+
+# force 模式：进入 GRASPED 的超时秒数；<=0 时用配置默认值
+float64 timeout_s
+---
+bool success
+string message

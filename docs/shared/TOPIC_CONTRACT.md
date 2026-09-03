@@ -20,7 +20,10 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | Servo 速度 | `geometry_msgs/TwistStamped` | MoveIt Servo 输入 |
 | 手柄 | `sensor_msgs/Joy` | `joy_node` 轴/按键 |
 | 命名姿态 | `std_msgs/String` | `zero` / `work` / `home` / `ready` |
-| 夹爪开合 | `std_msgs/Float32` | 0 闭合 … 1 张开 |
+| 夹爪开合 | `std_msgs/Float32` | 0 闭合 … 1 张开（POSITION 模式输入） |
+| 夹爪力控命令 | `a3_msgs/srv/GripperCommand` | `mode`：`position`/`force`/`release`/`stop`；`position` 0–1；`torque_nm` 目标握力；`timeout_s` |
+| 夹爪配置 | `a3_msgs/srv/GripperSetConfig` | 键值下发（`max_torque_nm` 等），返回是否接受与原因 |
+| 夹爪状态 | `a3_msgs/msg/GripperStatus` | 模式、目标/实际力矩、位置、接触/抓稳标志、错误码、时间戳 |
 | DS4 IMU | `sensor_msgs/Imu` | 可选 hidraw（陀螺/加速度） |
 ## 标准话题（单臂，无 namespace）
 
@@ -56,7 +59,10 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/move_to_pose` | `a3_msgs/action/MoveToPose` | IK + 执行 |
 | `/a3/gravity_torque` | `sensor_msgs/JointState` | URDF 系重力力矩（effort） |
 | `/a3/goto_named_pose` | `std_msgs/String` | 命名姿态（`zero`/`work`/`home`/`ready`） |
-| `/a3/gripper_cmd` | `std_msgs/Float32` | 夹爪归一化 0–1（调试；手柄 R2 亦走此语义） |
+| `/a3/gripper_cmd` | `std_msgs/Float32` | 夹爪归一化 0–1（POSITION 模式；手柄 R2 亦走此语义，由 `gripper_controller_node` 订阅执行） |
+| `/a3/gripper_status` | `a3_msgs/msg/GripperStatus` | 夹爪力控状态快照（模式/目标与实际力矩/位置/接触标志/错误码），默认 10 Hz，力控期间 50 Hz |
+| `/a3/gripper/command` | `a3_msgs/srv/GripperCommand` | 夹爪命令：`position`（开合 0–1）/ `force`（按 `torque_nm` 抓取）/ `release` / `stop` |
+| `/a3/gripper/set_config` | `a3_msgs/srv/GripperSetConfig` | 握力参数下发（如 `max_torque_nm`）；越界（超硬上限/±6 Nm）拒绝并返回原因 |
 | `/joy` | `sensor_msgs/Joy` | PS4 轴与按键 |
 | `/a3/ds4/imu` | `sensor_msgs/Imu` | 可选 DualShock 4 HID 惯性 |
 | `/a3/ds4/battery` | `std_msgs/Float32` | 可选电量 0–1 |
@@ -143,6 +149,49 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 
 - 状态：`IDLE → INIT → READY`；`READY ↔ TRAJ / SERVO / TEACH / AI`；`READY → FAULT`。
 - 运动类命令（`goto_named_pose` / `playback`）在 `mode ∈ {ZERO_TORQUE, SERVO, GRAVITY_COMP}` 或 gate 关闭（`require_gate:=true` 时）拒绝。
+
+## 夹爪力控（a3_gripper_controller，需求 F24–F27）
+
+独立 Python 节点 `gripper_controller_node`（50 Hz 力外环），输出 L7 单关节 `JointTrajectory` 走现有执行层；不改动 C++ CAN 实时路径。力环只在 Edge 本地运行（见 [SAFETY.md](SAFETY.md)）。
+
+### 服务与话题
+
+| 接口 | 类型 | 方向 | 说明 |
+|------|------|------|------|
+| `/a3/gripper/command` | `a3_msgs/srv/GripperCommand` | 服务 | `mode=position`（`position` 0–1）/ `force`（`torque_nm` 目标握力，`timeout_s`）/ `release` / `stop` |
+| `/a3/gripper/set_config` | `a3_msgs/srv/GripperSetConfig` | 服务 | 下发 `max_torque_nm` 等；校验 `≤ max_grasp_torque_nm` 且在 ±6 Nm 内，越界 `success=false` |
+| `/a3/gripper_cmd` | `std_msgs/Float32` | 订阅 | 归一化开合（0 闭…1 开），POSITION 模式输入 |
+| `/a3/gripper_status` | `a3_msgs/msg/GripperStatus` | 发布 | 状态快照，默认 10 Hz，力控期间 50 Hz |
+| `/joint_states` | `sensor_msgs/JointState` | 订阅 | 取 `L7_joint` 的 `effort` 作力反馈（MIT 力矩，±6 Nm 量程） |
+| `/a3/control_mode`、`/power_sequence/gate_open` | `std_msgs/String`/`Bool` | 订阅 | 互锁：gate 关闭或臂在 `TRAJ_RUNNING`/`SERVO`/`ZERO_TORQUE`/`GRAVITY_COMP` 时拒绝 `force` |
+
+`GripperStatus` 字段语义：`state`（`IDLE`/`POSITION`/`FORCE_CLOSING`/`GRASPED`/`RELEASING`/`FAULT`）、`mode`（最近命令模式）、`target_torque_nm`、`actual_torque_nm`、`position`（0–1）、`contact`（接触/抓稳）、`error_code`（0 无；1 互锁拒绝；2 抓取超时；3 反馈看门狗；4 超硬限；5 配置越界；6 固件硬限写入失败）。
+
+### MQTT 下行指令（a3_mqtt_bridge ↔ Web，需求 F26/F27）
+
+同一 `<prefix>/cmd` 与 `<prefix>/cmd_result` 通道，白名单追加 4 个 op：
+
+| op | args | 对应服务 |
+|----|------|----------|
+| `gripper_grasp` | `{"torque": <Nm>}` 或 `{"preset": "weak"\|"medium"\|"strong"}` | `/a3/gripper/command`（`mode=force`） |
+| `gripper_release` | `{}` | `/a3/gripper/command`（`mode=release`） |
+| `gripper_stop` | `{}` | `/a3/gripper/command`（`mode=stop`） |
+| `gripper_set_max_torque` | `{"value": <Nm>}` | `/a3/gripper/set_config`（`max_torque_nm=args.value`） |
+
+- `torque`/`value` 越界或缺失 preset 时回 `ok=false`，服务端不执行；回执 JSON 格式与臂指令一致（`op`/`ok`/`message`/`ts`）。
+- `/a3/gripper_status` 经 `bridge.yaml` 的 `scalar` 展平上报 telemetry points：
+
+| points key | 来源字段 | 类型 |
+|------------|----------|------|
+| `grip_state` | `state` | discrete |
+| `grip_mode` | `mode` | discrete |
+| `grip_target_torque` | `target_torque_nm` | float（Nm） |
+| `grip_actual_torque` | `actual_torque_nm` | float（Nm） |
+| `grip_position` | `position` | float（0–1） |
+| `grip_contact` | `contact` | discrete（0/1） |
+| `grip_error` | `error_code` | discrete |
+
+信号 code 须与 deep-trace 设备 YAML `HOME-DEMO.RK3588.yaml` 的 `points[].code` 完全对齐。
 
 ## 关节名
 

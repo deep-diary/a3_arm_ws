@@ -18,11 +18,14 @@ A3 Edge 与 A3 CloudEdge 共同遵守的安全设计原则。具体参数以配�
 
 | 模式 | 含义 | 允许 |
 |------|------|------|
-| `IDLE` | 空闲 | 可进轨迹 / 重力 / 零力矩 / Servo |
-| `TRAJ_RUNNING` | 轨迹执行中 | 拒绝重力启动、零力矩、Servo |
-| `GRAVITY_COMP` | 重力补偿开启 | 新轨迹应退出重力；拒绝零力矩/Servo |
-| `ZERO_TORQUE` | 软阻抗拖动（低 kp + 重力 FF） | 拒绝轨迹 Action / Servo |
-| `SERVO` | MoveIt Servo | 拒绝轨迹 Action / 零力矩 |
+| `IDLE` | 空闲 | 可进轨迹 / 重力 / 零力矩 / Servo / 夹爪力控 |
+| `TRAJ_RUNNING` | 轨迹执行中 | 拒绝重力启动、零力矩、Servo、夹爪力控 |
+| `GRAVITY_COMP` | 重力补偿开启 | 新轨迹应退出重力；拒绝零力矩/Servo/夹爪力控 |
+| `ZERO_TORQUE` | 软阻抗拖动（低 kp + 重力 FF） | 拒绝轨迹 Action / Servo / 夹爪力控 |
+| `SERVO` | MoveIt Servo | 拒绝轨迹 Action / 零力矩 / 夹爪力控 |
+| `GRIPPER_FORCE` | 夹爪力控（PI 力外环，L7） | 臂侧轨迹/Servo/零力矩启动须先终止力环 |
+
+夹爪力控为 L7 单关节关节层力控（非 L8 末端六维力），力环在 `gripper_controller_node` 本地 50 Hz 运行；gate 关闭时拒绝 `force` 命令。
 
 - gate 关闭时：强制退出运动相关模式，禁止新轨迹
 - Servo：`incoming_command_timeout` 超时后应回 `IDLE` 并停止下发
@@ -65,6 +68,23 @@ A3 Edge 与 A3 CloudEdge 共同遵守的安全设计原则。具体参数以配�
 
 CloudEdge 须在 ESP32 固件中实现等效逻辑；网络侧 `shutdown` 命令可作为补充，**不能**作为唯一安全手段。
 
+## 夹爪力控安全（L7，需求 F24–F26）
+
+夹爪（L7）力控是关节层「PI 力外环 + 电机位置内环」，目标是把接触/握力维持在设定值、自适应抓取软硬物体，不是 L8 末端六维力控。
+
+1. **握力硬限双保险：**
+   - 固件层：电机使能时经 `/a3/motor/set_param`（`motor_id=7`，`param_id=0x700B`）写入力矩限制；写入失败则夹爪不报就绪、禁止力控。
+   - 软件层：节点对目标力与输出位置增量做 clamp，任何设定/反馈不得超过 `max_grasp_torque_nm`（且在 MIT ±6 Nm 量程内）。
+2. **参数下发校验：** web/服务下发的目标力或最大握力必须 `≤ max_grasp_torque_nm`；越界一律拒绝（`error_code=5`），不执行、不落盘。合法值落盘 `data/gripper_overrides.yaml`，重启加载。
+3. **超力保护：** 力控中实测力矩瞬时超过硬限，立即停止积分、停止下发并回退/停机，置 `FAULT`（`error_code=4`）。
+4. **看门狗：** `feedback_fresh_timeout_s`（默认 0.30 s）内无新鲜 `eff_L7` 反馈，停止力环并置 `FAULT`（`error_code=3`）；节点退出/断连不得让电机维持夹紧力。
+5. **抓取超时：** `force` 命令带 `timeout_s`，在时限内未进入 `GRASPED`（力矩入目标带 ±10% 并维持 settle 时间）则安全停止（`error_code=2`）。
+6. **力环仅边缘：** PI 力环必须在 Edge（RK3588）/ CloudEdge ESP32 固件本地闭环；**禁止**云端以 50–200 Hz 闭环力控，网络只下发目标力/档位等稀疏参数。
+7. **模式互锁：** gate 关闭或臂处于 `TRAJ_RUNNING`/`SERVO`/`ZERO_TORQUE`/`GRAVITY_COMP` 时拒绝 `force`（`error_code=1`）；力控运行中臂侧轨迹/Servo 启动须先终止力环。
+8. **位置安全：** 力环输出的 L7 位置目标始终钳位在 `joint_cmd_min/max_rad` 内，位置增量变化率受限，防止积分饱和导致猛夹。
+
+配置见 `a3_gripper_controller/config/gripper_config.yaml`；接口契约见 [TOPIC_CONTRACT.md](TOPIC_CONTRACT.md)。
+
 ## 产品线实现差异
 
 | 安全能力 | A3 Edge | A3 CloudEdge |
@@ -74,6 +94,7 @@ CloudEdge 须在 ESP32 固件中实现等效逻辑；网络侧 `shutdown` 命令
 | 断连看门狗 | 可选 ROS 层 | **必须** ESP32 本地（建议 &lt; 100 ms 级检测） |
 | 硬件急停 | 板载 GPIO / 急停回路 | ESP32 GPIO，独立于 WiFi |
 | 重力补偿闭环 | 可板载 Pinocchio | 轨迹级开环在服务器；实时闭环在边缘 |
+| 夹爪握力硬限 | 固件 `0x700B` + `gripper_controller` 软件 clamp | 固件 `0x700B` + ESP32 本地 PI 力环（E12） |
 
 ## CloudEdge 断连策略（要求）
 

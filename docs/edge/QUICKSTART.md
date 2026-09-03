@@ -101,8 +101,9 @@
     ./scripts/a3_test/a3_test.sh telemetry  # MQTT 上行：转动电机，断言 pos_L7 变化
     ./scripts/a3_test/a3_test.sh mqtt_cmd   # MQTT 下行：mock 编排层，10 个 op 全链路
     ./scripts/a3_test/a3_test.sh servo      # 仿真：MoveIt Servo 六方向直线 jog
+    ./scripts/a3_test/a3_test.sh gripper    # 夹爪力控闭环（默认 sim 无硬件；hw 见第 14 节）
     ./scripts/a3_test/a3_test.sh web        # 启动 deep-trace 网页，人工确认曲线/3D（操作清单）
-    ./scripts/a3_test/a3_test.sh all        # 顺序跑 env→hw→telemetry→mqtt_cmd→servo
+    ./scripts/a3_test/a3_test.sh all        # 顺序跑 env→gripper→hw→telemetry→mqtt_cmd→servo
     ```
     - 真机直连底层 `/a3/motor/*`（`motor_id:=7`），**不**走 `/a3/arm/init`（需 7 电机齐全）；脚本以 `use_power_sequence:=false` 起 can_bridge。
     - 所有真机运动经安全限幅（目标 ≤0.30 rad、时长 ≥2.5 s），结束自动失能；零力矩步骤需人工在旁。
@@ -120,6 +121,30 @@
     - 所有动作 **二次确认** 后才下发 `.../cmd`（`{"op","args"}`），回执 `.../cmd_result`（`{op,ok,message,ts}`）以 toast + 消息列表反馈；MQTT 未连接时按钮禁用。op↔服务映射见 [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)。
     - 改设备 YAML 后须在 deep-trace 后端 `python manage.py load_device_config` 合入 `edge_config`。
     - 单电机现状下 `init`/`goto` 等会如实回 `ok=false`（message 带 `n/7` 等原因），失败信息显示在面板，正好验证回执链路；真机完整动作需 7 电机齐全。
+
+14. **夹爪力控（F24–F28，L7 自适应抓取）：**
+    夹爪（第 7 电机）支持「PI 力外环 + 电机位置内环」：读 `eff_L7` 反馈，力不足继续闭合、超力回退，自适应抓取软硬物体；握力可经配置文件或 web 设定，固件 `0x700B` + 软件 clamp 双保险限力。
+    ```bash
+    # (a) 无硬件闭环回归（任意机器可跑，自起节点 + 假「电机+物体」植物）：
+    ./scripts/a3_test/a3_test.sh gripper          # 12 项 PASS：配置校验/开合/软硬物体收敛±10%/超力/看门狗
+
+    # (b) 起夹爪节点（独立节点，不改 C++ CAN 实时路径；力控仅在 Edge 本地）：
+    ros2 launch a3_gripper_controller gripper_controller.launch.py require_gate:=false
+
+    # (c) 服务/话题验证：
+    ros2 service call /a3/gripper/set_config a3_msgs/srv/GripperSetConfig "{key: max_torque_nm, value: 1.5}"
+    ros2 service call /a3/gripper/command a3_msgs/srv/GripperCommand "{mode: force, preset: medium}"
+    ros2 service call /a3/gripper/command a3_msgs/srv/GripperCommand "{mode: release}"
+    ros2 topic echo /a3/gripper_status           # state/mode/target/actual_torque/contact/error_code
+    ros2 topic pub --once /a3/gripper_cmd std_msgs/msg/Float32 "{data: 1.0}"   # POSITION 开合 0..1
+
+    # (d) web 下发（经 a3_mqtt_bridge 白名单 4 op）：
+    #   {"op":"gripper_grasp","args":{"preset":"medium"}}  或  {"op":"gripper_grasp","args":{"torque":0.6}}
+    #   {"op":"gripper_release"}  {"op":"gripper_stop"}  {"op":"gripper_set_max_torque","args":{"value":1.2}}
+    ```
+    - 参数：`a3_gripper_controller/config/gripper_config.yaml`（最大握力 `max_grasp_torque_nm`、弱/中/强档位、PI、接触阈值、超时/看门狗）；下发的最大握力落盘 `~/.a3/gripper/gripper_overrides.yaml`，重启保留，越界（超硬上限/±6 Nm）拒绝。
+    - 真机：`A3_GRIPPER_TEST_MODE=hw ./scripts/a3_test/a3_test.sh gripper` 做服务/配置/开合安全检查；力控阶跃需人工在夹爪放置海绵（软）/木块（硬阻挡），观察 `grip_actual_torque` 收敛到目标 ±10% 且 `GRASPED`，握力不超硬上限。
+    - 力控与臂运动互锁：gate 关闭或臂处于 `TRAJ_RUNNING`/`SERVO`/`ZERO_TORQUE`/`GRAVITY_COMP` 时拒绝力控；安全条款见 [shared/SAFETY.md](../shared/SAFETY.md)「夹爪力控安全」。
 
 ## 相关文档
 

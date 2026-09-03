@@ -28,7 +28,13 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_srvs.srv import Trigger
 
-from a3_msgs.srv import GotoNamedPose, PlaybackTrajectory, SaveTrajectory
+from a3_msgs.srv import (
+    GotoNamedPose,
+    GripperCommand,
+    GripperSetConfig,
+    PlaybackTrajectory,
+    SaveTrajectory,
+)
 
 
 def _load_msg_class(type_str: str):
@@ -263,6 +269,23 @@ class Ros2MqttBridge(Node):
             ),
             "enter_ai": (self.create_client(Trigger, "/a3/arm/enter_ai"), Trigger.Request),
             "exit_ai": (self.create_client(Trigger, "/a3/arm/exit_ai"), Trigger.Request),
+            # 夹爪力控（F26）：command 服务被 grasp/release/stop 三个 op 共用
+            "gripper_grasp": (
+                self.create_client(GripperCommand, "/a3/gripper/command"),
+                GripperCommand.Request,
+            ),
+            "gripper_release": (
+                self.create_client(GripperCommand, "/a3/gripper/command"),
+                GripperCommand.Request,
+            ),
+            "gripper_stop": (
+                self.create_client(GripperCommand, "/a3/gripper/command"),
+                GripperCommand.Request,
+            ),
+            "gripper_set_max_torque": (
+                self.create_client(GripperSetConfig, "/a3/gripper/set_config"),
+                GripperSetConfig.Request,
+            ),
         }
 
     def _enqueue_cmd(self, payload) -> None:
@@ -296,6 +319,31 @@ class Ros2MqttBridge(Node):
             req.pose_name = str(args.get("pose") or args.get("pose_name") or "")
         elif op in ("save", "playback"):
             req.name = str(args.get("name") or "")
+        elif op == "gripper_grasp":
+            req.mode = "force"
+            if "torque" in args:
+                try:
+                    req.torque_nm = float(args.get("torque"))
+                except (TypeError, ValueError):
+                    self._publish_cmd_result(op, False, "invalid torque value")
+                    return
+            req.preset = str(args.get("preset") or "")
+            if "timeout" in args:
+                try:
+                    req.timeout_s = float(args.get("timeout"))
+                except (TypeError, ValueError):
+                    pass
+        elif op == "gripper_release":
+            req.mode = "release"
+        elif op == "gripper_stop":
+            req.mode = "stop"
+        elif op == "gripper_set_max_torque":
+            req.key = "max_torque_nm"
+            try:
+                req.value = float(args.get("value"))
+            except (TypeError, ValueError):
+                self._publish_cmd_result(op, False, "invalid torque value")
+                return
         if not client.service_is_ready():
             self._publish_cmd_result(op, False, f"{op} service unavailable")
             return

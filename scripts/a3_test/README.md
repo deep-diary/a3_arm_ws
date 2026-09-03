@@ -18,9 +18,17 @@
 ./scripts/a3_test/a3_test.sh telemetry  # 阶段三 MQTT 上行：转电机，断言 pos_L7 变化
 ./scripts/a3_test/a3_test.sh mqtt_cmd   # 阶段二 MQTT 下行：mock 编排层，10 op 全链路
 ./scripts/a3_test/a3_test.sh servo      # 阶段四 仿真：MoveIt Servo 六方向直线 jog
+./scripts/a3_test/a3_test.sh gripper    # 阶段五 夹爪力控（默认 sim 闭环，无硬件可跑）
 ./scripts/a3_test/a3_test.sh web        # 网页人工确认（保持遥测栈运行，打印操作清单）
-./scripts/a3_test/a3_test.sh all        # env→hw→telemetry→mqtt_cmd→servo
+./scripts/a3_test/a3_test.sh all        # env→gripper→hw→telemetry→mqtt_cmd→servo
 ```
+
+夹爪力控（F28）两种模式：
+- 默认（`sim`）：脚本在独立 `ROS_DOMAIN_ID=77` 自起 `gripper_controller` + 假「电机+物体」植物
+  （订阅 L7 轨迹→一阶位置跟随→接触后按物体刚度反算 `eff_L7`），闭环断言 12 项：配置越界/合法、
+  POSITION 开合、软/硬物体力控收敛 ±10% 且 GRASPED、超硬限 FAULT(4)、反馈看门狗 FAULT(3)。
+- 真机（`A3_GRIPPER_TEST_MODE=hw`）：起 can_bridge + gripper_controller，做服务/配置/开合安全检查；
+  力控阶跃需人工放海绵/硬阻挡观察（不自动断言真机力矩）。
 
 每阶段打印 `[PASS]/[FAIL]` 与汇总；非零退出码表示有失败项。
 

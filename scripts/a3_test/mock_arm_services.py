@@ -9,7 +9,13 @@ import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 
-from a3_msgs.srv import GotoNamedPose, SaveTrajectory, PlaybackTrajectory
+from a3_msgs.srv import (
+    GotoNamedPose,
+    GripperCommand,
+    GripperSetConfig,
+    PlaybackTrajectory,
+    SaveTrajectory,
+)
 
 
 class MockArmController(Node):
@@ -55,7 +61,27 @@ class MockArmController(Node):
         self.create_service(GotoNamedPose, "/a3/arm/goto_named_pose", goto_cb)
         self.create_service(SaveTrajectory, "/a3/arm/save_trajectory", save_cb)
         self.create_service(PlaybackTrajectory, "/a3/arm/playback", playback_cb)
-        self.get_logger().info("mock arm controller: 10 services ready")
+
+        # ---- 夹爪服务 mock（F26，供 gripper op 桥接确定性断言）----
+        def gripper_cmd_cb(req, resp):
+            self.calls.append("gripper_cmd:%s" % req.mode)
+            resp.success = True
+            resp.message = "mock gripper mode=%s tau=%.2f preset=%s" % (
+                req.mode, req.torque_nm, req.preset)
+            self.get_logger().info("call gripper command mode=%s" % req.mode)
+            return resp
+
+        def gripper_cfg_cb(req, resp):
+            self.calls.append("gripper_cfg:%s=%.2f" % (req.key, req.value))
+            resp.success = True
+            resp.applied_value = req.value
+            resp.message = "mock gripper set %s=%.2f" % (req.key, req.value)
+            self.get_logger().info("call gripper set_config %s=%.2f" % (req.key, req.value))
+            return resp
+
+        self.create_service(GripperCommand, "/a3/gripper/command", gripper_cmd_cb)
+        self.create_service(GripperSetConfig, "/a3/gripper/set_config", gripper_cfg_cb)
+        self.get_logger().info("mock arm controller: 10 arm + 2 gripper services ready")
 
 
 def main():
@@ -63,11 +89,14 @@ def main():
     node = MockArmController()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node.destroy_node()
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
