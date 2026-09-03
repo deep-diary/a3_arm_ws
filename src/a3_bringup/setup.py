@@ -26,6 +26,7 @@ setup(
             "trajectory_bridge = a3_bringup.trajectory_bridge:main",
             "rebot_remap_info = a3_bringup.rebot_remap_info:main",
             "sim_executor = a3_bringup.sim_executor:main",
+            "sim_camera = a3_bringup.sim_camera:main",
             "zero_to_work_publisher = a3_bringup.zero_to_work_publisher:main",
             "gravity_torque_node = a3_bringup.gravity_torque_node:main",
             "follow_joint_trajectory_action = a3_bringup.follow_joint_trajectory_action:main",

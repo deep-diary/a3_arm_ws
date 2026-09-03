@@ -1,7 +1,20 @@
 # A3 × LeRobot integration notes
 
 ## Status
-Scaffold only. Enable after `a3_can_bridge` bringup is stable.
+LeRobot robot plugin **implemented (sim)** as the separate pip package
+[`src/lerobot_robot_a3`](../../lerobot_robot_a3) (auto-discovered as
+`--robot.type=a3`; reads `/joint_states`, sends `/joint_group_effort_controller/joint_trajectory`,
+best-effort calls `/a3/arm/enter_ai|exit_ai`). **F25** adds camera observations
+and dataset recording (sim-verified): a `ros_topic` camera type subscribes to
+`/camera/color/image_raw` (uint8/HWC/RGB, no cv_bridge), an `a3_auto`
+teleoperator enables gamepad-free `lerobot-record`, and `record_sim.py` records
++ verifies a LeRobotDataset (`observation.state(7)` / `action(7)` /
+`observation.images.head`). The sim stack starts `a3_sim_camera`; a real Gemini 2
+publishes the same topics (zero plugin change). See that package's README for
+install + sim verification. This `a3_lerobot_config` package holds the shared
+joint/limits YAML the plugin mirrors. Real-hardware episodes, the Gemini 2
+driver, hand-eye calibration and depth recording remain pending
+(AI_ROADMAP A1/F25-real). Below notes remain valid for the integration contract.
 
 ## Orchestration entry (`a3_arm_controller`)
 

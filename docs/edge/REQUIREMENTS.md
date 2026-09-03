@@ -251,6 +251,32 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（cmd/cmd_result JSON 契约）；F18（MQTT 遥测桥）、F20（Web 3D）、F21（编排节点）、F22（分层测试）；外部前端仓库 `deep-trace`（分支 `rk3588`，`useRk3588Mqtt.js` / `ArmControlPanel.vue` / `Rk3588HubPanel.vue` / `HOME-DEMO.RK3588.yaml`）
 - **状态：** `implemented`
 
+### F24 — LeRobot robot 插件（lerobot_robot_a3，A0 数据地基）
+
+- **说明：** 新增独立可 `pip install` 的 LeRobot 插件包 `lerobot_robot_a3`（包名前缀 `lerobot_robot_`，被 LeRobot 自动发现，`--robot.type=a3`），把 EDULITE A3 作为 7-DOF follower 臂接入 LeRobot 数据采集/回放工具链。插件**内部只用 ROS 2 接口，不碰 CAN**：`get_observation()` 订阅 `/joint_states`（`sensor_msgs/JointState`，按 `L1_joint`..`L7_joint` 排序取弧度位置）；`send_action()` 把 7 维关节位置动作按软限位裁剪后，组单点 `trajectory_msgs/JointTrajectory` 发布到执行层主话题 `/joint_group_effort_controller/joint_trajectory`；`connect()`/`disconnect()` 以 best-effort 方式调用门面服务 `/a3/arm/enter_ai`、`/a3/arm/exit_ai`（F21，服务缺失/超时时不致命）。ROS 侧收发一律**弧度 + URDF 关节系、不乘 joint_signs**（对齐 TOPIC_CONTRACT）；L7 夹爪有效区间 0(闭)~1.5708(开)。关节名/限位/默认话题镜像 `src/a3_lerobot_config/config/a3_robot.yaml`。A3 回零走 `/a3/arm/init`，插件提供 passthrough/identity 校准，使 `lerobot-calibrate` 不构成阻塞。本期 `cameras` 为空（无图像观测）。
+- **验收标准：**
+  1. `lerobot_robot_a3` 可 `pip install -e .`（普通 pip 包，无 package.xml，colcon 自动跳过）；安装后 LeRobot 能自动发现并以 `--robot.type=a3` 实例化（robot registry 含 `a3`）
+  2. 仿真栈（`edge_moveit_execute.launch.py use_sim:=true` + `arm_controller.launch.py require_gate:=false`，均 `use_rviz:=false`）下：插件 `connect()` 后 `get_observation()` 返回 7 维弧度状态且与 `/joint_states` 一致
+  3. `send_action()` 下发一个合法 7 关节目标后，`/joint_states` 经 sim_executor 跟随到位（关节名/顺序/弧度正确，软限位外的目标被裁剪）
+  4. `connect()` 时 `/a3/arm/enter_ai` 被调用（`/a3/arm_status` 进入 AI 态）；门面服务不存在时插件不报错、可继续；`disconnect()` best-effort 调 `exit_ai`
+  5. 插件 README 含可复制的安装与仿真验证命令；动作不绕过门控/软限位（SAFETY）
+- **关联：** [shared/AI_ROADMAP.md](../shared/AI_ROADMAP.md) A0 / F24；[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（关节状态/轨迹主话题/门面服务契约）；[shared/SAFETY.md](../shared/SAFETY.md)；F21（编排节点 enter_ai/exit_ai）、F10（FJT Action）；[`a3_lerobot_config`](../../src/a3_lerobot_config)（`a3_robot.yaml` 关节定义）；插件包 [`src/lerobot_robot_a3`](../../src/lerobot_robot_a3)（含 README 仿真验证步骤）
+- **状态：** `implemented`（仿真链路实测通过：LeRobot 可发现 `--robot.type=a3`；`get_observation` 读 7 关节弧度、`send_action` 驱动 `/joint_states` 到位且软限位裁剪生效、enter_ai/exit_ai best-effort 成功；真机 episode、相机与训练待硬件/GPU 服务器）
+
+### F25 — LeRobot 相机观测 + 数据采集（lerobot-record，仿真先行）
+
+- **说明：** 在 F24 的 `lerobot_robot_a3` 插件上补齐**相机观测**与**数据采集落盘**能力，使 A3 能用 `lerobot-record` 录制包含 `observation.state`(7 关节)、`action`(7 关节)、`observation.images.<cam>`(RGB) 的 LeRobotDataset v2 数据集（parquet + mp4）。本期**无硬件仿真先行**：插件新增一个 LeRobot 相机类型 `ros_topic`（`@CameraConfig.register_subclass`），内部用 rclpy 订阅 `sensor_msgs/Image`，用 numpy 按 `rgb8`/`bgr8` 直接解析为 **uint8 / HWC / RGB** 帧（系统 ROS 未装 cv_bridge，故不依赖 cv_bridge）；关节特征由 F24 的向量 `{"state":(7,)}` 修正为 LeRobot 录制管线要求的**逐关节 `float` 标量**（`L1.pos`…`L7.pos`，否则 tuple 会被误判为相机）。另提供一个虚拟遥操作 `a3_auto`（`@TeleoperatorConfig.register_subclass`，输出限内正弦动作），使真实 `lerobot-record --robot.type=a3 --teleop.type=a3_auto` CLI 可人工按键录制；自动化测试用程序化 `LeRobotDataset.create(...)` 脚本（避开 record 的键盘门控），视频编码用板上 ffmpeg 可用的 `mpeg4`（无 libx264/libsvtav1）。仿真侧新增 `a3_bringup/sim_camera` 节点，纯 numpy 发布 `/camera/color/image_raw`（`rgb8`，画面随 `/joint_states` 关节角调制），并在 `edge_moveit_execute.launch.py use_sim` 条件下拉起；预留 `/camera/depth/image_raw`(16UC1) 与 `/camera/color/camera_info`。真机 Gemini 2 由 OrbbecSDK_ROS2 发布同一 `/camera/color/*` 话题，插件零改动切换。深度图本期不落盘（LeRobot 0.4.4 录制管线仅接受 len==3 的图像 tuple）。
+- **验收标准：**
+  1. `lerobot_robot_a3` 安装后，LeRobot 可发现机器人 `a3`、相机 `ros_topic`、遥操作 `a3_auto`（`register_third_party_plugins()` 后 registry 均含）
+  2. 仿真栈（`edge_moveit_execute.launch.py use_sim:=true` 含 `sim_camera` + `arm_controller`）下，`/camera/color/image_raw` 以 `rgb8` 持续发布；`RosTopicCamera.read()` 返回 `(480,640,3)` uint8 RGB 帧且帧间有变化
+  3. `robot.observation_features` 含 7 个逐关节 `float`（`L1.pos`…`L7.pos`）与 1 个 `(480,640,3)` 图像特征；`get_observation()` 返回对应关节标量与相机图像 key
+  4. 程序化录制脚本跑通 ≥2 个短 episode：`meta/info.json` 含 `observation.state(7)`/`action(7)`/`observation.images.head(480,640,3)`；`data/**/*.parquet` 帧数正确；`videos/**/*.mp4` 存在且非空；读回数据集图像为 HWC、state/action 为 7 维
+  5. F24 回归：`send_action` 仍驱动 sim_executor `/joint_states` 到位并保持，软限位裁剪生效，`enter_ai`/`exit_ai` best-effort 成功
+  6. 真实 `lerobot-record --robot.type=a3 --teleop.type=a3_auto --dataset.push_to_hub=false --dataset.vcodec=mpeg4 ...` 配置可解析（CLI 可发现，人工按键录制命令写入插件 README）
+  7. 仿真与真机共用 `/camera/color/image_raw` 契约（见 TOPIC_CONTRACT）；`sim_camera` 纯 numpy 不依赖 cv2/cv_bridge
+- **关联：** [shared/AI_ROADMAP.md](../shared/AI_ROADMAP.md) A0/A1 / F25；[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（新增「相机」话题契约：`/camera/color/image_raw`、`/camera/color/camera_info`、`/camera/depth/image_raw`）；F24（robot 插件）、F21（enter_ai/exit_ai）；插件包 [`src/lerobot_robot_a3`](../../src/lerobot_robot_a3)（`ros_camera.py`/`auto_teleop.py`/`record_sim.py`）；仿真节点 [`src/a3_bringup`](../../src/a3_bringup)（`sim_camera.py`）；真机驱动待硬件（OrbbecSDK_ROS2 Gemini 2）
+- **状态：** `implemented`（仿真链路实测通过：`ros_topic` 相机/`a3_auto` 遥操作/`a3` 机器人三类插件均可被 LeRobot 发现；`sim_camera` 发布 `rgb8` `/camera/color/image_raw`；程序化录制落盘 `observation.state(7)`/`action(7)`/`observation.images.head(480,640,3)` → parquet + mp4，读回 10/10 断言通过；F24 关节回归通过；真机 Gemini 2 驱动、手眼标定、深度落盘待硬件）
+
 ## 非功能需求
 
 | 指标 | 要求 |

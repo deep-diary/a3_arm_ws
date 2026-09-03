@@ -22,6 +22,9 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | 命名姿态 | `std_msgs/String` | `zero` / `work` / `home` / `ready` |
 | 夹爪开合 | `std_msgs/Float32` | 0 闭合 … 1 张开 |
 | DS4 IMU | `sensor_msgs/Imu` | 可选 hidraw（陀螺/加速度） |
+| 彩色图像 | `sensor_msgs/Image` | RGB-D 相机彩色流，约定 `rgb8`（H×W×3，uint8） |
+| 深度图像 | `sensor_msgs/Image` | 深度流，约定 `16UC1`（毫米，uint16）；本期仅预留，LeRobot 0.4.4 录制不落深度 |
+| 相机标定 | `sensor_msgs/CameraInfo` | 内参/畸变/帧号 |
 ## 标准话题（单臂，无 namespace）
 
 ### 轨迹输入（订阅侧 / 执行层监听）
@@ -69,6 +72,20 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 |------|------|
 | `/joint_states` | 电机反馈汇总，默认 50 Hz |
 | `/rebotarm/joint_states` | `trajectory_bridge` 镜像输出，供 reBot 消费 |
+
+### 相机（RGB-D，AI/LeRobot 侧）
+
+由深度相机驱动（真机 OrbbecSDK_ROS2 Gemini 2；仿真 `a3_bringup/sim_camera`）发布，LeRobot 插件 `lerobot_robot_a3` 的 ROS 话题相机订阅彩色流：
+
+| 话题 | 类型 | 编码 | 说明 |
+|------|------|------|------|
+| `/camera/color/image_raw` | `sensor_msgs/Image` | `rgb8`（H×W×3, uint8） | 彩色图像，RGB 通道序；默认 640×480@30 |
+| `/camera/color/camera_info` | `sensor_msgs/CameraInfo` | — | 内参/畸变/`frame_id` |
+| `/camera/depth/image_raw` | `sensor_msgs/Image` | `16UC1`（毫米, uint16） | 深度流，本期仅预留（LeRobot 0.4.4 录制管线不落深度） |
+
+- 真机 Gemini 2 由 `OrbbecSDK_ROS2`（`gemini2.launch.py`）发布同名话题；插件只认话题，不绑定具体驱动，换相机零改动。
+- 仿真 `sim_camera` 发布合成 `rgb8` 图（画面随 `/joint_states` 关节角调制），用于无硬件跑通 `lerobot-record` 数据链路。
+- 图像约定：**uint8 / HWC / RGB**；`frame_id` 用 `camera_color_optical_frame`。
 
 ### 电源序列
 

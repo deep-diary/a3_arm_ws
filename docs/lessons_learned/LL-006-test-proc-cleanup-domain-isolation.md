@@ -41,6 +41,20 @@
 3. **避免 pkill 自匹配**：pattern 里用括号技巧断开子串，如
    `pkill -f 'motor_protocol_[n]ode'`、`pkill -f 'ros2mqtt_bridg[e]'`，
    这样正则能匹配目标进程，但 pattern 字面量本身不再匹配自己的命令行。
+4. **开测前先排"上一轮会话"遗留的孤儿（ppid=1）**：手动/交互式起仿真栈做验证时，
+   上次没退干净的 `sim_executor` / `arm_controller` 会被 init 收养（`ps -ef` 里 PPID=1），
+   与新实例**同名共存**。症状：`ros2 node list` 里同名节点出现多次（如
+   `/a3_sim_executor` ×4）；轨迹话题有多个 publisher；`/joint_states` 在目标值与 0 之间
+   抖动（旧 sim_executor 持续发零位）；`/a3/arm/enter_ai` 等服务调用超时（连到旧节点）。
+   开测前预检并清理：
+   ```bash
+   ros2 node list | sort | uniq -c            # 同名计数 >1 即有孤儿
+   ps -ef | grep -E 'sim_executor|a3_arm_controller/lib' | grep -v grep
+   # 只杀 PPID=1 的陈旧实例（保留本轮 launch 派生的），按 PID：
+   kill <stale_pid>...
+   ```
+   F24 LeRobot 插件仿真联调时即因此出现"动作 0.5s 到位、1s 后被拉回零"，清掉 3 个
+   遗留 `sim_executor` + 1 个遗留 `arm_controller` 后恢复正常。
 
 ## 相关路径
 

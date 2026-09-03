@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_robot_a3"
+version = "0.1.0"
+description = "LeRobot robot plugin for the EDULITE A3 7-DOF arm (ROS 2 Humble backend, RK3588)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "A3 Edge" }]
+dependencies = [
+    "numpy<2.0",
+]
+# lerobot is the host framework; it is expected to be installed in the same
+# environment (pip install lerobot). rclpy is provided by the system ROS 2
+# install (/opt/ros/humble) and must NOT be pip-installed; use a venv created
+# with `--system-site-packages` so `import rclpy` resolves.
+
+[tool.setuptools]
+packages = ["lerobot_robot_a3"]
+
+[tool.setuptools.package-data]
+lerobot_robot_a3 = ["py.typed"]

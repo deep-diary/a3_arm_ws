@@ -49,6 +49,13 @@ def generate_launch_description():
             ),
             Node(
                 package="a3_bringup",
+                executable="sim_camera",
+                name="a3_sim_camera",
+                parameters=[{"width": 640, "height": 480, "fps": 30.0}],
+                condition=IfCondition(use_sim),
+            ),
+            Node(
+                package="a3_bringup",
                 executable="trajectory_bridge",
                 name="a3_trajectory_bridge",
             ),

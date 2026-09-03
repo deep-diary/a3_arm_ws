@@ -26,3 +26,4 @@ LL-NNN-short-slug.md
 | [LL-005](LL-005-humble-timer-qos-python-node.md) | Humble Python 节点：create_timer 无 oneshot；/joint_states 需 best-effort 订阅 | Edge | 2026-09-02 |
 | [LL-006](LL-006-test-proc-cleanup-domain-isolation.md) | 测试脚本后台 ros2 launch 需 setsid 整组清理；mock 用独立 ROS_DOMAIN_ID 隔离；pkill -f 防自匹配 | Edge | 2026-09-02 |
 | [LL-007](LL-007-servo-zero-pose-ik-singularity.md) | MoveIt Servo 在全零位（L2/L3 限位边界+奇异）IK 失败 -31，需先预定位到 home 非奇异位再 jog | Edge | 2026-09-02 |
+| [LL-008](LL-008-lerobot-rclpy-conventions.md) | LeRobot 插件接 ROS 相机/录制：多节点 spin 冲突需独立 executor、关节特征必须 float 标量、record 键盘门控、PyAV 自带 x264、首条命令等订阅匹配 | Edge | 2026-09-03 |
