@@ -11,6 +11,9 @@
 
   <exec_depend>a3_description</exec_depend>
   <exec_depend>a3_can_bridge</exec_depend>
+  <exec_depend>a3_arm_controller</exec_depend>
+  <exec_depend>a3_mqtt_bridge</exec_depend>
+  <exec_depend>a3_gripper_controller</exec_depend>
   <exec_depend>a3_teleop_ps4</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>rviz2</exec_depend>

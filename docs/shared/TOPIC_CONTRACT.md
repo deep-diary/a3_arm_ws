@@ -99,6 +99,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/arm/enable` | `std_srvs/Trigger` | 使能 7 电机，状态 → `READY` |
 | `/a3/arm/disable` | `std_srvs/Trigger` | 失能 7 电机，状态 → `IDLE` |
 | `/a3/arm/goto_named_pose` | `a3_msgs/srv/GotoNamedPose` | `pose_name` 按 `named_poses.yaml` 插值下发 |
+| `/a3/arm/set_joint_positions` | `a3_msgs/srv/SetJointPositions` | 设 7 关节目标位置（`positions[7]` + `duration`），限位 clamp 后短插值下发；节流连续下发以覆盖语义衔接 |
 | `/a3/arm/start_teach` | `std_srvs/Trigger` | 切零力矩拖动 + 开始记录 |
 | `/a3/arm/stop_teach` | `std_srvs/Trigger` | 停止记录 + 退出拖动 |
 | `/a3/arm/save_trajectory` | `a3_msgs/srv/SaveTrajectory` | `name` → 保存为本地轨迹文件 |
@@ -128,6 +129,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `enable` | `{}` | `/a3/arm/enable` |
 | `disable` | `{}` | `/a3/arm/disable` |
 | `goto` | `{"pose": "zero\|home\|ready\|work"}` | `/a3/arm/goto_named_pose`（`pose_name=args.pose`） |
+| `set_joints` | `{"positions": [7 个 rad], "duration": 0.3}` | `/a3/arm/set_joint_positions`（`SetJointPositions`，滑动条 jog 直驱，限位 clamp + 短插值） |
 | `teach_start` | `{}` | `/a3/arm/start_teach` |
 | `teach_stop` | `{}` | `/a3/arm/stop_teach` |
 | `save` | `{"name": "<轨迹名>"}` | `/a3/arm/save_trajectory`（`name=args.name`） |

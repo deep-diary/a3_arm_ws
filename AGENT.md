@@ -242,3 +242,76 @@ npm run dev -- --host                        # Network http://192.168.3.78:5173
 ```
 
 演示账号 `wangwu / demo123`；详情页 `/device/HOME-DEMO/RK3588`。
+
+## 8. 关节直驱控制 + 仿真闭环（set_joints，2026-09 落地）
+
+**当前部署机是 RK3588 板（hostname `lubancat`），路径 `/home/cat/a3_arm_ws`**（§3 的 `/home/Blue/dev/a3_arm_ws` 是 WSL 开发机，勿混）。
+
+### 8.1 控制链路（web 滑动条 → 关节直驱）
+
+```
+web 滑动条拖动 --MQTT cmd {op:set_joints, args:{positions[7], duration}}--> ros2mqtt_bridge
+  --> 服务 /a3/arm/set_joint_positions (a3_msgs/srv/SetJointPositions) --> a3_arm_controller
+  --> 限位 clamp + 短插值 JointTrajectory --> /joint_group_effort_controller/joint_trajectory
+  --> 执行层(motor_protocol_node 真机 / sim_motor_node 仿真) --> /joint_states(50Hz)
+  --> ros2mqtt_bridge 展平 pos_L1..L7 --> MQTT telemetry --> web(3D + 滑动条实时值)
+```
+
+- 新 srv：`src/a3_msgs/srv/SetJointPositions.srv`（`positions[7]` + `duration`）。
+- 新服务：`a3_arm_controller` 的 `/a3/arm/set_joint_positions`（`_set_joint_positions_cb`）：限位从 `a3_description/urdf/el_a3.urdf` 读，越界 clamp；短插值 11 点下发；jog 覆盖语义（`TRAJ` 中仅允许 jog 自覆盖，空闲 ~0.5s 自动回 `READY`）。
+- 新 op：`a3_mqtt_bridge` 白名单 `set_joints`，映射到上述服务；参数校验 `positions` 须 7 个。
+- 契约：`docs/shared/TOPIC_CONTRACT.md` 已补 `set_joints` op 与 `set_joint_positions` 服务行。
+- 前端（deep-trace）：`Rk3588HubPanel` 右侧 `ArmJointSliders.vue`（7 滑动条，上下限来自 URDF `joint-limits` emit）；拖动节流 ~120ms 下发 + 松手补发；首次拖动二次确认。
+
+### 8.2 无电机 / 无 CAN 仿真闭环（三模拟节点，2026-09 更新）
+
+不接电机、电池充电时，用三个**模拟节点**替代硬件栈，构成「反馈≈指令 + 一阶跟随 + L7 接触弹簧」的完整闭环，可全链路验证前端（编排、夹爪力控、关节直驱、重力补偿、电源序列全部在线）：
+
+| 模拟节点（name=对齐设备 YAML） | 替代 | 职责 |
+|------|------|------|
+| `sim_motor_node`（name=`motor_protocol_node`） | 真机 C++ `motor_protocol_node` | 订阅轨迹插值回发 `/joint_states`（7 关节 position/velocity/effort；一阶跟随 `follow_alpha=0.35`；L7 用接触弹簧 `tau=contact_k·max(0, contact_q−q)`，默认 `contact_q=0.6 contact_k=20`）；提供 `/a3/motor/{set_zero,enable,reset,get_device_id,request_version}`、`/a3/motor/set_param`（夹爪力矩硬限写入）、`/a3/zero_torque/{start,stop}`（示教） |
+| `sim_power_sequence_node`（name=`power_sequence_node`） | 真机 C++ `power_sequence_node` | 上电即发 `/power_sequence/gate_open=true`、`/power_sequence/state=Running`（transient_local 锁存）；响应 `/power_sequence/command` start/prone/shutdown/set_zero |
+| `gravity_torque_node`（name=`gravity_torque_node`） | 真机同名节点（复用现有 executable） | Pinocchio 重力矩发 `/a3/gravity_torque`；name 覆盖对齐 YAML（原节点名 `a3_gravity_torque`） |
+
+L7 接触弹簧让夹爪力控（`gripper_controller_node`）能真实收敛到 `GRASPED`（闭合到 `contact_q` 后力矩上升、力环 PI 调节），无需真实电机/物体。
+
+**一键整体启动（已落地）：**
+
+```bash
+# 1) 停掉硬件栈（否则 /joint_states 与 sim_motor_node 冲突）
+pkill -f "a3_can_bridge can_bridge.launch"; pkill -f motor_protocol_node; pkill -f can_transport_node
+
+# 2) 整体启动：rsp + sim_motor + sim_power + gravity + arm_controller + mqtt_bridge + gripper
+source /opt/ros/humble/setup.bash && source ~/a3_arm_ws/install/local_setup.bash
+export PYTHONNOUSERSITE=1
+ros2 launch a3_bringup edge_web_sim.launch.py use_gripper:=true
+```
+
+`edge_web_sim.launch.py`（`src/a3_bringup/launch/`）组合了：`robot_state_publisher` + `sim_motor_node` + `sim_power_sequence_node` + `gravity_torque_node` + `arm_controller.launch.py` + `bridge.launch.py` + `gripper_controller.launch.py`（`use_gripper` 默认 `true`）。真机模式则用 `a3_bringup.launch.py`（硬件栈）+ 单独起 `arm_controller.launch.py` + `bridge.launch.py` + `gripper_controller.launch.py`。
+
+**端到端验证命令（paho，无需 ros2 CLI）：**
+
+```bash
+unset PYTHONNOUSERSITE
+python3 - <<'PY'
+import json, time, paho.mqtt.client as mqtt
+P = "deep-trace/HOME-DEMO/RK3588"; res=[]
+c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2); 
+def on_msg(c,u,m):
+    p=json.loads(m.payload.decode())
+    if m.topic.endswith("/cmd_result"): res.append(p)
+c.on_message=on_msg; c.connect("192.168.3.73",1883); c.loop_start()
+c.subscribe(f"{P}/cmd_result"); time.sleep(1)
+c.publish(f"{P}/cmd", json.dumps({"op":"set_joints","args":{"positions":[0,0.8,-0.5,0.3,0,0,0],"duration":0.5}}))
+time.sleep(2); print(json.dumps(res, ensure_ascii=False)); c.disconnect()
+PY
+# 期望回执 {"op":"set_joints","ok":true,"message":"jog 7 joints (0.50s)",...}
+# telemetry pos_L2/pos_L3/pos_L4 收敛到 0.8 / -0.5 / 0.3
+```
+
+### 8.3 构建与重启要点
+
+- 改 `a3_msgs` 后：`colcon build --symlink-install --packages-select a3_msgs a3_arm_controller a3_mqtt_bridge`。
+- 新增/改 launch 文件或 `a3_bringup/setup.py` 的 `entry_points`（如 `sim_motor_node`、`sim_power_sequence_node`）后：需 `colcon build --packages-select a3_bringup`（`install/share` 的 launch 是 symlink，重新 build 才会建链接；新 entry point 也要重建才生成 `install/a3_bringup/lib/a3_bringup/<name>`）。
+- `bridge.launch.py` 内部 `SetEnvironmentVariable("PYTHONNOUSERSITE","")` 解除 `.bashrc` 屏蔽，加载 `~/.local` 的 paho-mqtt。
+- `can_bridge`（`motor_protocol_node`/`can_transport_node`）是 C++ 硬件执行层，不依赖 `a3_msgs`，改 srv 无需重编。

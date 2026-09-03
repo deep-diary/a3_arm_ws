@@ -19,6 +19,7 @@ import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from builtin_interfaces.msg import Duration
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -29,7 +30,12 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from a3_can_bridge.srv import MotorCommand
 from a3_msgs.msg import ArmStatus
-from a3_msgs.srv import GotoNamedPose, PlaybackTrajectory, SaveTrajectory
+from a3_msgs.srv import (
+    GotoNamedPose,
+    PlaybackTrajectory,
+    SaveTrajectory,
+    SetJointPositions,
+)
 
 JOINTS = [
     "L1_joint",
@@ -71,6 +77,11 @@ class ArmController(Node):
     def __init__(self) -> None:
         super().__init__("a3_arm_controller")
 
+        # 可重入回调组：服务回调内会同步调用电机服务（_wait_future 轮询等待），
+        # 若用默认 MutuallyExclusiveCallbackGroup，回调阻塞期间 client 响应回调无法
+        # 并发执行，导致 init/enable/disable/teach 全部死锁超时。
+        self._cb_group = ReentrantCallbackGroup()
+
         self.declare_parameter("joint_names", JOINTS)
         self.declare_parameter("joint_states_topic", "/joint_states")
         self.declare_parameter("control_mode_topic", "/a3/control_mode")
@@ -108,6 +119,8 @@ class ArmController(Node):
         self._velocities: List[float] = [0.0] * self._n_joints
         self._efforts: List[float] = [0.0] * self._n_joints
         self._have_js = False
+        # jog（滑动条直驱）进行中标志：区分 TRAJ 是 jog 还是 goto/playback
+        self._jogging = False
 
         # 示教录制
         self._recording = False
@@ -120,6 +133,8 @@ class ArmController(Node):
 
         # 命名预设点
         self._poses = self._load_poses()
+        # 关节限位（来自 URDF，与前端滑动条上下限同源）
+        self._joint_limits = self._load_joint_limits()
 
         # 订阅（/joint_states 为 best-effort；gate/state 为 transient_local 锁存）
         js_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -129,16 +144,20 @@ class ArmController(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         self.create_subscription(
-            JointState, str(self.get_parameter("joint_states_topic").value), self._on_js, js_qos
+            JointState, str(self.get_parameter("joint_states_topic").value), self._on_js, js_qos,
+            callback_group=self._cb_group,
         )
         self.create_subscription(
-            String, str(self.get_parameter("control_mode_topic").value), self._on_mode, 10
+            String, str(self.get_parameter("control_mode_topic").value), self._on_mode, 10,
+            callback_group=self._cb_group,
         )
         self.create_subscription(
-            Bool, str(self.get_parameter("gate_topic").value), self._on_gate, latched_qos
+            Bool, str(self.get_parameter("gate_topic").value), self._on_gate, latched_qos,
+            callback_group=self._cb_group,
         )
         self.create_subscription(
-            String, str(self.get_parameter("power_state_topic").value), self._on_power_state, latched_qos
+            String, str(self.get_parameter("power_state_topic").value), self._on_power_state, latched_qos,
+            callback_group=self._cb_group,
         )
 
         # 发布
@@ -149,27 +168,31 @@ class ArmController(Node):
         )
 
         # 服务（对外门面）
-        self.create_service(Trigger, "/a3/arm/init", self._init_cb)
-        self.create_service(Trigger, "/a3/arm/enable", self._enable_cb)
-        self.create_service(Trigger, "/a3/arm/disable", self._disable_cb)
-        self.create_service(GotoNamedPose, "/a3/arm/goto_named_pose", self._goto_cb)
-        self.create_service(Trigger, "/a3/arm/start_teach", self._start_teach_cb)
-        self.create_service(Trigger, "/a3/arm/stop_teach", self._stop_teach_cb)
-        self.create_service(SaveTrajectory, "/a3/arm/save_trajectory", self._save_cb)
-        self.create_service(PlaybackTrajectory, "/a3/arm/playback", self._playback_cb)
-        self.create_service(Trigger, "/a3/arm/enter_ai", self._enter_ai_cb)
-        self.create_service(Trigger, "/a3/arm/exit_ai", self._exit_ai_cb)
+        self.create_service(Trigger, "/a3/arm/init", self._init_cb, callback_group=self._cb_group)
+        self.create_service(Trigger, "/a3/arm/enable", self._enable_cb, callback_group=self._cb_group)
+        self.create_service(Trigger, "/a3/arm/disable", self._disable_cb, callback_group=self._cb_group)
+        self.create_service(GotoNamedPose, "/a3/arm/goto_named_pose", self._goto_cb, callback_group=self._cb_group)
+        self.create_service(
+            SetJointPositions, "/a3/arm/set_joint_positions", self._set_joint_positions_cb,
+            callback_group=self._cb_group,
+        )
+        self.create_service(Trigger, "/a3/arm/start_teach", self._start_teach_cb, callback_group=self._cb_group)
+        self.create_service(Trigger, "/a3/arm/stop_teach", self._stop_teach_cb, callback_group=self._cb_group)
+        self.create_service(SaveTrajectory, "/a3/arm/save_trajectory", self._save_cb, callback_group=self._cb_group)
+        self.create_service(PlaybackTrajectory, "/a3/arm/playback", self._playback_cb, callback_group=self._cb_group)
+        self.create_service(Trigger, "/a3/arm/enter_ai", self._enter_ai_cb, callback_group=self._cb_group)
+        self.create_service(Trigger, "/a3/arm/exit_ai", self._exit_ai_cb, callback_group=self._cb_group)
 
         # 底层服务客户端
-        self._motor_cli = self.create_client(MotorCommand, "/a3/motor/set_zero")
-        self._enable_cli = self.create_client(MotorCommand, "/a3/motor/enable")
-        self._reset_cli = self.create_client(MotorCommand, "/a3/motor/reset")
-        self._zt_start_cli = self.create_client(Trigger, "/a3/zero_torque/start")
-        self._zt_stop_cli = self.create_client(Trigger, "/a3/zero_torque/stop")
+        self._motor_cli = self.create_client(MotorCommand, "/a3/motor/set_zero", callback_group=self._cb_group)
+        self._enable_cli = self.create_client(MotorCommand, "/a3/motor/enable", callback_group=self._cb_group)
+        self._reset_cli = self.create_client(MotorCommand, "/a3/motor/reset", callback_group=self._cb_group)
+        self._zt_start_cli = self.create_client(Trigger, "/a3/zero_torque/start", callback_group=self._cb_group)
+        self._zt_stop_cli = self.create_client(Trigger, "/a3/zero_torque/stop", callback_group=self._cb_group)
 
         # 状态发布定时器
         rate = max(1.0, float(self.get_parameter("status_hz").value))
-        self.create_timer(1.0 / rate, self._publish_status)
+        self.create_timer(1.0 / rate, self._publish_status, callback_group=self._cb_group)
 
         self.get_logger().info(
             f"a3_arm_controller ready: joints={self._n_joints} state={self._state} "
@@ -193,6 +216,32 @@ class ArmController(Node):
             self.get_logger().warn(f"cannot load named poses: {exc}")
             return {}
 
+    def _load_joint_limits(self) -> Dict[str, Tuple[float, float]]:
+        """从 a3_description/urdf/el_a3.urdf 读取各关节 limit lower/upper（与前端滑动条同源）。"""
+        import xml.etree.ElementTree as ET
+
+        limits: Dict[str, Tuple[float, float]] = {}
+        try:
+            share = get_package_share_directory("a3_description")
+            path = os.path.join(share, "urdf", "el_a3.urdf")
+            root = ET.parse(path).getroot()
+            for joint in root.iter("joint"):
+                name = joint.get("name", "")
+                if name not in self._joint_names:
+                    continue
+                limit = joint.find("limit")
+                if limit is None:
+                    continue
+                try:
+                    lower = float(limit.get("lower"))
+                    upper = float(limit.get("upper"))
+                except (TypeError, ValueError):
+                    continue
+                limits[name] = (lower, upper)
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"cannot load joint limits from URDF: {exc}")
+        return limits
+
     def _set_state(self, state: str, message: str = "") -> None:
         with self._lock:
             self._state = state
@@ -215,6 +264,20 @@ class ArmController(Node):
             time.sleep(0.05)
         return client.service_is_ready()
 
+    def _wait_future(self, future, timeout_s: float = 2.0) -> bool:
+        """轮询等待 future 完成。
+
+        本节点跑在 MultiThreadedExecutor（默认 cpu_count 个线程），服务回调占住
+        一个线程；若在回调里用 rclpy.spin_until_future_complete() 会把节点临时
+        「转挂」到全局 SingleThreadedExecutor 并导致后续回调停摆（init/enable/
+        disable/teach 全部超时）。改为纯轮询，靠 executor 其余线程处理 client
+        响应回调来完成 future。
+        """
+        deadline = time.monotonic() + max(timeout_s, 0.0)
+        while time.monotonic() < deadline and not future.done() and rclpy.ok():
+            time.sleep(0.01)
+        return bool(future.done() and future.result() is not None)
+
     def _motor_command(self, client, command: int) -> Tuple[bool, str]:
         if not self._wait_service(client):
             return False, "motor service unavailable"
@@ -224,8 +287,7 @@ class ArmController(Node):
         future = client.call_async(req)
         if future is None:
             return False, "service call rejected"
-        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
-        if future.done() and future.result() is not None:
+        if self._wait_future(future, 2.0):
             resp = future.result()
             return bool(resp.success), resp.message
         return False, "service call timeout"
@@ -236,8 +298,7 @@ class ArmController(Node):
         future = client.call_async(Trigger.Request())
         if future is None:
             return False, f"{label} rejected"
-        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
-        if future.done() and future.result() is not None:
+        if self._wait_future(future, 2.0):
             resp = future.result()
             return bool(resp.success), resp.message
         return False, f"{label} timeout"
@@ -264,6 +325,7 @@ class ArmController(Node):
         self._traj_done_at = time.monotonic() + max(delay_s, 0.1)
 
     def _back_to_ready(self) -> None:
+        self._jogging = False
         if self._state == STATE_TRAJ:
             self._set_state(STATE_READY, "trajectory finished")
 
@@ -429,6 +491,74 @@ class ArmController(Node):
 
         resp.success = True
         resp.message = f"goto {name} ({duration:.1f}s, {n} pts)"
+        return resp
+
+    def _set_joint_positions_cb(
+        self, req: SetJointPositions.Request, resp: SetJointPositions.Response
+    ) -> SetJointPositions.Response:
+        """Web 滑动条 jog 直驱：设 7 关节目标位置，短插值下发执行层（需求 F23 扩展）。"""
+        if not self._have_js:
+            resp.success = False
+            resp.message = "no /joint_states yet"
+            return resp
+        if self._state in (STATE_INIT, STATE_TEACH, STATE_AI, STATE_FAULT, STATE_SERVO):
+            resp.success = False
+            resp.message = f"busy in state={self._state}"
+            return resp
+        if self._mode in BLOCKED_MODES:
+            resp.success = False
+            resp.message = f"mode={self._mode}"
+            return resp
+        if self._state == STATE_TRAJ and not self._jogging:
+            resp.success = False
+            resp.message = "busy in goto/playback"
+            return resp
+
+        if len(req.positions) != self._n_joints:
+            resp.success = False
+            resp.message = f"need {self._n_joints} positions, got {len(req.positions)}"
+            return resp
+
+        target: List[float] = []
+        clamped: List[str] = []
+        for i, jn in enumerate(self._joint_names):
+            v = float(req.positions[i])
+            lo_hi = self._joint_limits.get(jn)
+            if lo_hi:
+                lo, hi = lo_hi
+                if v < lo:
+                    v = lo
+                    clamped.append(jn)
+                elif v > hi:
+                    v = hi
+                    clamped.append(jn)
+            target.append(v)
+
+        duration = float(req.duration) if req.duration and req.duration > 0 else 0.3
+        duration = max(0.05, min(duration, 5.0))
+
+        q0 = list(self._positions)
+        n = 11
+        traj = JointTrajectory()
+        traj.joint_names = list(self._joint_names)
+        for i in range(n):
+            alpha = i / (n - 1)
+            pt = JointTrajectoryPoint()
+            pt.positions = [a + alpha * (b - a) for a, b in zip(q0, target)]
+            pt.time_from_start = _duration(duration * alpha)
+            traj.points.append(pt)
+
+        self._publish_mode("TRAJ_RUNNING")
+        self._traj_pub.publish(traj)
+        self._jogging = True
+        self._set_state(STATE_TRAJ, "jog")
+        self._schedule_back_to_ready(duration + 0.5)
+
+        resp.success = True
+        msg = f"jog {self._n_joints} joints ({duration:.2f}s)"
+        if clamped:
+            msg += f"; clamped {','.join(sorted(set(clamped)))}"
+        resp.message = msg
         return resp
 
     def _start_teach_cb(

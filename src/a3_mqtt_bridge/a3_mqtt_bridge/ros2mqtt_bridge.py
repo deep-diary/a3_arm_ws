@@ -34,6 +34,7 @@ from a3_msgs.srv import (
     GripperSetConfig,
     PlaybackTrajectory,
     SaveTrajectory,
+    SetJointPositions,
 )
 
 
@@ -156,6 +157,9 @@ class Ros2MqttBridge(Node):
 
         self._mqtt = None
         self._mqtt_connected = False
+        # 信号缓存：各话题回调只更新自己的信号，telemetry 始终发布完整聚合 points，
+        # 避免不同话题各自发一条 points 不完整的 telemetry，导致前端信号时有时无。
+        self._points_cache: dict = {}
         self._catalog = self._build_catalog()
 
         self._cmd_queue: "queue.Queue[dict]" = queue.Queue()
@@ -254,6 +258,10 @@ class Ros2MqttBridge(Node):
                 self.create_client(GotoNamedPose, "/a3/arm/goto_named_pose"),
                 GotoNamedPose.Request,
             ),
+            "set_joints": (
+                self.create_client(SetJointPositions, "/a3/arm/set_joint_positions"),
+                SetJointPositions.Request,
+            ),
             "teach_start": (
                 self.create_client(Trigger, "/a3/arm/start_teach"),
                 Trigger.Request,
@@ -344,6 +352,20 @@ class Ros2MqttBridge(Node):
             except (TypeError, ValueError):
                 self._publish_cmd_result(op, False, "invalid torque value")
                 return
+        elif op == "set_joints":
+            positions = args.get("positions")
+            if not isinstance(positions, (list, tuple)) or len(positions) != 7:
+                self._publish_cmd_result(op, False, "set_joints needs positions[7]")
+                return
+            try:
+                req.positions = [float(v) for v in positions]
+            except (TypeError, ValueError):
+                self._publish_cmd_result(op, False, "invalid positions value")
+                return
+            try:
+                req.duration = float(args.get("duration") or 0.3)
+            except (TypeError, ValueError):
+                req.duration = 0.3
         if not client.service_is_ready():
             self._publish_cmd_result(op, False, f"{op} service unavailable")
             return
@@ -482,7 +504,7 @@ class Ros2MqttBridge(Node):
                         if idx >= len(arr):
                             break
                         points[f"{prefix}_{short}"] = arr[idx]
-                self._publish_telemetry(points)
+                self._update_telemetry(points)
 
             return cb
 
@@ -493,9 +515,14 @@ class Ros2MqttBridge(Node):
             for fi, field in enumerate(fields):
                 name = names[fi] if fi < len(names) else field
                 points[name] = getattr(msg, field, None)
-            self._publish_telemetry(points)
+            self._update_telemetry(points)
 
         return cb
+
+    def _update_telemetry(self, points: dict):
+        """合并信号到缓存并发布完整 points（各话题共享同一 telemetry 载荷）。"""
+        self._points_cache.update(points)
+        self._publish_telemetry(dict(self._points_cache))
 
     def _publish_telemetry(self, points: dict):
         payload = {

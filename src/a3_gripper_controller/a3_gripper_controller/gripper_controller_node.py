@@ -62,7 +62,7 @@ def _duration(sec: float) -> Duration:
 _DEFAULTS = {
     "gripper_motor_id": 7,
     "gripper_joint_index": 6,
-    "torque_limit_param_id": float(PARAM_TORQUE_LIMIT),
+    "torque_limit_param_id": int(PARAM_TORQUE_LIMIT),
     "max_grasp_torque_nm": 2.0,
     "default_target_torque_nm": 0.6,
     "torque_preset_weak_nm": 0.3,

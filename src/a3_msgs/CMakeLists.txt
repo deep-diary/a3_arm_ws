@@ -11,6 +11,7 @@ find_package(action_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/MoveToPoseIK.srv"
   "srv/GotoNamedPose.srv"
+  "srv/SetJointPositions.srv"
   "srv/SaveTrajectory.srv"
   "srv/PlaybackTrajectory.srv"
   "srv/GripperCommand.srv"

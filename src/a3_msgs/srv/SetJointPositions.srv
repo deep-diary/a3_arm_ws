@@ -1,0 +1,9 @@
+# 设 7 关节目标位置（rad），供 Web 滑动条 jog 直驱（需求 F23 扩展）。
+# 长度须为 7（L1_joint..L7_joint 顺序），越界由 a3_arm_controller 按 URDF limit 拒绝或 clamp。
+float64[] positions
+
+# 本次插值时长（s），默认约 0.3（短插值，节流连续下发以覆盖语义衔接）。
+float64 duration
+---
+bool success
+string message
