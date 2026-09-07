@@ -200,6 +200,14 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 
 信号 code 须与 deep-trace 设备 YAML `HOME-DEMO.RK3588.yaml` 的 `points[].code` 完全对齐。
 
+### 停止语义（web 停止按钮，F37）
+
+- **`gripper_stop` 只停 Python 力环**：`_stop_force` 置 `_force_active=False`、状态回 `IDLE`、恢复位置增益——但**不使电机失能**。C++ refresh keeper 仍以当前增益（默认 kp=80）续推最后目标角（[LL-017](../../lessons_learned/LL-017-mit-hold-end-refresh-kp80.md)），夹爪继续挤压 → 表现为「停止无效」。
+- **web 停止按钮 = 两指令序列**：顺序下发 `gripper_stop {}` + `motor_reset {"motor": 7}`（固件 `0x04` 停止帧 = 失能），各得一条 `cmd_result`；确认框提示夹持物会掉落。
+- **失能后**：keeper 仍按旧目标角发帧，但固件忽略（电机 `mode_status`→0）；重新 `motor_enable {"motor": 7}` 后电机在旧目标角重新接合——夹爪未被拨动则无跳变；**失能期间手工拨动夹爪，重新使能会被拽回旧目标角（夹手风险，见 SAFETY）**。
+- **`设置零位` = `motor_set_zero {"motor": 7}`**：仅限全开硬止位执行（流程：使能 → 释放到头 → 设零位），否则零点平移整个开=0/闭=1.79 区间、破坏力控基线（接触门限见 LL-013）。
+- 上述 `motor_*` op 复用 F32 电机调试 op 表（gate 互锁仍由 C++ 权威拦截、拒绝文案经 `cmd_result` 回传）；夹爪面板曲线合并为单图双轴（`group_by_unit` 轴模式，左轴 Nm / 右轴 0–1，图例点击隐藏）。
+
 ### PS4 扳机力控契约（F36）
 
 `a3_teleop_ps4` 的 `ps4_mapper` 把 R2 扳机（`trigger_01` 归一化，0=松开…1=按满）经 `/a3/gripper/command` 服务映射到夹爪力控（`simple.yaml` 与 `default.yaml` 同改，L2→L6 不变）：

@@ -83,6 +83,8 @@ CloudEdge 须在 ESP32 固件中实现等效逻辑；网络侧 `shutdown` 命令
 6. **力环仅边缘：** PI 力环必须在 Edge（RK3588）/ CloudEdge ESP32 固件本地闭环；**禁止**云端以 50–200 Hz 闭环力控，网络只下发目标力/档位等稀疏参数。
 7. **模式互锁：** gate 关闭或臂处于 `TRAJ_RUNNING`/`SERVO`/`ZERO_TORQUE`/`GRAVITY_COMP` 时拒绝 `force`（`error_code=1`）；力控运行中臂侧轨迹/Servo 启动须先终止力环。
 8. **位置安全：** 力环输出的 L7 位置目标始终钳位在 `joint_cmd_min/max_rad` 内，位置增量变化率受限，防止积分饱和导致猛夹。
+9. **失能即松脱（F37）：** web「停止」= `gripper_stop` + `motor_reset {motor:7}`（失能 L7）——夹持物会**立即掉落**；停止前先移开/托住工件。`gripper_stop` 单独下发只停力环、电机仍使能保持（LL-017）。
+10. **设置零位限全开硬止位（F37）：** `motor_set_zero {motor:7}` 平移整个开=0/闭=1.79 区间、破坏力控基线（接触门限 LL-013）；仅在夹爪处于全开硬止位时执行（流程：使能 → 释放到头 → 设零位）。另：失能期间手工拨动夹爪，重新使能会被 refresh keeper 以当前增益拽回旧目标角——**夹手风险**，失能后勿把手伸入夹爪。
 
 配置见 `a3_gripper_controller/config/gripper_config.yaml`；接口契约见 [TOPIC_CONTRACT.md](TOPIC_CONTRACT.md)。
 

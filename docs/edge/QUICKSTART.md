@@ -106,6 +106,7 @@
     ./scripts/a3_test/a3_test.sh force_web  # web 路径力控阶梯验收 0.3→0.5→0（真机+泡棉+生产 MQTT 桥，F34）
     ./scripts/a3_test/a3_test.sh all        # 顺序跑 env→gripper→hw→telemetry→mqtt_cmd→servo
     ```
+    - **跑 `mqtt_cmd` 前先停真机 `a3_mqtt_bridge`**（`pkill -f bridge.launch.py`）：测试桥与真机桥共享 `deep-trace/HOME-DEMO/RK3588/cmd` 话题，两边的 `cmd_result` 会互相覆盖（2026-09-07 实测 15/18 串扰，且测试指令会被真机夹爪执行）；跑完重启真机桥。
     - 真机直连底层 `/a3/motor/*`（`motor_id:=7`），**不**走 `/a3/arm/init`（需 7 电机齐全）；脚本以 `use_power_sequence:=false` 起 can_bridge。
     - 所有真机运动经安全限幅（目标 ≤0.30 rad、时长 ≥2.5 s），结束自动失能；零力矩步骤需人工在旁。
     - 详见 [`scripts/a3_test/README.md`](../../scripts/a3_test/README.md)。
@@ -145,9 +146,12 @@
     #   {"op":"gripper_grasp","args":{"preset":"medium"}}  或  {"op":"gripper_grasp","args":{"torque":0.6}}
     #   {"op":"gripper_release"}  {"op":"gripper_stop"}  {"op":"gripper_set_max_torque","args":{"value":0.8}}
     #   {"op":"gripper_set_position","args":{"position":0.5}}   # 0..1，0 闭 1 开（位置模式直驱，F31）
+    # web 夹爪面板（F37）：「停止」= gripper_stop + motor_reset{motor:7} 顺序下发（失能、夹持物会掉落）；
+    #   「使能」= motor_enable{motor:7}；「设置零位」= motor_set_zero{motor:7}（仅限全开硬止位）；
+    #   恢复流程：使能 → 释放 → 设置零位；曲线合并为单图双轴（左 Nm / 右 0–1，图例点击隐藏）。
     ```
     - 参数：`a3_gripper_controller/config/gripper_config.yaml`（最大握力 `max_grasp_torque_nm` 出厂硬上限 1.0 Nm（2026-09-07 由 2.0 下调，见 LL-014）、弱/中/强档位、PI（2026-09-07 减半为 kp=0.25/ki=0.3）、接触阈值、超时/看门狗；超硬限 FAULT 阈值 = 1.0 × `overtorque_ratio`(1.5) = 1.5 Nm 瞬态带，固件 0x700B 仍硬钳 1.0）；下发的最大握力落盘 `~/.a3/gripper/gripper_overrides.yaml`，重启保留，越界（超硬上限/±6 Nm）拒绝。
-    - 遥测：`grip_target_position` 为最近 position/release 命令目标（未命令前跟随实测），web 位置曲线用它与 `grip_position` 同轴对比。桥接层对非有限浮点（NaN/±Inf）统一清洗为 null 并以 `allow_nan=False` 兜底，telemetry JSON 恒合法（见 [LL-011](../../lessons_learned/LL-011-nan-poisons-json-telemetry.md)）。
+    - 遥测：`grip_target_position` 为最近 position/release 命令目标（未命令前跟随实测）；web 面板曲线已合并为单图双轴（F37：`group_by_unit` 轴模式，力矩对左轴 Nm、位置对右轴 0–1，图例点击隐藏）。桥接层对非有限浮点（NaN/±Inf）统一清洗为 null 并以 `allow_nan=False` 兜底，telemetry JSON 恒合法（见 [LL-011](../../lessons_learned/LL-011-nan-poisons-json-telemetry.md)）。
     - 真机：`A3_GRIPPER_TEST_MODE=hw ./scripts/a3_test/a3_test.sh gripper` 做服务/配置/开合安全检查；力控阶跃需人工在夹爪放置海绵（软）/木块（硬阻挡），观察 `grip_actual_torque` 收敛到目标 ±10% 且 `GRASPED`，握力不超硬上限。
     - 力控与臂运动互锁：gate 关闭或臂处于 `TRAJ_RUNNING`/`SERVO`/`ZERO_TORQUE`/`GRAVITY_COMP` 时拒绝力控；安全条款见 [shared/SAFETY.md](../shared/SAFETY.md)「夹爪力控安全」。
 
