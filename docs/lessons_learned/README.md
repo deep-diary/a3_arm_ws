@@ -27,3 +27,11 @@ LL-NNN-short-slug.md
 | [LL-006](LL-006-ros2-param-type-mismatch.md) | ROS 2 参数：declare_parameter 默认值类型必须与 params-file 一致 | Edge | 2026-09-03 |
 | [LL-006](LL-006-test-proc-cleanup-domain-isolation.md) | 测试脚本后台 ros2 launch 需 setsid 整组清理；mock 用独立 ROS_DOMAIN_ID 隔离；pkill -f 防自匹配 | Edge | 2026-09-02 |
 | [LL-007](LL-007-servo-zero-pose-ik-singularity.md) | MoveIt Servo 在全零位（L2/L3 限位边界+奇异）IK 失败 -31，需先预定位到 home 非奇异位再 jog | Edge | 2026-09-02 |
+| [LL-008](LL-008-paho-mqtt-v2-on-disconnect-signature.md) | paho-mqtt 2.x VERSION2 回调 5 参数：on_disconnect 只写 4 形参 → 断线 TypeError、无法重连 | Edge | 2026-09-06 |
+| [LL-009](LL-009-arm-control-mode-no-release.md) | /a3/control_mode 只发 TRAJ_RUNNING 不回收 + VOLATILE 启动发布丢消息：真机夹爪力控互锁永久锁存 | Edge | 2026-09-06 |
+| [LL-010](LL-010-gripper-force-timeout-ignored.md) | GripperCommand.timeout_s 被忽略：软物体力环未收敛就 ERR_GRASP_TIMEOUT | Edge | 2026-09-06 |
+| [LL-011](LL-011-nan-poisons-json-telemetry.md) | NaN 毒化 JSON：allow_nan=True 产出非法 JSON，浏览器 JSON.parse 整包丢弃（Python json.loads 容忍 NaN 掩盖问题） | Edge | 2026-09-06 |
+| [LL-012](LL-012-rclcpp-deferred-service-response.md) | rclcpp Humble 延迟服务响应必须用两参数 (header,req) DeferResponse 回调；三参数 (header,req,resp) 返回即自动回包 | Edge | 2026-09-06 |
+| [LL-013](LL-013-gripper-hardstop-torque-false-contact.md) | 0 位硬止位静置力矩（≈0.16 Nm）≥ 接触阈值致起步误判接触 + web 力控不传 timeout 落 5s 默认 → 真机力控卡 42% 开合 | Edge | 2026-09-06 |
+| [LL-014](LL-014-gripper-stuck-trajectory-stream-overheat.md) | 轨迹插值卡死持续流送旧目标 + 单帧卸力被覆盖：电机顶泡棉 1.55 Nm 过热 125°C；卸力=停流送器+cansend 零力矩帧作最后一帧 | Edge | 2026-09-06 |
+| [LL-015](LL-015-f32-short-traj-starvation.md) | F32 回归：单点轨迹「只出 2 帧且无效」=命名轨迹索引回退误驱 L1 + 启动平滑吞 0.05s 短轨迹 + traj/refresh 共享限速戳饿死 traj 帧 | Edge | 2026-09-06 |

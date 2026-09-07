@@ -22,3 +22,7 @@ int32 error_code
 
 # 最近事件或错误文本
 string message
+
+# 目标开合位置：最近 position/release 命令目标；未命令前跟随实测（需求 F31）；
+# 力控期间为 PI 实时位置目标（需求 F33）
+float64 target_position

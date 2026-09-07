@@ -256,13 +256,15 @@
     <child link="end_effector"/>
   </joint>
 
-  <!-- Joint L7 (EL05 Motor 7 - Gripper, separate kinematic branch) -->
+  <!-- Joint L7 (EL05 Motor 7 - Gripper, separate kinematic branch)
+       2026-09-06 标定：全开位（丝杠硬限位）设零，闭合为正（实测行程 1.7945 rad）；
+       电机正方向=闭合，轴取 -Z 使模型正转=闭合，与实物一致。 -->
   <joint name="L7_joint" type="revolute">
     <origin xyz="0 0 -0.074" rpy="0 0 0"/>
     <parent link="l5_l6_urdf_asm"/>
     <child link="gripper_link"/>
-    <axis xyz="0 0 1"/>
-    <limit effort="6.0" velocity="50" lower="-1.5708" upper="1.5708"/>
+    <axis xyz="0 0 -1"/>
+    <limit effort="6.0" velocity="50" lower="0" upper="1.8"/>
     <dynamics damping="0.05" friction="0.05"/>
   </joint>
 
@@ -450,8 +452,8 @@
       <param name="zero_torque_kd_min">0.02</param>
       <param name="zero_torque_kd_max">0.10</param>
       <command_interface name="position">
-        <param name="min">-1.5708</param>
-        <param name="max">1.5708</param>
+        <param name="min">0</param>
+        <param name="max">1.8</param>
       </command_interface>
       <command_interface name="velocity">
         <param name="min">-50.0</param>

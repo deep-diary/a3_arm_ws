@@ -23,8 +23,8 @@ SETTLE_S = 0.8                   # 到位后停顿
 MIT_KP_MAX = 40.0                # 单电机测试限制位置刚度（默认 80 偏大）
 MIT_KD_MAX = 2.0
 
-# CHAMP 系 L7 软限位（control_gains.yaml：L7 ±1.5708）
-L7_LIMIT_RAD = 1.5708
+# CHAMP 系 L7 软限位（control_gains.yaml：L7 [0, 1.8]，全开位设零、闭合为正）
+L7_LIMIT_RAD = 1.8
 
 
 def clamp_target(rad: float) -> float:

@@ -314,6 +314,77 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** [QUICKSTART.md](QUICKSTART.md)（夹爪力控验证节）；F22（测试基座/安全限幅）；F24/F25/F26；[shared/SAFETY.md](../shared/SAFETY.md)
 - **状态：** `implemented`（`./scripts/a3_test/a3_test.sh gripper` 仿真闭环 12 项 PASS；真机 `A3_GRIPPER_TEST_MODE=hw` 服务/安全检查就绪，力控阶跃需人工放海绵/硬阻挡板测）
 
+### F29 — 互锁模式回收（/a3/control_mode 发布缺陷修复，真机实测）
+
+- **说明：** 真机 2026-09-06 实测发现：`a3_arm_controller` 只在轨迹开始时发布 `TRAJ_RUNNING`，轨迹结束（`_back_to_ready`）与节点启动均不发布非阻塞模式；`/a3/control_mode` 为 VOLATILE 事件型话题，无周期性兜底 → 夹爪力控互锁（F25/F26 的 `GRIPPER_FORCE` 互锁表）在真机跑过任意轨迹后**永久锁存 `TRAJ_RUNNING`**，力控指令永远被拒（仿真闭环不经过该节点，故 F28 未暴露）。修复：① 轨迹结束发布 `READY`；② 节点启动即发布 `IDLE`，并 2 s 后重发一次（启动首条发布可能早于订阅发现、被静默丢弃）。
+- **验收标准：**
+  1. 真机跑完任意轨迹（`goto` / `set_joint_positions` / `playback`）后，立即发 `/a3/gripper/command {mode: force}` 成功（无需重启任何节点）
+  2. `a3_arm_controller` 重启后，无需其他操作，夹爪力控指令成功（2 s 重发覆盖发现窗口）
+  3. 夹爪互锁恢复全程无人工干预，仿真闭环回归不退化
+- **关联：** F25（力控）、F26（互锁表）、[shared/SAFETY.md](../shared/SAFETY.md)（`GRIPPER_FORCE` 互锁）；[LL-009](../../lessons_learned/LL-009-arm-control-mode-no-release.md)
+- **状态：** `implemented`（2026-09-06 真机泡棉力控测试验证：跑完 set_joints 轨迹后力控 0.3 Nm 直接成功）
+
+### F30 — 夹爪力控超时以命令参数为准（真机实测）
+
+- **说明：** 真机 2026-09-06 实测发现：`GripperCommand.timeout_s` 传入 `_start_force` 后被丢弃，`_tick_force` 恒用配置 `grasp_timeout_s=5.0` → 软物体（泡棉）0.3 Nm 力环尚未收敛即误报 `ERR_GRASP_TIMEOUT` 进 FAULT。修复：每次夹取把命令 `timeout_s` 存入 `_force_timeout_s`（缺省/非正回落配置值），超时判断改用它。
+- **验收标准：**
+  1. 真机泡棉 0.3/0.5/0.7/1.0 Nm 四档均在 `timeout_s: 12.0` 内 `GRASPED`，稳态力矩在目标 ±10% 内
+  2. 不传 `timeout_s` 时回落配置 `grasp_timeout_s`（5.0 s）行为不变
+  3. 超时进 FAULT 后，下一次指令（release/force）清除错误码（F25 原语义不变）
+- **关联：** F25（力环）、F28（真机回归）；[LL-010](../../lessons_learned/LL-010-gripper-force-timeout-ignored.md)
+- **状态：** `implemented`（2026-09-06 真机泡棉四档力控实测通过）
+
+### F31 — Web 端夹爪面板 v2：位置模式直驱 / 双曲线 / NaN 遥测毒化修复（跨仓）
+
+- **说明：** 真机 2026-09-06 联调发现夹爪面板状态/曲线全为空：`/joint_states` 对未连接关节 L1–L6 发布 NaN 速度，桥接层 `json.dumps` 默认 `allow_nan=True` 把 `"vel_L1": NaN` 写入 telemetry，构成非法 JSON；浏览器 `JSON.parse` 抛错后整包丢弃，所有 telemetry 衍生 UI 显示「—」（Python `json.loads` 容忍 NaN，故板侧测试未暴露）。本轮：① 桥接层递归清洗非有限浮点（NaN/±Inf → null）并对全部载荷 `allow_nan=False` 硬兜底；② 前端容错解析（NaN 词法替换为 null）+ 解析错误计数/原文面板；③ 夹爪面板 v2：状态行中文模式映射（position 位置模式/force 力矩模式/release 释放/stop 停止）、模式选择器（位置/力矩）、位置模式 0–1 开合滑块节流直驱（新 op `gripper_set_position` → `/a3/gripper/command mode=position`）、力矩模式滑块节流抓取、目标 vs 实测双曲线（位置/力矩两页签，各页签同轴对比）；④ `GripperStatus.msg` 追加 `target_position`（position/release 命令写入，未命令前跟随实测），bridge 展平为 `grip_target_position`。
+- **验收标准：**
+  1. telemetry JSON 任意时刻均为合法 JSON 且无 NaN/Infinity 词法（板侧严格解析器 10 s 采样 0 异常）
+  2. MQTT 下发 `gripper_set_position {position: 0..1}` 回 `cmd_result.ok=true`，`grip_target_position` 随动；越界/非法值 `ok=false` 且服务端不执行
+  3. 浏览器：夹爪状态/模式（中文）/接触/错误正常显示；模式选择器切换控件；位置滑块拖动节流下发并回显实测；两页签曲线目标 vs 实测同轴实时刷新
+  4. 调试面板显示原始报文、grip 各 code 在线/新鲜度、解析错误计数（修复后保持 0）
+  5. 回归：`a3_test.sh gripper`、`mqtt_cmd`、F23 臂面板 10 op 不受影响
+- **关联：** [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)；[QUICKSTART.md](QUICKSTART.md)（§14）；[LL-011](../../lessons_learned/LL-011-nan-poisons-json-telemetry.md)；F18/F26/F27/F28；外部前端仓库 `deep-trace`（分支 `rk3588`，`GripperPanel.vue` / `Rk3588HubPanel.vue` / `useRk3588Mqtt.js` / `RealtimePerSignalChart.vue` / `HOME-DEMO.RK3588.yaml`）
+- **状态：** `completed`（2026-09-06；浏览器硬刷新目检由用户确认；真机位置直驱待 can_bridge 轨迹订阅 QoS 对齐 BEST_EFFORT，见 F32）
+
+### F32 — Web 端电机调试页（CAN 扫描 / MIT 保持 / 实时曲线，跨仓）
+
+- **说明：** 仿 sparkbot 电机模块页，为 RK3588 增加 `motor_protocol_node` 专用单电机调试详情页：`Rk3588HubPanel` 的电机节点卡片跳转 `device-module` 路由（moduleId `rk3588_motor`），新面板 `Rk3588MotorPanel.vue` 提供 CAN 扫描（`/a3/motor/scan_and_collect` 聚合返回 ids/uids）→ 电机选择 → 状态卡片（在线/温度/模式/故障位/原始力矩/原始角）→ 使能/复位/设零（二次确认）→ 模式单选（MIT/位置/速度，复用 `/a3/motor/set_param` 0x7005）→ MIT 面板（`MotorParamField` 滑条：位置 ±12.57、速度 ±50、kp 0–500、kd 0–5、力矩 ±6；**ROS 侧定时保持**——前端只发目标+时长，`motor_protocol_node` 内部定时器按 hz 发帧、超时自动停，另提供单发与 `motor_stop` 卸力）→ 该节点话题/信号下拉 + `RealtimePerSignalChart` 实时曲线（默认 `mp/mtq/temp_L{n}`）。ROS 侧补齐：类型化逐电机遥测 `/a3/motor/states`（`MotorStates` 包装消息 50 Hz，7 电机 temp/err/mode/online/原始 MIT 角/力矩）；**互锁**——`gate_open=true`（电源序列 Running）时拒绝使能/复位/设零/MIT/参数/模式写入（扫描、读类、`motor_stop` 不受限），gate 打开瞬间 MIT 保持自动取消；仿真 `sim_motor_node` 同步补齐新话题/服务（sim 不实现互锁，有意分歧）。MQTT bridge 新增 9 个电机级 op + `motor_state` flatten（42 个新 telemetry 点），设备 YAML `HOME-DEMO.RK3588.yaml` 同步 points 与 nodes 目录。
+- **验收标准：**
+  1. `/a3/motor/states` 以 50 Hz 稳定发布 7 条 `MotorState`；`ros2 topic hz` 达标；无 CAN 时 `fresh=false`、单电机台架时仅对应 ID `fresh=true`
+  2. `/a3/motor/mit_command`：`hold_duration_s<=0` 单发一帧；`>0` 按 `hold_hz` 定时发帧、到期自动停、新保持替换旧保持；`/a3/motor/stop` 立即取消保持并发卸力帧（kp=kd=t=0）；gate 打开瞬间保持自动取消并 WARN
+  3. 互锁：`gate_open=true` 时 enable/reset/set_zero/MIT/set_param/set_mode 服务返回拒绝文案；scan/scan_and_collect/stop/get_device_id/request_version 照常可用
+  4. `/a3/motor/scan_and_collect` 在 timeout_s（默认 1.5 s）内返回 `ids/uids`；busy 时拒绝重复扫描；`/a3/motor/scan`（F19/F22 兼容）行为不变
+  5. MQTT：9 个电机 op 按契约返回 `cmd_result`（成功/参数非法/gate 拒绝三种文案）；telemetry 出现 `temp/err/mode/online/mtq/mp_L1..L7` 共 42 点且均为合法 JSON（无 NaN，F31 兜底回归）
+  6. `./scripts/a3_test/a3_test.sh motor_debug` 仿真闭环全 PASS；前端在 `edge_web_sim` 下扫描→选择→保持→曲线全链路可用，`vite build` 通过；F22/F23/F26/F31 回归不受影响
+- **关联：** [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（电机调试节）；[shared/SAFETY.md](../shared/SAFETY.md)（MOTOR_DEBUG 互锁）；[QUICKSTART.md](QUICKSTART.md)（电机调试页节）；F17（EL05 协议命令集）、F19（总线扫描）、F22（单电机回归基座）、F23/F27（MQTT 面板模式）、F31（telemetry NaN 兜底）；外部前端仓库 `deep-trace`（分支 `rk3588`，`Rk3588MotorPanel.vue` / `DeviceModuleView.vue` / `registry.js` / `Rk3588HubPanel.vue` / `HOME-DEMO.RK3588.yaml`；需求文档 REQ-IOT-311）
+- **状态：** `in_progress`
+
+### F33 — 夹爪力控真机行为修正（接触位移门 / 默认超时 / 释放柔顺 / 零力矩直开 / 力环目标位置遥测）
+
+- **说明：** 用户真机实测（2026-09-06，泡棉）发现 4 个问题并逐一修正：
+  1. **目标 0.3 Nm 实际仅 0.13 Nm、卡在 42% 开合**：两个叠加根因——(a) 0 位硬止位静置力矩 ≈0.16 Nm ≥ 接触阈值 max(0.1, 0.35×0.3)=0.105，力控起步即误判「已接触」，跳过恒速软闭合段，PI 从 e≈0.14 缓慢爬升；(b) web 力控按键不传 timeout，落到默认 `grasp_timeout_s: 5.0`，「grasp timeout > 5.0s」FAULT 冻结力环（LL-013）。修正：新增 `contact_min_travel_rad: 0.1` 接触判定位移门（离开力控起点 ≥0.1 rad 后力矩阈值判定才生效）；默认 `grasp_timeout_s` 5.0→15.0。
+  2. **释放过快**（旧 1.08→0 rad 用位置增益 80/2 + 0.8s 轨迹）：新增释放柔顺参数 `release_duration_s: 1.5`、`release_kp: 30.0`、`release_kd: 5.0`，释放轨迹用专用低增益 + 较高阻尼，轨迹结束 +0.3s 后一次性 timer 自动恢复位置增益 80/2（重复释放先取消旧 timer）。
+  3. **缺零力矩硬逻辑**：force 模式 `torque_nm<=0 且 preset 为空` → 直接 `_release()` 全开，跳过 PI 与力矩校验（返回 `"force 0 -> full open"`）；`_tick_force` 加安全网：`_target_torque<=0` 立即转释放。注意：此改动使「force 无参数用默认 0.6 Nm」路径失效（web 永远显式传 torque>0），按用户规格接受。
+  4. **力控期间目标位置遥测**：`_tick_force` 每 tick 把 PI 输出更新到 `target_position`（`_target_pos_commanded=True`），前端力控期间可观察目标位置逐步变大的趋势。
+- **验收标准：**
+  1. sim 闭环（`./scripts/a3_test/a3_test.sh gripper`）回归全 PASS（该套件自身用 `-p grasp_timeout_s:=6.0` 覆盖，不受 15s 默认影响）
+  2. 真机（泡棉）：目标 0.3 Nm 时力环持续推进，实际力矩稳定在 0.3±10% 且 GRASPED；0.5 Nm 同样
+  3. 真机：force 0 → 3s 内夹爪回 0 位（归一化 position→1.0），状态非 FAULT，释放无冲击（峰值速度明显低于旧版）
+  4. 释放后 gains 在 `release_duration_s + 0.3s` 内恢复 position_mode_kp/kd
+  5. 力控期间 `gripper_status.target_position` 随 PI 输出实时变化（不再停留命令陈旧值）
+- **关联：** [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（GripperStatus 字段语义）；[lessons_learned/LL-013](../lessons_learned/LL-013-gripper-hardstop-torque-false-contact.md)；F24/F25/F26（力控基线）、F31（target_position 字段）、F34（web 路径阶梯验收）
+- **状态：** `completed`（2026-09-06 真机 F34 阶梯全 PASS：0.3Nm actual=0.281、0.5Nm actual=0.508 均 GRASPED；力控期间 target_position 随 PI 输出逐步变大；force 0 硬逻辑 3s 内回 0 位无 FAULT；释放柔顺生效。重抓超硬限问题经位移门基准改 q_open 修复；期间暴露的 F32 插值流缺陷由电机调试会话修复（LL-014/LL-015））
+
+### F34 — web 路径力控阶梯验收（MQTT 模拟按键 0.3 → 0.5 → 0）
+
+- **说明：** 新增 `scripts/a3_test/mqtt_force_ladder_test.py`：走生产 MQTT 路径（broker `bluemac.local:1883`、前缀 `deep-trace/HOME-DEMO/RK3588`，下行 `.../cmd`、回执 `.../cmd_result`、订阅 `.../telemetry` 拿 grip_* 信号）模拟 web 按键序列：`gripper_release` → `gripper_grasp {torque:0.3, timeout:20}` → `gripper_grasp {torque:0.5, timeout:20}` → `gripper_grasp {torque:0}`；每步断言 GRASPED、actual ∈ 目标 ±15%、force 0 后 3s 内 position→1.0。`scripts/a3_test/a3_test.sh` 新增 `force_web` 阶段（真机 + 生产 bridge，不进 `all`）；`scripts/a3_test/README.md` 补前置说明（泡棉在夹爪中、生产 bridge 在线、电机使能、gate 关）。
+- **验收标准：**
+  1. 真机运行 `./scripts/a3_test/a3_test.sh force_web`：0.3/0.5 两步均 GRASPED 且实际力矩在目标 ±15% 内，采样记录 grip_target_position 逐步变大趋势
+  2. force 0 步 3s 内 grip_position→1.0（0 位），无 FAULT
+  3. 测试结束电机温度正常（<50°C），夹爪停在 0 位
+- **关联：** F33（本测试的验证目标）；F26/F27（MQTT 桥契约）；[QUICKSTART.md](QUICKSTART.md)（测试节）
+- **状态：** `completed`（2026-09-06 真机验收 6 PASS / 0 FAIL：0.3Nm actual=0.281、0.5Nm actual=0.508 均 GRASPED 且在 ±15% 内；force 0 硬逻辑 3s 内回 0 位（grip_position 0.9988）；测试结束电机 temp=44°C、mode=2、err=0）
+
 ## 非功能需求
 
 | 指标 | 要求 |

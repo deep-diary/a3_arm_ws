@@ -20,16 +20,28 @@ Behaviours:
     (teach mode). `set_zero` resets all joints to 0 and clears any active trajectory.
   * Publishes `/a3/control_mode` on ZERO_TORQUE transitions and `/motor_feedback`
     summary, and honours `/power_sequence/gate_open`.
+  * F32：发布 `/a3/motor/states`（7 条逐电机状态）并提供 `/a3/motor/mit_command|stop|
+    set_mode|scan_and_collect`（MIT 保持超时自动取消；扫描返回 1..7 + 假 UID）。
+    仿真不实现 gate 互锁（与真机有意分歧，见 docs/shared/TOPIC_CONTRACT.md）。
 """
 
 from __future__ import annotations
 
+import math
 import threading
 from typing import List, Optional
 
 import rclpy
 from a3_bringup.trajectory_spline import sample_joint_trajectory
-from a3_can_bridge.srv import MotorCommand, SetMotorParam
+from a3_can_bridge.msg import MotorState, MotorStates
+from a3_can_bridge.srv import (
+    MotorCommand,
+    MotorMitCommand,
+    MotorScanCollect,
+    MotorSetMode,
+    MotorStop,
+    SetMotorParam,
+)
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, String
@@ -68,6 +80,8 @@ class SimMotorNode(Node):
         self.declare_parameter("gate_topic", "/power_sequence/gate_open")
         self.declare_parameter("zero_torque_kp", 0.0)
         self.declare_parameter("zero_torque_kd", 1.0)
+        self.declare_parameter("motor_states_topic", "/a3/motor/states")
+        self.declare_parameter("max_hold_duration_s", 30.0)
 
         self._joint_names: List[str] = list(
             self.get_parameter("joint_names").get_parameter_value().string_array_value
@@ -93,6 +107,16 @@ class SimMotorNode(Node):
         self._traj_start = None
         self._last_tick = None
         self._fb_seq = 0
+        # F32 MIT 保持（仿真）：hold 期间按 hz 重复施加目标，超时自动取消
+        self._mit_hold = {
+            "active": False,
+            "motor": 0,
+            "p": 0.0,
+            "hz": 50.0,
+            "end_time": None,
+        }
+        self._mit_hold_timer = None
+        self._modes = [0] * self._n  # 0=mit 1=position 2=speed（装饰性）
 
         traj_topic = self.get_parameter("trajectory_topic").value
         js_topic = self.get_parameter("joint_states_topic").value
@@ -111,6 +135,9 @@ class SimMotorNode(Node):
         )
         self._feedback_pub = self.create_publisher(
             String, self.get_parameter("motor_feedback_topic").value, 50
+        )
+        self._motor_states_pub = self.create_publisher(
+            MotorStates, self.get_parameter("motor_states_topic").value, 50
         )
 
         # ---- 电机协议服务（F17 命名，广播/单电机均返回 ok）----
@@ -155,6 +182,20 @@ class SimMotorNode(Node):
             Trigger, "/a3/zero_torque/stop", lambda req, resp: self._zt_stop(req, resp)
         )
 
+        # ---- F32 电机调试服务（仿真对齐：零 CAN 可跑通 web 全链路）----
+        self.create_service(
+            MotorMitCommand, "/a3/motor/mit_command", self._mit_cb
+        )
+        self.create_service(
+            MotorStop, "/a3/motor/stop", self._motor_stop_cb
+        )
+        self.create_service(
+            MotorSetMode, "/a3/motor/set_mode", self._set_mode_cb
+        )
+        self.create_service(
+            MotorScanCollect, "/a3/motor/scan_and_collect", self._scan_cb
+        )
+
         period = 1.0 / max(rate_hz, 1.0)
         self._timer = self.create_timer(period, self._on_timer)
         self._fb_timer = self.create_timer(1.0, self._on_feedback_timer)
@@ -190,6 +231,116 @@ class SimMotorNode(Node):
         self._publish_mode("IDLE")
         resp.success = True
         resp.message = "ZERO_TORQUE off (sim)"
+        return resp
+
+    # ------------------------------------------------- F32 电机调试服务
+
+    def _cancel_mit_hold(self) -> None:
+        if self._mit_hold_timer is not None:
+            self._mit_hold_timer.cancel()
+            self.destroy_timer(self._mit_hold_timer)
+            self._mit_hold_timer = None
+        self._mit_hold["active"] = False
+        self._mit_hold["end_time"] = None
+
+    def _mit_cb(self, req, resp):
+        motor = int(req.motor_id)
+        if not 1 <= motor <= 127:
+            resp.success = False
+            resp.message = f"motor_id {motor} out of [1, 127]"
+            return resp
+        duration = float(req.hold_duration_s)
+        p = float(req.position_rad)
+        hz = float(req.hold_hz) if float(req.hold_hz) > 0 else 50.0
+        hz = min(max(hz, 1.0), 200.0)
+        with self._lock:
+            if motor - 1 < self._n:
+                self._target[motor - 1] = p
+        if duration <= 0:
+            with self._lock:
+                if self._mit_hold["active"] and self._mit_hold["motor"] == motor:
+                    self._cancel_mit_hold()
+            resp.success = True
+            resp.message = f"one-shot sent motor={motor} (sim)"
+            return resp
+        duration = min(duration, float(self.get_parameter("max_hold_duration_s").value))
+        with self._lock:
+            self._cancel_mit_hold()
+            self._mit_hold["active"] = True
+            self._mit_hold["motor"] = motor
+            self._mit_hold["p"] = p
+            self._mit_hold["hz"] = hz
+            self._mit_hold["end_time"] = self.get_clock().now() + rclpy.duration.Duration(
+                seconds=duration
+            )
+
+            def tick():
+                with self._lock:
+                    hold = self._mit_hold
+                    if not hold["active"]:
+                        return
+                    if self.get_clock().now() >= hold["end_time"]:
+                        self._cancel_mit_hold()
+                        self.get_logger().info(
+                            f"sim mit hold ended motor={hold['motor']}"
+                        )
+                        return
+                    if hold["motor"] - 1 < self._n:
+                        self._target[hold["motor"] - 1] = hold["p"]
+
+            self._mit_hold_timer = self.create_timer(1.0 / hz, tick)
+        resp.success = True
+        resp.message = f"hold started motor={motor} ({duration:.1f} s @ {hz:.1f} Hz) (sim)"
+        return resp
+
+    def _motor_stop_cb(self, req, resp):
+        motor = int(req.motor_id)
+        if not 0 <= motor <= 127:
+            resp.success = False
+            resp.message = f"motor_id {motor} out of [0, 127]"
+            return resp
+        with self._lock:
+            if motor == 0:
+                self._cancel_mit_hold()
+            elif self._mit_hold["active"] and self._mit_hold["motor"] == motor:
+                self._cancel_mit_hold()
+        resp.success = True
+        resp.message = f"stopped motor={'all' if motor == 0 else motor} (sim)"
+        return resp
+
+    def _set_mode_cb(self, req, resp):
+        motor = int(req.motor_id)
+        mode = str(req.mode).strip().lower()
+        if not 1 <= motor <= 127:
+            resp.success = False
+            resp.message = f"motor_id {motor} out of [1, 127]"
+            return resp
+        mode_val = {"mit": 0, "position": 1, "speed": 2}.get(mode)
+        if mode_val is None:
+            resp.success = False
+            resp.message = f"mode must be mit|position|speed (got {mode!r})"
+            return resp
+        with self._lock:
+            if motor - 1 < self._n:
+                self._modes[motor - 1] = mode_val
+            if self._mit_hold["active"] and self._mit_hold["motor"] == motor:
+                self._cancel_mit_hold()
+        resp.success = True
+        resp.message = f"mode={mode} motor={motor} (sim)"
+        return resp
+
+    def _scan_cb(self, req, resp):
+        ids = list(range(1, self._n + 1))
+        resp.success = True
+        resp.ids = [int(i) for i in ids]
+        # 假 UID：0x0102030405060708 + id（仿真便于前端展示）
+        resp.uids = [0x0102030405060708 + int(i) for i in ids]
+        resp.message = "found {}: {}".format(
+            len(ids),
+            " ".join(
+                f"id={i} uid={0x0102030405060708 + i:016X}" for i in ids
+            ),
+        )
         return resp
 
     def _publish_mode(self, mode: str) -> None:
@@ -268,7 +419,28 @@ class SimMotorNode(Node):
             js.position = list(self._positions)
             js.velocity = list(self._velocities)
             js.effort = list(self._effort)
+
+            # F32：/a3/motor/states（7 条逐电机状态，web 电机调试页数据源）
+            ms = MotorStates()
+            ms.header.stamp = now.to_msg()
+            t_now = now.nanoseconds * 1e-9
+            for i in range(self._n):
+                st = MotorState()
+                st.motor_id = i + 1
+                st.master_id = 0xFD
+                st.position_rad = float(self._positions[i])
+                st.speed_rad_s = float(self._velocities[i])
+                st.torque_nm = float(self._effort[i])
+                st.temperature_c = 28.0 + 2.0 * math.sin(t_now * 0.5 + i)
+                st.mode_status = 2 if self._enabled else 0
+                st.error_status = 0
+                st.fault_mask = 0
+                st.has_feedback = True
+                st.fresh = True
+                st.enabled = self._enabled
+                ms.states.append(st)
         self._js_pub.publish(js)
+        self._motor_states_pub.publish(ms)
 
     def _on_feedback_timer(self) -> None:
         with self._lock:

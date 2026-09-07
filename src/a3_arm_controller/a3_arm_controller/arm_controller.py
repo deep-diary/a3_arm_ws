@@ -166,6 +166,11 @@ class ArmController(Node):
         self._mode_pub = self.create_publisher(
             String, str(self.get_parameter("control_mode_topic").value), 10
         )
+        # /a3/control_mode 是 VOLATILE 且仅状态变化时发布。本节点重启后须主动
+        # 清掉其他节点（如夹爪力控互锁）锁存的旧 TRAJ_RUNNING：启动即发一次 +
+        # 2 s 后重发一次（首次发布可能早于订阅发现、被静默丢弃）。
+        self._publish_mode("IDLE")
+        self._startup_mode_timer = self.create_timer(2.0, self._announce_startup_mode)
 
         # 服务（对外门面）
         self.create_service(Trigger, "/a3/arm/init", self._init_cb, callback_group=self._cb_group)
@@ -254,6 +259,11 @@ class ArmController(Node):
         msg.data = mode
         self._mode_pub.publish(msg)
 
+    def _announce_startup_mode(self) -> None:
+        """启动 2 s 后重发当前状态模式，覆盖订阅发现窗口（一次性）。"""
+        self._startup_mode_timer.cancel()
+        self._publish_mode(self._state)
+
     def _wait_service(self, client, timeout_s: float = 2.0) -> bool:
         if client.service_is_ready():
             return True
@@ -328,6 +338,9 @@ class ArmController(Node):
         self._jogging = False
         if self._state == STATE_TRAJ:
             self._set_state(STATE_READY, "trajectory finished")
+            # 轨迹结束必须发回非阻塞模式：此前只发 TRAJ_RUNNING（轨迹开始），
+            # 真机上夹爪力控互锁会永久锁存 TRAJ_RUNNING，力控永远被拒。
+            self._publish_mode("READY")
 
     # ------------------------------------------------------------ subscriptions
 

@@ -1,0 +1,10 @@
+# 总线扫描并聚合结果（需求 F32）：发 0x00 探针后收集 device_id 回复直至超时
+uint8 id_min            # 默认 1
+uint8 id_max            # 默认 127
+uint8 bus               # 0=can0，1=can1（默认 1，机械臂总线）
+float32 timeout_s       # 收集窗口（默认 1.5 s；<=0 用默认）
+---
+bool success
+string message          # 例如 "found 7: id=1 uid=0102030405060708 ..." / "scan busy"
+uint8[] ids             # 发现的电机 CAN_ID 列表（与 uids 同序）
+uint64[] uids           # 对应 MCU UID（大端字节序数值）

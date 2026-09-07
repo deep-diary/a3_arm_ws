@@ -1,0 +1,5 @@
+# 停止单电机调试：取消 MIT 保持并发一帧卸力（kp=kd=t=0）（需求 F32）
+uint8 motor_id          # 1..127 单电机；0=全部（逐个卸力）
+---
+bool success
+string message

@@ -23,7 +23,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | 夹爪开合 | `std_msgs/Float32` | 0 闭合 … 1 张开（POSITION 模式输入） |
 | 夹爪力控命令 | `a3_msgs/srv/GripperCommand` | `mode`：`position`/`force`/`release`/`stop`；`position` 0–1；`torque_nm` 目标握力；`timeout_s` |
 | 夹爪配置 | `a3_msgs/srv/GripperSetConfig` | 键值下发（`max_torque_nm` 等），返回是否接受与原因 |
-| 夹爪状态 | `a3_msgs/msg/GripperStatus` | 模式、目标/实际力矩、位置、接触/抓稳标志、错误码、时间戳 |
+| 夹爪状态 | `a3_msgs/msg/GripperStatus` | 模式、目标/实际力矩、目标/实际位置、接触/抓稳标志、错误码、时间戳 |
 | DS4 IMU | `sensor_msgs/Imu` | 可选 hidraw（陀螺/加速度） |
 ## 标准话题（单臂，无 namespace）
 
@@ -60,7 +60,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/gravity_torque` | `sensor_msgs/JointState` | URDF 系重力力矩（effort） |
 | `/a3/goto_named_pose` | `std_msgs/String` | 命名姿态（`zero`/`work`/`home`/`ready`） |
 | `/a3/gripper_cmd` | `std_msgs/Float32` | 夹爪归一化 0–1（POSITION 模式；手柄 R2 亦走此语义，由 `gripper_controller_node` 订阅执行） |
-| `/a3/gripper_status` | `a3_msgs/msg/GripperStatus` | 夹爪力控状态快照（模式/目标与实际力矩/位置/接触标志/错误码），默认 10 Hz，力控期间 50 Hz |
+| `/a3/gripper_status` | `a3_msgs/msg/GripperStatus` | 夹爪力控状态快照（模式/目标与实际力矩/目标与实际位置/接触标志/错误码），默认 10 Hz，力控期间 50 Hz |
 | `/a3/gripper/command` | `a3_msgs/srv/GripperCommand` | 夹爪命令：`position`（开合 0–1）/ `force`（按 `torque_nm` 抓取）/ `release` / `stop` |
 | `/a3/gripper/set_config` | `a3_msgs/srv/GripperSetConfig` | 握力参数下发（如 `max_torque_nm`）；越界（超硬上限/±6 Nm）拒绝并返回原因 |
 | `/joy` | `sensor_msgs/Joy` | PS4 轴与按键 |
@@ -167,11 +167,11 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/joint_states` | `sensor_msgs/JointState` | 订阅 | 取 `L7_joint` 的 `effort` 作力反馈（MIT 力矩，±6 Nm 量程） |
 | `/a3/control_mode`、`/power_sequence/gate_open` | `std_msgs/String`/`Bool` | 订阅 | 互锁：gate 关闭或臂在 `TRAJ_RUNNING`/`SERVO`/`ZERO_TORQUE`/`GRAVITY_COMP` 时拒绝 `force` |
 
-`GripperStatus` 字段语义：`state`（`IDLE`/`POSITION`/`FORCE_CLOSING`/`GRASPED`/`RELEASING`/`FAULT`）、`mode`（最近命令模式）、`target_torque_nm`、`actual_torque_nm`、`position`（0–1）、`contact`（接触/抓稳）、`error_code`（0 无；1 互锁拒绝；2 抓取超时；3 反馈看门狗；4 超硬限；5 配置越界；6 固件硬限写入失败）。
+`GripperStatus` 字段语义：`state`（`IDLE`/`POSITION`/`FORCE_CLOSING`/`GRASPED`/`RELEASING`/`FAULT`）、`mode`（最近命令模式）、`target_torque_nm`、`actual_torque_nm`、`position`（0–1 实测开合）、`target_position`（0–1，最近 position/release 命令目标；未命令前跟随实测，需求 F31；力控期间为 PI 实时位置目标，需求 F33）、`contact`（接触/抓稳）、`error_code`（0 无；1 互锁拒绝；2 抓取超时；3 反馈看门狗；4 超硬限；5 配置越界；6 固件硬限写入失败）。
 
 ### MQTT 下行指令（a3_mqtt_bridge ↔ Web，需求 F26/F27）
 
-同一 `<prefix>/cmd` 与 `<prefix>/cmd_result` 通道，白名单追加 4 个 op：
+同一 `<prefix>/cmd` 与 `<prefix>/cmd_result` 通道，白名单追加 5 个 op：
 
 | op | args | 对应服务 |
 |----|------|----------|
@@ -179,8 +179,10 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `gripper_release` | `{}` | `/a3/gripper/command`（`mode=release`） |
 | `gripper_stop` | `{}` | `/a3/gripper/command`（`mode=stop`） |
 | `gripper_set_max_torque` | `{"value": <Nm>}` | `/a3/gripper/set_config`（`max_torque_nm=args.value`） |
+| `gripper_set_position` | `{"position": <0..1>}` | `/a3/gripper/command`（`mode=position`，需求 F31） |
 
-- `torque`/`value` 越界或缺失 preset 时回 `ok=false`，服务端不执行；回执 JSON 格式与臂指令一致（`op`/`ok`/`message`/`ts`）。
+- `torque`/`value` 越界、`position` 非有限或越界 [0,1]、缺失 preset 时回 `ok=false`，服务端不执行；回执 JSON 格式与臂指令一致（`op`/`ok`/`message`/`ts`）。
+- 桥接层对全部下行载荷做非有限浮点清洗（NaN/±Inf → null）且 `json.dumps(allow_nan=False)` 硬兜底，保证线上 JSON 恒合法（[LL-011](../../lessons_learned/LL-011-nan-poisons-json-telemetry.md)）。
 - `/a3/gripper_status` 经 `bridge.yaml` 的 `scalar` 展平上报 telemetry points：
 
 | points key | 来源字段 | 类型 |
@@ -189,9 +191,80 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `grip_mode` | `mode` | discrete |
 | `grip_target_torque` | `target_torque_nm` | float（Nm） |
 | `grip_actual_torque` | `actual_torque_nm` | float（Nm） |
-| `grip_position` | `position` | float（0–1） |
+| `grip_position` | `position` | float（0–1，实测开合） |
+| `grip_target_position` | `target_position` | float（0–1，目标开合，F31） |
 | `grip_contact` | `contact` | discrete（0/1） |
 | `grip_error` | `error_code` | discrete |
+
+信号 code 须与 deep-trace 设备 YAML `HOME-DEMO.RK3588.yaml` 的 `points[].code` 完全对齐。
+
+## 电机调试（motor_protocol_node，需求 F32）
+
+Web 端单电机调试页（deep-trace `rk3588_motor` 模块）依赖的 ROS 侧契约：逐电机结构化遥测 + CAN 扫描聚合 + 单电机 MIT 直驱。全部接口由 C++ `motor_protocol_node` 提供（无 CAN 仿真下由 `sim_motor_node` 等效实现）。
+
+### 话题与消息
+
+| 接口 | 类型 | 方向 | 说明 |
+|------|------|------|------|
+| `/a3/motor/states` | `a3_can_bridge/msg/MotorStates` | 发布 | 7 条 `MotorState`（`header` + `states[]`），50 Hz，SensorDataQoS（best_effort） |
+
+`MotorState` 字段：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `motor_id` | uint8 | CAN_ID 1..7 = L1..L7 |
+| `master_id` | uint8 | 反馈帧 master id（默认 0xFD，无反馈时保持默认值） |
+| `position_rad` / `speed_rad_s` / `torque_nm` / `temperature_c` | float32 | MIT 域原始值；**无反馈时发 0 而非 NaN**（避免 MQTT JSON 污染，用 `fresh`/`has_feedback` 表无效） |
+| `mode_status` | uint8 | 固件 bit22-23：0=复位 1=标定 2=闭环 |
+| `error_status` | uint8 | 聚合故障 0/1 |
+| `fault_mask` | uint32 | bit0=综合 bit1=霍尔 bit2=磁编 bit3=过温 bit4=过流 bit5=电压 |
+| `has_feedback` / `fresh` | bool | 是否收到过反馈 / 最近反馈在 `feedback_fresh_timeout_s` 内 |
+| `enabled` | bool | `mode_status` 为闭环（尽力而为） |
+
+### 服务（4 个新增）
+
+| 服务 | 类型 | 说明 |
+|------|------|------|
+| `/a3/motor/scan_and_collect` | `a3_can_bridge/srv/MotorScanCollect` | 对 `[id_min,id_max]` 发 0x00 探针并聚合 device_id 回复直至 `timeout_s`（默认 1.5 s）；返回 `ids[]`/`uids[]`（同序，UID 为大端字节序 uint64）。busy 时拒绝；限时返回，永挂起 |
+| `/a3/motor/mit_command` | `a3_can_bridge/srv/MotorMitCommand` | 单电机 MIT 直驱（`motor_id` 禁止 0 广播）：`hold_duration_s<=0` 单发一帧；`>0` ROS 侧定时保持（`hold_hz` 上限 `min(200, max_tx_rate_per_motor_hz)`，时长上限 `max_hold_duration_s` 默认 30 s；新保持替换旧保持）。数值越界自动 clamp |
+| `/a3/motor/stop` | `a3_can_bridge/srv/MotorStop` | 取消该电机（0=全部）MIT 保持，并逐电机发一帧 `kp=kd=t=0` 卸力帧（p=最近反馈角） |
+| `/a3/motor/set_mode` | `a3_can_bridge/srv/MotorSetMode` | 写 0x7005 运行模式：`mit`=0/`position`=1/`speed`=2；position 追加写 0x7016（目标位置）+0x7017（限速），speed 追加写 0x700A（目标速度）。切换取消该电机保持 |
+
+**保持（hold）语义**：`hold_duration_s>0` 时由 `motor_protocol_node` 内部 5 ms tick 定时发帧（前端不做 setInterval 流式发送）；到时长自动停；`motor_stop` 手动取消；**`/power_sequence/gate_open` 由关→开的瞬间自动取消**（并记 WARN）。
+
+### 互锁（gate 关闭才可调试写）
+
+`gate_open=true`（电源序列运行中）时，以下**调试写操作**被 C++ 侧拒绝并返回带 gate 文案的 `success=false`：`/a3/motor/enable`（command=1）、`/a3/motor/reset`（command=2）、`/a3/motor/set_zero`（command=3）、`/a3/motor/set_param`、`/a3/motor/mit_command`、`/a3/motor/set_mode`、`/a3/motor/set_can_id`。**扫描、读类（get_device_id/request_version）、`/a3/motor/stop` 永不拦截**。a3_mqtt_bridge 不做前置 gate 预检（有意为之）：C++ 是权威拦截点，拒绝文案经 `cmd_result` 回传；预检会破坏 sim 闭环（`sim_power_sequence_node` 的 gate 恒 true，仿真有意不实现互锁）。
+
+### MQTT 下行指令（a3_mqtt_bridge ↔ Web，需求 F32）
+
+同一 `<prefix>/cmd` 与 `<prefix>/cmd_result` 通道，白名单追加 9 个 op：
+
+| op | args | 对应服务 |
+|----|------|----------|
+| `motor_scan` | `{id_min?, id_max?, bus?, timeout_s?}`（默认 1/127/1/1.5） | `/a3/motor/scan_and_collect` |
+| `motor_enable` / `motor_reset` / `motor_set_zero` | `{motor}`（int 1..127） | `/a3/motor/enable|reset|set_zero`（command=1/2/3） |
+| `motor_mit` | `{motor, p, v?, kp, kd, t?}` | `/a3/motor/mit_command`（`hold_duration_s=0` 单发） |
+| `motor_hold` | `{motor, p, v?, kp, kd, t?, duration_s, hz?}` | `/a3/motor/mit_command`（`hold_duration_s=duration_s`） |
+| `motor_stop` | `{motor}`（0=全部） | `/a3/motor/stop` |
+| `motor_set_mode` | `{motor, mode, position?, limit_spd?, speed?}`（mode∈mit\|position\|speed） | `/a3/motor/set_mode` |
+| `motor_set_param` | `{motor, index, value}`（index 支持 int 或 `"0x7005"`） | `/a3/motor/set_param` |
+
+- 校验失败（`motor` 非 int 1..127、浮点非法、mode 非法）时回 `ok=false` 且不调用服务；回执 JSON 格式与臂指令一致（`op`/`ok`/`message`/`ts`）。
+- `motor_scan` 成功时 `cmd_result.message` 重编码为 JSON：`{"motors":[{"id":<int>,"uid":"<16位大写十六进制>"}, ...]}`（前端直接 `JSON.parse`）。
+
+### 遥测展平（flatten=motor_state）
+
+`/a3/motor/states` 经 `bridge.yaml` 的 `motor_state` 展平上报 telemetry points（6 前缀 × L1..L7 = 42 个）：
+
+| points key（n=1..7） | 来源字段 | 类型 |
+|----------------------|----------|------|
+| `temp_Ln` | `temperature_c` | float（°C） |
+| `err_Ln` | `fault_mask` | int（位掩码） |
+| `mode_Ln` | `mode_status` | int（0 复位/1 标定/2 闭环） |
+| `online_Ln` | `fresh` | 0/1 |
+| `mtq_Ln` | `torque_nm` | float（Nm） |
+| `mp_Ln` | `position_rad` | float（rad，MIT 原始角） |
 
 信号 code 须与 deep-trace 设备 YAML `HOME-DEMO.RK3588.yaml` 的 `points[].code` 完全对齐。
 

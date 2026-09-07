@@ -85,6 +85,17 @@ CloudEdge 须在 ESP32 固件中实现等效逻辑；网络侧 `shutdown` 命令
 
 配置见 `a3_gripper_controller/config/gripper_config.yaml`；接口契约见 [TOPIC_CONTRACT.md](TOPIC_CONTRACT.md)。
 
+## 单电机调试（MOTOR_DEBUG，需求 F32）
+
+Web 端单电机调试（CAN 扫描 / MIT 直驱 / 保持）的安全边界：
+
+1. **互锁（gate 关闭才可调试写）：** `gate_open=true`（电源序列运行中）时，`motor_protocol_node` 拒绝使能/复位/设零/MIT/模式切换/参数写入（带 gate 文案的 `success=false`）。扫描、读类（device_id/version）与 `motor_stop` **永不拦截**——停止能力在任何时刻都必须可用。
+2. **保持自动取消：** `gate_open` 由关→开的瞬间，正在进行的 MIT 保持被 C++ 侧自动取消并记 WARN；前端不承担安全职责。
+3. **停止即卸力：** `/a3/motor/stop` 取消保持并逐电机发送一帧 `kp=kd=t=0`（p=最近反馈角）卸力。保持期间若 CAN 中断，电机固件按帧停超时自然卸力（与轨迹路径同一机制）。
+4. **参数安全：** `mit_command` 的 `motor_id` 禁止 0 广播（只允许 1..127 单电机）；位置/速度/增益/力矩在服务端 clamp 到 `ProtocolCodec` 常量；保持时长上限 `max_hold_duration_s`（默认 30 s），发送频率上限 `min(200, max_tx_rate_per_motor_hz)`。
+5. **保持与轨迹互斥：** 调试保持仅限 gate 关闭期间（此时轨迹插值与 refresh 均被 gate 阻断），保持是唯一 CAN 发送者，无总线争用；gate 打开瞬间保持即取消。
+6. **仿真有意分歧：** sim 闭环不实现互锁（`sim_power_sequence_node` gate 恒 true），互锁只真机验证；前端在 `gate_open=true` 时展示提示横幅但不自行拦截（拒绝文案经 `cmd_result` 回传）。
+
 ## 产品线实现差异
 
 | 安全能力 | A3 Edge | A3 CloudEdge |

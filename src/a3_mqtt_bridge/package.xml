@@ -16,6 +16,7 @@
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>trajectory_msgs</exec_depend>
   <exec_depend>a3_msgs</exec_depend>
+  <exec_depend>a3_can_bridge</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>python3-paho-mqtt</exec_depend>

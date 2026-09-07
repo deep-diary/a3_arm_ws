@@ -50,8 +50,9 @@
     feedback_step_limit_rad: 2.0
     feedback_fresh_timeout_s: 0.30
     use_joint_cmd_limits: true
-    joint_cmd_min_rad: [-2.79253, 0.0, -4.01426, -1.5708, -1.5708, -1.5708, -1.5708]
-    joint_cmd_max_rad: [2.79253, 3.66519, 0.0, 1.5708, 1.5708, 1.5708, 1.5708]
+    # L7（末位）：2026-09-06 标定全开位设零、闭合为正，实测行程 1.7945 rad → [0, 1.8]
+    joint_cmd_min_rad: [-2.79253, 0.0, -4.01426, -1.5708, -1.5708, -1.5708, 0.0]
+    joint_cmd_max_rad: [2.79253, 3.66519, 0.0, 1.5708, 1.5708, 1.5708, 1.8]
     use_motor_domain_limits: true
     derive_motor_limits_from_joint_cmd: true
     joint_mit_min_rad: [-12.57, -12.57, -12.57, -12.57, -12.57, -12.57, -12.57]

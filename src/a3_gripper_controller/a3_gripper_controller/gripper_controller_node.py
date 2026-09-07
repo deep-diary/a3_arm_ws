@@ -78,16 +78,24 @@ _DEFAULTS = {
     # 接触前恒速软闭合不积分，接触后才切入 PI（防接触前积分饱和猛夹）
     "contact_detect_ratio": 0.35,
     "contact_detect_min_nm": 0.1,
+    # 接触判定位移门：从全开硬止位（gripper_open_rad）算起的位移 ≥ 该值后力矩阈值判定才生效
+    # （0 位硬止位静置力矩≈0.16 Nm 会误判接触，LL-013；基准取全开位，F34 重抓超硬限教训）
+    "contact_min_travel_rad": 0.1,
     "force_mode_kp": 20.0,
     "force_mode_kd": 1.0,
     "position_mode_kp": 80.0,
     "position_mode_kd": 2.0,
+    # 释放柔顺（F33）：专用轨迹时长与位置增益，完成后自动恢复 position_mode_kp/kd
+    "release_duration_s": 1.5,
+    "release_kp": 30.0,
+    "release_kd": 5.0,
     "gripper_open_rad": 1.5708,
     "gripper_close_rad": 0.0,
     "release_position": 1.0,
     "force_band_ratio": 0.10,
     "settle_s": 0.3,
-    "grasp_timeout_s": 5.0,
+    # 默认抓取超时（web 力控按键不传 timeout 时落到此值，LL-013）
+    "grasp_timeout_s": 15.0,
     "feedback_fresh_timeout_s": 0.30,
     "overtorque_ratio": 1.0,
     "status_hz": 10.0,
@@ -129,6 +137,9 @@ class GripperControllerNode(Node):
         self._q_open = float(self._p("gripper_open_rad"))
         self._q_close = float(self._p("gripper_close_rad"))
         self._release_pos = float(self._clamp01(self._p("release_position")))
+        # 闭合方向符号：新标定约定 open=0（全开位设零）、close=+1.79（闭合为正）；
+        # 兼容旧约定（close < open，闭合为负）。力环按此符号推进/回退。
+        self._dir_close = 1.0 if self._q_close > self._q_open else -1.0
 
         # 力控参数
         # 出厂硬上限（YAML，运行时不可越界）；_max_torque 为可调上限（可经服务下调并落盘）
@@ -159,6 +170,10 @@ class GripperControllerNode(Node):
         self._overtorque_ratio = float(self._p("overtorque_ratio"))
         self._require_gate = bool(self._p("require_gate"))
         self._apply_fw_limit = bool(self._p("apply_firmware_torque_limit"))
+        self._contact_min_travel = float(self._p("contact_min_travel_rad"))
+        self._release_duration_s = float(self._p("release_duration_s"))
+        self._release_kp_gain = float(self._p("release_kp"))
+        self._release_kd_gain = float(self._p("release_kd"))
 
         # 运行时状态
         self._state = ST_IDLE
@@ -168,6 +183,9 @@ class GripperControllerNode(Node):
         self._q_cmd = self._q_open          # 力环输出的 L7 位置目标（rad）
         self._q_meas = self._q_open
         self._norm_pos = 1.0
+        # 目标开合位置：最近 position/release 命令目标；未命令前跟随实测（需求 F31）
+        self._target_position = self._norm_pos
+        self._target_pos_commanded = False
         self._contact = False
         self._error_code = ERR_NONE
         self._message = "init"
@@ -180,9 +198,11 @@ class GripperControllerNode(Node):
         self._contact_detected = False
         self._force_active = False
         self._force_start_time = 0.0
+        self._force_timeout_s = float(self._p("grasp_timeout_s"))
         self._in_band_since = 0.0
         self._last_js_time = 0.0
         self._last_tick_time = 0.0
+        self._release_gain_timer = None       # 释放后恢复位置增益的一次性 timer
 
         # 落盘
         self._overrides_dir = os.path.expanduser(str(self._p("overrides_dir")))
@@ -351,6 +371,8 @@ class GripperControllerNode(Node):
         with self._lock:
             self._q_meas = float(msg.position[idx])
             self._norm_pos = self._norm_from_rad(self._q_meas)
+            if not self._target_pos_commanded:
+                self._target_position = self._norm_pos
             if idx < len(msg.effort) and math.isfinite(msg.effort[idx]):
                 # 握力反馈取力矩幅值（夹紧阻力）；用绝对值对反馈方向符号不敏感，
                 # 避免真机力矩符号标定反了导致 PI 反向跑飞猛夹。
@@ -391,10 +413,16 @@ class GripperControllerNode(Node):
                 resp.success = True
                 resp.message = f"position {v:.2f}"
             elif mode == "force":
+                preset = str(getattr(req, "preset", "") or "").strip().lower()
+                # 硬逻辑（F33）：目标力矩 0（且未给档位）→ 直接全开，跳过 PI。
+                if float(req.torque_nm) <= 0 and not preset:
+                    self._release()
+                    resp.success = True
+                    resp.message = "force 0 -> full open"
+                    return resp
                 if req.torque_nm and req.torque_nm > 0:
                     tau = float(req.torque_nm)
                 else:
-                    preset = str(getattr(req, "preset", "") or "").strip().lower()
                     if preset:
                         if preset not in self._presets:
                             resp.success = False
@@ -483,6 +511,8 @@ class GripperControllerNode(Node):
         self._integral = 0.0
         self._state = ST_POSITION
         self._mode = "position"
+        self._target_position = norm_v
+        self._target_pos_commanded = True
         self._contact = False
         if self._error_code in (ERR_GRASP_TIMEOUT, ERR_WATCHDOG, ERR_OVERTORQUE):
             self._error_code = ERR_NONE
@@ -503,6 +533,8 @@ class GripperControllerNode(Node):
         self._state = ST_FORCE_CLOSING
         now = self.get_clock().now().nanoseconds * 1e-9
         self._force_start_time = now
+        # 每次夹取的超时以命令参数为准（默认回落配置值）
+        self._force_timeout_s = float(timeout) if timeout and timeout > 0 else self._grasp_timeout_s
         self._in_band_since = 0.0
         # 力环从当前实测位置起步，避免阶跃
         self._q_cmd = self._q_meas if self._have_js else self._q_open
@@ -518,13 +550,30 @@ class GripperControllerNode(Node):
         self._contact = False
         self._state = ST_RELEASING
         self._mode = "release"
+        self._target_position = self._release_pos
+        self._target_pos_commanded = True
         if self._error_code in (ERR_GRASP_TIMEOUT, ERR_WATCHDOG, ERR_OVERTORQUE):
             self._error_code = ERR_NONE
         q = self._q_close + self._release_pos * (self._q_open - self._q_close)
         self._q_cmd = q
-        self._set_gains(self._pos_kp_gain, self._pos_kd_gain)
-        self._publish_traj(q, duration=0.8)
+        # 释放柔顺（F33）：专用低 kp + 较高 kd + 较长轨迹时长，减小释放冲击；
+        # 轨迹结束后自动恢复位置模式增益。
+        self._set_gains(self._release_kp_gain, self._release_kd_gain)
+        self._publish_traj(q, duration=self._release_duration_s)
         self._state = ST_IDLE
+        self._schedule_gain_restore()
+
+    def _schedule_gain_restore(self) -> None:
+        """释放完成后恢复位置模式增益（一次性 timer，重复释放先取消旧的）。"""
+        if self._release_gain_timer is not None:
+            self._release_gain_timer.cancel()
+        self._release_gain_timer = self.create_timer(
+            self._release_duration_s + 0.3, self._restore_pos_gains
+        )
+
+    def _restore_pos_gains(self) -> None:
+        if not self._force_active:
+            self._set_gains(self._pos_kp_gain, self._pos_kd_gain)
 
     def _stop_force(self) -> None:
         self._force_active = False
@@ -552,7 +601,9 @@ class GripperControllerNode(Node):
         self._gains_pub.publish(msg)
 
     def _publish_traj(self, q: float, duration: float = 0.05) -> None:
-        q = max(self._q_close, min(self._q_open, q))
+        lo = min(self._q_close, self._q_open)
+        hi = max(self._q_close, self._q_open)
+        q = max(lo, min(hi, q))
         traj = JointTrajectory()
         traj.joint_names = [self._joint_name]
         pt = JointTrajectoryPoint()
@@ -574,6 +625,11 @@ class GripperControllerNode(Node):
         self._last_tick_time = now
         dt = min(max(dt, 1e-3), 0.2)
 
+        # 安全网（F33）：目标力矩 <=0 立即全开，防止 0 目标落入 PI
+        if self._target_torque <= 0:
+            self._release()
+            return
+
         # 看门狗：反馈超时
         if self._have_js and (now - self._last_js_time) > self._fb_timeout_s:
             self._fault(ERR_WATCHDOG, f"feedback stale > {self._fb_timeout_s:.2f}s")
@@ -589,14 +645,23 @@ class GripperControllerNode(Node):
         contact_thresh = max(
             self._contact_detect_min, self._contact_detect_ratio * self._target_torque
         )
-        if not self._contact_detected and self._meas_torque >= contact_thresh:
+        # 接触判定位移门（LL-013）：位移从全开硬止位（q_open）算起，≥ contact_min_travel_rad
+        # 后力矩阈值判定才生效，避免 0 位硬止位静置力矩（≈0.16 Nm）误判"已接触"。
+        # 基准必须取 q_open 而非力控起点：已夹持中重发力控命令时力控起点就在物体上，
+        # 若按起点算位移，会盲跑完整快速接近段把物体压穿（F34 实测 0.5Nm 重抓超硬限 FAULT）。
+        traveled = abs(self._q_meas - self._q_open) if self._have_js else 0.0
+        if (
+            not self._contact_detected
+            and self._meas_torque >= contact_thresh
+            and traveled >= self._contact_min_travel
+        ):
             self._contact_detected = True
             self._integral = 0.0
 
         e = self._target_torque - self._meas_torque  # >0 力不足
         if not self._contact_detected:
             # 接触前：恒速软闭合（不积分，避免接触瞬间积分饱和猛夹）
-            dq = -self._v_close * dt
+            dq = self._dir_close * self._v_close * dt
         else:
             # 接触后 PI，单向约束：力够了/超了绝不继续夹；超力按比例回退
             self._integral = max(
@@ -604,14 +669,19 @@ class GripperControllerNode(Node):
             )
             if e > 0.0:
                 v_close = self._kp * e + self._ki * max(self._integral, 0.0)
-                dq = -min(max(v_close, 0.0), self._v_close) * dt
+                dq = self._dir_close * min(max(v_close, 0.0), self._v_close) * dt
             else:
                 back = self._kp * (-e)  # 超力 → 开口回退
-                dq = min(back, self._v_open) * dt
+                dq = -self._dir_close * min(back, self._v_open) * dt
 
         q_new = self._q_cmd + dq
-        q_new = max(self._q_close, min(self._q_open, q_new))
+        lo = min(self._q_close, self._q_open)
+        hi = max(self._q_close, self._q_open)
+        q_new = max(lo, min(hi, q_new))
         self._q_cmd = q_new
+        # 力控期间目标位置 = PI 实时输出（F33：前端可观察目标位置逐步变大的趋势）
+        self._target_position = self._norm_from_rad(q_new)
+        self._target_pos_commanded = True
         self._publish_traj(q_new)
 
         # 接触 / 抓稳判定
@@ -633,11 +703,11 @@ class GripperControllerNode(Node):
                 self._state = ST_FORCE_CLOSING
                 self._contact = False
 
-        # 抓取超时
-        if self._state != ST_GRASPED and (now - self._force_start_time) > self._grasp_timeout_s:
+        # 抓取超时（以命令传入的 timeout_s 为准，默认回落配置 grasp_timeout_s）
+        if self._state != ST_GRASPED and (now - self._force_start_time) > self._force_timeout_s:
             self._fault(
                 ERR_GRASP_TIMEOUT,
-                f"grasp timeout > {self._grasp_timeout_s:.1f}s (meas={self._meas_torque:.2f})",
+                f"grasp timeout > {self._force_timeout_s:.1f}s (meas={self._meas_torque:.2f})",
             )
 
     # ---------- 状态发布 ----------
@@ -658,6 +728,7 @@ class GripperControllerNode(Node):
         msg.target_torque_nm = float(self._target_torque)
         msg.actual_torque_nm = float(self._meas_torque)
         msg.position = float(self._norm_pos)
+        msg.target_position = float(self._target_position)
         msg.contact = bool(self._contact)
         msg.error_code = int(self._error_code)
         msg.message = str(self._message)

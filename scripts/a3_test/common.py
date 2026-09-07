@@ -5,7 +5,7 @@ import os
 import time
 
 # ---- MQTT / 设备契约（与 src/a3_mqtt_bridge/config/bridge.yaml 对齐）----
-MQTT_HOST = os.environ.get("A3_MQTT_HOST", "192.168.3.73")
+MQTT_HOST = os.environ.get("A3_MQTT_HOST", "bluemac.local")
 MQTT_PORT = int(os.environ.get("A3_MQTT_PORT", "1883"))
 TOPIC_PREFIX = "deep-trace/HOME-DEMO/RK3588"
 TOPIC_TELEMETRY = f"{TOPIC_PREFIX}/telemetry"

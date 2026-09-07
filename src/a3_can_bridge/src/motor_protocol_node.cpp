@@ -4,6 +4,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -31,6 +32,12 @@
 #include "a3_can_bridge/srv/set_can_id.hpp"
 #include "a3_can_bridge/srv/set_motor_param.hpp"
 #include "a3_can_bridge/srv/motor_scan.hpp"
+#include "a3_can_bridge/msg/motor_state.hpp"
+#include "a3_can_bridge/msg/motor_states.hpp"
+#include "a3_can_bridge/srv/motor_mit_command.hpp"
+#include "a3_can_bridge/srv/motor_stop.hpp"
+#include "a3_can_bridge/srv/motor_set_mode.hpp"
+#include "a3_can_bridge/srv/motor_scan_collect.hpp"
 
 using diagnostic_msgs::msg::DiagnosticArray;
 using diagnostic_msgs::msg::DiagnosticStatus;
@@ -41,15 +48,25 @@ using std_msgs::msg::Bool;
 using std_msgs::msg::String;
 using std_msgs::msg::UInt8MultiArray;
 using std_srvs::srv::Trigger;
+using a3_can_bridge::msg::MotorState;
+using a3_can_bridge::msg::MotorStates;
 using a3_can_bridge::srv::MotorCommand;
 using a3_can_bridge::srv::SetCanId;
 using a3_can_bridge::srv::SetMotorParam;
 using a3_can_bridge::srv::MotorScan;
+using a3_can_bridge::srv::MotorMitCommand;
+using a3_can_bridge::srv::MotorStop;
+using a3_can_bridge::srv::MotorSetMode;
+using a3_can_bridge::srv::MotorScanCollect;
 
 namespace a3_can_bridge
 {
 
 static constexpr size_t kNumArmJoints = DogMapper::kTemporaryIndexMap.size();
+// 平滑收敛判定阈值（rad）：|平滑输出 - 限幅目标| <= 该值视为到达
+static constexpr double kSmoothingConvergeTol = 1e-3;
+// 单点 jog 轨迹在采样结束后的最大保持时长（s）：覆盖启动平滑 2 s + 全行程速度限幅
+static constexpr double kSinglePointHoldMaxS = 10.0;
 
 /// Unused for arm (kept so expand_joint_offsets_from_mirror=false path compiles if referenced).
 static std::vector<double> BuildMirrorJointOffsetsRad(double hip, double thigh, double calf_mag)
@@ -111,6 +128,31 @@ static std::optional<MotorRoute> GetRouteByMotorId(uint8_t motor_id)
   }
   return std::nullopt;
 }
+
+/// 单电机 MIT 定时保持状态（需求 F32）：ROS 侧按 hz 持续发帧，到期/停止/gate 打开时取消
+struct MitHoldState
+{
+  bool active{false};
+  uint8_t motor_id{0};
+  float position{0.0f};
+  float velocity{0.0f};
+  float kp{0.0f};
+  float kd{0.0f};
+  float torque{0.0f};
+  double hz{50.0};
+  int64_t next_tx_ns{0};
+  int64_t end_ns{0};
+};
+
+/// 扫描收集状态（需求 F32）：发探针后收集 device_id 回复直至 deadline，再填充挂起的服务响应
+struct ScanCollectState
+{
+  bool active{false};
+  int64_t deadline_ns{0};
+  std::shared_ptr<rmw_request_id_t> header;
+  std::shared_ptr<MotorScanCollect::Response> pending;
+  std::map<uint8_t, uint64_t> found;
+};
 
 class MotorProtocolNode : public rclcpp::Node
 {
@@ -190,6 +232,10 @@ public:
     min_tx_refresh_interval_s_ = this->declare_parameter<double>("min_tx_refresh_interval_s", 0.02);
     enable_max_tx_rate_limit_ = this->declare_parameter<bool>("enable_max_tx_rate_limit", true);
     max_tx_rate_per_motor_hz_ = this->declare_parameter<double>("max_tx_rate_per_motor_hz", 60.0);
+    publish_motor_states_ = this->declare_parameter<bool>("publish_motor_states", true);
+    motor_states_topic_ = this->declare_parameter<std::string>(
+      "motor_states_topic", "/a3/motor/states");
+    max_hold_duration_s_ = this->declare_parameter<double>("max_hold_duration_s", 30.0);
     joint_signs_ = this->declare_parameter<std::vector<double>>(
       "joint_signs", std::vector<double>(kNumArmJoints, 1.0));
 
@@ -245,8 +291,13 @@ public:
       "control_mode_topic", "/a3/control_mode");
     zero_torque_active_ = false;
 
+    // RELIABLE（F32 由 SensorDataQoS 改为 reliable）：
+    // DDS 兼容规则——best_effort 订阅兼容 best_effort 与 reliable 两种发布者，
+    // reliable 订阅只兼容 reliable 发布者。编排层/夹爪控制器/ros2 CLI 默认均为
+    // reliable，原注释「BE 与 reliable 发布者不兼容」与事实不符（BE 本可匹配）；
+    // 保留 reliable 是为轨迹指令的可靠投递（BE 队列满时会静默丢帧且无重传）。
     traj_sub_ = this->create_subscription<JointTrajectory>(
-      "/joint_group_effort_controller/joint_trajectory", rclcpp::SensorDataQoS(),
+      "/joint_group_effort_controller/joint_trajectory", rclcpp::QoS(10).reliable(),
       std::bind(&MotorProtocolNode::OnTrajectory, this, std::placeholders::_1));
     rx_sub_ = this->create_subscription<UInt8MultiArray>(
       "/can_rx_frames", rclcpp::SensorDataQoS(),
@@ -260,8 +311,9 @@ public:
         std::bind(&MotorProtocolNode::OnPowerGate, this, std::placeholders::_1));
     }
 
+    // 同 joint_trajectory：gravity_torque_node 默认 reliable 发布，best_effort 订阅不匹配
     gravity_sub_ = this->create_subscription<JointState>(
-      gravity_compensation_topic_, rclcpp::SensorDataQoS(),
+      gravity_compensation_topic_, rclcpp::QoS(10).reliable(),
       std::bind(&MotorProtocolNode::OnGravityTorque, this, std::placeholders::_1));
     RCLCPP_INFO(
       this->get_logger(),
@@ -354,6 +406,35 @@ public:
         HandleScanService(req, resp);
       });
 
+    // 单电机调试服务（F32）：MIT 直驱/保持、停止卸力、模式切换、扫描收集
+    mit_command_srv_ = this->create_service<MotorMitCommand>(
+      "/a3/motor/mit_command",
+      [this](const std::shared_ptr<MotorMitCommand::Request> req,
+             std::shared_ptr<MotorMitCommand::Response> resp) {
+        HandleMitCommandService(req, resp);
+      });
+    motor_stop_srv_ = this->create_service<MotorStop>(
+      "/a3/motor/stop",
+      [this](const std::shared_ptr<MotorStop::Request> req,
+             std::shared_ptr<MotorStop::Response> resp) {
+        HandleMotorStopService(req, resp);
+      });
+    set_mode_srv_ = this->create_service<MotorSetMode>(
+      "/a3/motor/set_mode",
+      [this](const std::shared_ptr<MotorSetMode::Request> req,
+             std::shared_ptr<MotorSetMode::Response> resp) {
+        HandleSetModeService(req, resp);
+      });
+    // 两参数 (header, request) 回调 = rclcpp 的 DeferResponse 形式：dispatch 返回 nullptr，
+    // 回调返回时不会自动 send_response；响应在扫描窗口结束后经 FinishScanCollect 显式发送。
+    // （三参数 (header, req, resp) 回调返回时 rclcpp 会立即自动发送默认响应，不能用于延迟响应。）
+    scan_collect_srv_ = this->create_service<MotorScanCollect>(
+      "/a3/motor/scan_and_collect",
+      [this](const std::shared_ptr<rmw_request_id_t> header,
+             const std::shared_ptr<MotorScanCollect::Request> req) {
+        HandleScanCollectService(header, req);
+      });
+
     if (enable_trajectory_interpolation_ && trajectory_interp_rate_hz_ > 1e-3) {
       const int64_t period_ns = static_cast<int64_t>(1e9 / trajectory_interp_rate_hz_);
       traj_interp_timer_ = this->create_wall_timer(
@@ -375,6 +456,10 @@ public:
     feedback_pub_ = this->create_publisher<String>("/motor_feedback", 50);
     device_id_pub_ = this->create_publisher<String>("/a3/motor/device_id", 10);
     version_pub_ = this->create_publisher<String>("/a3/motor/version", 10);
+    if (publish_motor_states_) {
+      motor_states_pub_ = this->create_publisher<MotorStates>(
+        motor_states_topic_, rclcpp::SensorDataQoS());
+    }
     if (publish_feedback_joint_states_) {
       feedback_joint_states_pub_ = this->create_publisher<JointState>(
         feedback_joint_states_topic_, rclcpp::SensorDataQoS());
@@ -383,7 +468,7 @@ public:
       diagnostics_pub_ = this->create_publisher<DiagnosticArray>(motor_diagnostics_topic_, 10);
     }
     if (
-      (publish_feedback_joint_states_ || publish_motor_diagnostics_) &&
+      (publish_feedback_joint_states_ || publish_motor_diagnostics_ || publish_motor_states_) &&
       feedback_joint_states_timer_hz_ > 1e-3)
     {
       const int64_t period_ns = static_cast<int64_t>(1e9 / feedback_joint_states_timer_hz_);
@@ -402,6 +487,10 @@ public:
     tx_refresh_timer_ = this->create_wall_timer(
       std::chrono::milliseconds(2),
       std::bind(&MotorProtocolNode::OnTxRefreshTimer, this));
+    // 调试节拍（F32）：5 ms 粒度支撑 MIT 保持（<=200 Hz）与扫描收集超时；空闲早退
+    debug_tick_timer_ = this->create_wall_timer(
+      std::chrono::milliseconds(5),
+      std::bind(&MotorProtocolNode::OnDebugTickTimer, this));
     tx_stats_timer_ = this->create_wall_timer(
       std::chrono::seconds(5),
       std::bind(&MotorProtocolNode::LogTxWindowStats, this));
@@ -424,6 +513,9 @@ public:
     }
     ResetRuntimeTuning();
     last_commanded_mit_rad_.fill(std::numeric_limits<double>::quiet_NaN());
+    last_feedback_mit_rad_.fill(std::numeric_limits<double>::quiet_NaN());
+    last_feedback_mit_vel_rad_s_.fill(std::numeric_limits<double>::quiet_NaN());
+    last_feedback_master_id_.fill(0xFD);  // EL05 默认 master id
     last_feedback_champ_rad_.fill(std::numeric_limits<double>::quiet_NaN());
     last_feedback_joint_vel_rad_s_.fill(std::numeric_limits<double>::quiet_NaN());
     last_feedback_effort_nm_.fill(std::numeric_limits<double>::quiet_NaN());
@@ -440,6 +532,7 @@ public:
     first_command_time_by_joint_ns_.fill(0);
     last_command_time_by_joint_ns_.fill(0);
     last_tx_pub_stamp_ns_.fill(0);
+    last_refresh_stamp_ns_.fill(0);
     latest_input_champ_rad_.fill(0.0);
     has_latest_input_.fill(false);
 
@@ -605,6 +698,7 @@ private:
       active_traj_ = *msg;
       traj_start_ = this->now();
       has_active_traj_ = true;
+      smoothing_converged_.fill(false);
       RCLCPP_INFO_THROTTLE(
         this->get_logger(), *this->get_clock(), 1000,
         "Trajectory buffered for interpolation: %zu points, %zu joints",
@@ -653,15 +747,28 @@ private:
       return;
     }
 
-    ApplyPositionTargets(positions, traj_copy.joint_names);
+    const bool converged = ApplyPositionTargets(positions, traj_copy.joint_names);
 
     if (finished) {
-      std::lock_guard<std::mutex> lock(traj_mutex_);
-      has_active_traj_ = false;
+      // 单点 jog 轨迹（如 web 夹爪单关节直驱、滑条短插值）：采样结束后若平滑尚未收敛
+      // 到目标（启动平滑 2 s / command_max_velocity 1.5 rad/s 限幅会让短轨迹结束时输出
+      // 仍远离目标），继续按最后一点保持，直到收敛才清 has_active_traj_——
+      // 否则 refresh 会把半途值当终值持续保持（F32 回归「电机不动」根因之一）。
+      // kSinglePointHoldMaxS 兜底：全行程收敛 ≈ 启动平滑 2 s + 行程/1.5 ≈ 6.6 s。
+      const bool single_point = traj_copy.points.size() == 1;
+      const double t_end = single_point ?
+        rclcpp::Duration(traj_copy.points.back().time_from_start).seconds() : 0.0;
+      const bool hold_until_converged =
+        single_point && !converged && (elapsed - t_end) < kSinglePointHoldMaxS;
+      if (!hold_until_converged) {
+        std::lock_guard<std::mutex> lock(traj_mutex_);
+        has_active_traj_ = false;
+      }
     }
   }
 
-  void ApplyPositionTargets(
+  /// 下发本 tick 的各关节目标；返回所有被下发的关节是否已平滑收敛到限幅后目标。
+  bool ApplyPositionTargets(
     const std::vector<double> & positions,
     const std::vector<std::string> & joint_names)
   {
@@ -669,6 +776,7 @@ private:
     uint32_t front_count = 0;
     uint32_t rear_count = 0;
     size_t total_sent = 0;
+    bool all_converged = true;
 
     std::array<double, DogMapper::kTemporaryIndexMap.size()> mapped_rad{};
     mapped_rad.fill(std::numeric_limits<double>::quiet_NaN());
@@ -694,7 +802,10 @@ private:
         }
       }
       if (!got) {
-        if (i < positions.size()) {
+        // 索引回退仅在无名轨迹（use_names=false）下使用：命名轨迹按名匹配失败
+        // 说明该关节不在本轨迹内，绝不能拿 positions[0] 喂给第一个关节
+        // （F32 回归：单关节 L7 轨迹曾同时驱动 L1 基座）。
+        if (!use_names && i < positions.size()) {
           target = positions[i];
           got = true;
         } else if (has_latest_input_[i]) {
@@ -715,6 +826,7 @@ private:
       }
       SendMitFrame(route.value(), target, front_count, rear_count, &mapped_rad);
       ++total_sent;
+      all_converged = all_converged && smoothing_converged_[i];
     }
 
     if (publish_mit_mapped_ && mapped_positions_pub_) {
@@ -732,6 +844,7 @@ private:
       this->get_logger(), *this->get_clock(), 1000,
       "MIT publish: total=%zu front(can0)=%u rear(can1)=%u kp=%.2f kd=%.2f v=%.2f tau=%.2f",
       total_sent, front_count, rear_count, runtime_kp_can0_, runtime_kd_can0_, default_velocity_, runtime_tau_can0_);
+    return all_converged;
   }
 
   void SendMitFrame(
@@ -755,6 +868,10 @@ private:
     }
     const double champ_limited = ClampJointCommand(idx, champ_position_raw);
     const double champ_smoothed = SmoothJointCommand(idx, champ_limited);
+    if (idx < smoothing_converged_.size()) {
+      smoothing_converged_[idx] =
+        std::fabs(champ_smoothed - champ_limited) <= kSmoothingConvergeTol;
+    }
     const double mapped_position_raw = joint_signs_[idx] * champ_smoothed + joint_offsets_rad_[idx];
     const double mapped_position = ClampMotorCommand(idx, mapped_position_raw);
     if (mapped_out != nullptr) {
@@ -822,10 +939,10 @@ private:
     const int64_t refresh_ns = static_cast<int64_t>(min_tx_refresh_interval_s_ * 1e9);
     for (const auto & route : DogMapper::kTemporaryIndexMap) {
       const size_t idx = std::min(route.trajectory_index, static_cast<size_t>(ArmMapper::kTemporaryIndexMap.size() - 1));
-      if (idx >= last_tx_pub_stamp_ns_.size()) {
+      if (idx >= last_refresh_stamp_ns_.size()) {
         continue;
       }
-      if (last_tx_pub_stamp_ns_[idx] > 0 && (now_ns - last_tx_pub_stamp_ns_[idx]) < refresh_ns) {
+      if (last_refresh_stamp_ns_[idx] > 0 && (now_ns - last_refresh_stamp_ns_[idx]) < refresh_ns) {
         continue;
       }
       const bool is_front = (ArmMapper::ArmBus() == CanBus::CAN0);
@@ -859,7 +976,61 @@ private:
       } else {
         ++tx_refresh_can1_window_;
       }
-      last_tx_pub_stamp_ns_[idx] = now_ns;
+      last_refresh_stamp_ns_[idx] = now_ns;
+    }
+  }
+
+  void OnDebugTickTimer()
+  {
+    const int64_t now_ns = this->now().nanoseconds();
+    if (mit_hold_.active) {
+      // 故障保护：目标电机报故障（含过温锁存）时立即取消保持并卸力，
+      // 避免向故障电机持续流送目标帧（真机过温 125°C 教训）。
+      bool fault_aborted = false;
+      if (const auto hr = GetRouteByMotorId(mit_hold_.motor_id); hr.has_value()) {
+        const size_t fidx = std::min(
+          hr->trajectory_index, static_cast<size_t>(ArmMapper::kTemporaryIndexMap.size() - 1));
+        if (fidx < last_feedback_fault_mask_.size() && last_feedback_fault_mask_[fidx] != 0) {
+          fault_aborted = true;
+          RCLCPP_WARN(
+            this->get_logger(),
+            "MIT hold aborted: motor=%d fault_mask=0x%X",
+            static_cast<int>(mit_hold_.motor_id), last_feedback_fault_mask_[fidx]);
+          const double p = (mit_hold_.motor_id < last_feedback_mit_rad_.size() &&
+            std::isfinite(last_feedback_mit_rad_[mit_hold_.motor_id])) ?
+            last_feedback_mit_rad_[mit_hold_.motor_id] : 0.0;
+          PublishFrame(ProtocolCodec::BuildMitControlFrame(
+            ArmMapper::ArmBus(), mit_hold_.motor_id,
+            static_cast<float>(p), 0.0f, 0.0f, 0.0f, 0.0f));
+          mit_hold_.active = false;
+        }
+      }
+      if (!fault_aborted && now_ns >= mit_hold_.end_ns) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "MIT hold finished motor=%d",
+          static_cast<int>(mit_hold_.motor_id));
+        mit_hold_.active = false;
+      } else if (!fault_aborted && now_ns >= mit_hold_.next_tx_ns) {
+        PublishFrame(ProtocolCodec::BuildMitControlFrame(
+          ArmMapper::ArmBus(), mit_hold_.motor_id,
+          mit_hold_.position, mit_hold_.velocity,
+          mit_hold_.kp, mit_hold_.kd, mit_hold_.torque));
+        mit_hold_.next_tx_ns += static_cast<int64_t>(1e9 / mit_hold_.hz);
+        if (mit_hold_.motor_id < last_commanded_mit_rad_.size()) {
+          last_commanded_mit_rad_[mit_hold_.motor_id] = mit_hold_.position;
+        }
+        if (const auto route = GetRouteByMotorId(mit_hold_.motor_id); route.has_value()) {
+          const size_t idx = std::min(
+            route->trajectory_index, static_cast<size_t>(ArmMapper::kTemporaryIndexMap.size() - 1));
+          if (idx < last_tx_pub_stamp_ns_.size()) {
+            last_tx_pub_stamp_ns_[idx] = now_ns;
+          }
+        }
+      }
+    }
+    if (scan_collect_.active && now_ns >= scan_collect_.deadline_ns) {
+      FinishScanCollect();
     }
   }
 
@@ -907,7 +1078,16 @@ private:
     }
     power_gate_open_ = next;
     RCLCPP_WARN(this->get_logger(), "Power sequence gate changed: gate_open=%d", power_gate_open_ ? 1 : 0);
-    if (!power_gate_open_) {
+    if (power_gate_open_) {
+      // 互锁（F32）：gate 打开即整机进入正常轨迹运行，单电机 MIT 保持必须立刻让路
+      if (mit_hold_.active) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "MIT hold auto-cancelled: gate opened (motor=%d)",
+          static_cast<int>(mit_hold_.motor_id));
+        mit_hold_.active = false;
+      }
+    } else {
       last_tx_pub_stamp_ns_.fill(0);
       if (zero_torque_active_) {
         runtime_kp_can0_ = saved_kp_can0_;
@@ -965,6 +1145,16 @@ private:
       resp->message = "motor_id must be 0..127";
       return;
     }
+    // 互锁（F32）：enable/reset/set_zero 为写操作，gate 打开（电源序列 Running）时拒绝；
+    // 0=get_device_id / 4=request_version 为读操作，不受限
+    if (command == 1 || command == 2 || command == 3) {
+      std::string why;
+      if (DebugOpBlockedByGate(&why)) {
+        resp->success = false;
+        resp->message = why;
+        return;
+      }
+    }
     std::vector<uint8_t> ids;
     if (req->motor_id == 0) {
       ids.reserve(DogMapper::kTemporaryIndexMap.size());
@@ -1020,6 +1210,12 @@ private:
       resp->message = "current_id/new_id must be 1..127";
       return;
     }
+    std::string why;
+    if (DebugOpBlockedByGate(&why)) {
+      resp->success = false;
+      resp->message = why;
+      return;
+    }
     PublishFrame(ProtocolCodec::BuildSetCanIdFrame(
       BusForMotorId(req->current_id), req->current_id, req->new_id));
     resp->success = true;
@@ -1033,6 +1229,12 @@ private:
     if (req->motor_id == 0 || req->motor_id > 127) {
       resp->success = false;
       resp->message = "motor_id must be 1..127";
+      return;
+    }
+    std::string why;
+    if (DebugOpBlockedByGate(&why)) {
+      resp->success = false;
+      resp->message = why;
       return;
     }
     PublishFrame(ProtocolCodec::BuildSetParamFrame(
@@ -1068,6 +1270,284 @@ private:
       (bus == CanBus::CAN0 ? "can0" : "can1");
   }
 
+  /// 互锁助手（F32）：gate 打开（电源序列 Running）时拒绝电机级调试写操作
+  bool DebugOpBlockedByGate(std::string * why) const
+  {
+    if (enable_power_sequence_gate_ && power_gate_open_) {
+      if (why != nullptr) {
+        *why = "gate open (power sequence running): motor debug op refused; stop power sequence first";
+      }
+      return true;
+    }
+    return false;
+  }
+
+  void HandleMitCommandService(
+    const std::shared_ptr<MotorMitCommand::Request> & req,
+    const std::shared_ptr<MotorMitCommand::Response> & resp)
+  {
+    if (req->motor_id == 0 || req->motor_id > 127) {
+      resp->success = false;
+      resp->message = "motor_id must be 1..127 (no broadcast MIT)";
+      return;
+    }
+    std::string why;
+    if (DebugOpBlockedByGate(&why)) {
+      resp->success = false;
+      resp->message = why;
+      return;
+    }
+    const double p = Clamp(
+      static_cast<double>(req->position_rad), ProtocolCodec::kPMin, ProtocolCodec::kPMax);
+    const double v = Clamp(
+      static_cast<double>(req->velocity_rad_s), ProtocolCodec::kVMin, ProtocolCodec::kVMax);
+    const double kp = Clamp(
+      static_cast<double>(req->kp), ProtocolCodec::kKpMin, ProtocolCodec::kKpMax);
+    const double kd = Clamp(
+      static_cast<double>(req->kd), ProtocolCodec::kKdMin, ProtocolCodec::kKdMax);
+    const double t = Clamp(
+      static_cast<double>(req->torque_ff_nm), ProtocolCodec::kTMin, ProtocolCodec::kTMax);
+    const double duration = req->hold_duration_s > 0.0 ?
+      std::min(static_cast<double>(req->hold_duration_s), max_hold_duration_s_) : 0.0;
+
+    if (duration <= 0.0) {
+      PublishFrame(ProtocolCodec::BuildMitControlFrame(
+        ArmMapper::ArmBus(), req->motor_id,
+        static_cast<float>(p), static_cast<float>(v),
+        static_cast<float>(kp), static_cast<float>(kd), static_cast<float>(t)));
+      resp->success = true;
+      resp->message = "one-shot sent motor=" + std::to_string(static_cast<int>(req->motor_id));
+      return;
+    }
+
+    const bool replaced = mit_hold_.active;
+    const int replaced_motor = replaced ? static_cast<int>(mit_hold_.motor_id) : 0;
+    const double hz = req->hold_hz > 0.0 ?
+      std::min(
+        std::max(static_cast<double>(req->hold_hz), 1.0),
+        std::min(200.0, max_tx_rate_per_motor_hz_)) : 50.0;
+    const int64_t now_ns = this->now().nanoseconds();
+    mit_hold_.active = true;
+    mit_hold_.motor_id = req->motor_id;
+    mit_hold_.position = static_cast<float>(p);
+    mit_hold_.velocity = static_cast<float>(v);
+    mit_hold_.kp = static_cast<float>(kp);
+    mit_hold_.kd = static_cast<float>(kd);
+    mit_hold_.torque = static_cast<float>(t);
+    mit_hold_.hz = hz;
+    mit_hold_.next_tx_ns = now_ns;  // 立即发第一帧
+    mit_hold_.end_ns = now_ns + static_cast<int64_t>(duration * 1e9);
+    std::ostringstream oss;
+    oss << "hold started motor=" << static_cast<int>(req->motor_id)
+        << " (" << duration << " s @ " << hz << " Hz)";
+    if (replaced) {
+      oss << "; replaced hold on motor=" << replaced_motor;
+    }
+    resp->success = true;
+    resp->message = oss.str();
+  }
+
+  void HandleMotorStopService(
+    const std::shared_ptr<MotorStop::Request> & req,
+    const std::shared_ptr<MotorStop::Response> & resp)
+  {
+    if (req->motor_id > 127) {
+      resp->success = false;
+      resp->message = "motor_id must be 0..127";
+      return;
+    }
+    std::vector<uint8_t> ids;
+    if (req->motor_id == 0) {
+      ids.reserve(DogMapper::kTemporaryIndexMap.size());
+      for (const auto & route : DogMapper::kTemporaryIndexMap) {
+        ids.push_back(route.motor_id);
+      }
+    } else {
+      ids.push_back(req->motor_id);
+    }
+    // stop 永不被 gate 拒绝（安全路径）。
+    // 终止流语义（F32 真机回归教训）：单帧卸力在有插值流/refresh 保持时 ~5 ms 内
+    // 即被旧目标帧覆盖——必须先终止所有后续帧源（hold、插值流、refresh 保持），
+    // 再发卸力帧，使其成为总线上的最后一帧。
+    if (mit_hold_.active && (req->motor_id == 0 || mit_hold_.motor_id == req->motor_id)) {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "MIT hold cancelled by motor_stop (motor=%d)",
+        static_cast<int>(mit_hold_.motor_id));
+      mit_hold_.active = false;
+    }
+    {
+      std::lock_guard<std::mutex> lock(traj_mutex_);
+      if (has_active_traj_) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "Active trajectory stream terminated by motor_stop (motor=%d)",
+          static_cast<int>(req->motor_id));
+        has_active_traj_ = false;
+      }
+    }
+    smoothing_converged_.fill(false);
+    for (const uint8_t mid : ids) {
+      if (mid < last_commanded_mit_rad_.size()) {
+        // NaN 使 OnTxRefreshTimer 不再为该电机续发旧目标保持帧
+        last_commanded_mit_rad_[mid] = std::numeric_limits<double>::quiet_NaN();
+      }
+    }
+    size_t sent = 0;
+    for (const uint8_t mid : ids) {
+      // 卸力帧：kp=kd=t=0，p=最近 MIT 域反馈位置（无反馈用 0）
+      const double p = (mid < last_feedback_mit_rad_.size() &&
+        std::isfinite(last_feedback_mit_rad_[mid])) ?
+        last_feedback_mit_rad_[mid] : 0.0;
+      PublishFrame(ProtocolCodec::BuildMitControlFrame(
+        ArmMapper::ArmBus(), mid, static_cast<float>(p), 0.0f, 0.0f, 0.0f, 0.0f));
+      ++sent;
+    }
+    resp->success = true;
+    resp->message = "stopped (" + std::to_string(sent) + " limp frame(s))";
+  }
+
+  void HandleSetModeService(
+    const std::shared_ptr<MotorSetMode::Request> & req,
+    const std::shared_ptr<MotorSetMode::Response> & resp)
+  {
+    if (req->motor_id == 0 || req->motor_id > 127) {
+      resp->success = false;
+      resp->message = "motor_id must be 1..127";
+      return;
+    }
+    std::string why;
+    if (DebugOpBlockedByGate(&why)) {
+      resp->success = false;
+      resp->message = why;
+      return;
+    }
+    const std::string mode = ToLower(req->mode);
+    const CanBus bus = ArmMapper::ArmBus();
+    const uint8_t mid = req->motor_id;
+    // 0x7005 运行模式：0=MIT 1=位置 2=速度（与 sparkbot / EL05 固件一致；真机切换前对照电机手册）
+    std::ostringstream oss;
+    if (mode == "mit") {
+      PublishFrame(ProtocolCodec::BuildSetParamFrame(bus, mid, ProtocolCodec::kParamRunMode, 0.0f));
+      oss << "mode=mit motor=" << static_cast<int>(mid);
+    } else if (mode == "position") {
+      const double pos = Clamp(
+        static_cast<double>(req->position_rad), ProtocolCodec::kPMin, ProtocolCodec::kPMax);
+      const double limit_spd = Clamp(
+        static_cast<double>(req->limit_speed_rad_s), 0.0, ProtocolCodec::kVMax);
+      PublishFrame(ProtocolCodec::BuildSetParamFrame(bus, mid, ProtocolCodec::kParamRunMode, 1.0f));
+      PublishFrame(ProtocolCodec::BuildSetParamFrame(
+        bus, mid, ProtocolCodec::kParamLimitSpd, static_cast<float>(limit_spd)));
+      PublishFrame(ProtocolCodec::BuildSetParamFrame(
+        bus, mid, ProtocolCodec::kParamLocRef, static_cast<float>(pos)));
+      oss << "mode=position motor=" << static_cast<int>(mid)
+          << " pos=" << pos << " limit_spd=" << limit_spd;
+    } else if (mode == "speed") {
+      const double spd = Clamp(
+        static_cast<double>(req->speed_rad_s), ProtocolCodec::kVMin, ProtocolCodec::kVMax);
+      PublishFrame(ProtocolCodec::BuildSetParamFrame(bus, mid, ProtocolCodec::kParamRunMode, 2.0f));
+      PublishFrame(ProtocolCodec::BuildSetParamFrame(
+        bus, mid, ProtocolCodec::kParamSpdRef, static_cast<float>(spd)));
+      oss << "mode=speed motor=" << static_cast<int>(mid) << " speed=" << spd;
+    } else {
+      resp->success = false;
+      resp->message = "mode must be mit|position|speed";
+      return;
+    }
+    // 切模式会改变电机内部闭环，正在进行的 MIT 保持不再适用
+    if (mit_hold_.active && mit_hold_.motor_id == mid) {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "MIT hold cancelled by mode switch (motor=%d)",
+        static_cast<int>(mid));
+      mit_hold_.active = false;
+    }
+    resp->success = true;
+    resp->message = oss.str();
+  }
+
+  void HandleScanCollectService(
+    const std::shared_ptr<rmw_request_id_t> & header,
+    const std::shared_ptr<MotorScanCollect::Request> & req)
+  {
+    // DeferResponse 回调没有现成 Response 对象，由本服务创建并持有至窗口结束
+    auto resp = std::make_shared<MotorScanCollect::Response>();
+    if (scan_collect_.active) {
+      resp->success = false;
+      resp->message = "scan busy";
+      scan_collect_srv_->send_response(*header, *resp);
+      return;
+    }
+    uint8_t id_min = req->id_min == 0 ? 1 : req->id_min;
+    uint8_t id_max = req->id_max == 0 ? 127 : req->id_max;
+    if (id_max > 127) {
+      id_max = 127;
+    }
+    if (id_min > id_max) {
+      resp->success = false;
+      resp->message = "id_min > id_max";
+      scan_collect_srv_->send_response(*header, *resp);
+      return;
+    }
+    const CanBus bus = (req->bus == 1) ? CanBus::CAN1 : CanBus::CAN0;
+    const double timeout_s = req->timeout_s > 0.0 ? static_cast<double>(req->timeout_s) : 1.5;
+    uint32_t sent = 0;
+    for (uint32_t mid = id_min; mid <= id_max; ++mid) {
+      PublishFrame(ProtocolCodec::BuildGetDeviceIdProbeFrame(bus, static_cast<uint8_t>(mid)));
+      ++sent;
+    }
+    scan_collect_.active = true;
+    scan_collect_.deadline_ns = this->now().nanoseconds() + static_cast<int64_t>(timeout_s * 1e9);
+    scan_collect_.header = header;
+    scan_collect_.pending = resp;
+    scan_collect_.found.clear();
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Scan collect: %u probes [%d..%d] on %s, window %.2f s",
+      sent, static_cast<int>(id_min), static_cast<int>(id_max),
+      (bus == CanBus::CAN0 ? "can0" : "can1"), timeout_s);
+    // 响应在 OnDebugTickTimer 收集窗口结束后经 FinishScanCollect 显式发送
+  }
+
+  void FeedScanCollector(const DeviceIdResponse & rsp)
+  {
+    if (!scan_collect_.active) {
+      return;
+    }
+    scan_collect_.found[static_cast<uint8_t>(rsp.motor_id)] = rsp.mcu_uid;
+  }
+
+  void FinishScanCollect()
+  {
+    scan_collect_.active = false;
+    if (!scan_collect_.pending || !scan_collect_.header) {
+      scan_collect_.pending.reset();
+      scan_collect_.header.reset();
+      return;
+    }
+    auto resp = scan_collect_.pending;
+    auto header = scan_collect_.header;
+    scan_collect_.pending.reset();
+    scan_collect_.header.reset();
+    std::ostringstream oss;
+    oss << "found " << scan_collect_.found.size();
+    for (const auto & kv : scan_collect_.found) {
+      char uid[17];
+      FormatMcuUidHex(kv.second, uid, sizeof(uid));
+      oss << " id=" << static_cast<int>(kv.first) << " uid=" << uid;
+    }
+    resp->message = oss.str();
+    resp->ids.reserve(scan_collect_.found.size());
+    resp->uids.reserve(scan_collect_.found.size());
+    for (const auto & kv : scan_collect_.found) {
+      resp->ids.push_back(kv.first);
+      resp->uids.push_back(kv.second);
+    }
+    resp->success = true;
+    scan_collect_srv_->send_response(*header, *resp);
+    RCLCPP_INFO(this->get_logger(), "Scan collect: %s", resp->message.c_str());
+  }
+
   void PublishDeviceId(const DeviceIdResponse & rsp)
   {
     char uid[17];
@@ -1079,6 +1559,7 @@ private:
     if (device_id_pub_) {
       device_id_pub_->publish(out);
     }
+    FeedScanCollector(rsp);
     RCLCPP_INFO(this->get_logger(), "Device ID response: %s", out.data.c_str());
   }
 
@@ -1140,6 +1621,10 @@ private:
       last_feedback_effort_nm_[idx] = static_cast<double>(feedback->current_torque);
       last_feedback_mode_status_[idx] = static_cast<int>(feedback->mode_status);
       last_feedback_temp_c_[idx] = static_cast<double>(feedback->current_temp);
+      // MIT 域原始值（F32 调试遥测用，按 motor_id 存储；力矩同号无需另存）
+      last_feedback_mit_rad_[feedback->motor_id] = static_cast<double>(feedback->current_angle);
+      last_feedback_mit_vel_rad_s_[feedback->motor_id] = static_cast<double>(feedback->current_speed);
+      last_feedback_master_id_[feedback->motor_id] = feedback->master_id;
       {
         uint32_t mask = 0;
         if (feedback->error_status) {
@@ -1225,6 +1710,50 @@ private:
     if (publish_motor_diagnostics_ && diagnostics_pub_) {
       PublishMotorDiagnostics();
     }
+    if (publish_motor_states_ && motor_states_pub_) {
+      PublishMotorStates();
+    }
+  }
+
+  void PublishMotorStates()
+  {
+    if (!motor_states_pub_) {
+      return;
+    }
+    MotorStates out;
+    out.header.stamp = this->now();
+    out.states.reserve(DogMapper::kTemporaryIndexMap.size());
+    const int64_t now_ns = this->now().nanoseconds();
+    const int64_t fresh_ns = static_cast<int64_t>(feedback_fresh_timeout_s_ * 1e9);
+    for (const auto & route : DogMapper::kTemporaryIndexMap) {
+      const size_t idx = std::min(
+        route.trajectory_index, static_cast<size_t>(ArmMapper::kTemporaryIndexMap.size() - 1));
+      MotorState st;
+      st.motor_id = route.motor_id;
+      st.master_id = last_feedback_master_id_[route.motor_id];
+      st.position_rad = static_cast<float>(last_feedback_mit_rad_[route.motor_id]);
+      st.speed_rad_s = static_cast<float>(last_feedback_mit_vel_rad_s_[route.motor_id]);
+      st.torque_nm = static_cast<float>(last_feedback_effort_nm_[idx]);
+      st.temperature_c = static_cast<float>(last_feedback_temp_c_[idx]);
+      const int mode = last_feedback_mode_status_[idx];
+      st.mode_status = (mode >= 0) ? static_cast<uint8_t>(mode) : 0;
+      const uint32_t mask = last_feedback_fault_mask_[idx];
+      st.error_status = (mask & (1u << 0)) ? 1 : 0;
+      st.fault_mask = mask;
+      const int64_t stamp_ns = last_feedback_stamp_ns_[idx];
+      st.has_feedback = (stamp_ns > 0);
+      st.fresh = st.has_feedback && ((now_ns - stamp_ns) <= fresh_ns);
+      st.enabled = (mode >= 0) && IsEnabledMode(mode);
+      // 无反馈时发 0 而非 NaN：MQTT flatten 会字符串化，NaN 会污染 JSON
+      if (!st.has_feedback) {
+        st.position_rad = 0.0f;
+        st.speed_rad_s = 0.0f;
+        st.torque_nm = 0.0f;
+        st.temperature_c = 0.0f;
+      }
+      out.states.emplace_back(st);
+    }
+    motor_states_pub_->publish(out);
   }
 
   void PublishMotorDiagnostics()
@@ -1691,12 +2220,18 @@ private:
   double min_tx_refresh_interval_s_{0.02};
   bool enable_max_tx_rate_limit_{true};
   double max_tx_rate_per_motor_hz_{60.0};
+  bool publish_motor_states_{true};
+  std::string motor_states_topic_;
+  double max_hold_duration_s_{30.0};
   std::vector<double> joint_signs_;
   std::vector<double> joint_offsets_rad_;
   bool publish_mit_mapped_{false};
   std::string mit_mapped_topic_;
   rclcpp::Publisher<JointState>::SharedPtr mapped_positions_pub_;
   std::array<double, 256> last_commanded_mit_rad_{};
+  std::array<double, 256> last_feedback_mit_rad_{};
+  std::array<double, 256> last_feedback_mit_vel_rad_s_{};
+  std::array<uint8_t, 256> last_feedback_master_id_{};
   std::array<double, DogMapper::kTemporaryIndexMap.size()> last_feedback_champ_rad_{};
   std::array<double, DogMapper::kTemporaryIndexMap.size()> last_feedback_joint_vel_rad_s_{};
   std::array<double, DogMapper::kTemporaryIndexMap.size()> last_feedback_effort_nm_{};
@@ -1715,6 +2250,11 @@ private:
   std::array<int64_t, 12> first_command_time_by_joint_ns_{};
   std::array<int64_t, 12> last_command_time_by_joint_ns_{};
   std::array<int64_t, 12> last_tx_pub_stamp_ns_{};
+  // refresh 帧专用戳记（F32 回归修复）：与 traj/hold 的 last_tx_pub_stamp_ns_ 分离，
+  // 避免 refresh 每 20 ms 盖戳使 5 ms 限速检查误吞轨迹帧。
+  std::array<int64_t, 12> last_refresh_stamp_ns_{};
+  // 各关节最近一次平滑输出是否已收敛到限幅后目标（单点 jog 轨迹保持到收敛用）
+  std::array<bool, DogMapper::kTemporaryIndexMap.size()> smoothing_converged_{};
   size_t error_sample_count_{0};
   double error_abs_sum_{0.0};
   double error_abs_max_{0.0};
@@ -1779,6 +2319,13 @@ private:
   rclcpp::Service<SetCanId>::SharedPtr set_can_id_srv_;
   rclcpp::Service<SetMotorParam>::SharedPtr set_param_srv_;
   rclcpp::Service<MotorScan>::SharedPtr scan_srv_;
+  rclcpp::Service<MotorMitCommand>::SharedPtr mit_command_srv_;
+  rclcpp::Service<MotorStop>::SharedPtr motor_stop_srv_;
+  rclcpp::Service<MotorSetMode>::SharedPtr set_mode_srv_;
+  rclcpp::Service<MotorScanCollect>::SharedPtr scan_collect_srv_;
+  MitHoldState mit_hold_;
+  ScanCollectState scan_collect_;
+  rclcpp::Publisher<MotorStates>::SharedPtr motor_states_pub_;
   rclcpp::Publisher<UInt8MultiArray>::SharedPtr tx_pub_;
   rclcpp::Publisher<String>::SharedPtr feedback_pub_;
   rclcpp::Publisher<String>::SharedPtr device_id_pub_;
@@ -1788,6 +2335,7 @@ private:
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr on_set_params_handle_;
   rclcpp::TimerBase::SharedPtr feedback_js_timer_;
   rclcpp::TimerBase::SharedPtr tx_refresh_timer_;
+  rclcpp::TimerBase::SharedPtr debug_tick_timer_;
   rclcpp::TimerBase::SharedPtr tx_stats_timer_;
   rclcpp::TimerBase::SharedPtr traj_interp_timer_;
 };

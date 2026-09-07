@@ -3,7 +3,7 @@
 # 信号命名（points key）须与 deep-trace 设备 YAML points[].code 一致。
 
 mqtt:
-  host: 192.168.3.73
+  host: bluemac.local
   port: 1883
   topic_prefix: deep-trace/HOME-DEMO/RK3588
   client_id_prefix: a3-rk3588
@@ -78,11 +78,21 @@ topics:
     fields: [state, mode, message]
     names: [arm_state, arm_mode, arm_message]
 
-  # /a3/gripper_status（a3_gripper_controller 夹爪力控状态，需求 F26/F27）
-  # scalar 展平：力控状态/目标与实测力矩/位置/接触/错误码 -> grip_*（前端夹爪面板）
+  # /a3/gripper_status（a3_gripper_controller 夹爪力控状态，需求 F26/F27/F31）
+  # scalar 展平：力控状态/目标与实测力矩/目标与实测位置/接触/错误码 -> grip_*（前端夹爪面板）
   - topic: /a3/gripper_status
     node: gripper_controller_node
     type: a3_msgs/msg/GripperStatus
     flatten: scalar
-    fields: [state, mode, target_torque_nm, actual_torque_nm, position, contact, error_code]
-    names: [grip_state, grip_mode, grip_target_torque, grip_actual_torque, grip_position, grip_contact, grip_error]
+    fields: [state, mode, target_torque_nm, actual_torque_nm, position, target_position, contact, error_code]
+    names: [grip_state, grip_mode, grip_target_torque, grip_actual_torque, grip_position, grip_target_position, grip_contact, grip_error]
+
+  # /a3/motor/states（电机逐条状态，需求 F32）
+  # motor_state 展平：6 前缀 × L1..L7 = 42 个信号 -> temp/err/mode/online/mtq/mp_L{n}
+  - topic: /a3/motor/states
+    node: motor_protocol_node
+    type: a3_can_bridge/msg/MotorStates
+    qos: best_effort
+    flatten: motor_state
+    prefixes: [temp, err, mode, online, mtq, mp]
+    joints: [L1_joint, L2_joint, L3_joint, L4_joint, L5_joint, L6_joint, L7_joint]

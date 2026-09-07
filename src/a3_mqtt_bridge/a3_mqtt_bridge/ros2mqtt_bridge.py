@@ -15,6 +15,7 @@ See docs/edge/REQUIREMENTS.md F18 and config/bridge.yaml.
 
 import importlib
 import json
+import math
 import os
 import queue
 import socket
@@ -37,6 +38,16 @@ from a3_msgs.srv import (
     SetJointPositions,
 )
 
+# 电机调试（F32）：a3_can_bridge 服务
+from a3_can_bridge.srv import (
+    MotorCommand,
+    MotorMitCommand,
+    MotorScanCollect,
+    MotorSetMode,
+    MotorStop,
+    SetMotorParam,
+)
+
 
 def _load_msg_class(type_str: str):
     """'sensor_msgs/msg/JointState' -> the message class."""
@@ -49,8 +60,57 @@ def _short_joint(name: str) -> str:
     return name[:-6] if name.endswith("_joint") else name
 
 
+def _motor_id_arg(args: dict):
+    """motor 必须 int 1..127（F32 安全约束）；非法返回 None。"""
+    try:
+        motor = int(args.get("motor"))
+    except (TypeError, ValueError):
+        return None
+    return motor if 1 <= motor <= 127 else None
+
+
+def _motor_int_arg(args: dict, key: str, default: int) -> int:
+    try:
+        return int(args.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _motor_float_arg(args: dict, key: str, default: float) -> float:
+    try:
+        val = float(args.get(key, default))
+        return val if math.isfinite(val) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _motor_hex_arg(args: dict, key: str):
+    """index 支持十进制 int 或 '0x7005' 十六进制字符串；非法返回 None。"""
+    raw = args.get(key)
+    try:
+        if isinstance(raw, str) and raw.strip().lower().startswith("0x"):
+            return int(raw.strip(), 16)
+        val = int(raw)
+        return val if 0 <= val <= 0xFFFF else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _sanitize_nonfinite(obj):
+    """递归把 NaN/±Inf 浮点替换为 None，保证 allow_nan=False 序列化不抛（LL-011）。"""
+    if isinstance(obj, float):
+        if obj != obj or obj in (float("inf"), float("-inf")):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_nonfinite(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_nonfinite(v) for v in obj]
+    return obj
 
 
 def _first_ipv4() -> str:
@@ -215,7 +275,10 @@ class Ros2MqttBridge(Node):
                 self._mqtt_connected = False
                 self.get_logger().warning(f"mqtt connect failed rc={rc}")
 
-        def on_disconnect(client, userdata, rc, properties=None):
+        def on_disconnect(client, userdata, disconnect_flags=None, rc=None, properties=None):
+            # paho 2.x (CallbackAPIVersion.VERSION2) 调用签名为 5 参数：
+            # (client, userdata, disconnect_flags, reason_code, properties)；
+            # 旧版 1.x 为 3 参数。缺 disconnect_flags 会 TypeError 导致断线后无法重连。
             self._mqtt_connected = False
             self.get_logger().warning(f"mqtt disconnected rc={rc}")
 
@@ -239,7 +302,11 @@ class Ros2MqttBridge(Node):
         if not self._mqtt or not self._mqtt_connected:
             return False
         try:
-            body = payload if isinstance(payload, str) else json.dumps(payload)
+            # allow_nan=False 双保险：非有限浮点必须先清洗（LL-011）。漏网时抛异常落日志，
+            # 而不是把非法 JSON（"vel_L1": NaN）污染给所有订阅者（浏览器 JSON.parse 整包丢弃）。
+            body = payload if isinstance(payload, str) else json.dumps(
+                _sanitize_nonfinite(payload), allow_nan=False
+            )
             self._mqtt.publish(topic, body, qos=0, retain=retain)
             return True
         except Exception as exc:  # noqa: BLE001
@@ -277,7 +344,7 @@ class Ros2MqttBridge(Node):
             ),
             "enter_ai": (self.create_client(Trigger, "/a3/arm/enter_ai"), Trigger.Request),
             "exit_ai": (self.create_client(Trigger, "/a3/arm/exit_ai"), Trigger.Request),
-            # 夹爪力控（F26）：command 服务被 grasp/release/stop 三个 op 共用
+            # 夹爪（F26/F31）：command 服务被 grasp/release/stop/set_position 四个 op 共用
             "gripper_grasp": (
                 self.create_client(GripperCommand, "/a3/gripper/command"),
                 GripperCommand.Request,
@@ -290,9 +357,50 @@ class Ros2MqttBridge(Node):
                 self.create_client(GripperCommand, "/a3/gripper/command"),
                 GripperCommand.Request,
             ),
+            "gripper_set_position": (
+                self.create_client(GripperCommand, "/a3/gripper/command"),
+                GripperCommand.Request,
+            ),
             "gripper_set_max_torque": (
                 self.create_client(GripperSetConfig, "/a3/gripper/set_config"),
                 GripperSetConfig.Request,
+            ),
+            # 电机调试（F32）：扫描/使能/复位/设零/MIT/保持/停止/模式/参数
+            "motor_scan": (
+                self.create_client(MotorScanCollect, "/a3/motor/scan_and_collect"),
+                MotorScanCollect.Request,
+            ),
+            "motor_enable": (
+                self.create_client(MotorCommand, "/a3/motor/enable"),
+                MotorCommand.Request,
+            ),
+            "motor_reset": (
+                self.create_client(MotorCommand, "/a3/motor/reset"),
+                MotorCommand.Request,
+            ),
+            "motor_set_zero": (
+                self.create_client(MotorCommand, "/a3/motor/set_zero"),
+                MotorCommand.Request,
+            ),
+            "motor_mit": (
+                self.create_client(MotorMitCommand, "/a3/motor/mit_command"),
+                MotorMitCommand.Request,
+            ),
+            "motor_hold": (
+                self.create_client(MotorMitCommand, "/a3/motor/mit_command"),
+                MotorMitCommand.Request,
+            ),
+            "motor_stop": (
+                self.create_client(MotorStop, "/a3/motor/stop"),
+                MotorStop.Request,
+            ),
+            "motor_set_mode": (
+                self.create_client(MotorSetMode, "/a3/motor/set_mode"),
+                MotorSetMode.Request,
+            ),
+            "motor_set_param": (
+                self.create_client(SetMotorParam, "/a3/motor/set_param"),
+                SetMotorParam.Request,
             ),
         }
 
@@ -345,6 +453,18 @@ class Ros2MqttBridge(Node):
             req.mode = "release"
         elif op == "gripper_stop":
             req.mode = "stop"
+        elif op == "gripper_set_position":
+            # 位置模式直驱（F31）：0..1 归一化开合，越界/非有限明确拒绝而非 clamp（可测）
+            try:
+                p = float(args.get("position"))
+            except (TypeError, ValueError):
+                self._publish_cmd_result(op, False, "position must be in [0, 1]")
+                return
+            if not math.isfinite(p) or not 0.0 <= p <= 1.0:
+                self._publish_cmd_result(op, False, "position must be in [0, 1]")
+                return
+            req.mode = "position"
+            req.position = p
         elif op == "gripper_set_max_torque":
             req.key = "max_torque_nm"
             try:
@@ -366,6 +486,63 @@ class Ros2MqttBridge(Node):
                 req.duration = float(args.get("duration") or 0.3)
             except (TypeError, ValueError):
                 req.duration = 0.3
+        elif op == "motor_scan":
+            req.id_min = _motor_int_arg(args, "id_min", 1)
+            req.id_max = _motor_int_arg(args, "id_max", 127)
+            req.bus = _motor_int_arg(args, "bus", 1)
+            req.timeout_s = _motor_float_arg(args, "timeout_s", 1.5)
+        elif op in ("motor_enable", "motor_reset", "motor_set_zero"):
+            motor = _motor_id_arg(args)
+            if motor is None:
+                self._publish_cmd_result(op, False, "motor must be int in [1, 127]")
+                return
+            req.motor_id = motor
+            req.command = {"motor_enable": 1, "motor_reset": 2, "motor_set_zero": 3}[op]
+        elif op in ("motor_mit", "motor_hold"):
+            motor = _motor_id_arg(args)
+            if motor is None:
+                self._publish_cmd_result(op, False, "motor must be int in [1, 127]")
+                return
+            req.motor_id = motor
+            req.position_rad = _motor_float_arg(args, "p", 0.0)
+            req.velocity_rad_s = _motor_float_arg(args, "v", 0.0)
+            req.kp = _motor_float_arg(args, "kp", 20.0)
+            req.kd = _motor_float_arg(args, "kd", 1.0)
+            req.torque_ff_nm = _motor_float_arg(args, "t", 0.0)
+            if op == "motor_hold":
+                req.hold_duration_s = _motor_float_arg(args, "duration_s", 0.0)
+                req.hold_hz = _motor_float_arg(args, "hz", 0.0)
+        elif op == "motor_stop":
+            req.motor_id = _motor_int_arg(args, "motor", 0)
+            if not 0 <= req.motor_id <= 127:
+                self._publish_cmd_result(op, False, "motor must be int in [0, 127]")
+                return
+        elif op == "motor_set_mode":
+            motor = _motor_id_arg(args)
+            if motor is None:
+                self._publish_cmd_result(op, False, "motor must be int in [1, 127]")
+                return
+            mode = str(args.get("mode") or "").strip().lower()
+            if mode not in ("mit", "position", "speed"):
+                self._publish_cmd_result(op, False, "mode must be mit|position|speed")
+                return
+            req.motor_id = motor
+            req.mode = mode
+            req.position_rad = _motor_float_arg(args, "position", 0.0)
+            req.limit_speed_rad_s = _motor_float_arg(args, "limit_spd", 5.0)
+            req.speed_rad_s = _motor_float_arg(args, "speed", 0.0)
+        elif op == "motor_set_param":
+            motor = _motor_id_arg(args)
+            if motor is None:
+                self._publish_cmd_result(op, False, "motor must be int in [1, 127]")
+                return
+            index = _motor_hex_arg(args, "index")
+            if index is None:
+                self._publish_cmd_result(op, False, "index must be int or hex string")
+                return
+            req.motor_id = motor
+            req.param_id = index
+            req.value = _motor_float_arg(args, "value", 0.0)
         if not client.service_is_ready():
             self._publish_cmd_result(op, False, f"{op} service unavailable")
             return
@@ -382,6 +559,15 @@ class Ros2MqttBridge(Node):
             resp = future.result()
             ok = bool(resp.success)
             message = resp.message
+            if op == "motor_scan" and ok:
+                # 扫描结果重编码为 JSON 电机列表（uid 大端十六进制串）
+                motors = []
+                ids = getattr(resp, "ids", [])
+                uids = getattr(resp, "uids", [])
+                for i, mid in enumerate(ids):
+                    uid = uids[i] if i < len(uids) else 0
+                    motors.append({"id": int(mid), "uid": f"{uid:016X}"})
+                message = json.dumps({"motors": motors}, allow_nan=False)
         except Exception as exc:  # noqa: BLE001
             message = str(exc)
         self._publish_cmd_result(op, ok, message)
@@ -407,6 +593,15 @@ class Ros2MqttBridge(Node):
     def _signals_for(self, rule) -> list[str]:
         if rule.get("flatten") == "joint_state":
             prefixes = rule.get("prefixes") or rule.get("fields", [])
+            joints = rule.get("joints") or []
+            shorts = [_short_joint(j) for j in joints]
+            out = []
+            for p in prefixes:
+                out.extend(f"{p}_{s}" for s in shorts)
+            return out
+        if rule.get("flatten") == "motor_state":
+            # F32：6 前缀 × L1..L7 = 42 个信号（key 与 _make_callback 一致）
+            prefixes = rule.get("prefixes") or []
             joints = rule.get("joints") or []
             shorts = [_short_joint(j) for j in joints]
             out = []
@@ -504,6 +699,30 @@ class Ros2MqttBridge(Node):
                         if idx >= len(arr):
                             break
                         points[f"{prefix}_{short}"] = arr[idx]
+                self._update_telemetry(points)
+
+            return cb
+
+        if flatten == "motor_state":
+            # F32：/a3/motor/states 逐电机展平。points key = prefix_L{n}，n=motor_id（1..7）
+            prefixes = rule.get("prefixes") or []
+            sig_map = {
+                "temp": lambda st: float(st.temperature_c),
+                "err": lambda st: int(st.fault_mask),
+                "mode": lambda st: int(st.mode_status),
+                "online": lambda st: 1 if st.fresh else 0,
+                "mtq": lambda st: float(st.torque_nm),
+                "mp": lambda st: float(st.position_rad),
+            }
+
+            def cb(msg):
+                points = {}
+                for st in getattr(msg, "states", []):
+                    n = int(st.motor_id)
+                    for p in prefixes:
+                        fn = sig_map.get(p)
+                        if fn is not None:
+                            points[f"{p}_L{n}"] = fn(st)
                 self._update_telemetry(points)
 
             return cb

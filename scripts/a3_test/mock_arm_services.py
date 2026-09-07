@@ -66,8 +66,8 @@ class MockArmController(Node):
         def gripper_cmd_cb(req, resp):
             self.calls.append("gripper_cmd:%s" % req.mode)
             resp.success = True
-            resp.message = "mock gripper mode=%s tau=%.2f preset=%s" % (
-                req.mode, req.torque_nm, req.preset)
+            resp.message = "mock gripper mode=%s tau=%.2f preset=%s pos=%.2f" % (
+                req.mode, req.torque_nm, req.preset, req.position)
             self.get_logger().info("call gripper command mode=%s" % req.mode)
             return resp
 

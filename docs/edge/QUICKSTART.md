@@ -103,6 +103,7 @@
     ./scripts/a3_test/a3_test.sh servo      # 仿真：MoveIt Servo 六方向直线 jog
     ./scripts/a3_test/a3_test.sh gripper    # 夹爪力控闭环（默认 sim 无硬件；hw 见第 14 节）
     ./scripts/a3_test/a3_test.sh web        # 启动 deep-trace 网页，人工确认曲线/3D（操作清单）
+    ./scripts/a3_test/a3_test.sh force_web  # web 路径力控阶梯验收 0.3→0.5→0（真机+泡棉+生产 MQTT 桥，F34）
     ./scripts/a3_test/a3_test.sh all        # 顺序跑 env→gripper→hw→telemetry→mqtt_cmd→servo
     ```
     - 真机直连底层 `/a3/motor/*`（`motor_id:=7`），**不**走 `/a3/arm/init`（需 7 电机齐全）；脚本以 `use_power_sequence:=false` 起 can_bridge。
@@ -124,6 +125,8 @@
 
 14. **夹爪力控（F24–F28，L7 自适应抓取）：**
     夹爪（第 7 电机）支持「PI 力外环 + 电机位置内环」：读 `eff_L7` 反馈，力不足继续闭合、超力回退，自适应抓取软硬物体；握力可经配置文件或 web 设定，固件 `0x700B` + 软件 clamp 双保险限力。
+
+    **L7 零点标定（2026-09-06 台架实测）：** 全开位（丝杠硬限位）设零，闭合为正，实测行程 1.7945 rad。软件约定 `gripper_config.yaml` open=0 / close=1.79，URDF L7 限位 `[0, 1.8]`、轴 `0 0 -1`（正转=闭合，与 web 3D 一致），`control_gains.yaml` L7 joint_cmd `[0, 1.8]`。设零：电机通电后 `ros2 service call /a3/motor/set_zero a3_can_bridge/srv/MotorCommand "{motor_id: 7, command: 3}"`。**断电与多圈计数**：短时断电（分钟级 24V 断电重上）实测多圈计数保留（2026-09-06 事故后重启，硬止位读数 0.0056 rad 未漂）；但更早一次长时间断电曾丢计数（读数跳变）。机制不明，**重上电后先读硬止位读数校验零点**：与标定值（全开≈0）偏差大才 set_zero，不要盲信也不盲设。
     ```bash
     # (a) 无硬件闭环回归（任意机器可跑，自起节点 + 假「电机+物体」植物）：
     ./scripts/a3_test/a3_test.sh gripper          # 12 项 PASS：配置校验/开合/软硬物体收敛±10%/超力/看门狗
@@ -135,16 +138,45 @@
     ros2 service call /a3/gripper/set_config a3_msgs/srv/GripperSetConfig "{key: max_torque_nm, value: 1.5}"
     ros2 service call /a3/gripper/command a3_msgs/srv/GripperCommand "{mode: force, preset: medium}"
     ros2 service call /a3/gripper/command a3_msgs/srv/GripperCommand "{mode: release}"
-    ros2 topic echo /a3/gripper_status           # state/mode/target/actual_torque/contact/error_code
+    ros2 topic echo /a3/gripper_status           # state/mode/target+actual_torque/target+actual position/contact/error_code
     ros2 topic pub --once /a3/gripper_cmd std_msgs/msg/Float32 "{data: 1.0}"   # POSITION 开合 0..1
 
-    # (d) web 下发（经 a3_mqtt_bridge 白名单 4 op）：
+    # (d) web 下发（经 a3_mqtt_bridge 白名单 5 op，F31 起）：
     #   {"op":"gripper_grasp","args":{"preset":"medium"}}  或  {"op":"gripper_grasp","args":{"torque":0.6}}
     #   {"op":"gripper_release"}  {"op":"gripper_stop"}  {"op":"gripper_set_max_torque","args":{"value":1.2}}
+    #   {"op":"gripper_set_position","args":{"position":0.5}}   # 0..1，0 闭 1 开（位置模式直驱，F31）
     ```
     - 参数：`a3_gripper_controller/config/gripper_config.yaml`（最大握力 `max_grasp_torque_nm`、弱/中/强档位、PI、接触阈值、超时/看门狗）；下发的最大握力落盘 `~/.a3/gripper/gripper_overrides.yaml`，重启保留，越界（超硬上限/±6 Nm）拒绝。
+    - 遥测：`grip_target_position` 为最近 position/release 命令目标（未命令前跟随实测），web 位置曲线用它与 `grip_position` 同轴对比。桥接层对非有限浮点（NaN/±Inf）统一清洗为 null 并以 `allow_nan=False` 兜底，telemetry JSON 恒合法（见 [LL-011](../../lessons_learned/LL-011-nan-poisons-json-telemetry.md)）。
     - 真机：`A3_GRIPPER_TEST_MODE=hw ./scripts/a3_test/a3_test.sh gripper` 做服务/配置/开合安全检查；力控阶跃需人工在夹爪放置海绵（软）/木块（硬阻挡），观察 `grip_actual_torque` 收敛到目标 ±10% 且 `GRASPED`，握力不超硬上限。
     - 力控与臂运动互锁：gate 关闭或臂处于 `TRAJ_RUNNING`/`SERVO`/`ZERO_TORQUE`/`GRAVITY_COMP` 时拒绝力控；安全条款见 [shared/SAFETY.md](../shared/SAFETY.md)「夹爪力控安全」。
+
+15. **单电机调试页（F32，跨仓 deep-trace）：**
+    web 端 `motor_protocol_node` 卡片 → 「调试页 →」进入电机详情页：CAN 扫描选择电机、状态卡片（温度/模式/故障位）、使能/复位/设零、MIT+位置+速度三模式、MIT 单发/定时保持、话题信号下拉 + 实时曲线。
+    ```bash
+    # (a) 仿真闭环（任意机器可跑；sim 不实现 gate 互锁，见 TOPIC_CONTRACT）：
+    ros2 launch a3_bringup edge_web_sim.launch.py use_gripper:=true
+    ros2 topic echo /a3/motor/states --field states   # 7 条，fresh=true
+
+    # (b) 无 CAN 单节点（真机台架 use_power_sequence:=false）：
+    ros2 launch a3_can_bridge can_bridge.launch.py use_power_sequence:=false require_gate:=false
+    ros2 topic echo /a3/motor/states --field states   # 7 条 fresh=false（无反馈发 0 而非 NaN）
+    ros2 service call /a3/motor/scan_and_collect a3_can_bridge/srv/MotorScanCollect \
+      "{id_min: 1, id_max: 127, bus: 1, timeout_s: 1.5}"
+    ros2 service call /a3/motor/mit_command a3_can_bridge/srv/MotorMitCommand \
+      "{motor_id: 7, position_rad: 0.2, velocity_rad_s: 0.0, kp: 20.0, kd: 1.0, torque_ff_nm: 0.0, hold_duration_s: 0.0, hold_hz: 0.0}"
+    ros2 service call /a3/motor/mit_command a3_can_bridge/srv/MotorMitCommand \
+      "{motor_id: 7, position_rad: 0.2, velocity_rad_s: 0.0, kp: 20.0, kd: 1.0, torque_ff_nm: 0.0, hold_duration_s: 2.0, hold_hz: 20.0}"
+    ros2 service call /a3/motor/stop a3_can_bridge/srv/MotorStop "{motor_id: 7}"
+
+    # (c) 回归测试（纯 MQTT 驱动 sim 闭环，9 个 motor op 全链路）：
+    ./scripts/a3_test/a3_test.sh motor_debug
+    ```
+    - MIT 保持语义：`hold_duration_s<=0` 单发一帧；`>0` 由 `motor_protocol_node` 内部定时发帧（前端不做流式发送），到时长自动停，`/a3/motor/stop` 手动取消；`gate_open` 由关→开瞬间自动取消。
+    - 互锁：真机 `gate_open=true` 时使能/复位/设零/MIT/模式/参数写入被拒（拒绝文案经 `cmd_result` 回传），扫描/读类/停止不受限；仿真有意不实现（sim gate 恒 true）。
+    - 前端（外部仓 `/home/cat/deep-trace`）：节点卡片进入 `rk3588_motor` 模块；`motor_scan` 回执 message 为 JSON 电机列表（`{"motors":[{"id","uid"}]}`）；状态与曲线来自 `temp/err/mode/online/mtq/mp_L{n}` 42 个遥测点（改 YAML 后须 `load_device_config`）。
+    - 真机台架：单电机 CAN_ID=7 空载，扫描见真实 UID，MIT hold 用小角度 ±0.3 rad、2 s，结束自动停 + `motor_stop` 卸力；整机 gate 测试见 [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)「互锁」节。
+    - 安全条款见 [shared/SAFETY.md](../shared/SAFETY.md)「单电机调试（MOTOR_DEBUG）」；契约细节（服务/op 表/42 遥测点）见 [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)。
 
 ## 相关文档
 

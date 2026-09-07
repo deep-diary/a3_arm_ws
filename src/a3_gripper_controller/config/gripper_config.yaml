@@ -45,14 +45,28 @@
     position_mode_kd: 2.0
 
     # ===== 行程 / 位置限幅 =====
-    gripper_open_rad: 1.5708
-    gripper_close_rad: 0.0
+    # 2026-09-06 标定：全开位（丝杠硬限位）设零，闭合为正，实测行程 1.7945 rad。
+    gripper_open_rad: 0.0
+    gripper_close_rad: 1.79
     release_position: 1.0   # release 模式张开到的归一化位置（0..1）
+
+    # ===== 释放柔顺（F33）=====
+    # 释放轨迹时长与专用位置增益：低 kp 减小冲击、较高 kd 增加阻尼
+    # （真机实测 0.8s + kp=80/kd=2 过快）；释放完成 +0.3s 后自动恢复 position_mode_kp/kd
+    release_duration_s: 1.5
+    release_kp: 30.0
+    release_kd: 5.0
 
     # ===== 接触判定 / 超时 / 看门狗 =====
     force_band_ratio: 0.10  # 进入目标带 ±10%
     settle_s: 0.3           # 力矩在带内维持该时长 → GRASPED
-    grasp_timeout_s: 5.0
+    # 默认抓取超时（web 力控按键不传 timeout 时落到此值）：软泡棉接近 ~4s + PI 压缩，
+    # 5s 真机上不够（LL-013），15s 留有裕量；命令可传 timeout_s 覆盖
+    grasp_timeout_s: 15.0
+    # 接触判定位移门：从全开硬止位（gripper_open_rad）算起的位移 ≥ 该值后，力矩阈值判定才生效。
+    # 0 位硬止位静置力矩≈0.16 Nm ≥ 接触阈值会误判"已接触"跳过快速接近段（LL-013）；
+    # 基准取全开位而非力控起点，否则已夹持中重发力控命令会盲跑快速接近段压穿物体（F34 实测超硬限）
+    contact_min_travel_rad: 0.1
     feedback_fresh_timeout_s: 0.30
     # 实测力矩瞬时超过 max_grasp_torque_nm * 该系数 → 超硬限 FAULT
     overtorque_ratio: 1.0

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # A3 机械臂单电机分层回归测试套件（F22）统一入口。
-# 用法: ./a3_test.sh {env|hw|telemetry|mqtt_cmd|servo|gripper|web|all}
+# 用法: ./a3_test.sh {env|hw|telemetry|mqtt_cmd|servo|gripper|motor_debug|web|force_web|all}
 #
 # 真机阶段默认 can1 / CAN_ID=7 / L7_joint，空载、24V 锂电池供电。
 # 所有真机运动经 safety_limits.py 限幅，结束自动失能。
@@ -8,7 +8,7 @@ set -u
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="$(cd "$DIR/../.." && pwd)"
-MQTT_HOST="${A3_MQTT_HOST:-192.168.3.73}"
+MQTT_HOST="${A3_MQTT_HOST:-bluemac.local}"
 
 # ---- ROS 环境 ----
 # shellcheck disable=SC1091
@@ -157,6 +157,26 @@ stage_gripper() {
   fi
 }
 
+# ---- 阶段六：单电机调试下行（F32）----
+# sim 闭环（sim_motor_node 提供 /a3/motor/* 服务与 /a3/motor/states）+ a3_mqtt_bridge，
+# 纯 MQTT 驱动 9 个电机 op 全链路；独立 ROS_DOMAIN_ID=44 不碰 CAN。
+# sim 有意不实现 gate 互锁（真机才验证，见 docs/shared/TOPIC_CONTRACT.md）。
+stage_motor_debug() {
+  log "阶段六 单电机调试下行 (sim 闭环 + a3_mqtt_bridge, ROS_DOMAIN_ID=44)"
+  export ROS_DOMAIN_ID=44
+  bg env ROS_DOMAIN_ID=44 ros2 run a3_bringup sim_motor_node
+  bg env ROS_DOMAIN_ID=44 ros2 run a3_bringup sim_power_sequence_node
+  bg env ROS_DOMAIN_ID=44 ros2 launch a3_mqtt_bridge bridge.launch.py
+  if ! wait_service "/a3/motor/mit_command" 30; then
+    echo "[FAIL] sim_motor_node 未就绪"; unset ROS_DOMAIN_ID; return 1
+  fi
+  sleep 4
+  PYTHONNOUSERSITE= python3 "$DIR/motor_debug_test.py"
+  local rc=$?
+  unset ROS_DOMAIN_ID
+  return $rc
+}
+
 # ---- 网页人工确认 ----
 stage_web() {
   log "网页人工确认：启动真机遥测栈，保持运行"
@@ -188,6 +208,14 @@ EOF
   wait
 }
 
+# ---- 阶段七：web 路径力控阶梯验收（真机 + 生产 MQTT 桥，F34）----
+# 不启动任何节点：走已在运行的生产栈（can_bridge + gripper_controller + mqtt_bridge）。
+# 前置：泡棉在夹爪中、电机使能、gate 关。不进 `all`（需要人工放置泡棉/在线监督）。
+stage_force_web() {
+  log "阶段七 web 路径力控阶梯验收 0.3 -> 0.5 -> 0 (生产 MQTT 桥, F34)"
+  PYTHONNOUSERSITE= python3 "$DIR/mqtt_force_ladder_test.py"
+}
+
 case "${1:-}" in
   env)       stage_env ;;
   hw)        stage_hw ;;
@@ -195,18 +223,21 @@ case "${1:-}" in
   mqtt_cmd)  stage_mqtt_cmd ;;
   servo)     stage_servo ;;
   gripper)   stage_gripper ;;
+  motor_debug) stage_motor_debug ;;
   web)       stage_web ;;
+  force_web) stage_force_web ;;
   all)
     stage_env || exit 1
-    stage_gripper;   r0=$?; cleanup_stage
-    stage_hw;        r1=$?; cleanup_stage
-    stage_telemetry; r2=$?; cleanup_stage
-    stage_mqtt_cmd;  r3=$?; cleanup_stage
-    stage_servo;     r4=$?; cleanup_stage
-    log "汇总: gripper=$r0 hw=$r1 telemetry=$r2 mqtt_cmd=$r3 servo=$r4 (0=PASS)"
-    [ $((r0+r1+r2+r3+r4)) -eq 0 ] ;;
+    stage_gripper;    r0=$?; cleanup_stage
+    stage_hw;         r1=$?; cleanup_stage
+    stage_telemetry;  r2=$?; cleanup_stage
+    stage_mqtt_cmd;   r3=$?; cleanup_stage
+    stage_servo;      r4=$?; cleanup_stage
+    stage_motor_debug; r5=$?; cleanup_stage
+    log "汇总: gripper=$r0 hw=$r1 telemetry=$r2 mqtt_cmd=$r3 servo=$r4 motor_debug=$r5 (0=PASS)"
+    [ $((r0+r1+r2+r3+r4+r5)) -eq 0 ] ;;
   *)
     grep '^#' "$0" | head -n 6
-    echo "用法: $0 {env|hw|telemetry|mqtt_cmd|servo|gripper|web|all}"
+    echo "用法: $0 {env|hw|telemetry|mqtt_cmd|servo|gripper|motor_debug|web|force_web|all}"
     exit 2 ;;
 esac

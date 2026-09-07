@@ -1,0 +1,9 @@
+# 切换电机运行模式（需求 F32）：写 0x7005 运行模式 + 按模式附加参数
+uint8  motor_id            # 1..127
+string mode                # "mit" | "position" | "speed"
+float32 position_rad       # mode=position 时写入 0x7016 目标位置（默认 0）
+float32 limit_speed_rad_s  # mode=position 时写入 0x7017 限速（默认 5.0）
+float32 speed_rad_s        # mode=speed 时写入 0x700A 目标速度（默认 0）
+---
+bool success
+string message             # 例如 "mode=mit motor=1" / "mode=position motor=1 pos=0.5 limit_spd=2.0"

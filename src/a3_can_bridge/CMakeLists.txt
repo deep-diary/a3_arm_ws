@@ -22,10 +22,21 @@ set(srv_files
   "srv/SetCanId.srv"
   "srv/SetMotorParam.srv"
   "srv/MotorScan.srv"
+  "srv/MotorMitCommand.srv"
+  "srv/MotorStop.srv"
+  "srv/MotorSetMode.srv"
+  "srv/MotorScanCollect.srv"
+)
+
+set(msg_files
+  "msg/MotorState.msg"
+  "msg/MotorStates.msg"
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   ${srv_files}
+  ${msg_files}
+  DEPENDENCIES std_msgs
 )
 
 add_library(socketcan_driver

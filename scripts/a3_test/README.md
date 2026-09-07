@@ -7,7 +7,7 @@
 
 - can1 UP（1Mbps，`can-up.service`）；电机 CAN_ID=7 接 can1，空载。
 - ROS 2 Humble 已 source；`a3_can_bridge / a3_mqtt_bridge / a3_bringup / a3_msgs` 已构建。
-- EMQX `192.168.3.73` 的 1883（MQTT/TCP）可达；`paho-mqtt` 已装（`~/.local`，脚本自动处理 `PYTHONNOUSERSITE`）。
+- EMQX（默认 `bluemac.local`，可用 `A3_MQTT_HOST` 覆盖）的 1883（MQTT/TCP）可达；`paho-mqtt` 已装（`~/.local`，脚本自动处理 `PYTHONNOUSERSITE`）。
 - MoveIt Servo 仿真阶段需要 `ros-humble-moveit-servo`。
 
 ## 用法
@@ -19,8 +19,10 @@
 ./scripts/a3_test/a3_test.sh mqtt_cmd   # 阶段二 MQTT 下行：mock 编排层，10 op 全链路
 ./scripts/a3_test/a3_test.sh servo      # 阶段四 仿真：MoveIt Servo 六方向直线 jog
 ./scripts/a3_test/a3_test.sh gripper    # 阶段五 夹爪力控（默认 sim 闭环，无硬件可跑）
+./scripts/a3_test/a3_test.sh motor_debug # 阶段六 单电机调试下行（sim 闭环，9 个电机 op，无硬件可跑）
 ./scripts/a3_test/a3_test.sh web        # 网页人工确认（保持遥测栈运行，打印操作清单）
-./scripts/a3_test/a3_test.sh all        # env→gripper→hw→telemetry→mqtt_cmd→servo
+./scripts/a3_test/a3_test.sh force_web  # 阶段七 web 路径力控阶梯验收 0.3→0.5→0（真机，见下）
+./scripts/a3_test/a3_test.sh all        # env→gripper→hw→telemetry→mqtt_cmd→servo→motor_debug
 ```
 
 夹爪力控（F28）两种模式：
@@ -32,6 +34,15 @@
 
 每阶段打印 `[PASS]/[FAIL]` 与汇总；非零退出码表示有失败项。
 
+web 路径力控阶梯验收（F34，`force_web`）：
+- 纯 MQTT 客户端（模拟 web 按键），不启动任何节点，走**已在运行的生产栈**（can_bridge +
+  gripper_controller + a3_mqtt_bridge），broker `bluemac.local:1883`（可用 `A3_MQTT_HOST` 覆盖）。
+- 前置：泡棉（软物体）已放在夹爪中、电机使能、gate 关（force 互锁不拦截）。
+- 流程：`gripper_release` → `gripper_grasp {torque:0.3, timeout:20}` → `{torque:0.5, timeout:20}`
+  → `{torque:0}`（F33 硬逻辑直接全开）；断言两步 GRASPED 且实际力矩在目标 ±15% 内、
+  采样记录 grip_target_position 逐步变大趋势、force 0 后 3s 内 grip_position→1.0（0 位）且无 FAULT。
+- 不进 `all`（需人工放泡棉 + 在线监督）；失败时兜底发 `gripper_release` 松开。
+
 ## 分层说明（为什么这样测）
 
 | 阶段 | 链路 | 为什么这样设计 |
@@ -40,6 +51,7 @@
 | telemetry | 真机 `/joint_states` → mqtt_bridge → EMQX | 验证真实电机角度经 MQTT 上报为 `pos_L7` |
 | mqtt_cmd | EMQX `cmd` → mqtt_bridge → **mock** `/a3/arm/*` | 网页下行的 10 个 op 映射到编排层服务；用 mock 做确定性断言（路由+参数+`cmd_result`），不依赖 7 电机 |
 | servo | 仿真 `servo.launch.py`（sim_executor 闭环，不碰 CAN） | Servo 笛卡尔 jog 作用于 L1–L6（arm 组），ID=7 是夹爪不在 arm 组；且真机有 SERVO 模式互锁（CONTROL_ROADMAP 待办） |
+| motor_debug | EMQX `cmd` → mqtt_bridge → sim `/a3/motor/*`（独立 `ROS_DOMAIN_ID=44`） | 9 个电机调试 op 全链路（扫描 JSON 列表/MIT 单发与保持/停止/模式/参数 + 非法拒绝），hold 期间断言 `mp_L1` 收敛与 `temp/mode/online` 遥测；sim 有意不实现 gate 互锁（真机才验证） |
 | web | 真机遥测 + deep-trace 网页 | 前端 RK3588 页只读、无控制按钮；控制链路用 mqtt_cmd 阶段的 MQTT CLI 等价验证，网页确认曲线/3D 渲染 |
 
 ## 安全
@@ -59,3 +71,5 @@
 - `mqtt_telemetry_test.py` — 阶段三 MQTT 上行
 - `mock_arm_services.py` / `mqtt_cmd_test.py` — 阶段二 MQTT 下行
 - `servo_sim_test.py` — 阶段四 Servo 仿真
+- `motor_debug_test.py` — 阶段六 单电机调试下行（F32）
+- `mqtt_force_ladder_test.py` — 阶段七 web 路径力控阶梯验收（F34，纯 paho，走生产 MQTT 桥）
