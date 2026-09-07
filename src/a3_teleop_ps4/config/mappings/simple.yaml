@@ -26,13 +26,13 @@ axes:
   left_y:
     fn: servo_lin_x
     kind: analog_n11
-  # L2 → 第 6 关节 L6；R2 → 第 7 关节 L7（夹爪）
+  # L2 → 第 6 关节 L6；R2 → 夹爪力控（F36：松开全开，按过 0.2 后 0.2..1 → 0.1..1.0 Nm）
   l2:
     fn: set_joint_L6
     kind: analog_01
     source: trigger
   r2:
-    fn: set_joint_L7
+    fn: gripper_force
     kind: analog_01
     source: trigger
 

@@ -15,8 +15,14 @@ import threading
 from typing import Optional
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+
+try:  # Humble: RCLError 只在私有编译模块暴露（SIGINT 竞态兜底，见 LL-016）
+    from rclpy._rclpy_pybind11 import RCLError
+except ImportError:  # pragma: no cover
+    RCLError = None
 from builtin_interfaces.msg import Duration
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float32, Bool, String
@@ -63,14 +69,14 @@ _DEFAULTS = {
     "gripper_motor_id": 7,
     "gripper_joint_index": 6,
     "torque_limit_param_id": int(PARAM_TORQUE_LIMIT),
-    "max_grasp_torque_nm": 2.0,
+    "max_grasp_torque_nm": 1.0,
     "default_target_torque_nm": 0.6,
     "torque_preset_weak_nm": 0.3,
     "torque_preset_medium_nm": 0.6,
     "torque_preset_strong_nm": 1.0,
     "gripper_torque_sign": 1.0,
-    "force_kp": 0.5,
-    "force_ki": 0.6,
+    "force_kp": 0.25,
+    "force_ki": 0.3,
     "integral_limit_nm": 0.5,
     "max_close_speed_rad_s": 0.3,
     "max_open_speed_rad_s": 0.6,
@@ -89,15 +95,15 @@ _DEFAULTS = {
     "release_duration_s": 1.5,
     "release_kp": 30.0,
     "release_kd": 5.0,
-    "gripper_open_rad": 1.5708,
-    "gripper_close_rad": 0.0,
+    "gripper_open_rad": 0.0,
+    "gripper_close_rad": 1.79,
     "release_position": 1.0,
     "force_band_ratio": 0.10,
     "settle_s": 0.3,
     # 默认抓取超时（web 力控按键不传 timeout 时落到此值，LL-013）
     "grasp_timeout_s": 15.0,
     "feedback_fresh_timeout_s": 0.30,
-    "overtorque_ratio": 1.0,
+    "overtorque_ratio": 1.5,
     "status_hz": 10.0,
     "force_status_hz": 50.0,
     "require_gate": False,
@@ -514,7 +520,8 @@ class GripperControllerNode(Node):
         self._target_position = norm_v
         self._target_pos_commanded = True
         self._contact = False
-        if self._error_code in (ERR_GRASP_TIMEOUT, ERR_WATCHDOG, ERR_OVERTORQUE):
+        # 任何成功运动命令都清零瞬时错误（含配置越界 ERR_CONFIG），避免错误码永久锁存
+        if self._error_code in (ERR_GRASP_TIMEOUT, ERR_WATCHDOG, ERR_OVERTORQUE, ERR_CONFIG):
             self._error_code = ERR_NONE
         q = self._q_close + norm_v * (self._q_open - self._q_close)
         self._q_cmd = q
@@ -552,7 +559,8 @@ class GripperControllerNode(Node):
         self._mode = "release"
         self._target_position = self._release_pos
         self._target_pos_commanded = True
-        if self._error_code in (ERR_GRASP_TIMEOUT, ERR_WATCHDOG, ERR_OVERTORQUE):
+        # 任何成功运动命令都清零瞬时错误（含配置越界 ERR_CONFIG），避免错误码永久锁存
+        if self._error_code in (ERR_GRASP_TIMEOUT, ERR_WATCHDOG, ERR_OVERTORQUE, ERR_CONFIG):
             self._error_code = ERR_NONE
         q = self._q_close + self._release_pos * (self._q_open - self._q_close)
         self._q_cmd = q
@@ -741,8 +749,14 @@ def main(args=None):
     # 固件力矩硬限由 3s 重试定时器与 force 启动时确保写入（服务可能晚于本节点就绪）
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
+    except Exception as exc:
+        # SIGINT 与 WaitSet 创建竞态（Humble），见 LL-016：视为正常退出
+        if RCLError is not None and isinstance(exc, RCLError):
+            pass
+        else:
+            raise
     finally:
         node.destroy_node()
         try:

@@ -261,7 +261,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   4. 电机使能流程中 `/a3/motor/set_param`（ID7, 0x700B）被调用且值与配置一致；服务失败时节点不上报就绪并报错
   5. 弱/中/强三档目标力均 ≤ 硬上限；不修改 L1–L6 的任何增益/限位配置
 - **关联：** [shared/SAFETY.md](../shared/SAFETY.md)（夹爪力控安全段）；[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)；`a3_gripper_controller/config/gripper_config.yaml`；F17（`/a3/motor/set_param`）；F26（配置服务/MQTT）
-- **状态：** `implemented`（仿真闭环验证；真机 0x700B 写入与力矩方向标定板测中）
+- **状态：** `implemented`（仿真闭环验证；真机 0x700B 写入与力矩方向标定板测中。2026-09-07：出厂硬上限 2.0→1.0 Nm（1.5 持续出力几分钟过热，见 LL-014），PI 减半为 kp=0.25/ki=0.3，运行时持久化上限同步 1.0 Nm；sim 植物接触方向随 2026-09-06 标定反转。同日起超硬限 FAULT 瞬态带放宽为 `overtorque_ratio` 1.0→1.5：硬物体 PI 过冲会顶穿 1.0 误报 `error_code=4`，软件 FAULT 只做失控兜底，固件 0x700B 仍硬钳 1.0 Nm）
 
 ### F25 — 夹爪自适应力控（PI 力外环 + 位置内环）
 
@@ -384,6 +384,28 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   3. 测试结束电机温度正常（<50°C），夹爪停在 0 位
 - **关联：** F33（本测试的验证目标）；F26/F27（MQTT 桥契约）；[QUICKSTART.md](QUICKSTART.md)（测试节）
 - **状态：** `completed`（2026-09-06 真机验收 6 PASS / 0 FAIL：0.3Nm actual=0.281、0.5Nm actual=0.508 均 GRASPED 且在 ±15% 内；force 0 硬逻辑 3s 内回 0 位（grip_position 0.9988）；测试结束电机 temp=44°C、mode=2、err=0）
+
+### F35 — MQTT 遥测降采样 5 Hz（全局）
+
+- **说明：** 桥接节点按源话题速率发布全量遥测（叠加最坏 ~140–180 Hz，每条为 ~60 点 JSON），前端浏览器处理不过来，且 cmd（QoS 1）PUBACK 5 s 超时。改造 `a3_mqtt_bridge`：新增全局配置 `telemetry_min_interval_sec`（默认 0.2 = 5 Hz 上限），各话题回调只更新 `_points_cache` 置脏，由 0.05 s flusher 定时统一发布完整 points（最新值胜出）；发布路径解耦为有界队列（256）+ 独立发布线程，JSON 串行化与 paho publish 全部移出单线程 executor——慢 socket 不再阻塞遥测回调、cmd 分发与服务回执；telemetry 队列满可丢（最新值胜出），`cmd_result`/`device/status`/`device/info` 永不丢、不受节流；paho 线程内发布点（on_connect info、未知 op 回执）经队列后天然线程安全。
+- **验收标准：**
+  1. 生产栈遥测实测 ≤5 Hz（10 s 计数 ≈50 条），points 仍为全量聚合
+  2. `a3_test.sh mqtt_cmd`（含 6 个 gripper op）与 `telemetry` 套件仍 PASS；cmd 下发后 `cmd_result` ~1 s 内到达
+  3. web 端 cmd 发布（QoS 1）不再触发 5 s PUBACK 超时（前端零改动）
+  4. broker 断连/慢 socket 期间 executor 不卡死：状态/回执重连后正常恢复
+- **关联：** F18（MQTT 遥测桥）、F23（cmd 契约）；[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（遥测速率契约）；`a3_mqtt_bridge/config/bridge.yaml`
+- **状态：** `implemented`（2026-09-07 真机实测：连续运动期 12 s 计 55 条 ≈4.6 Hz、间隔中位 0.232 s ≈5 Hz 上限；`a3_test.sh mqtt_cmd` 18/18、`telemetry` 6/6 PASS，cmd_result 均 <1 s 回达；顺带修复 SIGINT 退出竞态 exit code 1，见 LL-016。web 端 PUBACK 不再超时由前端观察复验）
+
+### F36 — PS4 R2 扳机力控夹爪
+
+- **说明：** 改造 PS4 映射（`simple` 与 `default` 两份）：R2 从「夹爪位置模拟量」升级为「扳机力控」——新 action `gripper_force`（`a3_teleop_ps4/actions.py`，经 `/a3/gripper/command` 服务，`a3_msgs` 依赖新增）。语义：松开（v<0.15，迟滞下沿）→ 下降沿发一次 `release`（全开）；按过 0.22（迟滞上沿）→ `force`，扳机 0.2..1 线性映射目标力矩 **0.1..1.0 Nm**（下限 0.1 因目标 ≤0 触发全开硬逻辑且接触判定下限 0.1 Nm），按得越深抓得越紧；持按期间目标变化 ≥0.1 Nm 才重发（避免 50 Hz 重发把积分清零）；服务未就绪/互锁拒绝（臂运动中等）→ 0.5 s 间隔重试，松手即停；`timeout_s=15` 与节点默认一致，GRASPED 后持续持握。L2→L6 不动，急停键（Triangle/L1/R1/Share 等）不动；顺带把 `set_gripper`/`set_joint_L7`/`gripper_toggle` 的旧标定常量对齐 2026-09-06 标定（open=0/close=1.79，修复 Square/Circle 开合反向）。
+- **验收标准：**
+  1. `simple.yaml`/`default.yaml` 经 `validate_mapping` 校验通过，mapper 正常启动
+  2. sim 注入假 `/joy`（axes[5] 扫描 0→1→0）：收到 force 且目标力矩随扳机单调递增，下沿只发一次 release
+  3. 真机（泡棉）：按住 R2 → GRASPED 且实际力矩 ≈ 映射值；松手 → 3 s 内回 0 位全开；扳机深浅变化抓力跟随
+  4. 手臂运动中按 R2：命令被拒（互锁）且 0.5 s 重试、松手停止；急停按键行为不变
+- **关联：** F24（力矩上限 1.0 Nm，映射上限对齐）、F26（GripperCommand 服务）、F33（force 0 全开/互锁）；[shared/SAFETY.md](../shared/SAFETY.md)（R2 力控安全）；[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（扳机契约）
+- **状态：** `implemented`（2026-09-07 真机验收：`simple`/`default` 双映射 validate_mapping 通过；泡棉手柄实测 R2 深浅 → 目标力矩 0.3→1.0 Nm 跟随（含持按期间深浅双向调制）、GRASPED 实际力矩 ±2% 内（1.00→1.01、0.96→0.97、0.78→0.79）、每次松手下降沿单次 release 全开、全程 error_code=0；验收项 4（臂运动互锁重试）在单电机台架（仅 ID7）无法触发臂运动，代码路径由 sim 互锁检查覆盖）
 
 ## 非功能需求
 

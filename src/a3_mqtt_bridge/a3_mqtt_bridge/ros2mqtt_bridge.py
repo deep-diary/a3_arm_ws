@@ -6,7 +6,7 @@ into a ``points`` dict, and publishes:
 
 - ``<prefix>/device/info``   (retained)  board system info + node/topic/signal catalog
 - ``<prefix>/device/status`` (~1 Hz)     heartbeat + cpu/mem/temp + running nodes
-- ``<prefix>/telemetry``     (per msg)   flattened ``points``
+- ``<prefix>/telemetry``     (≤5 Hz, F35) flattened ``points``, latest-wins throttled
 
 Also subscribes ``<prefix>/cmd`` as a stub for future bidirectional control.
 
@@ -19,6 +19,7 @@ import math
 import os
 import queue
 import socket
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -26,6 +27,11 @@ from datetime import datetime, timezone
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+
+try:  # Humble: RCLError 只在私有编译模块暴露（SIGINT 竞态兜底，见 main()）
+    from rclpy._rclpy_pybind11 import RCLError
+except ImportError:  # pragma: no cover - 其他发行版可能没有该符号
+    RCLError = None
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_srvs.srv import Trigger
 
@@ -214,16 +220,32 @@ class Ros2MqttBridge(Node):
         self.topics_rules = config.get("topics", [])
         status_interval = float(config.get("status_interval_sec", 1.0))
         info_interval = float(config.get("info_interval_sec", 10.0))
+        # F35：遥测全局最小发布间隔（最新值胜出）；cmd/cmd_result/status/info 不受限
+        self._telemetry_min_interval = float(
+            config.get("telemetry_min_interval_sec", 0.2)
+        )
 
         self._mqtt = None
         self._mqtt_connected = False
         # 信号缓存：各话题回调只更新自己的信号，telemetry 始终发布完整聚合 points，
         # 避免不同话题各自发一条 points 不完整的 telemetry，导致前端信号时有时无。
         self._points_cache: dict = {}
+        self._telemetry_dirty = False
+        self._last_telemetry_pub = 0.0
         self._catalog = self._build_catalog()
 
         self._cmd_queue: "queue.Queue[dict]" = queue.Queue()
         self._cmd_clients = self._setup_cmd_clients()
+
+        # F35：发布解耦——所有 MQTT 发布经有界队列交独立线程发送，慢 socket / JSON
+        # 串行化不再阻塞单线程 executor（遥测回调、cmd 分发、服务回执都在其上）。
+        # telemetry 可丢（最新值胜出），cmd_result/status/info 永不丢。
+        self._pub_queue: "queue.Queue" = queue.Queue(maxsize=256)
+        self._closing = False  # destroy_node 置位后发布线程不再触碰日志器
+        self._pub_thread = threading.Thread(
+            target=self._publish_loop, name="a3-mqtt-publish", daemon=True
+        )
+        self._pub_thread.start()
 
         self._setup_mqtt()
         self._setup_subscriptions()
@@ -231,6 +253,7 @@ class Ros2MqttBridge(Node):
         self.create_timer(status_interval, self._publish_status)
         self.create_timer(info_interval, self._publish_info)
         self.create_timer(0.05, self._drain_cmds)
+        self.create_timer(0.05, self._flush_telemetry)
 
         self.get_logger().info(
             f"bridge up: {self.topic_prefix} -> {self.host}:{self.port} "
@@ -238,6 +261,20 @@ class Ros2MqttBridge(Node):
         )
 
     # ------------------------------------------------------------------ MQTT
+
+    def destroy_node(self) -> bool:
+        # 发哨兵停止发布线程，避免销毁后仍触碰 ROS 日志器
+        self._closing = True
+        try:
+            self._pub_queue.put_nowait(None)
+        except queue.Full:
+            pass
+        try:
+            self._mqtt.disconnect()  # 让慢 publish 尽快返回，join 不必等满 2 s
+        except Exception:
+            pass
+        self._pub_thread.join(timeout=2.0)
+        return super().destroy_node()
 
     def _setup_mqtt(self):
         try:
@@ -298,20 +335,46 @@ class Ros2MqttBridge(Node):
         except Exception as exc:  # noqa: BLE001
             self.get_logger().error(f"mqtt connect error: {exc}")
 
-    def _publish(self, topic: str, payload, retain: bool = False):
-        if not self._mqtt or not self._mqtt_connected:
-            return False
+    def _publish(self, topic: str, payload, retain: bool = False, droppable: bool = False):
+        """入队给发布线程；任何线程（executor / paho 回调）调用都安全（F35）。
+
+        droppable=True（仅遥测）：队列满直接丢新值（最新值胜出，下个 flush 会补）。
+        其余（cmd_result/status/info）：队列满挤掉最旧一条重试一次，保证不丢。
+        """
+        item = (topic, payload, retain)
         try:
-            # allow_nan=False 双保险：非有限浮点必须先清洗（LL-011）。漏网时抛异常落日志，
-            # 而不是把非法 JSON（"vel_L1": NaN）污染给所有订阅者（浏览器 JSON.parse 整包丢弃）。
-            body = payload if isinstance(payload, str) else json.dumps(
-                _sanitize_nonfinite(payload), allow_nan=False
-            )
-            self._mqtt.publish(topic, body, qos=0, retain=retain)
+            self._pub_queue.put_nowait(item)
             return True
-        except Exception as exc:  # noqa: BLE001
-            self.get_logger().warning(f"publish failed {topic}: {exc}")
-            return False
+        except queue.Full:
+            if droppable:
+                return False
+            try:
+                self._pub_queue.get_nowait()  # 挤掉最旧
+                self._pub_queue.put_nowait(item)
+                return True
+            except queue.Full:
+                self.get_logger().warning(f"publish queue full, dropped {topic}")
+                return False
+
+    def _publish_loop(self) -> None:
+        """发布消费线程：JSON 串行化 + paho publish 全部在此执行（F35）。"""
+        while True:
+            item = self._pub_queue.get()
+            if item is None:  # 关闭哨兵
+                return
+            topic, payload, retain = item
+            if not self._mqtt or not self._mqtt_connected:
+                continue
+            try:
+                # allow_nan=False 双保险：非有限浮点必须先清洗（LL-011）。漏网时抛异常落日志，
+                # 而不是把非法 JSON（"vel_L1": NaN）污染给所有订阅者（浏览器 JSON.parse 整包丢弃）。
+                body = payload if isinstance(payload, str) else json.dumps(
+                    _sanitize_nonfinite(payload), allow_nan=False
+                )
+                self._mqtt.publish(topic, body, qos=0, retain=retain)
+            except Exception as exc:  # noqa: BLE001
+                if not self._closing:  # 销毁后日志器失效，避免守护线程再触碰
+                    self.get_logger().warning(f"publish failed {topic}: {exc}")
 
     # ------------------------------------------------------------- downlink
 
@@ -739,8 +802,19 @@ class Ros2MqttBridge(Node):
         return cb
 
     def _update_telemetry(self, points: dict):
-        """合并信号到缓存并发布完整 points（各话题共享同一 telemetry 载荷）。"""
+        """合并信号到缓存并置脏；由 _flush_telemetry 定时统一发布（F35 降频）。"""
         self._points_cache.update(points)
+        self._telemetry_dirty = True
+
+    def _flush_telemetry(self) -> None:
+        """F35：脏且距上次发布 ≥ 最小间隔 → 发布完整 points（最新值胜出）。"""
+        if not self._telemetry_dirty:
+            return
+        now = time.time()
+        if now - self._last_telemetry_pub < self._telemetry_min_interval:
+            return
+        self._telemetry_dirty = False
+        self._last_telemetry_pub = now
         self._publish_telemetry(dict(self._points_cache))
 
     def _publish_telemetry(self, points: dict):
@@ -751,7 +825,7 @@ class Ros2MqttBridge(Node):
             "ts": _now_iso(),
             "points": points,
         }
-        self._publish(self.topic_telemetry, payload)
+        self._publish(self.topic_telemetry, payload, droppable=True)
 
 
 def main(args=None):
@@ -779,6 +853,13 @@ def main(args=None):
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
+    except Exception as exc:
+        # SIGINT 与 WaitSet 创建竞态（Humble）：信号处理已调用 rclpy.shutdown()，
+        # executor 在 context 失效后创建 WaitSet 会抛 RCLError —— 视为正常退出。
+        if RCLError is not None and isinstance(exc, RCLError):
+            pass
+        else:
+            raise
     finally:
         if node is not None:
             node.destroy_node()

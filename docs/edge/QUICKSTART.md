@@ -59,7 +59,7 @@
     ros2 launch a3_bringup edge_teleop_sim.launch.py use_rviz:=true
     # 默认 mapping:=simple（无 L1 组合键）；恢复 L1 死人开关：mapping:=default
     ```
-    - **simple（默认）**：右摇杆基座系左右/上下；左摇杆 Y 前后；L2→L6、R2→L7；Square/Circle 夹爪开/合
+    - **simple（默认）**：右摇杆基座系左右/上下；左摇杆 Y 前后；L2→L6、R2→夹爪力控（F36：松开全开，按过 0.2 后 0.2..1 → 0.1..1.0 Nm）；Square/Circle 夹爪开/合
     - D-pad 上/下/左/右：`work` / `zero` / `home` / `ready`；Cross 急停
     - 改映射只编 `config/mappings/*.yaml`；轴序校准见 `ds4_linux.yaml`
     - 真机：`a3_bringup.launch.py use_teleop:=true mapping:=default` 起 mapper；笛卡尔还需另开 `servo.launch.py`（板测待办）
@@ -129,13 +129,13 @@
     **L7 零点标定（2026-09-06 台架实测）：** 全开位（丝杠硬限位）设零，闭合为正，实测行程 1.7945 rad。软件约定 `gripper_config.yaml` open=0 / close=1.79，URDF L7 限位 `[0, 1.8]`、轴 `0 0 -1`（正转=闭合，与 web 3D 一致），`control_gains.yaml` L7 joint_cmd `[0, 1.8]`。设零：电机通电后 `ros2 service call /a3/motor/set_zero a3_can_bridge/srv/MotorCommand "{motor_id: 7, command: 3}"`。**断电与多圈计数**：短时断电（分钟级 24V 断电重上）实测多圈计数保留（2026-09-06 事故后重启，硬止位读数 0.0056 rad 未漂）；但更早一次长时间断电曾丢计数（读数跳变）。机制不明，**重上电后先读硬止位读数校验零点**：与标定值（全开≈0）偏差大才 set_zero，不要盲信也不盲设。
     ```bash
     # (a) 无硬件闭环回归（任意机器可跑，自起节点 + 假「电机+物体」植物）：
-    ./scripts/a3_test/a3_test.sh gripper          # 12 项 PASS：配置校验/开合/软硬物体收敛±10%/超力/看门狗
+    ./scripts/a3_test/a3_test.sh gripper          # 13 项 PASS：配置校验/开合/软硬物体收敛±10%/超力/看门狗
 
     # (b) 起夹爪节点（独立节点，不改 C++ CAN 实时路径；力控仅在 Edge 本地）：
     ros2 launch a3_gripper_controller gripper_controller.launch.py require_gate:=false
 
     # (c) 服务/话题验证：
-    ros2 service call /a3/gripper/set_config a3_msgs/srv/GripperSetConfig "{key: max_torque_nm, value: 1.5}"
+    ros2 service call /a3/gripper/set_config a3_msgs/srv/GripperSetConfig "{key: max_torque_nm, value: 1.0}"
     ros2 service call /a3/gripper/command a3_msgs/srv/GripperCommand "{mode: force, preset: medium}"
     ros2 service call /a3/gripper/command a3_msgs/srv/GripperCommand "{mode: release}"
     ros2 topic echo /a3/gripper_status           # state/mode/target+actual_torque/target+actual position/contact/error_code
@@ -143,10 +143,10 @@
 
     # (d) web 下发（经 a3_mqtt_bridge 白名单 5 op，F31 起）：
     #   {"op":"gripper_grasp","args":{"preset":"medium"}}  或  {"op":"gripper_grasp","args":{"torque":0.6}}
-    #   {"op":"gripper_release"}  {"op":"gripper_stop"}  {"op":"gripper_set_max_torque","args":{"value":1.2}}
+    #   {"op":"gripper_release"}  {"op":"gripper_stop"}  {"op":"gripper_set_max_torque","args":{"value":0.8}}
     #   {"op":"gripper_set_position","args":{"position":0.5}}   # 0..1，0 闭 1 开（位置模式直驱，F31）
     ```
-    - 参数：`a3_gripper_controller/config/gripper_config.yaml`（最大握力 `max_grasp_torque_nm`、弱/中/强档位、PI、接触阈值、超时/看门狗）；下发的最大握力落盘 `~/.a3/gripper/gripper_overrides.yaml`，重启保留，越界（超硬上限/±6 Nm）拒绝。
+    - 参数：`a3_gripper_controller/config/gripper_config.yaml`（最大握力 `max_grasp_torque_nm` 出厂硬上限 1.0 Nm（2026-09-07 由 2.0 下调，见 LL-014）、弱/中/强档位、PI（2026-09-07 减半为 kp=0.25/ki=0.3）、接触阈值、超时/看门狗；超硬限 FAULT 阈值 = 1.0 × `overtorque_ratio`(1.5) = 1.5 Nm 瞬态带，固件 0x700B 仍硬钳 1.0）；下发的最大握力落盘 `~/.a3/gripper/gripper_overrides.yaml`，重启保留，越界（超硬上限/±6 Nm）拒绝。
     - 遥测：`grip_target_position` 为最近 position/release 命令目标（未命令前跟随实测），web 位置曲线用它与 `grip_position` 同轴对比。桥接层对非有限浮点（NaN/±Inf）统一清洗为 null 并以 `allow_nan=False` 兜底，telemetry JSON 恒合法（见 [LL-011](../../lessons_learned/LL-011-nan-poisons-json-telemetry.md)）。
     - 真机：`A3_GRIPPER_TEST_MODE=hw ./scripts/a3_test/a3_test.sh gripper` 做服务/配置/开合安全检查；力控阶跃需人工在夹爪放置海绵（软）/木块（硬阻挡），观察 `grip_actual_torque` 收敛到目标 ±10% 且 `GRASPED`，握力不超硬上限。
     - 力控与臂运动互锁：gate 关闭或臂处于 `TRAJ_RUNNING`/`SERVO`/`ZERO_TORQUE`/`GRAVITY_COMP` 时拒绝力控；安全条款见 [shared/SAFETY.md](../shared/SAFETY.md)「夹爪力控安全」。

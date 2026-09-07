@@ -13,8 +13,9 @@ Behaviours:
   * Publishes `/joint_states` (7 joints, position + velocity + effort) @ 50 Hz.
     Each joint is a first-order follower toward the commanded target (small lag
     makes the gripper force loop observable).
-  * L7 effort uses a "contact spring" model: `tau = contact_k * max(0, contact_q - q)`
-    so the gripper force controller can genuinely converge to GRASPED.
+  * L7 effort uses a "contact spring" model: `tau = contact_k * max(0, q - contact_q)`
+    so the gripper force controller can genuinely converge to GRASPED
+    （2026-09-06 标定：全开位设零、闭合为正，接触 = q 越过 contact_q）。
   * Provides the `/a3/motor/*` services (`set_zero` zeroes feedback positions),
     `/a3/motor/set_param` (gripper torque-limit write) and `/a3/zero_torque/{start,stop}`
     (teach mode). `set_zero` resets all joints to 0 and clears any active trajectory.
@@ -410,7 +411,7 @@ class SimMotorNode(Node):
                 self._velocities[i] = (q_new - q_old) / dt if dt > 1e-6 else 0.0
             self._effort = [0.0] * self._n
             if self._enable_contact and self._n > L7_IDX:
-                penetration = max(0.0, self._contact_q - self._positions[L7_IDX])
+                penetration = max(0.0, self._positions[L7_IDX] - self._contact_q)
                 self._effort[L7_IDX] = self._contact_k * penetration
 
             js = JointState()

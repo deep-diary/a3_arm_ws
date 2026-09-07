@@ -59,7 +59,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/move_to_pose` | `a3_msgs/action/MoveToPose` | IK + 执行 |
 | `/a3/gravity_torque` | `sensor_msgs/JointState` | URDF 系重力力矩（effort） |
 | `/a3/goto_named_pose` | `std_msgs/String` | 命名姿态（`zero`/`work`/`home`/`ready`） |
-| `/a3/gripper_cmd` | `std_msgs/Float32` | 夹爪归一化 0–1（POSITION 模式；手柄 R2 亦走此语义，由 `gripper_controller_node` 订阅执行） |
+| `/a3/gripper_cmd` | `std_msgs/Float32` | 夹爪归一化 0–1（POSITION 模式，web 直驱与遗留路径；由 `gripper_controller_node` 订阅执行）。PS4 R2 自 F36 起不再走此话题，改走 `/a3/gripper/command` 力控服务 |
 | `/a3/gripper_status` | `a3_msgs/msg/GripperStatus` | 夹爪力控状态快照（模式/目标与实际力矩/目标与实际位置/接触标志/错误码），默认 10 Hz，力控期间 50 Hz |
 | `/a3/gripper/command` | `a3_msgs/srv/GripperCommand` | 夹爪命令：`position`（开合 0–1）/ `force`（按 `torque_nm` 抓取）/ `release` / `stop` |
 | `/a3/gripper/set_config` | `a3_msgs/srv/GripperSetConfig` | 握力参数下发（如 `max_torque_nm`）；越界（超硬上限/±6 Nm）拒绝并返回原因 |
@@ -147,6 +147,8 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 - 未知 op 不抛异常，回 `ok=false, message="unknown op ..."`；服务未就绪回 `ok=false, message="<op> service unavailable"`。
 - `/a3/arm_status` 经 `bridge.yaml` 的 `scalar` 展平上报为 telemetry `points.arm_state`（=`state`）、`points.arm_mode`（=`mode`）、`points.arm_message`（=`message`），前端据此渲染状态，不另开话题。
 
+**遥测发布速率（F35）：** telemetry 按源话题速率聚合不发布——各话题回调只更新缓存，由桥内 flusher 按 `telemetry_min_interval_sec`（默认 0.2 s = 5 Hz 上限）统一发布全量 points，**最新值胜出**。`cmd_result`/`device/status`/`device/info` 不受节流、永不丢（遥测队列满时只丢遥测）；发布经独立线程，broker 慢不影响 cmd 处理。前端绘制曲线无需 50 Hz 原始采样，若曲线不平滑属正常（降频预期）。
+
 ### 状态机与仲裁
 
 - 状态：`IDLE → INIT → READY`；`READY ↔ TRAJ / SERVO / TEACH / AI`；`READY → FAULT`。
@@ -197,6 +199,16 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `grip_error` | `error_code` | discrete |
 
 信号 code 须与 deep-trace 设备 YAML `HOME-DEMO.RK3588.yaml` 的 `points[].code` 完全对齐。
+
+### PS4 扳机力控契约（F36）
+
+`a3_teleop_ps4` 的 `ps4_mapper` 把 R2 扳机（`trigger_01` 归一化，0=松开…1=按满）经 `/a3/gripper/command` 服务映射到夹爪力控（`simple.yaml` 与 `default.yaml` 同改，L2→L6 不变）：
+
+- 迟滞：按过 **0.22** 进入力控；松开低于 **0.15** 才发一次 `release`（全开），避免抖动来回切换。
+- 力矩映射：扳机 0.2..1 → 目标力矩 **0.1..1.0 Nm** 线性（下限 0.1：目标 ≤0 触发「直接全开」硬逻辑、接触判定下限 0.1 Nm；上限对齐 `max_grasp_torque_nm` 硬上限）。
+- 持按期间目标变化 **≥0.1 Nm** 才重发 `force`（频繁重发会重置力环积分退化成纯 P）；`timeout_s=15`（与节点默认一致，GRASPED 后持续持握）。
+- 服务未就绪或互锁拒绝（臂在 `TRAJ_RUNNING`/`SERVO`/`ZERO_TORQUE`/`GRAVITY_COMP`）→ 每 **0.5 s** 重试，松手即停；`default.yaml` 仍受 L1 死人开关门控（松 L1 而 R2 按住 → mapper 停发 → 保持当前夹持，再按 L1 恢复跟随）。
+- 遗留位置路径（`set_gripper`/`set_joint_L7`/Square/Circle 按键）常量已对齐 2026-09-06 标定（开=0/闭=1.79）。
 
 ## 电机调试（motor_protocol_node，需求 F32）
 

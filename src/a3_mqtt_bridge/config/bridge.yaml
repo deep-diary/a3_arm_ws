@@ -18,6 +18,9 @@ device:
 
 status_interval_sec: 1.0
 info_interval_sec: 10.0
+# F35：遥测全局最小发布间隔（秒），最新值胜出；0.2 = 5 Hz 上限。
+# 前端浏览器处理不过来时调大；cmd/cmd_result/device/status、device/info 不受此限。
+telemetry_min_interval_sec: 0.2
 
 # flatten:
 #   joint_state — sensor_msgs/JointState：fields×joints 展平为 prefix_L{1..7}

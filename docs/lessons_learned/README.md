@@ -35,3 +35,4 @@ LL-NNN-short-slug.md
 | [LL-013](LL-013-gripper-hardstop-torque-false-contact.md) | 0 位硬止位静置力矩（≈0.16 Nm）≥ 接触阈值致起步误判接触 + web 力控不传 timeout 落 5s 默认 → 真机力控卡 42% 开合 | Edge | 2026-09-06 |
 | [LL-014](LL-014-gripper-stuck-trajectory-stream-overheat.md) | 轨迹插值卡死持续流送旧目标 + 单帧卸力被覆盖：电机顶泡棉 1.55 Nm 过热 125°C；卸力=停流送器+cansend 零力矩帧作最后一帧 | Edge | 2026-09-06 |
 | [LL-015](LL-015-f32-short-traj-starvation.md) | F32 回归：单点轨迹「只出 2 帧且无效」=命名轨迹索引回退误驱 L1 + 启动平滑吞 0.05s 短轨迹 + traj/refresh 共享限速戳饿死 traj 帧 | Edge | 2026-09-06 |
+| [LL-016](LL-016-rclpy-sigint-waitset-race.md) | rclpy Humble SIGINT 与 WaitSet 竞态：节点退出时 RCLError 穿透 spin 致 exit code 1；须在 main 捕获（RCLError 只在 rclpy._rclpy_pybind11 私有模块） | Edge | 2026-09-07 |

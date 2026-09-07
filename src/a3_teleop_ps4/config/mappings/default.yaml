@@ -12,7 +12,7 @@ speed_boost: 1.0
 
 axes:
   r2:
-    fn: set_gripper
+    fn: gripper_force
     kind: analog_01
     source: trigger
   right_x:

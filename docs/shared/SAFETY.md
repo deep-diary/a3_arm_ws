@@ -30,7 +30,8 @@ A3 Edge 与 A3 CloudEdge 共同遵守的安全设计原则。具体参数以配�
 - gate 关闭时：强制退出运动相关模式，禁止新轨迹
 - Servo：`incoming_command_timeout` 超时后应回 `IDLE` 并停止下发
 - 零力矩 ≠ 纯 `tau=0`：默认同重力前馈叠加，退出时恢复原 `kp`/`kd`
-- **手柄死人开关：** 生产映射 `mapping:=default` 时，PS4 **L1 按住** 才允许非零 Servo Twist 与 R2 夹爪模拟量；松开立即发零速度。仿真默认 `mapping:=simple` **关闭** L1 死人开关（见 `config/mappings/simple.yaml`）。D-pad 命名姿态与电源长按不要求 L1。Cross → `stop_motion`。
+- **手柄死人开关：** 生产映射 `mapping:=default` 时，PS4 **L1 按住** 才允许非零 Servo Twist 与 R2 夹爪力控（F36）；松开立即发零速度。仿真默认 `mapping:=simple` **关闭** L1 死人开关（见 `config/mappings/simple.yaml`）。D-pad 命名姿态与电源长按不要求 L1。Cross → `stop_motion`。
+- **R2 力控扳机（F36）：** 松开 → 夹爪全开（`release`）；按过 0.22 → 目标力矩 0.1..1.0 Nm（上限 = 硬限 1.0 Nm）；迟滞 0.15 防抖动。default 映射下「L1 松开而 R2 还按着」→ mapper 停发指令 → 夹持保持现状（不是松开），重新按住 L1 才恢复跟随；松 R2（L1 按住）→ 全开。臂运动中力控被互锁拒绝 → 每 0.5 s 重试、松手即停。力控本身仍受抓取超时/看门狗/超硬限三重保护（见下节）。
 
 ## 轨迹门控（gate）
 
@@ -63,7 +64,7 @@ A3 Edge 与 A3 CloudEdge 共同遵守的安全设计原则。具体参数以配�
 | 启动 | PS4 Square 长按 / `start` | `/power_sequence/command` |
 | 关机 | PS4 Triangle / L1+R1+Share | `shutdown` |
 | 调零 | PS4 Options 长按 | `set_zero` |
-| Servo / 夹爪模拟量 | PS4 **L1 按住** + 摇杆 / R2 | Twist / L7 轨迹 |
+| Servo / 夹爪力控 | PS4 **L1 按住** + 摇杆 / R2（F36） | Twist / 夹爪 force-release |
 | 立即停 | PS4 Cross | 零 Twist，中止命名姿态 |
 
 CloudEdge 须在 ESP32 固件中实现等效逻辑；网络侧 `shutdown` 命令可作为补充，**不能**作为唯一安全手段。
@@ -74,9 +75,9 @@ CloudEdge 须在 ESP32 固件中实现等效逻辑；网络侧 `shutdown` 命令
 
 1. **握力硬限双保险：**
    - 固件层：电机使能时经 `/a3/motor/set_param`（`motor_id=7`，`param_id=0x700B`）写入力矩限制；写入失败则夹爪不报就绪、禁止力控。
-   - 软件层：节点对目标力与输出位置增量做 clamp，任何设定/反馈不得超过 `max_grasp_torque_nm`（且在 MIT ±6 Nm 量程内）。
+   - 软件层：节点对目标力与输出位置增量做 clamp，任何设定/反馈不得超过 `max_grasp_torque_nm`（且在 MIT ±6 Nm 量程内）。2026-09-07 起出厂硬上限为 **1.0 Nm**（原 2.0；1.5 持续出力几分钟即过热，见 LL-014）。
 2. **参数下发校验：** web/服务下发的目标力或最大握力必须 `≤ max_grasp_torque_nm`；越界一律拒绝（`error_code=5`），不执行、不落盘。合法值落盘 `data/gripper_overrides.yaml`，重启加载。
-3. **超力保护：** 力控中实测力矩瞬时超过硬限，立即停止积分、停止下发并回退/停机，置 `FAULT`（`error_code=4`）。
+3. **超力保护：** 力控中实测力矩瞬时超过硬限 × `overtorque_ratio`（1.5，瞬态带；固件 0x700B 仍硬钳 1.0 Nm），立即停止积分、停止下发并回退/停机，置 `FAULT`（`error_code=4`）。
 4. **看门狗：** `feedback_fresh_timeout_s`（默认 0.30 s）内无新鲜 `eff_L7` 反馈，停止力环并置 `FAULT`（`error_code=3`）；节点退出/断连不得让电机维持夹紧力。
 5. **抓取超时：** `force` 命令带 `timeout_s`，在时限内未进入 `GRASPED`（力矩入目标带 ±10% 并维持 settle 时间）则安全停止（`error_code=2`）。
 6. **力环仅边缘：** PI 力环必须在 Edge（RK3588）/ CloudEdge ESP32 固件本地闭环；**禁止**云端以 50–200 Hz 闭环力控，网络只下发目标力/档位等稀疏参数。

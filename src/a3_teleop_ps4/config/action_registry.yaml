@@ -31,11 +31,11 @@ functions:
 
   gripper_open:
     kind: discrete
-    description: L7 to open (1.5708 rad)
+    description: L7 to open (0 rad, 2026-09-06 标定)
 
   gripper_close:
     kind: discrete
-    description: L7 to close (0)
+    description: L7 to close (1.79 rad)
 
   gripper_toggle:
     kind: discrete
@@ -59,7 +59,11 @@ functions:
 
   set_gripper:
     kind: analog_01
-    description: q_L7 = v * 1.5708 rad (legacy alias)
+    description: q_L7 = v * 1.79 rad (legacy alias, 0 closed .. 1 open)
+
+  gripper_force:
+    kind: analog_01
+    description: R2 trigger -> /a3/gripper/command force (0.2..1 maps 0.1..1.0 Nm); release on falling edge (F36)
 
   set_joint_L6:
     kind: analog_01

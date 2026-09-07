@@ -18,7 +18,8 @@
 
     # ===== 握力参数（F24）=====
     # 出厂硬上限：任何下发目标/最大握力不得超过此值（且在 MIT ±6 Nm 量程内）
-    max_grasp_torque_nm: 2.0
+    # 2026-09-07：2.0 → 1.0 Nm（1.5 持续出力几分钟即过热，见 LL-014）
+    max_grasp_torque_nm: 1.0
     # 默认目标握力与弱/中/强档位（均须 <= max_grasp_torque_nm）
     default_target_torque_nm: 0.6
     torque_preset_weak_nm: 0.3
@@ -30,8 +31,9 @@
     # ===== PI 力外环（F25）=====
     # 两阶段：接触前恒速软闭合（不积分）；接触后 PI 调节，e = target - measured
     # 接触后：e>0 力不足 → dq/dt=-(kp*e+ki*∫e) 继续闭合；e<0 超力 → 按 kp 回退，绝不继续夹
-    force_kp: 0.5          # rad/s/Nm
-    force_ki: 0.6          # rad/s^2/Nm
+    # 2026-09-07：kp/ki 减半（0.5/0.6 → 0.25/0.3），收敛更平缓、超调更小
+    force_kp: 0.25         # rad/s/Nm
+    force_ki: 0.3          # rad/s^2/Nm
     integral_limit_nm: 0.5 # 积分项限幅（Nm），防饱和猛夹
     max_close_speed_rad_s: 0.3
     max_open_speed_rad_s: 0.6
@@ -68,8 +70,10 @@
     # 基准取全开位而非力控起点，否则已夹持中重发力控命令会盲跑快速接近段压穿物体（F34 实测超硬限）
     contact_min_travel_rad: 0.1
     feedback_fresh_timeout_s: 0.30
-    # 实测力矩瞬时超过 max_grasp_torque_nm * 该系数 → 超硬限 FAULT
-    overtorque_ratio: 1.0
+    # 实测力矩瞬时超过 max_grasp_torque_nm * 该系数 → 超硬限 FAULT。
+    # 2026-09-07: 硬上限降到 1.0 后瞬态带放宽到 1.5（硬物体 PI 过冲会顶穿 1.0 误报 FAULT；
+    # 固件 0x700B 仍硬钳 1.0，软件 FAULT 只做失控兜底）
+    overtorque_ratio: 1.5
 
     # ===== 状态发布 =====
     status_hz: 10.0

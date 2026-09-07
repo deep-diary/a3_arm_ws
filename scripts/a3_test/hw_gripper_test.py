@@ -40,8 +40,9 @@ ALL_JOINTS = [
     "L5_joint", "L6_joint", "L7_joint",
 ]
 L7_IDX = 6
-Q_OPEN = 1.5708
-Q_CLOSE = 0.0
+# 2026-09-06 标定：全开位设零、闭合为正（与 gripper_config.yaml / 节点 _DEFAULTS 对齐）
+Q_OPEN = 0.0
+Q_CLOSE = 1.79
 
 
 class FakeGripperPlant(Node):
@@ -71,9 +72,9 @@ class FakeGripperPlant(Node):
     def _tick(self):
         # 电机位置内环：一阶快速跟随
         self.q += (self.q_cmd - self.q) * 0.35
-        self.q = max(Q_CLOSE, min(Q_OPEN, self.q))
-        # 接触握力：闭合到物体表面后，穿透量 × 刚度
-        penetration = max(0.0, self.contact_q - self.q)
+        self.q = max(Q_OPEN, min(Q_CLOSE, self.q))
+        # 接触握力：闭合为正方向，q 越过物体表面后，穿透量 × 刚度
+        penetration = max(0.0, self.q - self.contact_q)
         self.tau = self.contact_k * penetration
         if not math.isfinite(self.tau):
             self.tau = 0.0
@@ -133,7 +134,7 @@ def run_sim(rep):
         "-p", "apply_firmware_torque_limit:=false",
         "-p", "require_gate:=false",
         "-p", "overrides_dir:=" + overrides_dir,
-        "-p", "grasp_timeout_s:=6.0",
+        "-p", "grasp_timeout_s:=10.0",
         "-p", "feedback_fresh_timeout_s:=0.3",
     ]
     rep.info("启动 gripper_controller（sim，ROS_DOMAIN_ID=%s）" % env["ROS_DOMAIN_ID"])
@@ -194,8 +195,11 @@ def run_sim(rep):
         r = cfg("max_torque_nm", -1.0)
         rep.check("配置非法(负值)被拒", bool(r and not r.success),
                   getattr(r, "message", "无响应"))
+        r = cfg("max_torque_nm", 1.0)
+        rep.check("配置合法(1.0Nm)接受并落盘", bool(r and r.success),
+                  getattr(r, "message", "无响应"))
         r = cfg("max_torque_nm", 1.5)
-        rep.check("配置合法(1.5Nm)接受并落盘", bool(r and r.success),
+        rep.check("配置超硬上限(1.5Nm)被拒", bool(r and not r.success),
                   getattr(r, "message", "无响应"))
 
         # (b) POSITION 开合
@@ -234,7 +238,7 @@ def run_sim(rep):
         time.sleep(1.5)
         r = cmd("force", torque=0.5)
         time.sleep(0.5)
-        plant.force_tau_override = 5.0  # 远超 max 1.5Nm
+        plant.force_tau_override = 5.0  # 远超 FAULT 阈值 1.5Nm（=1.0×overtorque_ratio）
         time.sleep(1.0)  # 等后台 executor 处理故障状态
         rep.check("超硬限 -> FAULT(error_code=4)",
                   reader.error_code == 4,
@@ -266,7 +270,7 @@ def run_sim(rep):
             pass
 
 
-def _wait_grasped(reader, rep, target, label, timeout=6.0):
+def _wait_grasped(reader, rep, target, label, timeout=10.0):
     # reader 由后台 MultiThreadedExecutor spin，这里只等待并读取其字段
     end = time.time() + timeout
     grasped = False

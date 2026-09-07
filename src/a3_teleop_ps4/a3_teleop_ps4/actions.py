@@ -16,6 +16,8 @@ from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
+from a3_msgs.srv import GripperCommand
+
 
 JOINTS = [
     "L1_joint",
@@ -26,10 +28,21 @@ JOINTS = [
     "L6_joint",
     "L7_joint",
 ]
-GRIPPER_OPEN = 1.5708
-GRIPPER_CLOSE = 0.0
+# 2026-09-06 标定：全开位设零、闭合为正（与 gripper_config.yaml open=0/close=1.79 对齐）
+GRIPPER_OPEN = 0.0
+GRIPPER_CLOSE = 1.79
 L6_MIN = -1.5708
 L6_MAX = 1.5708
+
+# F36：R2 扳机力控。v 为 trigger_01 归一化值（0=松开，1=按满）
+FORCE_TRIG_ON = 0.22      # 迟滞上沿：超过才进入力控
+FORCE_TRIG_OFF = 0.15     # 迟滞下沿：低于才松开（全开）
+FORCE_TRIG_MIN = 0.2      # 映射起点：0.2..1 → 0.1..1.0 Nm
+FORCE_TORQUE_MIN = 0.1    # 映射下限（目标 ≤0 触发「直接全开」硬逻辑；接触判定下限 0.1 Nm）
+FORCE_TORQUE_MAX = 1.0    # 与 max_grasp_torque_nm 硬上限对齐（2026-09-07）
+FORCE_TORQUE_STEP = 0.1   # 持按期间目标变化 ≥ 该值才重发（频繁重发会把积分清零退化成纯 P）
+FORCE_TIMEOUT_S = 15.0    # 与节点默认 grasp_timeout_s 一致
+FORCE_RETRY_S = 0.5       # 服务未就绪 / 互锁拒绝的重发间隔
 
 
 def _duration(sec: float) -> Duration:
@@ -91,6 +104,7 @@ class ActionExecutor:
         self._servo_unpause_cli = node.create_client(Trigger, "/servo_node/unpause_servo")
         self._zt_start = node.create_client(Trigger, self.zt_start_srv)
         self._zt_stop = node.create_client(Trigger, self.zt_stop_srv)
+        self._grip_cli = node.create_client(GripperCommand, "/a3/gripper/command")
 
         self.speed_scale = 0.35
         self._servo_paused = False
@@ -112,6 +126,14 @@ class ActionExecutor:
         )
         self._stopped = False
         self._servo_started = False
+
+        # F36：R2 扳机力控状态机
+        self._force_engaged = False
+        self._force_last_torque: Optional[float] = None
+        self._force_wants_retry = False
+        self._force_next_retry_at = 0.0
+        self._release_wants_retry = False
+        self._release_next_retry_at = 0.0
 
         node.create_subscription(JointState, "/joint_states", self._on_js, 10)
         node.create_subscription(String, "/a3/goto_named_pose", self._on_goto_topic, 10)
@@ -312,7 +334,8 @@ class ActionExecutor:
         self.set_gripper(0.0)
 
     def gripper_toggle(self) -> None:
-        self.set_gripper(0.0 if self._gripper > 0.7 else 1.0)
+        # 2026-09-06 标定：开≈0、闭≈1.79，半程 0.9
+        self.set_gripper(0.0 if self._gripper < 0.9 else 1.0)
 
     def set_speed_slow(self) -> None:
         self.speed_scale = 0.25
@@ -358,6 +381,102 @@ class ActionExecutor:
         dbg.data = v
         self._grip_dbg.publish(dbg)
         self._publish_single_joint("L7_joint", q, "_last_l7_sent")
+
+    def gripper_force(self, v: float) -> None:
+        """F36：R2 扳机 → 夹爪力控（analog_01，50 Hz 每 tick 调用，内部迟滞状态机）。
+
+        松开（v<0.15）→ 下降沿发一次 release（全开）；
+        按过 0.22 → 发 force，目标力矩 0.2..1 → 0.1..1.0 Nm（按得越深抓得越紧）；
+        持按期间目标变化 ≥0.1 Nm 才重发；服务未就绪 / 互锁拒绝 → 0.5 s 间隔重试，
+        松手即停。与 /a3/gripper/command 力控语义一致（F33/F34）。
+        """
+        v = max(0.0, min(1.0, float(v)))
+        now = self._n.get_clock().now().nanoseconds * 1e-9
+        if self._force_engaged:
+            if v < FORCE_TRIG_OFF:
+                self._force_engaged = False
+                self._force_last_torque = None
+                self._release_wants_retry = False
+                self._send_gripper("release")
+                return
+            tau = self._map_trigger_torque(v)
+            retry_due = self._force_wants_retry and now >= self._force_next_retry_at
+            if (
+                self._force_last_torque is None
+                or abs(tau - self._force_last_torque) >= FORCE_TORQUE_STEP
+                or retry_due
+            ):
+                self._send_gripper("force", tau)
+        else:
+            if self._release_wants_retry and now >= self._release_next_retry_at:
+                self._send_gripper("release")
+            if v >= FORCE_TRIG_ON:
+                self._force_engaged = True
+                self._release_wants_retry = False
+                self._force_last_torque = None
+                self._send_gripper("force", self._map_trigger_torque(v))
+
+    @staticmethod
+    def _map_trigger_torque(v: float) -> float:
+        span = max(1.0 - FORCE_TRIG_MIN, 1e-6)
+        tau = FORCE_TORQUE_MIN + (v - FORCE_TRIG_MIN) / span * (
+            FORCE_TORQUE_MAX - FORCE_TORQUE_MIN
+        )
+        return max(FORCE_TORQUE_MIN, min(FORCE_TORQUE_MAX, tau))
+
+    def _send_gripper(self, mode: str, torque: float = 0.0) -> None:
+        now = self._n.get_clock().now().nanoseconds * 1e-9
+        if not self._grip_cli.service_is_ready():
+            if mode == "force":
+                self._force_wants_retry = True
+                self._force_next_retry_at = now + FORCE_RETRY_S
+            else:
+                self._release_wants_retry = True
+                self._release_next_retry_at = now + FORCE_RETRY_S
+            self._n.get_logger().warn(
+                "gripper command service unavailable; will retry",
+                throttle_duration_sec=2.0,
+            )
+            return
+        req = GripperCommand.Request()
+        req.mode = mode
+        req.torque_nm = float(torque)
+        req.timeout_s = FORCE_TIMEOUT_S
+        future = self._grip_cli.call_async(req)
+        if future is None:
+            self._force_wants_retry = True
+            self._force_next_retry_at = now + FORCE_RETRY_S
+            return
+        if mode == "force":
+            self._force_last_torque = float(torque)
+            self._force_wants_retry = False
+        else:
+            self._release_wants_retry = False
+        future.add_done_callback(
+            lambda f, m=mode: self._on_gripper_cmd_done(f, m)
+        )
+
+    def _on_gripper_cmd_done(self, future, mode: str) -> None:
+        try:
+            resp = future.result()
+        except Exception as exc:  # noqa: BLE001
+            self._n.get_logger().warn(f"gripper {mode} call failed: {exc}")
+            resp = None
+        if resp is not None and resp.success:
+            return
+        # 互锁拒绝（臂运动中等）：持按 / 到期后重试，松手停止
+        message = getattr(resp, "message", "no response")
+        now = self._n.get_clock().now().nanoseconds * 1e-9
+        if mode == "force" and self._force_engaged:
+            self._force_wants_retry = True
+            self._force_next_retry_at = now + FORCE_RETRY_S
+        elif mode == "release":
+            self._release_wants_retry = True
+            self._release_next_retry_at = now + FORCE_RETRY_S
+        self._n.get_logger().warn(
+            f"gripper {mode} rejected: {message}",
+            throttle_duration_sec=2.0,
+        )
 
     def set_speed_scale(self, v: float) -> None:
         self.speed_scale = max(0.0, min(1.0, float(v)))
