@@ -37,3 +37,4 @@ LL-NNN-short-slug.md
 | [LL-015](LL-015-f32-short-traj-starvation.md) | F32 回归：单点轨迹「只出 2 帧且无效」=命名轨迹索引回退误驱 L1 + 启动平滑吞 0.05s 短轨迹 + traj/refresh 共享限速戳饿死 traj 帧 | Edge | 2026-09-06 |
 | [LL-016](LL-016-rclpy-sigint-waitset-race.md) | rclpy Humble SIGINT 与 WaitSet 竞态：节点退出时 RCLError 穿透 spin 致 exit code 1；须在 main 捕获（RCLError 只在 rclpy._rclpy_pybind11 私有模块） | Edge | 2026-09-07 |
 | [LL-017](LL-017-mit-hold-end-refresh-kp80.md) | MIT hold 结束后 refresh 以默认增益 kp=80 续推旧目标角：止位处被固件钳 1 Nm 持续顶死发热（33→56°C）；stop 后残余力矩是楔入止位的回弹外载 | Edge | 2026-09-07 |
+| [LL-018](LL-018-generic-arm-bringup-three-pits.md) | 通用 N 关节臂接入三坑：电机不主动上报反馈须先播种轨迹；新增 yaml 配置须清 build 目录重编（glob 对 build 副本生效）；/joint_states 是 BEST_EFFORT 订阅要同 QoS | Edge | 2026-09-11 |

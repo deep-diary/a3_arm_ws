@@ -95,6 +95,7 @@ class ArmController(Node):
         self.declare_parameter("require_gate", False)
         self.declare_parameter("goto_duration_s", 3.0)
         self.declare_parameter("goto_waypoints", 21)
+        self.declare_parameter("playback_ramp_duration_s", 2.5)
         self.declare_parameter("trajectories_dir", "~/.a3/trajectories")
         self.declare_parameter("named_poses_pkg", "a3_description")
 
@@ -693,6 +694,37 @@ class ArmController(Node):
             resp.success = False
             resp.message = "empty trajectory"
             return resp
+
+        # F38: 回放前先从当前位姿插值到首记录点（playback_ramp_duration_s），
+        # 避免回放起始位 ≠ 记录起始位时机械臂突然跳变；随后原样回放记录轨迹。
+        ramp_s = float(self.get_parameter("playback_ramp_duration_s").value)
+        if ramp_s > 0.05 and self._have_js:
+            q1 = [float(v) for v in traj.points[0].positions]
+            q0: List[float] = []
+            for jn in traj.joint_names:
+                if jn in self._joint_names:
+                    q0.append(float(self._positions[self._joint_names.index(jn)]))
+                elif len(q0) < len(q1):
+                    q0.append(q1[len(q0)])  # 轨迹含未知关节名：该关节不插值，取首点值
+                else:
+                    q0.append(0.0)
+            q0 = q0[: len(q1)] + q1[len(q0):]
+            n = max(2, int(self.get_parameter("goto_waypoints").value))
+            ramp_pts: List[JointTrajectoryPoint] = []
+            for i in range(n):
+                alpha = i / (n - 1)
+                pt = JointTrajectoryPoint()
+                pt.positions = [a + alpha * (b - a) for a, b in zip(q0, q1)]
+                pt.time_from_start = _duration(ramp_s * alpha)
+                ramp_pts.append(pt)
+            for pt in traj.points:
+                t = pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
+                pt.time_from_start = _duration(t + ramp_s)
+            traj.points = ramp_pts + traj.points
+            self.get_logger().info(
+                f"playback ramp: {ramp_s:.2f}s from current pose to first recorded "
+                f"point ({n} pts)"
+            )
 
         duration = (
             traj.points[-1].time_from_start.sec + traj.points[-1].time_from_start.nanosec * 1e-9

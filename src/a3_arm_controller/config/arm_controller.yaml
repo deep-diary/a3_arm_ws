@@ -16,6 +16,8 @@
 
     goto_duration_s: 3.0
     goto_waypoints: 21
+    # 回放前从当前位姿插值到首记录点的时长（s）；≤0.05 关闭插值（F38）
+    playback_ramp_duration_s: 2.5
 
     trajectories_dir: "~/.a3/trajectories"
     named_poses_pkg: a3_description

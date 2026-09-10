@@ -363,6 +363,16 @@ public:
           runtime_kp_can1_ = saved_kp_can1_;
           runtime_kd_can0_ = saved_kd_can0_;
           runtime_kd_can1_ = saved_kd_can1_;
+          // F38: 零力矩期间 refresh 流仍按旧目标位持续发帧；停止时把目标重锚定到
+          // 当前反馈位（MIT 原始角，与 last_commanded_mit_rad_ 同域），避免恢复
+          // kp 后手臂被拉回示教前的旧位姿（防弹回）。
+          for (const auto & route : DogMapper::kTemporaryIndexMap) {
+            const uint8_t mid = route.motor_id;
+            if (mid < last_feedback_mit_rad_.size() &&
+                std::isfinite(last_feedback_mit_rad_[mid])) {
+              last_commanded_mit_rad_[mid] = last_feedback_mit_rad_[mid];
+            }
+          }
           zero_torque_active_ = false;
           PublishControlMode("IDLE");
         }

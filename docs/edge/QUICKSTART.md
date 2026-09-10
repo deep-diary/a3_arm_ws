@@ -182,6 +182,38 @@
     - 真机台架：单电机 CAN_ID=7 空载，扫描见真实 UID，MIT hold 用小角度 ±0.3 rad、2 s，结束自动停 + `motor_stop` 卸力；整机 gate 测试见 [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)「互锁」节。
     - 安全条款见 [shared/SAFETY.md](../shared/SAFETY.md)「单电机调试（MOTOR_DEBUG）」；契约细节（服务/op 表/42 遥测点）见 [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)。
 
+16. **通用 N 关节臂验证流程（F38，can1 接非 A3 臂、URDF 无关）：**
+    在 can1 换接无夹爪/异 URDF 机械臂时，用专用配置跑 init → 挪臂确认 → 示教 → 回放全流程，无需改代码、无 URDF/前端依赖：
+    ```bash
+    # (a) 探测总线电机（纯标准库，无使能）：
+    python3 scripts/mit_noenable_stream.py probe --iface can1 --ids "1 2 3 4 5 6"
+
+    # (b) 执行层：专用 gains（kp=40/kd=2、限位放宽 ±12.57、关 startup smoothing）
+    ros2 launch a3_can_bridge can_bridge.launch.py use_power_sequence:=false \
+      gains_file:=src/a3_can_bridge/config/control_gains_generic.yaml
+
+    # (c) 编排层：N 关节名参数化（6 关节臂去 L7_joint）
+    ros2 launch a3_arm_controller arm_controller.launch.py \
+      config_file:=src/a3_arm_controller/config/arm_controller_6j.yaml
+
+    # (d) 初始化：set_zero 广播 → 按 /joint_states 计数确认 → enable 广播
+    ros2 service call /a3/arm/init std_srvs/srv/Trigger "{}"   # 期望 "6/6 confirmed"
+    ros2 topic echo /joint_states                               # 6 关节 |p| < 0.05
+
+    # (e) 零力矩挪臂：start 后自由拖动，stop 后保持释放位（F38a 防弹回，臂不弹回旧目标）
+    ros2 service call /a3/zero_torque/start std_srvs/srv/Trigger "{}"
+    ros2 service call /a3/zero_torque/stop std_srvs/srv/Trigger "{}"
+
+    # (f) 示教 5s → 保存 → 回放（F38b：回放先按 playback_ramp_duration_s 插值到首记录点，无跳变）
+    ros2 service call /a3/arm/start_teach std_srvs/srv/Trigger "{}"
+    ros2 service call /a3/arm/stop_teach std_srvs/srv/Trigger "{}"
+    ros2 service call /a3/arm/save_trajectory a3_msgs/srv/SaveTrajectory "{name: teach6}"
+    ros2 service call /a3/arm/playback a3_msgs/srv/PlaybackTrajectory "{name: teach6}"
+    ```
+    - init 前后顺序：先 set_zero 后 enable；6 关节配置下 `arm_controller` 只数 `joint_names` 内的关节，缺席/多余电机不影响确认计数。
+    - 无运动来源需「播种」：init 后由零力矩/示教/回放路径自动播种 refresh 目标（`last_commanded_mit_rad_`），无命令前 refresh 不发帧。
+    - 安全：全部运动来自用户拖动（kp=0）与回放自录轨迹 + 插值段；急停 = Ctrl+C 后 `ros2 service call /a3/motor/stop` + `/a3/arm/disable`。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
