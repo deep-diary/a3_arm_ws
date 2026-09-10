@@ -1,0 +1,8 @@
+# 通用平滑移动：当前位姿 → 目标位姿，duration_s 秒内多点线性插值（F39）。
+# positions 长度须 = joint_names 数（rad，按 joint_names 顺序），不做 URDF 限位
+# clamp（执行层 joint_cmd limits 仍权威拦截）。
+float64[] positions
+float64 duration_s
+---
+bool success
+string message

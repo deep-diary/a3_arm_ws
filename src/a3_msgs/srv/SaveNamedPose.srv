@@ -1,0 +1,8 @@
+# 把命名点位保存到用户层 ~/.a3/poses.yaml（同名覆盖，运行时即时生效）。
+# positions 留空 = 取当前 /joint_states 位姿（F39）。
+string name
+float64[] positions
+---
+bool success
+string message
+string path

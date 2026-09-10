@@ -13,7 +13,7 @@ import os
 import re
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import rclpy
 import yaml
@@ -32,7 +32,9 @@ from a3_can_bridge.srv import MotorCommand
 from a3_msgs.msg import ArmStatus
 from a3_msgs.srv import (
     GotoNamedPose,
+    MoveToJointPositions,
     PlaybackTrajectory,
+    SaveNamedPose,
     SaveTrajectory,
     SetJointPositions,
 )
@@ -182,6 +184,13 @@ class ArmController(Node):
             SetJointPositions, "/a3/arm/set_joint_positions", self._set_joint_positions_cb,
             callback_group=self._cb_group,
         )
+        self.create_service(
+            MoveToJointPositions, "/a3/arm/move_to", self._move_to_cb, callback_group=self._cb_group
+        )
+        self.create_service(
+            SaveNamedPose, "/a3/arm/save_named_pose", self._save_named_pose_cb,
+            callback_group=self._cb_group,
+        )
         self.create_service(Trigger, "/a3/arm/start_teach", self._start_teach_cb, callback_group=self._cb_group)
         self.create_service(Trigger, "/a3/arm/stop_teach", self._stop_teach_cb, callback_group=self._cb_group)
         self.create_service(SaveTrajectory, "/a3/arm/save_trajectory", self._save_cb, callback_group=self._cb_group)
@@ -208,19 +217,33 @@ class ArmController(Node):
     # ------------------------------------------------------------------ utils
 
     def _load_poses(self) -> Dict[str, List[float]]:
+        poses: Dict[str, List[float]] = {}
         try:
             pkg = str(self.get_parameter("named_poses_pkg").value)
             share = get_package_share_directory(pkg)
             path = os.path.join(share, "config", "named_poses.yaml")
             with open(path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f)
-            return {
+            poses.update({
                 name: list(spec["positions"])
                 for name, spec in (data.get("poses") or {}).items()
-            }
+            })
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warn(f"cannot load named poses: {exc}")
-            return {}
+        # F39: 用户层点位覆盖包内点位（save_named_pose 写入，同名覆盖）
+        try:
+            user_path = self._user_poses_path()
+            if os.path.exists(user_path):
+                with open(user_path, "r", encoding="utf-8") as f:
+                    udata = yaml.safe_load(f) or {}
+                for name, spec in (udata.get("poses") or {}).items():
+                    poses[name] = list(spec["positions"])
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"cannot load user named poses: {exc}")
+        return poses
+
+    def _user_poses_path(self) -> str:
+        return os.path.expanduser("~/.a3/poses.yaml")
 
     def _load_joint_limits(self) -> Dict[str, Tuple[float, float]]:
         """从 a3_description/urdf/el_a3.urdf 读取各关节 limit lower/upper（与前端滑动条同源）。"""
@@ -485,6 +508,8 @@ class ArmController(Node):
         q1 = self._poses[name]
         if len(q1) < self._n_joints:
             q1 = q1 + [0.0] * (self._n_joints - len(q1))
+        elif len(q1) > self._n_joints:
+            q1 = q1[: self._n_joints]
         q0 = list(self._positions)
         duration = float(self.get_parameter("goto_duration_s").value)
         n = max(2, int(self.get_parameter("goto_waypoints").value))
@@ -505,6 +530,97 @@ class ArmController(Node):
 
         resp.success = True
         resp.message = f"goto {name} ({duration:.1f}s, {n} pts)"
+        return resp
+
+    def _move_to_cb(
+        self, req: MoveToJointPositions.Request, resp: MoveToJointPositions.Response
+    ) -> MoveToJointPositions.Response:
+        """F39: 通用平滑移动——当前位姿到任意目标位姿，duration_s 内多点插值。"""
+        if len(req.positions) != self._n_joints:
+            resp.success = False
+            resp.message = f"need {self._n_joints} positions, got {len(req.positions)}"
+            return resp
+        can, why = self._can_move()
+        if not can:
+            resp.success = False
+            resp.message = why
+            return resp
+        if not self._have_js:
+            resp.success = False
+            resp.message = "no /joint_states yet"
+            return resp
+
+        q1 = [float(v) for v in req.positions]
+        q0 = list(self._positions)
+        duration = float(req.duration_s) if req.duration_s and req.duration_s > 0 else 1.0
+        duration = max(0.05, min(duration, 60.0))
+        n = max(2, int(self.get_parameter("goto_waypoints").value))
+
+        traj = JointTrajectory()
+        traj.joint_names = list(self._joint_names)
+        for i in range(n):
+            alpha = i / (n - 1)
+            pt = JointTrajectoryPoint()
+            pt.positions = [a + alpha * (b - a) for a, b in zip(q0, q1)]
+            pt.time_from_start = _duration(duration * alpha)
+            traj.points.append(pt)
+
+        self._publish_mode("TRAJ_RUNNING")
+        self._traj_pub.publish(traj)
+        self._set_state(STATE_TRAJ, f"move_to ({duration:.1f}s)")
+        self._schedule_back_to_ready(duration + 0.3)
+
+        resp.success = True
+        resp.message = f"move_to ({duration:.1f}s, {n} pts)"
+        return resp
+
+    def _save_named_pose_cb(
+        self, req: SaveNamedPose.Request, resp: SaveNamedPose.Response
+    ) -> SaveNamedPose.Response:
+        """F39: 保存命名点位（positions 留空 = 当前位姿）到 ~/.a3/poses.yaml 并即时生效。"""
+        name = _sanitize_name(req.name)
+        if not name:
+            resp.success = False
+            resp.message = "empty pose name"
+            return resp
+        if req.positions:
+            if len(req.positions) != self._n_joints:
+                resp.success = False
+                resp.message = f"need {self._n_joints} positions, got {len(req.positions)}"
+                return resp
+            q = [float(v) for v in req.positions]
+        else:
+            if not self._have_js:
+                resp.success = False
+                resp.message = "no /joint_states yet"
+                return resp
+            q = [float(p) for p in self._positions]
+
+        path = self._user_poses_path()
+        data: Dict[str, Any] = {}
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+            except Exception as exc:  # noqa: BLE001
+                resp.success = False
+                resp.message = f"load existing poses failed: {exc}"
+                return resp
+        data.setdefault("poses", {})[name] = q
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(data, f)
+        except Exception as exc:  # noqa: BLE001
+            resp.success = False
+            resp.message = f"save failed: {exc}"
+            return resp
+
+        self._poses[name] = q
+        resp.success = True
+        resp.message = f"saved pose '{name}'"
+        resp.path = path
+        self.get_logger().info(f"named pose saved: {name} -> {[round(v, 4) for v in q]}")
         return resp
 
     def _set_joint_positions_cb(

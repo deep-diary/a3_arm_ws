@@ -213,6 +213,15 @@
     - init 前后顺序：先 set_zero 后 enable；6 关节配置下 `arm_controller` 只数 `joint_names` 内的关节，缺席/多余电机不影响确认计数。
     - 无运动来源需「播种」：init 后由零力矩/示教/回放路径自动播种 refresh 目标（`last_commanded_mit_rad_`），无命令前 refresh 不发帧。
     - 安全：全部运动来自用户拖动（kp=0）与回放自录轨迹 + 插值段；急停 = Ctrl+C 后 `ros2 service call /a3/motor/stop` + `/a3/arm/disable`。
+    - 命名点位与平滑移动（F39）：`/a3/arm/save_named_pose`（positions 留空 = 当前位姿，写 `~/.a3/poses.yaml`，同名覆盖包内点位、重启保留）；`/a3/arm/move_to`（任意目标 + duration_s，多点插值，不 clamp）；失能 = `/a3/arm/disable`。典型序列：
+      ```bash
+      ros2 service call /a3/arm/save_named_pose a3_msgs/srv/SaveNamedPose "{name: ready}"          # 当前位姿
+      ros2 service call /a3/arm/save_named_pose a3_msgs/srv/SaveNamedPose "{name: home, positions: [0,0,0,0,0,0]}"
+      ros2 service call /a3/arm/move_to a3_msgs/srv/MoveToJointPositions "{positions: [0,0,0,0,0,0], duration_s: 5.0}"
+      ros2 service call /a3/arm/goto_named_pose a3_msgs/srv/GotoNamedPose "{pose_name: ready}"
+      ros2 service call /a3/arm/disable std_srvs/srv/Trigger "{}"
+      ```
+    - 失能后 refresh 流仍按最后锚定目标发帧（电机 mode 0 忽略力矩）；重新使能前若臂被挪过，先 `zero_torque/start→stop` 重锚定目标再 `enable`，避免拉回旧位姿。
 
 ## 相关文档
 

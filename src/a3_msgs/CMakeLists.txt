@@ -12,6 +12,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/MoveToPoseIK.srv"
   "srv/GotoNamedPose.srv"
   "srv/SetJointPositions.srv"
+  "srv/MoveToJointPositions.srv"
+  "srv/SaveNamedPose.srv"
   "srv/SaveTrajectory.srv"
   "srv/PlaybackTrajectory.srv"
   "srv/GripperCommand.srv"
