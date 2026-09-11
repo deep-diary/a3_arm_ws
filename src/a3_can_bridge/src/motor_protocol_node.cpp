@@ -34,6 +34,7 @@
 #include "a3_can_bridge/srv/motor_scan.hpp"
 #include "a3_can_bridge/msg/motor_state.hpp"
 #include "a3_can_bridge/msg/motor_states.hpp"
+#include "a3_can_bridge/msg/tx_stats.hpp"
 #include "a3_can_bridge/srv/motor_mit_command.hpp"
 #include "a3_can_bridge/srv/motor_stop.hpp"
 #include "a3_can_bridge/srv/motor_set_mode.hpp"
@@ -50,6 +51,7 @@ using std_msgs::msg::UInt8MultiArray;
 using std_srvs::srv::Trigger;
 using a3_can_bridge::msg::MotorState;
 using a3_can_bridge::msg::MotorStates;
+using a3_can_bridge::msg::TxStats;
 using a3_can_bridge::srv::MotorCommand;
 using a3_can_bridge::srv::SetCanId;
 using a3_can_bridge::srv::SetMotorParam;
@@ -232,6 +234,25 @@ public:
     min_tx_refresh_interval_s_ = this->declare_parameter<double>("min_tx_refresh_interval_s", 0.02);
     enable_max_tx_rate_limit_ = this->declare_parameter<bool>("enable_max_tx_rate_limit", true);
     max_tx_rate_per_motor_hz_ = this->declare_parameter<double>("max_tx_rate_per_motor_hz", 60.0);
+    // 限速容差：间隔 < min_interval × ratio 才丢弃。
+    // 200Hz 节拍下回调耗时抖动（rclcpp 下一次触发 = 完成时刻 + period）会让相邻 tick
+    // 间隔在 5ms 上下摆动，无容差时 ~45% 帧被误丢（示教卡顿根因，LL-023）。
+    max_tx_rate_limit_tolerance_ratio_ = this->declare_parameter<double>(
+      "max_tx_rate_limit_tolerance_ratio", 0.8);
+    // F42: 力矩方向钳位（执行层权威保护）。τ 超阈且目标增量与 sign(τ) 同向时
+    // 把目标钉在反馈位（冻结），反向放行；latch 防 200Hz 极限环。
+    enable_torque_protection_ = this->declare_parameter<bool>("enable_torque_protection", true);
+    torque_protection_limit_nm_ = this->declare_parameter<std::vector<double>>(
+      "torque_protection_limit_nm", std::vector<double>(kNumArmJoints, 3.0));
+    torque_protection_release_margin_rad_ = this->declare_parameter<double>(
+      "torque_protection_release_margin_rad", 0.02);
+    torque_protection_log_throttle_ms_ = this->declare_parameter<int>(
+      "torque_protection_log_throttle_ms", 1000);
+    // F46: TX 帧率监视——5s 窗口统计发布 /a3/motor/tx_stats
+    publish_tx_stats_ = this->declare_parameter<bool>("publish_tx_stats", true);
+    tx_stats_topic_ = this->declare_parameter<std::string>(
+      "tx_stats_topic", "/a3/motor/tx_stats");
+    tx_rate_ok_ratio_ = this->declare_parameter<double>("tx_rate_ok_ratio", 0.9);
     publish_motor_states_ = this->declare_parameter<bool>("publish_motor_states", true);
     motor_states_topic_ = this->declare_parameter<std::string>(
       "motor_states_topic", "/a3/motor/states");
@@ -262,6 +283,13 @@ public:
         "joint_signs/joint_offsets_rad size mismatch, reset to kNumArmJoints defaults.");
       joint_signs_ = std::vector<double>(kNumArmJoints, 1.0);
       joint_offsets_rad_ = std::vector<double>(kNumArmJoints, 0.0);
+    }
+    if (torque_protection_limit_nm_.size() != kNumArmJoints) {
+      RCLCPP_WARN(
+        this->get_logger(),
+        "torque_protection_limit_nm size != %zu, padding/truncating to 3.0.",
+        kNumArmJoints);
+      torque_protection_limit_nm_.resize(kNumArmJoints, 3.0);
     }
     if (tau_ff_nominal_nm_.size() != kNumArmJoints) {
       RCLCPP_WARN(this->get_logger(), "tau_ff_nominal_nm size != %zu, padding/truncating.", kNumArmJoints);
@@ -469,6 +497,10 @@ public:
     if (publish_motor_states_) {
       motor_states_pub_ = this->create_publisher<MotorStates>(
         motor_states_topic_, rclcpp::SensorDataQoS());
+    }
+    if (publish_tx_stats_) {
+      tx_stats_pub_ = this->create_publisher<TxStats>(
+        tx_stats_topic_, rclcpp::SensorDataQoS());
     }
     if (publish_feedback_joint_states_) {
       feedback_joint_states_pub_ = this->create_publisher<JointState>(
@@ -857,6 +889,60 @@ private:
     return all_converged;
   }
 
+  // F42: 力矩方向钳位（执行层权威）。MIT 约定 τ≈kp×(target−actual)，τ>0 ⟺
+  // 目标在反馈正侧、继续正向会继续增矩 → 钉在反馈位 target=min(target, fb)；
+  // τ<0 → max。latch：trip 后保持钉住，直到轨迹目标越过 fb 反向侧 + release
+  // margin 才放行（=「反向放行」的精确实现），避免 200Hz 下 0→阈值 周期脉冲
+  // 极限环。kp≤0.01（zero_torque/播种）或反馈不新鲜时不钳位并清 latch——
+  // kp=0 时钳位无意义且会污染 last_commanded 影响 F38 重锚定语义。
+  void ApplyTorqueDirectionClamp(size_t idx, uint8_t motor_id, double use_kp, double * mapped)
+  {
+    if (!enable_torque_protection_ || idx >= torque_protection_limit_nm_.size()) {
+      return;
+    }
+    const bool kp_active = use_kp > 0.01;
+    const bool fresh =
+      idx < last_feedback_stamp_ns_.size() &&
+      (this->now().nanoseconds() - last_feedback_stamp_ns_[idx]) <
+        static_cast<int64_t>(feedback_fresh_timeout_s_ * 1e9);
+    if (!kp_active || !fresh) {
+      torque_latch_active_[idx] = false;
+      torque_latch_sign_[idx] = 0.0;
+      return;
+    }
+    const double tau = last_feedback_effort_nm_[idx];
+    const double fb = motor_id < last_feedback_mit_rad_.size() ?
+      last_feedback_mit_rad_[motor_id] : std::numeric_limits<double>::quiet_NaN();
+    if (!std::isfinite(tau) || !std::isfinite(fb)) {
+      torque_latch_active_[idx] = false;
+      torque_latch_sign_[idx] = 0.0;
+      return;
+    }
+    const double limit = torque_protection_limit_nm_[idx];
+    if (torque_latch_active_[idx]) {
+      const double ls = torque_latch_sign_[idx];
+      // 轨迹目标已越过 fb 反向侧并超出余量 → 反向放行
+      if ((*mapped - fb) * ls < 0.0 &&
+          std::fabs(*mapped - fb) > torque_protection_release_margin_rad_)
+      {
+        torque_latch_active_[idx] = false;
+        torque_latch_sign_[idx] = 0.0;
+      } else {
+        *mapped = (ls > 0.0) ? std::min(*mapped, fb) : std::max(*mapped, fb);
+      }
+      return;
+    }
+    if (limit > 1e-9 && std::fabs(tau) >= limit) {
+      torque_latch_active_[idx] = true;
+      torque_latch_sign_[idx] = (tau > 0.0) ? 1.0 : -1.0;
+      *mapped = (tau > 0.0) ? std::min(*mapped, fb) : std::max(*mapped, fb);
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *this->get_clock(), torque_protection_log_throttle_ms_,
+        "F42 torque clamp trip: motor=%u tau=%.2f limit=%.2f fb=%.4f -> target frozen at fb",
+        static_cast<unsigned>(motor_id), tau, limit, fb);
+    }
+  }
+
   void SendMitFrame(
     const MotorRoute & route, double champ_position_raw,
     uint32_t & front_count, uint32_t & rear_count,
@@ -871,7 +957,10 @@ private:
       last_tx_pub_stamp_ns_[idx] > 0)
     {
       const int64_t min_interval_ns = static_cast<int64_t>(1e9 / max_tx_rate_per_motor_hz_);
-      if ((now_ns - last_tx_pub_stamp_ns_[idx]) < min_interval_ns) {
+      if (
+        static_cast<double>(now_ns - last_tx_pub_stamp_ns_[idx]) <
+        static_cast<double>(min_interval_ns) * max_tx_rate_limit_tolerance_ratio_)
+      {
         ++skip_max_rate_limit_window_;
         return;
       }
@@ -884,25 +973,30 @@ private:
     }
     const double mapped_position_raw = joint_signs_[idx] * champ_smoothed + joint_offsets_rad_[idx];
     const double mapped_position = ClampMotorCommand(idx, mapped_position_raw);
-    if (mapped_out != nullptr) {
-      (*mapped_out)[idx] = mapped_position;
-    }
 
     const bool is_front = (ArmMapper::ArmBus() == CanBus::CAN0);
-    if ((is_front && !tx_enable_can0_) || (!is_front && !tx_enable_can1_)) {
-      ++skip_bus_disabled_window_;
-      return;
-    }
     const double bus_kp = is_front ? runtime_kp_can0_ : runtime_kp_can1_;
     const double bus_kd = is_front ? runtime_kd_can0_ : runtime_kd_can1_;
     const double use_kp = ResolveKp(static_cast<int>(route.motor_id), bus_kp);
     const double use_kd = ResolveKd(static_cast<int>(route.motor_id), bus_kd);
     const double use_tau = ComputeMitTorqueFf(idx, is_front);
 
+    // F42: 力矩方向钳位（mapped 已入 MIT 域，与反馈同域比较）
+    double protected_position = mapped_position;
+    ApplyTorqueDirectionClamp(idx, route.motor_id, use_kp, &protected_position);
+    if (mapped_out != nullptr) {
+      (*mapped_out)[idx] = protected_position;
+    }
+
+    if ((is_front && !tx_enable_can0_) || (!is_front && !tx_enable_can1_)) {
+      ++skip_bus_disabled_window_;
+      return;
+    }
+
     const auto frame = ProtocolCodec::BuildMitControlFrame(
       ArmMapper::ArmBus(),
       route.motor_id,
-      static_cast<float>(mapped_position),
+      static_cast<float>(protected_position),
       static_cast<float>(default_velocity_),
       static_cast<float>(use_kp),
       static_cast<float>(use_kd),
@@ -911,6 +1005,14 @@ private:
     auto packed = FrameCodec::Pack(frame);
     tx_pub_->publish(packed);
     ++tx_traj_total_window_;
+    // F46: 轨迹帧活跃时长（首末帧跨度，供 tx_rate_ok 按真实发送期折算帧率）
+    if (tx_traj_last_tx_ns_ > 0 && now_ns > tx_traj_last_tx_ns_) {
+      tx_traj_active_ns_window_ += now_ns - tx_traj_last_tx_ns_;
+    }
+    tx_traj_last_tx_ns_ = now_ns;
+    if (idx < tx_frame_count_per_motor_window_.size()) {
+      ++tx_frame_count_per_motor_window_[idx];
+    }
     if (ArmMapper::ArmBus() == CanBus::CAN0) {
       ++front_count;
       ++tx_traj_can0_window_;
@@ -930,7 +1032,8 @@ private:
       ProtocolCodec::FrameSummary(frame).c_str());
 
     if (route.motor_id < last_commanded_mit_rad_.size()) {
-      last_commanded_mit_rad_[route.motor_id] = mapped_position;
+      // F42: 存钳位后的目标，refresh 流自动保持冻结位
+      last_commanded_mit_rad_[route.motor_id] = protected_position;
     }
     if (idx < last_tx_pub_stamp_ns_.size()) {
       last_tx_pub_stamp_ns_[idx] = now_ns;
@@ -986,6 +1089,9 @@ private:
       } else {
         ++tx_refresh_can1_window_;
       }
+      if (idx < tx_frame_count_per_motor_window_.size()) {
+        ++tx_frame_count_per_motor_window_[idx];
+      }
       last_refresh_stamp_ns_[idx] = now_ns;
     }
   }
@@ -1036,6 +1142,9 @@ private:
           if (idx < last_tx_pub_stamp_ns_.size()) {
             last_tx_pub_stamp_ns_[idx] = now_ns;
           }
+          if (idx < tx_frame_count_per_motor_window_.size()) {
+            ++tx_frame_count_per_motor_window_[idx];
+          }
         }
       }
     }
@@ -1046,6 +1155,44 @@ private:
 
   void LogTxWindowStats()
   {
+    // F46: 先按实测窗口发布 /a3/motor/tx_stats，再清零窗口计数
+    const int64_t now_ns = this->now().nanoseconds();
+    const double window_s = (last_tx_stats_tick_ns_ > 0) ?
+      static_cast<double>(now_ns - last_tx_stats_tick_ns_) / 1e9 : 5.0;
+    last_tx_stats_tick_ns_ = now_ns;
+    if (tx_stats_pub_ && window_s > 1e-6) {
+      TxStats st;
+      st.window_s = window_s;
+      st.traj_cb_count = traj_cb_count_window_;
+      st.tx_traj_total = tx_traj_total_window_;
+      st.tx_traj_can0 = tx_traj_can0_window_;
+      st.tx_traj_can1 = tx_traj_can1_window_;
+      st.tx_refresh_total = tx_refresh_total_window_;
+      st.tx_refresh_can0 = tx_refresh_can0_window_;
+      st.tx_refresh_can1 = tx_refresh_can1_window_;
+      st.skip_max_rate = skip_max_rate_limit_window_;
+      st.skip_bus_disabled = skip_bus_disabled_window_;
+      st.skip_power_gate = skip_power_gate_window_;
+      for (size_t i = 0; i < DogMapper::kTemporaryIndexMap.size(); ++i) {
+        st.joint_names.emplace_back(DogMapper::kChampJointNames[i]);
+        st.tx_hz.push_back(static_cast<double>(tx_frame_count_per_motor_window_[i]) / window_s);
+      }
+      // 仅窗口内有轨迹帧时校验达标（静止窗口只有 refresh ~50Hz/电机属正常）。
+      // 按轨迹活跃时长折算：3s 轨迹落进 5s 窗口若除以 window_s 会误判不达标。
+      st.traj_active_s = static_cast<double>(tx_traj_active_ns_window_) / 1e9;
+      size_t n_tx_motors = 0;
+      for (const size_t c : tx_frame_count_per_motor_window_) {
+        if (c > 0) { ++n_tx_motors; }
+      }
+      const double traj_hz_per_motor =
+        (st.traj_active_s > 1e-6 && n_tx_motors > 0) ?
+        (static_cast<double>(tx_traj_total_window_) / static_cast<double>(n_tx_motors) /
+          st.traj_active_s) : 0.0;
+      const double expect_hz = tx_rate_ok_ratio_ * std::min(200.0, max_tx_rate_per_motor_hz_);
+      st.tx_rate_ok = (tx_traj_total_window_ == 0) || (traj_hz_per_motor >= expect_hz);
+      tx_stats_pub_->publish(st);
+    }
+
     const size_t tx_total = tx_traj_total_window_ + tx_refresh_total_window_;
     RCLCPP_INFO(
       this->get_logger(),
@@ -1067,6 +1214,8 @@ private:
       power_gate_open_ ? 1 : 0,
       skip_power_gate_window_);
 
+    tx_traj_active_ns_window_ = 0;
+    tx_traj_last_tx_ns_ = 0;
     traj_cb_count_window_ = 0;
     traj_joint_count_window_ = 0;
     tx_traj_total_window_ = 0;
@@ -1078,6 +1227,7 @@ private:
     skip_max_rate_limit_window_ = 0;
     skip_bus_disabled_window_ = 0;
     skip_power_gate_window_ = 0;
+    tx_frame_count_per_motor_window_.fill(0);
   }
 
   void OnPowerGate(const Bool::SharedPtr msg)
@@ -1087,6 +1237,11 @@ private:
       return;
     }
     power_gate_open_ = next;
+    if (!power_gate_open_) {
+      // F42: 门禁关闭时清力矩钳位 latch，避免恢复后沿用陈旧冻结位
+      torque_latch_active_.fill(false);
+      torque_latch_sign_.fill(0.0);
+    }
     RCLCPP_WARN(this->get_logger(), "Power sequence gate changed: gate_open=%d", power_gate_open_ ? 1 : 0);
     if (power_gate_open_) {
       // 互锁（F32）：gate 打开即整机进入正常轨迹运行，单电机 MIT 保持必须立刻让路
@@ -1895,6 +2050,11 @@ private:
     if (idx >= boot_feedback_champ_rad_.size()) {
       return;
     }
+    // F42: 模式上升沿（重新使能）时清力矩钳位 latch
+    if (idx < torque_latch_active_.size()) {
+      torque_latch_active_[idx] = false;
+      torque_latch_sign_[idx] = 0.0;
+    }
     boot_feedback_champ_rad_[idx] = current_champ_feedback;
     boot_feedback_captured_[idx] = true;
     has_last_sent_[idx] = false;
@@ -2230,6 +2390,7 @@ private:
   double min_tx_refresh_interval_s_{0.02};
   bool enable_max_tx_rate_limit_{true};
   double max_tx_rate_per_motor_hz_{60.0};
+  double max_tx_rate_limit_tolerance_ratio_{0.8};
   bool publish_motor_states_{true};
   std::string motor_states_topic_;
   double max_hold_duration_s_{30.0};
@@ -2294,6 +2455,22 @@ private:
   size_t skip_max_rate_limit_window_{0};
   size_t skip_bus_disabled_window_{0};
   size_t skip_power_gate_window_{0};
+  // F42: 力矩方向钳位状态（per trajectory_index）
+  bool enable_torque_protection_{true};
+  std::vector<double> torque_protection_limit_nm_;
+  double torque_protection_release_margin_rad_{0.02};
+  int torque_protection_log_throttle_ms_{1000};
+  std::array<bool, 12> torque_latch_active_{};
+  std::array<double, 12> torque_latch_sign_{};
+  // F46: TX 帧率监视
+  bool publish_tx_stats_{true};
+  std::string tx_stats_topic_;
+  double tx_rate_ok_ratio_{0.9};
+  std::array<size_t, 12> tx_frame_count_per_motor_window_{};
+  int64_t tx_traj_active_ns_window_{0};
+  int64_t tx_traj_last_tx_ns_{0};
+  int64_t last_tx_stats_tick_ns_{0};
+  rclcpp::Publisher<TxStats>::SharedPtr tx_stats_pub_;
 
   bool enable_trajectory_interpolation_{true};
   double trajectory_interp_rate_hz_{200.0};

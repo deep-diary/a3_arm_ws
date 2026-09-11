@@ -18,6 +18,26 @@
     goto_waypoints: 21
     # 回放前从当前位姿插值到首记录点的时长（s）；≤0.05 关闭插值（F38）
     playback_ramp_duration_s: 2.5
+    # F41: move_to/goto/ramp 兜底——最短时长 + ≥50Hz 插值点
+    move_to_min_duration_s: 3.0
+    move_to_points_hz: 50.0
+    move_to_max_points: 5000
+    # F40: 失能保护（不在 home 容差内先平滑回 home 再失能，防掉臂）
+    disable_home_pose_name: home
+    disable_home_tol_rad: 0.15
+    disable_home_duration_s: 3.0
+    disable_home_confirm_s: 0.5
+    disable_park_timeout_s: 8.0
+    # F43: 最大力矩持久化
+    motor_states_topic: /a3/motor/states
+    torque_stats_file: "~/.a3/stats/torque_stats.yaml"
+    torque_stats_save_interval_s: 10.0
+    # F44: 温度管理（warn 仅告警；protect 自动回 home 失能降温；迟滞恢复）
+    temp_protect_enabled: true
+    temp_warn_c: 60.0
+    temp_protect_c: 65.0
+    temp_hysteresis_c: 5.0
+    fault_mask_reset_on_fault: true
 
     trajectories_dir: "~/.a3/trajectories"
     named_poses_pkg: a3_description

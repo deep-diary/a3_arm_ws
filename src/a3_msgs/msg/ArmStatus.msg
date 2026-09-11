@@ -15,3 +15,12 @@ float64[] efforts
 
 # 最近事件或错误文本
 string message
+
+# 电机温度（°C，按 joint_names 顺序；无 fresh 反馈的关节为 0.0，勿当 NaN 判读——需求 F44）
+float64[] temperatures
+
+# 每关节历史最大力矩绝对值（Nm，持久化 ~/.a3/stats/torque_stats.yaml，重启恢复——需求 F43）
+float64[] max_torques
+
+# 温度告警（≥ temp_warn_c 但未达保护阈值——需求 F44）
+bool temp_warn

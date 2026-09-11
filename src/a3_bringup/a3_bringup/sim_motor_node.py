@@ -83,6 +83,8 @@ class SimMotorNode(Node):
         self.declare_parameter("zero_torque_kd", 1.0)
         self.declare_parameter("motor_states_topic", "/a3/motor/states")
         self.declare_parameter("max_hold_duration_s", 30.0)
+        # F43 验证：注入偏置力矩（默认全 0），供编排层最大力矩统计/持久化测试
+        self.declare_parameter("sim_bias_torque_nm", [0.0] * 7)
 
         self._joint_names: List[str] = list(
             self.get_parameter("joint_names").get_parameter_value().string_array_value
@@ -95,6 +97,10 @@ class SimMotorNode(Node):
         self._contact_q = float(self.get_parameter("contact_q").value)
         self._contact_k = float(self.get_parameter("contact_k").value)
         self._enable_contact = bool(self.get_parameter("enable_contact").value)
+        bias = list(
+            self.get_parameter("sim_bias_torque_nm").get_parameter_value().double_array_value
+        )
+        self._bias_torque_nm: List[float] = (bias + [0.0] * self._n)[: self._n]
 
         self._positions = [0.0] * self._n
         self._velocities = [0.0] * self._n
@@ -409,10 +415,11 @@ class SimMotorNode(Node):
                 q_new = q_old + (self._target[i] - q_old) * self._follow_alpha
                 self._positions[i] = q_new
                 self._velocities[i] = (q_new - q_old) / dt if dt > 1e-6 else 0.0
-            self._effort = [0.0] * self._n
+            # F43 验证：偏置力矩注入（默认全 0，不影响常规仿真）
+            self._effort = list(self._bias_torque_nm)
             if self._enable_contact and self._n > L7_IDX:
                 penetration = max(0.0, self._positions[L7_IDX] - self._contact_q)
-                self._effort[L7_IDX] = self._contact_k * penetration
+                self._effort[L7_IDX] += self._contact_k * penetration
 
             js = JointState()
             js.header.stamp = now.to_msg()

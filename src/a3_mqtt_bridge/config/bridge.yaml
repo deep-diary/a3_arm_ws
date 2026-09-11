@@ -73,13 +73,24 @@ topics:
     names: [motor_feedback]
 
   # /a3/arm_status（a3_arm_controller 编排层聚合状态，需求 F21/F23）
-  # scalar 展平：state/mode/message -> arm_state/arm_mode/arm_message（前端控制面板状态）
+  # scalar 展平：state/mode/message/temp_warn -> arm_state/arm_mode/arm_message/arm_temp_warn
+  # （F44 加 temp_warn；F40/F45 的 SAFE_PARK/DISABLED/COOLING 状态经 arm_state 上行）
   - topic: /a3/arm_status
     node: a3_arm_controller
     type: a3_msgs/msg/ArmStatus
     flatten: scalar
-    fields: [state, mode, message]
-    names: [arm_state, arm_mode, arm_message]
+    fields: [state, mode, message, temp_warn]
+    names: [arm_state, arm_mode, arm_message, arm_temp_warn]
+
+  # F43：/a3/arm_status 第二条 rule——历史最大力矩绝对值按关节展平 mtqmax_L1..L7
+  # （同话题多 rule 各自独立订阅；数组序 = joint_names 序，按下标取）
+  - topic: /a3/arm_status
+    node: a3_arm_controller
+    type: a3_msgs/msg/ArmStatus
+    flatten: joint_state
+    fields: [max_torques]
+    prefixes: [mtqmax]
+    joints: [L1_joint, L2_joint, L3_joint, L4_joint, L5_joint, L6_joint, L7_joint]
 
   # /a3/gripper_status（a3_gripper_controller 夹爪力控状态，需求 F26/F27/F31）
   # scalar 展平：力控状态/目标与实测力矩/目标与实测位置/接触/错误码 -> grip_*（前端夹爪面板）
@@ -99,3 +110,22 @@ topics:
     flatten: motor_state
     prefixes: [temp, err, mode, online, mtq, mp]
     joints: [L1_joint, L2_joint, L3_joint, L4_joint, L5_joint, L6_joint, L7_joint]
+
+  # F46：/a3/motor/tx_stats（5s 一拍）——实测发送率按关节展平 txhz_L1..L7
+  - topic: /a3/motor/tx_stats
+    node: motor_protocol_node
+    type: a3_can_bridge/msg/TxStats
+    qos: best_effort
+    flatten: joint_state
+    fields: [tx_hz]
+    prefixes: [txhz]
+    joints: [L1_joint, L2_joint, L3_joint, L4_joint, L5_joint, L6_joint, L7_joint]
+
+  # F46：/a3/motor/tx_stats 第二条 rule——窗口统计与达标标志 scalar 展平
+  - topic: /a3/motor/tx_stats
+    node: motor_protocol_node
+    type: a3_can_bridge/msg/TxStats
+    qos: best_effort
+    flatten: scalar
+    fields: [window_s, tx_traj_total, tx_refresh_total, traj_active_s, tx_rate_ok]
+    names: [tx_window_s, tx_traj_total, tx_refresh_total, tx_traj_active_s, tx_rate_ok]

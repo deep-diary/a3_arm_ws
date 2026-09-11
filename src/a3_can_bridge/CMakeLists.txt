@@ -31,6 +31,7 @@ set(srv_files
 set(msg_files
   "msg/MotorState.msg"
   "msg/MotorStates.msg"
+  "msg/TxStats.msg"
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}

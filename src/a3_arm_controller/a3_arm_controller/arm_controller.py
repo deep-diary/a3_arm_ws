@@ -13,6 +13,7 @@ import os
 import re
 import threading
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import rclpy
@@ -28,6 +29,7 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
+from a3_can_bridge.msg import MotorStates
 from a3_can_bridge.srv import MotorCommand
 from a3_msgs.msg import ArmStatus
 from a3_msgs.srv import (
@@ -49,14 +51,17 @@ JOINTS = [
     "L7_joint",
 ]
 
-# 编排状态机
-STATE_IDLE = "IDLE"
+# 编排状态机（F45：11 态）
+STATE_IDLE = "IDLE"            # 上电未初始化
 STATE_INIT = "INIT"
 STATE_READY = "READY"
 STATE_TRAJ = "TRAJ"
 STATE_SERVO = "SERVO"
 STATE_TEACH = "TEACH"
 STATE_AI = "AI"
+STATE_SAFE_PARK = "SAFE_PARK"  # F40: 回安全位中，拒绝新运动指令
+STATE_DISABLED = "DISABLED"    # F45: 已失能，须显式 enable
+STATE_COOLING = "COOLING"      # F44: 超温保护后降温中，enable 被拒直到降温
 STATE_FAULT = "FAULT"
 
 # 禁止运动类命令的底层控制模式
@@ -100,6 +105,26 @@ class ArmController(Node):
         self.declare_parameter("playback_ramp_duration_s", 2.5)
         self.declare_parameter("trajectories_dir", "~/.a3/trajectories")
         self.declare_parameter("named_poses_pkg", "a3_description")
+        # F41: move_to/goto/ramp 兜底——最短时长 + ≥50Hz 插值点
+        self.declare_parameter("move_to_min_duration_s", 3.0)
+        self.declare_parameter("move_to_points_hz", 50.0)
+        self.declare_parameter("move_to_max_points", 5000)
+        # F40: 失能保护（不在 home 容差内先平滑回 home 再失能）
+        self.declare_parameter("disable_home_pose_name", "home")
+        self.declare_parameter("disable_home_tol_rad", 0.15)
+        self.declare_parameter("disable_home_duration_s", 3.0)
+        self.declare_parameter("disable_home_confirm_s", 0.5)
+        self.declare_parameter("disable_park_timeout_s", 8.0)
+        # F43: 最大力矩持久化
+        self.declare_parameter("motor_states_topic", "/a3/motor/states")
+        self.declare_parameter("torque_stats_file", "~/.a3/stats/torque_stats.yaml")
+        self.declare_parameter("torque_stats_save_interval_s", 10.0)
+        # F44: 温度管理（warn 仅告警；protect 自动回 home 失能降温；迟滞恢复）
+        self.declare_parameter("temp_protect_enabled", True)
+        self.declare_parameter("temp_warn_c", 60.0)
+        self.declare_parameter("temp_protect_c", 65.0)
+        self.declare_parameter("temp_hysteresis_c", 5.0)
+        self.declare_parameter("fault_mask_reset_on_fault", True)
 
         self._joint_names: List[str] = list(
             self.get_parameter("joint_names").get_parameter_value().string_array_value
@@ -124,6 +149,18 @@ class ArmController(Node):
         self._have_js = False
         # jog（滑动条直驱）进行中标志：区分 TRAJ 是 jog 还是 goto/playback
         self._jogging = False
+
+        # F43: 每关节最大力矩统计（正负双向 + 绝对值，节流落盘，重启恢复）
+        self._torque_stats: Dict[str, Dict[str, Any]] = self._load_torque_stats()
+        self._torque_stats_dirty = False
+        self._torque_stats_saved_at = 0.0
+        # F44: 温度/故障监视（fresh 门控；无反馈温度=0.0，勿当 NaN 判读）
+        self._temperatures: List[float] = [0.0] * self._n_joints
+        self._temp_fresh: List[bool] = [False] * self._n_joints
+        self._temp_warn = False
+        self._temp_protect_pending = False
+        self._fault_reset_pending = False
+        self._pending_fault: Tuple[str, int] = ("", 0)
 
         # 示教录制
         self._recording = False
@@ -161,6 +198,12 @@ class ArmController(Node):
         self.create_subscription(
             String, str(self.get_parameter("power_state_topic").value), self._on_power_state, latched_qos,
             callback_group=self._cb_group,
+        )
+        # F43/F44: 电机原始状态（力矩统计 + 温度/故障监视）；发布端 SensorDataQoS，
+        # best_effort 订阅兼容（js_qos 同）
+        self.create_subscription(
+            MotorStates, str(self.get_parameter("motor_states_topic").value), self._on_motor_states,
+            js_qos, callback_group=self._cb_group,
         )
 
         # 发布
@@ -230,20 +273,93 @@ class ArmController(Node):
             })
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warn(f"cannot load named poses: {exc}")
-        # F39: 用户层点位覆盖包内点位（save_named_pose 写入，同名覆盖）
+        # F39: 用户层点位覆盖包内点位（save_named_pose 写入，同名覆盖）。
+        # F39 落盘格式是 {poses: {name: [q...]}}（扁平列表），包级是 {name: {positions: [..]}}，
+        # 两种都兼容，避免「list indices must be integers」误告警导致 home 点位回退全零。
         try:
             user_path = self._user_poses_path()
             if os.path.exists(user_path):
                 with open(user_path, "r", encoding="utf-8") as f:
                     udata = yaml.safe_load(f) or {}
                 for name, spec in (udata.get("poses") or {}).items():
-                    poses[name] = list(spec["positions"])
+                    poses[name] = (
+                        list(spec["positions"]) if isinstance(spec, dict) else list(spec)
+                    )
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warn(f"cannot load user named poses: {exc}")
         return poses
 
     def _user_poses_path(self) -> str:
         return os.path.expanduser("~/.a3/poses.yaml")
+
+    # ------------------------------------------------------ F43 torque stats
+
+    def _torque_stats_path(self) -> str:
+        return os.path.expanduser(str(self.get_parameter("torque_stats_file").value))
+
+    def _load_torque_stats(self) -> Dict[str, Dict[str, Any]]:
+        """启动恢复 ~/.a3/stats/torque_stats.yaml（不存在则空）。"""
+        path = self._torque_stats_path()
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+                return {str(k): dict(v) for k, v in (data.get("joints") or {}).items()}
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().warn(f"cannot load torque stats: {exc}")
+        return {}
+
+    def _save_torque_stats(self) -> None:
+        path = self._torque_stats_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                yaml.safe_dump({"joints": self._torque_stats}, f)
+            self._torque_stats_dirty = False
+            self._torque_stats_saved_at = time.monotonic()
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"cannot save torque stats: {exc}")
+
+    def _update_torque_stats(self, jn: str, tau: float) -> None:
+        st = self._torque_stats.setdefault(
+            jn, {"max_abs": 0.0, "max_pos": 0.0, "max_neg": 0.0, "ts": ""}
+        )
+        changed = False
+        if tau > st["max_pos"]:
+            st["max_pos"] = tau
+            changed = True
+        if tau < st["max_neg"]:
+            st["max_neg"] = tau
+            changed = True
+        if abs(tau) > st["max_abs"]:
+            st["max_abs"] = abs(tau)
+            changed = True
+        if changed:
+            st["ts"] = datetime.now().astimezone().isoformat(timespec="seconds")
+            self._torque_stats_dirty = True
+
+    # ------------------------------------------------------------ F40 helpers
+
+    def _home_pose(self) -> List[float]:
+        """失能安全位：优先 poses.yaml 的 home（用户层覆盖包级），缺失回退全零。"""
+        name = str(self.get_parameter("disable_home_pose_name").value)
+        q = self._poses.get(name)
+        if q is None:
+            return [0.0] * self._n_joints
+        q = list(q)
+        if len(q) < self._n_joints:
+            q += [0.0] * (self._n_joints - len(q))
+        return [float(v) for v in q[: self._n_joints]]
+
+    def _at_home(self, tol: float) -> Tuple[bool, float]:
+        """全部关节 |q_i - home_i| ≤ tol 视为已在 home；返回 (是否, 最大偏差)。"""
+        if not self._have_js:
+            return False, float("inf")
+        home = self._home_pose()
+        worst = 0.0
+        for p, h in zip(self._positions, home):
+            worst = max(worst, abs(p - h))
+        return worst <= tol, worst
 
     def _load_joint_limits(self) -> Dict[str, Tuple[float, float]]:
         """从 a3_description/urdf/el_a3.urdf 读取各关节 limit lower/upper（与前端滑动条同源）。"""
@@ -351,9 +467,138 @@ class ArmController(Node):
             return False, "gate closed"
         if self._mode in BLOCKED_MODES:
             return False, f"mode={self._mode}"
-        if self._state in (STATE_INIT, STATE_TEACH, STATE_AI, STATE_TRAJ, STATE_SERVO):
+        # F45: DISABLED/COOLING 下运动命令被拒（原 IDLE 允许 move_to 语义混乱）
+        if self._state in (
+            STATE_INIT, STATE_TEACH, STATE_AI, STATE_TRAJ, STATE_SERVO,
+            STATE_SAFE_PARK, STATE_DISABLED, STATE_COOLING,
+        ):
             return False, f"state={self._state}"
         return True, ""
+
+    def _traj_point_count(self, duration_s: float) -> int:
+        """F41: 插值点数 = max(goto_waypoints, duration×move_to_points_hz)，上限防爆。"""
+        n = max(
+            int(self.get_parameter("goto_waypoints").value),
+            min(
+                int(math.ceil(duration_s * float(self.get_parameter("move_to_points_hz").value))),
+                int(self.get_parameter("move_to_max_points").value),
+            ),
+        )
+        return max(2, n)
+
+    def _safe_park_then_disable(self) -> Tuple[bool, str]:
+        """F40: 平滑回 home → 连续确认收敛 → 失能（同步阻塞，仿 _init_cb 轮询先例）。
+
+        发布 home 轨迹抢占活跃轨迹（执行层 OnTrajectory 天然支持替换），
+        SAFE_PARK 期间拒绝新运动指令；park 超时 → FAULT 且不 reset（保持使能，
+        停在半途，需人工介入）。
+        """
+        home = self._home_pose()
+        tol = float(self.get_parameter("disable_home_tol_rad").value)
+        confirm_s = float(self.get_parameter("disable_home_confirm_s").value)
+        timeout_s = float(self.get_parameter("disable_park_timeout_s").value)
+        duration = max(
+            float(self.get_parameter("disable_home_duration_s").value),
+            float(self.get_parameter("move_to_min_duration_s").value),
+        )
+        n = self._traj_point_count(duration)
+
+        traj = JointTrajectory()
+        traj.joint_names = list(self._joint_names)
+        q0 = list(self._positions)
+        for i in range(n):
+            alpha = i / (n - 1)
+            pt = JointTrajectoryPoint()
+            pt.positions = [a + alpha * (b - a) for a, b in zip(q0, home)]
+            pt.time_from_start = _duration(duration * alpha)
+            traj.points.append(pt)
+
+        self._publish_mode("TRAJ_RUNNING")
+        self._traj_pub.publish(traj)
+        self._traj_done_at = 0.0  # 防旧 TRAJ 时间戳在 SAFE_PARK 中误触发回 READY
+        self._set_state(STATE_SAFE_PARK, f"safe park -> home ({duration:.1f}s, {n} pts)")
+        t0 = time.monotonic()
+
+        converge_start = 0.0
+        while time.monotonic() - t0 < duration + timeout_s and rclpy.ok():
+            at_home, _ = self._at_home(tol)
+            if at_home:
+                if converge_start == 0.0:
+                    converge_start = time.monotonic()
+                elif time.monotonic() - converge_start >= confirm_s:
+                    break
+            else:
+                converge_start = 0.0
+            time.sleep(0.05)
+
+        at_home, _ = self._at_home(tol)
+        if not at_home:
+            self._set_state(STATE_FAULT, "safe park timeout: not at home, still enabled")
+            return False, "safe park timeout: not at home, still enabled"
+        ok, msg = self._motor_command(self._reset_cli, 2)
+        if not ok:
+            # reset 被拒（如 gate 互锁）：臂已在 home 位（安全），回 READY 待人工
+            self._set_state(STATE_READY, f"parked at home but disable refused: {msg}")
+            return False, f"{msg} (parked at home; stop power sequence first)"
+        self._set_state(STATE_DISABLED, "safe park -> disabled")
+        self._publish_mode("IDLE")
+        return True, f"safe park -> disabled ({time.monotonic() - t0:.1f}s)"
+
+    def _check_cooling(self) -> Tuple[bool, str]:
+        """F44: COOLING 下重新使能门禁——全 fresh 关节 < protect−hysteresis 才放行。
+
+        无 fresh 反馈的关节不阻碍（电机不在线则无从谈温度）。
+        """
+        limit = float(self.get_parameter("temp_protect_c").value) - float(
+            self.get_parameter("temp_hysteresis_c").value
+        )
+        hot = [
+            f"{jn}={t:.1f}" for jn, t, fr in zip(
+                self._joint_names, self._temperatures, self._temp_fresh
+            )
+            if fr and math.isfinite(t) and t >= limit
+        ]
+        if hot:
+            return False, f"cooling: {', '.join(hot)} >= {limit:.1f}C, wait"
+        return True, ""
+
+    def _trigger_temp_protect(self) -> None:
+        """F44: 超温保护——平滑回 home → 失能 → COOLING（在状态发布节拍执行）。"""
+        protect_c = float(self.get_parameter("temp_protect_c").value)
+        hot = ", ".join(
+            f"{jn}={t:.1f}" for jn, t, fr in zip(
+                self._joint_names, self._temperatures, self._temp_fresh
+            )
+            if fr and math.isfinite(t) and t >= protect_c
+        )
+        if self._state in (STATE_IDLE, STATE_DISABLED, STATE_COOLING):
+            self._set_state(STATE_COOLING, f"overtemp: {hot}, already disabled")
+            return
+        if self._state == STATE_SAFE_PARK:
+            return  # F40 流程进行中，不打断（同目标）
+        if not self._have_js:
+            ok, msg = self._motor_command(self._reset_cli, 2)
+            if ok:
+                self._set_state(STATE_COOLING, f"overtemp: {hot}, disabled (no js)")
+            else:
+                self._set_state(STATE_FAULT, f"overtemp: {hot}, reset refused: {msg}")
+            return
+        ok, msg = self._safe_park_then_disable()
+        if ok:
+            self._set_state(STATE_COOLING, f"overtemp: {hot}, parked+disabled")
+        else:
+            # park 超时已置 FAULT；reset 被拒已回 READY——温度保护不可放弃 → FAULT
+            self._set_state(STATE_FAULT, f"overtemp: {hot}, protect failed: {msg}")
+
+    def _handle_motor_fault(self) -> None:
+        """F44: 电机故障监视（fault_mask≠0，含固件过温锁存 bit3）→ 紧急失能 + FAULT。"""
+        jn, mask = self._pending_fault
+        self.get_logger().error(f"motor fault: joint={jn} mask=0x{mask:X} -> emergency reset")
+        ok, msg = self._motor_command(self._reset_cli, 2)
+        if ok:
+            self._set_state(STATE_FAULT, f"motor fault: {jn} mask=0x{mask:X}, disabled")
+        else:
+            self._set_state(STATE_FAULT, f"motor fault: {jn} mask=0x{mask:X}, reset refused: {msg}")
 
     def _schedule_back_to_ready(self, delay_s: float) -> None:
         self._traj_done_at = time.monotonic() + max(delay_s, 0.1)
@@ -393,6 +638,56 @@ class ArmController(Node):
     def _on_power_state(self, msg: String) -> None:
         self._power_state = msg.data or ""
 
+    def _on_motor_states(self, msg: MotorStates) -> None:
+        """F43/F44: 电机原始状态——最大力矩跟踪 + 温度/故障监视。
+
+        无反馈关节温度在 C++ 侧被置 0.0（非 NaN），所有温度判断必须 fresh 门控，
+        否则断连会被误判「已冷却」放行使能（LL-011 教训）。6J 臂 MotorStates 仍
+        含 7 条（motor 7 fresh=false），按 motor_id-1 索引并越界保护。
+        """
+        n = self._n_joints
+        temps = [0.0] * n
+        fresh = [False] * n
+        for st in msg.states:
+            idx = int(st.motor_id) - 1
+            if idx < 0 or idx >= n:
+                continue
+            jn = self._joint_names[idx]
+            if st.fresh and math.isfinite(float(st.torque_nm)):
+                self._update_torque_stats(jn, float(st.torque_nm))
+            if st.fresh:
+                temps[idx] = float(st.temperature_c)
+                fresh[idx] = True
+        self._temperatures = temps
+        self._temp_fresh = fresh
+
+        if not self.get_parameter("temp_protect_enabled").value:
+            return
+
+        # warn 级：仅告警 + 遥测，不动状态机
+        warn_c = float(self.get_parameter("temp_warn_c").value)
+        self._temp_warn = any(
+            fr and math.isfinite(t) and t >= warn_c for t, fr in zip(temps, fresh)
+        )
+
+        # protect 级：pending 标记交给 _publish_status 节拍执行（避免订阅回调长阻塞）
+        protect_c = float(self.get_parameter("temp_protect_c").value)
+        if any(fr and math.isfinite(t) and t >= protect_c for t, fr in zip(temps, fresh)):
+            if self._state in (STATE_READY, STATE_TRAJ, STATE_IDLE, STATE_DISABLED, STATE_COOLING):
+                self._temp_protect_pending = True
+
+        # 电机故障监视（fault_mask 非零，含固件过温锁存 bit3）
+        if self.get_parameter("fault_mask_reset_on_fault").value and self._state in (
+            STATE_READY, STATE_TRAJ, STATE_IDLE,
+        ):
+            for st in msg.states:
+                if st.fresh and int(st.fault_mask) != 0:
+                    idx = int(st.motor_id) - 1
+                    jn = self._joint_names[idx] if 0 <= idx < n else f"motor{st.motor_id}"
+                    self._pending_fault = (jn, int(st.fault_mask))
+                    self._fault_reset_pending = True
+                    break
+
     # ------------------------------------------------------------------ status
 
     def _publish_status(self) -> None:
@@ -405,6 +700,20 @@ class ArmController(Node):
             self._traj_done_at = 0.0
             self._back_to_ready()
 
+        # F44: 超温/故障保护在状态节拍执行（订阅回调只置 pending 标记）
+        if self._temp_protect_pending:
+            self._temp_protect_pending = False
+            self._trigger_temp_protect()
+        if self._fault_reset_pending:
+            self._fault_reset_pending = False
+            self._handle_motor_fault()
+
+        # F43: 力矩统计节流落盘
+        if self._torque_stats_dirty and time.monotonic() - self._torque_stats_saved_at >= float(
+            self.get_parameter("torque_stats_save_interval_s").value
+        ):
+            self._save_torque_stats()
+
         st = ArmStatus()
         st.header.stamp = self.get_clock().now().to_msg()
         with self._lock:
@@ -415,6 +724,13 @@ class ArmController(Node):
         st.positions = [float(p) for p in self._positions]
         st.velocities = [float(v) for v in self._velocities]
         st.efforts = [float(e) for e in self._efforts]
+        # F43/F44: 温度（无反馈 0.0）+ 历史最大力矩绝对值（无数据 0.0）
+        st.temperatures = [float(t) for t in self._temperatures]
+        st.max_torques = [
+            float(self._torque_stats.get(jn, {}).get("max_abs", 0.0))
+            for jn in self._joint_names
+        ]
+        st.temp_warn = bool(self._temp_warn)
         self._arm_status_pub.publish(st)
 
     # ------------------------------------------------------------------ services
@@ -424,6 +740,13 @@ class ArmController(Node):
             resp.success = False
             resp.message = f"busy in state={self._state}"
             return resp
+        # F44: COOLING 下重新使能门禁（init 含 enable）
+        if self._state == STATE_COOLING:
+            can_cool, why = self._check_cooling()
+            if not can_cool:
+                resp.success = False
+                resp.message = why
+                return resp
 
         self._set_state(STATE_INIT, "init: set_zero")
         ok, msg = self._motor_command(self._motor_cli, 3)  # set_zero
@@ -464,10 +787,17 @@ class ArmController(Node):
         return resp
 
     def _enable_cb(self, req: Trigger.Request, resp: Trigger.Response) -> Trigger.Response:
-        if self._state in (STATE_TRAJ, STATE_SERVO, STATE_TEACH, STATE_AI):
+        if self._state in (STATE_TRAJ, STATE_SERVO, STATE_TEACH, STATE_AI, STATE_SAFE_PARK):
             resp.success = False
             resp.message = f"busy in state={self._state}"
             return resp
+        # F44: COOLING 下重新使能门禁（降温到 protect−hysteresis 才放行）
+        if self._state == STATE_COOLING:
+            can_cool, why = self._check_cooling()
+            if not can_cool:
+                resp.success = False
+                resp.message = why
+                return resp
         ok, msg = self._motor_command(self._enable_cli, 1)
         if ok:
             self._set_state(STATE_READY, "enabled")
@@ -476,13 +806,63 @@ class ArmController(Node):
         return resp
 
     def _disable_cb(self, req: Trigger.Request, resp: Trigger.Response) -> Trigger.Response:
-        if self._state in (STATE_TRAJ, STATE_SERVO, STATE_TEACH, STATE_AI):
+        """F40: 失能保护——不在 home 容差内先平滑回 home 再失能，避免掉臂。
+
+        服务语义：success=true ⟺ 已失能（或本就已失能）。INIT/TEACH/SERVO/AI 期间
+        zero_torque/SERVO 下执行层会丢弃轨迹，无法安全回 home，拒绝并提示用底层
+        /a3/motor/reset 作紧急失能。
+        """
+        if self._state in (STATE_INIT, STATE_TEACH, STATE_SERVO, STATE_AI):
             resp.success = False
-            resp.message = f"busy in state={self._state}"
+            resp.message = f"busy in state={self._state} (use /a3/motor/reset for emergency)"
             return resp
-        ok, msg = self._motor_command(self._reset_cli, 2)  # reset = 失能
-        if ok:
-            self._set_state(STATE_IDLE, "disabled")
+        if self._state == STATE_SAFE_PARK:
+            resp.success = False
+            resp.message = "already safe parking"
+            return resp
+        if self._state in (STATE_DISABLED, STATE_COOLING):
+            resp.success = True
+            resp.message = "already disabled"
+            return resp
+
+        if not self._have_js:
+            self.get_logger().warn("disable without /joint_states: resetting directly")
+            ok, msg = self._motor_command(self._reset_cli, 2)
+            if ok:
+                self._set_state(STATE_DISABLED, "disabled (no js)")
+                self._publish_mode("IDLE")
+            resp.success = ok
+            resp.message = msg
+            return resp
+
+        # IDLE（上电未使能）/FAULT：直达 reset；READY/TRAJ：home 内直达，否则先 park
+        if self._state in (STATE_IDLE, STATE_FAULT):
+            ok, msg = self._motor_command(self._reset_cli, 2)
+            if ok:
+                self._set_state(STATE_DISABLED, "disabled")
+                self._publish_mode("IDLE")
+            resp.success = ok
+            resp.message = msg
+            return resp
+
+        if self.get_parameter("require_gate").value and not self._gate_open:
+            resp.success = False
+            resp.message = "gate closed: cannot safe park (open gate first)"
+            return resp
+
+        tol = float(self.get_parameter("disable_home_tol_rad").value)
+        at_home, _ = self._at_home(tol)
+        if at_home:
+            ok, msg = self._motor_command(self._reset_cli, 2)
+            if ok:
+                self._set_state(STATE_DISABLED, "disabled")
+                self._publish_mode("IDLE")
+            resp.success = ok
+            resp.message = msg
+            return resp
+
+        # TRAJ 中（运动/回放/jog）：home 轨迹抢占活跃轨迹（执行层 OnTrajectory 替换）
+        ok, msg = self._safe_park_then_disable()
         resp.success = ok
         resp.message = msg
         return resp
@@ -511,8 +891,12 @@ class ArmController(Node):
         elif len(q1) > self._n_joints:
             q1 = q1[: self._n_joints]
         q0 = list(self._positions)
-        duration = float(self.get_parameter("goto_duration_s").value)
-        n = max(2, int(self.get_parameter("goto_waypoints").value))
+        # F41: 时长下限 + ≥50Hz 插值点
+        duration = min(max(
+            float(self.get_parameter("goto_duration_s").value),
+            float(self.get_parameter("move_to_min_duration_s").value),
+        ), 60.0)
+        n = self._traj_point_count(duration)
 
         traj = JointTrajectory()
         traj.joint_names = list(self._joint_names)
@@ -552,9 +936,10 @@ class ArmController(Node):
 
         q1 = [float(v) for v in req.positions]
         q0 = list(self._positions)
+        # F41: 最短时长兜底（可配置，默认 3s）+ ≥50Hz 插值点（3s→150 点）
         duration = float(req.duration_s) if req.duration_s and req.duration_s > 0 else 1.0
-        duration = max(0.05, min(duration, 60.0))
-        n = max(2, int(self.get_parameter("goto_waypoints").value))
+        duration = min(max(duration, float(self.get_parameter("move_to_min_duration_s").value)), 60.0)
+        n = self._traj_point_count(duration)
 
         traj = JointTrajectory()
         traj.joint_names = list(self._joint_names)
@@ -631,7 +1016,10 @@ class ArmController(Node):
             resp.success = False
             resp.message = "no /joint_states yet"
             return resp
-        if self._state in (STATE_INIT, STATE_TEACH, STATE_AI, STATE_FAULT, STATE_SERVO):
+        if self._state in (
+            STATE_INIT, STATE_TEACH, STATE_AI, STATE_FAULT, STATE_SERVO,
+            STATE_SAFE_PARK, STATE_DISABLED, STATE_COOLING,
+        ):
             resp.success = False
             resp.message = f"busy in state={self._state}"
             return resp
@@ -825,7 +1213,8 @@ class ArmController(Node):
                 else:
                     q0.append(0.0)
             q0 = q0[: len(q1)] + q1[len(q0):]
-            n = max(2, int(self.get_parameter("goto_waypoints").value))
+            # F41: ramp 段同步 ≥50Hz（2.5s→125 点）
+            n = self._traj_point_count(ramp_s)
             ramp_pts: List[JointTrajectoryPoint] = []
             for i in range(n):
                 alpha = i / (n - 1)
@@ -885,6 +1274,8 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        # F43: 退出前尽力落盘最大力矩统计
+        node._save_torque_stats()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
