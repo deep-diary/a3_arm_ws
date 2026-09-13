@@ -8,7 +8,7 @@ import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction
 from launch.conditions import IfCondition
-from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import Command, FindExecutable, IfElseSubstitution, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
@@ -37,8 +37,16 @@ def generate_launch_description():
             description="Start RViz2 with MoveIt plugin",
         )
     )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "use_sw_render",
+            default_value="true",
+            description="RViz 软件渲染 LIBGL_ALWAYS_SOFTWARE=1（RK3588 默认开，LL-027）",
+        )
+    )
 
     use_rviz = LaunchConfiguration("use_rviz")
+    use_sw_render = LaunchConfiguration("use_sw_render")
 
     # Get URDF via xacro (mock hardware for demo)
     robot_description_content = Command(
@@ -176,6 +184,8 @@ def generate_launch_description():
         name="rviz2",
         output="log",
         arguments=["-d", rviz_config_file],
+        # 软件渲染规避 RK3588 panfrost GPU hang（LL-027）
+        prefix=IfElseSubstitution(use_sw_render, "env LIBGL_ALWAYS_SOFTWARE=1", ""),
         parameters=[
             robot_description,
             robot_description_semantic,

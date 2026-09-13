@@ -8,7 +8,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, LaunchConfiguration
+from launch.substitutions import Command, IfElseSubstitution, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -18,6 +18,7 @@ def generate_launch_description():
     bridge_share = get_package_share_directory("a3_can_bridge")
 
     use_rviz = LaunchConfiguration("use_rviz")
+    use_sw_render = LaunchConfiguration("use_sw_render")
     use_teleop = LaunchConfiguration("use_teleop")
     use_power_sequence = LaunchConfiguration("use_power_sequence")
     use_gravity_compensation = LaunchConfiguration("use_gravity_compensation")
@@ -86,11 +87,18 @@ def generate_launch_description():
         executable="rviz2",
         name="rviz2",
         arguments=["-d", rviz_cfg],
+        # 软件渲染规避 RK3588 panfrost GPU hang（LL-027）
+        prefix=IfElseSubstitution(use_sw_render, "env LIBGL_ALWAYS_SOFTWARE=1", ""),
         condition=IfCondition(use_rviz),
     )
 
     return LaunchDescription([
         DeclareLaunchArgument("use_rviz", default_value="false"),
+        DeclareLaunchArgument(
+            "use_sw_render",
+            default_value="true",
+            description="RViz 软件渲染 LIBGL_ALWAYS_SOFTWARE=1（RK3588 默认开，LL-027）",
+        ),
         DeclareLaunchArgument("use_teleop", default_value="true"),
         DeclareLaunchArgument("use_power_sequence", default_value="true"),
         DeclareLaunchArgument(

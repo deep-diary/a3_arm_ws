@@ -34,6 +34,7 @@ setup(
             "move_to_pose_ik_node = a3_bringup.move_to_pose_ik_node:main",
             "draw_rectangle_demo = a3_bringup.draw_rectangle_demo:main",
             "servo_mode_bridge = a3_bringup.servo_mode_bridge:main",
+            "urdf_dir_check_pub = a3_bringup.urdf_dir_check_pub:main",
         ],
     },
 )

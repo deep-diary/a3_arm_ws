@@ -291,6 +291,23 @@ cat ~/.a3/stats/torque_stats.yaml
 - **F45 状态机**：11 态（IDLE/INIT/READY/TRAJ/SERVO/TEACH/AI/SAFE_PARK/DISABLED/COOLING/FAULT）；disable/温度保护路径转移实测，arm_state 遥测一致。
 - **F46 帧率**：轨迹期 195 Hz/关节（4098 帧/3 s ≈99% 交付、限速丢弃 0.7%）、静止对照 47.2 Hz/关节、`tx_rate_ok=true`；**tx_stats 5 s 窗口旋转会切分轨迹尾巴，读帧率须对照同时段桥日志**（LL-026）。
 
+### URDF 方向校验（RViz 双模型，臂不失能）
+
+用两个模型对照 URDF 关节方向与真机反馈：**目标模型**（半透明青蓝色 ghost，默认静止在 home）与**实际反馈模型**（原色实体，由电机反馈 /joint_states 驱动）。全程臂失能（电机 mode=0，轨迹帧只收不执行，LL-018）；手转各关节，对比实际模型运动方向与真机是否一致。
+
+```bash
+# 1) 硬件栈（can1 已 UP）
+ros2 launch a3_can_bridge can_bridge.launch.py
+# 2) RViz 双模型（HDMI :0；use_sw_render 默认开，LL-027 必须软件渲染）
+DISPLAY=:0 ros2 launch a3_bringup urdf_dir_check.launch.py
+# 无窗口环境只跑数据流：use_rviz:=false
+```
+
+- 显示内容：`ArmActual_实际反馈`（TF Prefix 空，**原色橙/深棕**）+ `ArmTarget_目标`（TF Prefix `target`，**青蓝/深蓝色系**——换色 URDF 走独立 `/target_robot_description` 话题）+ TF 坐标轴（Marker Scale 0.1）；RViz 打开 4 s 后自动最大化（wmctrl，无则跳过）。
+- 目标默认**静止在 home**（固定参照，手转关节看实际模型偏离即可判方向）；需摆动对比时给 `urdf_dir_check_pub` 传 `osc_amplitudes_rad`（如 `[0.15,0,0,0.15,0.2,0.2,0]`，L2/L3/L7 限位不对称保持 0）；发布器护栏：任一电机 mode_status=2 即暂停轨迹下发（目标 ghost 照发）。
+- 校验对象：URDF 关节轴方向/旋转正负与电机实际方向一致（手转关节看实际模型是否同向转动、幅度是否吻合）。
+- 测试后注意：读数偏离 home 属正常（手转过）；重新使能会先回 last_commanded，且 F48 门禁要求读数在 URDF 限位内——测试期间勿断电。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
