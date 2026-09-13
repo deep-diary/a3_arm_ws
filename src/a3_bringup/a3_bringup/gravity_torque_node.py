@@ -186,12 +186,15 @@ class GravityTorqueNode(Node):
 
     def _apply_calibrated_inertia(self, model) -> None:
         """Best-effort override of link mass/COM from inertia_params.yaml."""
+        # 官方 dynamics_calibration.py 按 inertias[2..6]（= 各关节「下方」的杆，即
+        # L2_joint 驱动的 l2_l3_urdf_asm 等）改惯量——τ_i 只依赖第 i 关节以下的杆。
+        # 旧映射整体上移一杆（L2→l1_link 是 L2 上方杆，只影响 τ1，等效未生效）。
         joint_to_link = {
-            "L2": "l1_link_urdf_asm",
-            "L3": "l2_l3_urdf_asm",
-            "L4": "l3_lnik_urdf_asm",
-            "L5": "l4_l5_urdf_asm",
-            "L6": "part_9",
+            "L2": "l2_l3_urdf_asm",
+            "L3": "l3_lnik_urdf_asm",
+            "L4": "l4_l5_urdf_asm",
+            "L5": "part_9",
+            "L6": "l5_l6_urdf_asm",
         }
         params = self._inertia.get("inertia_params", {})
         if not params or not self._inertia.get("use_calibrated_params", False):

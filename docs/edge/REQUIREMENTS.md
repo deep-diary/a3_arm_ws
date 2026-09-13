@@ -481,6 +481,17 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F47（zero_sta 窗口，本需求是其开机侧兜底）；[lessons_learned/](../lessons_learned/)（环绕机理与「使能前必须 probe 校验」红线）；F45（状态机使能路径）
 - **状态：** `implemented`（2026-09-13 真机验证：零位帧恢复后 7/7≈0，脚本硬检查 PASS exit 0 且软检查匹配「URDF 零位」；隔离域仿真验证 enable 门禁三场景——无 /joint_states 拒绝、L6=5.9 越限拒绝并点名、限内放行；init 越限 WARN 放行。限位比较需裕量（编码器量化噪声 ±0.0002，L2/L3/L7 下界为 0），参数 `position_check_margin_rad: 0.001`。补充：真机发现桥无指令历史时 js 冻结旧值（LL-020）——新增 refresh 零增益播种 + 脚本/门禁 stamp 新鲜度检查，软检查容差按用户反馈放宽至 ±20°）
 
+## F49 重力标定（7J 真机 inertia_params 重标定，复刻官方 dynamics_calibration）
+
+- **说明：** 现有 `inertia_params.yaml` 是装夹爪前 6J 臂的官方标定数据（home 位 L3 模型预测 ≈2.9 Nm vs 实测 ≈0.55 Nm），零力矩/重力补偿不可用（LL-025 推飞事故的残留前置条件）。复刻官方 `dynamics_calibration.py` 做 7J 臂重标定：`scripts/gravity_calibration.py` 在本栈接口上实现——FJT action（/arm_controller/follow_joint_trajectory）下发 2 点轨迹（当前→目标，LL-015 单点轨迹坑），/joint_states（双订阅 BEST_EFFORT+RELIABLE，兼容真机/仿真两端 QoS，LL-030）读位姿与反馈力矩（Nm，LL-024 codec 已按型号校正），/a3/arm_status（state 作 READY 门禁 + temperatures 作温度守护）。采样位姿网格复用官方：基位 [0, 0.785, -0.785, 0.5, 0.5, 0]，L2×10、L3×10、L2×L3 网格 5×5、L4×L5 网格 6×5（去重+碰撞过滤后 ~67 点）+ rest 折叠位与 --anchors 锚点位追加（网格外姿态的 τ 外推锚定，服务 home/ready 验收）；每点 1.5 s 稳定 + 40 次×20 ms 采样均值。**安全适配（本仓红线）**：所有移动 ≤0.25 rad/步链式分段（3 s/段，F41 兜底之上）；碰撞过滤复用官方判据；每点移动前用当前模型预测 τ_g，任一关节 >3.5 Nm 跳过该点（网格最坏预测 L3 2.86 Nm、EL05 关节 ≤0.36 Nm——3.5 阈值不误跳且有裕量，F42 限 RS00 5/EL05 3）；L3 温度 >75°C 自动回折叠 home 等降至 <60°C 再续采；JSONL 增量落盘 `~/.a3/calibration/calibration_data.jsonl`（每点 fsync，断点续采/--start/--restart/--optimize-only/--data-file）。拟合：12 参数（L2–L6 质量+质心主分量，夹爪质量吸收进 L5/L6——重力补偿只需要模型正确，不需逐杆物理真实）L-BFGS-B 有界优化（官方初值/边界；--fix-masses 为官方 8 参数 COM-only 分支），**按各关节下方杆改写 inertia（官方 inertias[2..6] 同下标，LL-033 映射错位已修）**，输出 `a3_description/config/inertia_params.yaml`（官方格式，备份旧文件）。L7 全程 0（全开）；L1 恒 0（竖直轴自身重力矩为 0）。**零力矩实测协议（LL-025）**：先离线验证 τ_g 随姿态变化 + home 位模型≈实测（RMSE 目标 ≤0.15 Nm），再由用户托臂从 home 启动零力矩——臂应悬浮无推力、轻拖失重、stop 干净。
+- **验收标准：**
+  1. 仿真冒烟：quick 模式全流程（移动/采样/JSONL/拟合/输出 yaml）机制跑通
+  2. 真机采集 ≥50 有效点（跳过点记录原因），L3 温度全程 <80°C，无 F42 trip（WARN 0 条）
+  3. 拟合输出：RMSE ≤0.15 Nm（官方 6J 数据 0.10 Nm 同量级）；home/ready 两已知位姿模型 vs 实测 |Δτ| ≤0.2 Nm
+  4. 重力节点重启后日志 `Applied calibrated inertia to 5 links`，τ_g 随姿态变化（LL-025 验证协议）；零力矩实测：托臂启动无推力、轻拖失重感、无越限
+- **关联：** LL-025（零力矩推飞事故与验证协议）；LL-024（力矩 codec 量程）；LL-030（BEST_EFFORT js）；LL-015（单点轨迹）；LL-033（杆映射错位修复）；F42/F44（力矩/温度保护，采集期间依赖）
+- **状态：** `in_progress`（2026-09-13 脚本完成 + 杆映射修复（LL-033）+ 离线合成数据拟合冒烟 PASS：rmse 0.0193、home/ready/伸展外推 ≤0.014 Nm；域 55 仿真采集冒烟进行中）
+
 ### F40 — 失能保护（disable → 自动回 home → 失能）
 
 - **说明：** `/a3/arm/disable` 不再是「无条件直接失能」——不在 home 容差内时先平滑回 home 再失能，防止 ready 位直接掉臂。新增参数：`disable_home_pose_name: "home"`、`disable_home_tol_rad: 0.15`、`disable_home_duration_s: 3.0`、`disable_home_confirm_s: 0.5`、`disable_park_timeout_s: 8.0`。新辅助 `_at_home()`（全关节 |q−home| ≤ tol）与 `_safe_park_then_disable()`（同步阻塞：发布 home 轨迹抢占活跃轨迹——执行层 OnTrajectory 天然支持替换，无需排队 → `SAFE_PARK`（期间拒绝新运动指令）→ 轮询连续 `confirm_s` 收敛 → reset → `DISABLED`）。服务语义（同步阻塞返回，`success=true ⟺ 已失能`）：READY/TRAJ 容差内 → 直达 reset → DISABLED；容差外 → safe park → reset → DISABLED（message 含耗时）；IDLE → 直达 reset；DISABLED/COOLING → 幂等不动电机；FAULT → 紧急直达 reset；INIT/TEACH/SERVO/AI → 拒绝 busy；SAFE_PARK → 拒绝「already safe parking」。park 超时 → **FAULT 不 reset**（保持使能、停在半途，人工介入）；reset 被 gate 拒 → park 前 `success=false` + 原文 + "(stop power sequence first)"，park 完成后被拒 → 回 READY（已在 home 位，安全）；`_have_js==False` → 直达 reset + WARN（保持旧行为）。`/a3/motor/reset` 直达保留作紧急失能。
