@@ -64,7 +64,11 @@ class TrajectoryBridge(Node):
             self.create_subscription(JointTrajectory, topic, self._on_traj, 10)
             self.get_logger().info(f"Bridging JointTrajectory {topic} -> {out_topic}")
 
-        self.create_subscription(JointState, js_in, self._on_js, 10)
+        # 真机 /joint_states 是 BEST_EFFORT（motor_protocol）；默认 RELIABLE 收不到 → 镜像断流（LL-030）
+        self.create_subscription(
+            JointState, js_in, self._on_js,
+            rclpy.qos.QoSProfile(depth=10, reliability=rclpy.qos.ReliabilityPolicy.BEST_EFFORT),
+        )
         self.get_logger().info(f"Mirroring JointState {js_in} -> {js_out}")
 
     def _on_traj(self, msg: JointTrajectory) -> None:

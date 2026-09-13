@@ -60,7 +60,8 @@ class FollowJointTrajectoryActionNode(Node):
             JointState,
             self.get_parameter("joint_states_topic").value,
             self._on_js,
-            10,
+            # 真机 /joint_states 是 BEST_EFFORT（motor_protocol）；默认 RELIABLE 收不到 → 收敛判定恒失败（LL-030）
+            rclpy.qos.QoSProfile(depth=10, reliability=rclpy.qos.ReliabilityPolicy.BEST_EFFORT),
             callback_group=self._cb,
         )
 

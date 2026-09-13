@@ -59,7 +59,9 @@ class MoveToPoseIkNode(Node):
             JointState,
             self.get_parameter("joint_states_topic").value,
             self._on_js,
-            10,
+            # 真机 /joint_states 是 BEST_EFFORT（motor_protocol）；默认 RELIABLE 收不到 → _q 恒零，
+            # IK 种子/轨迹起点全错（LL-030）
+            rclpy.qos.QoSProfile(depth=10, reliability=rclpy.qos.ReliabilityPolicy.BEST_EFFORT),
             callback_group=self._cb,
         )
         self._traj_pub = self.create_publisher(
@@ -149,6 +151,7 @@ class MoveToPoseIkNode(Node):
         )
         eps = float(self.get_parameter("ik_eps").value)
         max_iter = int(self.get_parameter("ik_max_iter").value)
+        margin = 0.05  # 限位内缩裕量（rad）
         for _ in range(max_iter):
             pin.forwardKinematics(self._model, self._data, q)
             pin.updateFramePlacements(self._model, self._data)
@@ -158,12 +161,29 @@ class MoveToPoseIkNode(Node):
                 out = []
                 for iq in self._iq_map:
                     out.append(float(q[iq]) if 0 <= iq < len(q) else 0.0)
+                # 校验解在限位内（LL-031：求解无界可漂到翻转分支，如 L2<0）
+                # 注意：lowerPositionLimit 是 nq 维数组，按 idx_qs 索引（iq），按 joint id 索引会错位
+                for i, iq in enumerate(self._iq_map):
+                    if 0 <= iq < len(out):
+                        lo = float(self._model.lowerPositionLimit[iq]) + margin
+                        hi = float(self._model.upperPositionLimit[iq]) - margin
+                        if out[i] < lo or out[i] > hi:
+                            return False, (
+                                f"solution out of limits ({self._joint_names[i]}={out[i]:.3f})"
+                            ), []
                 return True, "ok", out
             J = pin.computeFrameJacobian(
                 self._model, self._data, q, self._ee_id, pin.ReferenceFrame.LOCAL
             )
             v = np.linalg.lstsq(J, err, rcond=None)[0]
             q = pin.integrate(self._model, q, v * 0.5)
+            # 每步把 q 钳回限位内，防止阻尼 LS 漂出界（LL-031）
+            # 注意：lowerPositionLimit 是 nq 维数组，按 idx_qs 索引（iq），按 joint id 索引会错位
+            for iq in self._iq_map:
+                if 0 <= iq < len(q):
+                    lo = float(self._model.lowerPositionLimit[iq]) + margin
+                    hi = float(self._model.upperPositionLimit[iq]) - margin
+                    q[iq] = min(max(q[iq], lo), hi)
         return False, "ik did not converge", []
 
     def _on_ik(self, req, resp):
