@@ -38,6 +38,8 @@ DATA_REPORT_OFF="0102030405060000"
 # 实测：设置零 data[0]=01；使能/失能全 0
 DATA_SET_ZERO="0100000000000000"
 DATA_EMPTY="0000000000000000"
+# 通信类型22 保存帧数据域固定 01 02 03 04 05 06 07 08（协议文档）；全零不触发保存
+DATA_SAVE="0102030405060708"
 
 # 前左腿 11–13 → can0；前右 21–23 → can0；后左 51–53 → can1；后右 61–63 → can1（与 dog_mapper / README 一致）
 IDS_CAN0=(11 12 13 21 22 23)
@@ -555,7 +557,7 @@ cmd_zero_sta_save() {
   local id
   echo "--- 保存参数 (CMD ${CMD_SAVE_PARAM}) ---"
   for id in $(resolve_motor_ids); do
-    send_cmd "$CMD_SAVE_PARAM" "$id" "$DATA_EMPTY"
+    send_cmd "$CMD_SAVE_PARAM" "$id" "$DATA_SAVE"
     sleep_ms "$SLEEP_MS"
   done
   echo "done."

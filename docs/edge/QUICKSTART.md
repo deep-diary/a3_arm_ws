@@ -223,6 +223,47 @@
       ```
     - 失能后 refresh 流仍按最后锚定目标发帧（电机 mode 0 忽略力矩）；重新使能前若臂被挪过，先 `zero_torque/start→stop` 重锚定目标再 `enable`，避免拉回旧位姿。
 
+### 断电多圈窗口 zero_sta 标定（F47，真机 7 关节臂）
+
+断电后手动转动关节再上电，默认 `zero_sta=0`（0~2π 重建）会把负向转动 +2π 环绕（实测 -22° 读 +338°，见 LL-019）。出厂标定一次：工装摆 URDF 零位 → set_zero → zero_sta=1 → save；之后 ±180° 内断电转动读数连续。上电后必须先 probe 校验 7 关节读数全部落在 URDF 限位内，**读数超限严禁使能**。
+
+```bash
+# 1) 读当前 zero_sta（0x7029=28713）：7 电机应答 values_u8 全 0 = 出厂默认
+ros2 service call /a3/motor/get_param a3_can_bridge/srv/GetMotorParam \
+  "{motor_id: 0, param_id: 28713, timeout_s: 0.5}"
+
+# 2) 广播置 1 → 保存 flash → 读回校验（缺帧时对个别 motor_id 单发补写）
+ros2 service call /a3/motor/set_param_u8 a3_can_bridge/srv/SetMotorParamU8 \
+  "{motor_id: 0, param_id: 28713, value: 1}"
+ros2 service call /a3/motor/save_param a3_can_bridge/srv/MotorCommand "{motor_id: 0, command: 5}"
+ros2 service call /a3/motor/get_param a3_can_bridge/srv/GetMotorParam \
+  "{motor_id: 0, param_id: 28713, timeout_s: 0.5}"
+
+# 3) 断电 → 各关节 ± 转动（<180°）→ 上电 → probe 校验
+python3 scripts/mit_noenable_stream.py probe --iface can1 --ids 1..127
+```
+
+- **窗口仅上电重建多圈时生效**：运行中改 zero_sta 不会重推导当前读数。
+- **保存帧数据域**：类型 22 数据域固定 `01 02 03 04 05 06 07 08`，全零不触发保存（实测断电参数回退）。协议原文：`~/EDULITE_A3/el_a3_sdk/docs/电机通信协议汇总.md`。
+- **固件版本分裂**（2026-09-13 实测）：RS00 `0.0.3.4`（L1/L3）**读回恒 0 但写+保存实际生效**（断电行为验证：L1/L3 断电负转读数连续）——判断以断电行为为准，别信读回；RS00 `0.0.3.19`（L2）与 EL05 `10.5.0.1`（L4–L7）读写正常。
+- **不要用「每次上电 set_zero 代替」**：会把零位定义成当次上电姿态，poses/FK 每次漂移（只适合无绝对位姿的机器狗）。
+- L2（0~3.67）/L3（-4.01~0）行程超 ±π：这两个关节断电转动超 ±180° 仍会环绕。
+
+### 开机零位校验（F48，真机 7 关节臂）
+
+上电后、使能前校验读数（两层）：编排层 `/a3/arm/enable` 内置限位门禁（读数越限/无 /joint_states 一律拒绝，环绕时 kp×误差会瞬间猛拉）；独立脚本做完整检查。
+
+```bash
+# 开机后（硬件栈已起）：
+python3 scripts/a3_check_zero_frame.py        # exit 0 = 限位内，可 enable
+ros2 service call /a3/arm/enable std_srvs/srv/Trigger "{}"
+```
+
+- **硬检查（决定 exit code）**：7 关节读数全部落在 URDF 限位内（默认裕量 0.001 rad 吸收编码器量化噪声 ±0.0002）；越限 = 疑似断电多圈环绕（LL-019）。
+- **软检查（仅 WARN，默认容差 ±20°）**：L2/L3/L5/L6/L7 ≈ 0、L4 ≈ 0（URDF 零位）或 ≈ 0.34（折叠下垂）、L1 自由（±178° 机械限位）——模板外说明臂被留在其它位姿；判断是否环绕的唯一标准是硬检查，软检查不阻断。
+- **越限恢复**：把臂摆回 URDF 零位（工装/泡沫垫）→ `/a3/arm/init`（set_zero 重建零位帧；init 是恢复路径，越限只 WARN 不阻断，见 REQUIREMENTS F48）。
+- **enable 门禁参数**：`enable_position_check: true`（默认）、`position_check_margin_rad: 0.001`（arm_controller.yaml / arm_controller_6j.yaml）。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

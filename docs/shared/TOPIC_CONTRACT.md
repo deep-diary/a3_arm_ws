@@ -95,8 +95,8 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 
 | 服务 | 类型 | 说明 |
 |------|------|------|
-| `/a3/arm/init` | `std_srvs/Trigger` | 设零 → 异步确认 7 电机到位 → 使能；`message` 携带 `n/7` |
-| `/a3/arm/enable` | `std_srvs/Trigger` | 使能 7 电机，状态 → `READY` |
+| `/a3/arm/init` | `std_srvs/Trigger` | 设零 → 异步确认 7 电机到位 → 使能；`message` 携带 `n/7`。F48：读数越限只 WARN 不阻断（恢复路径——set_zero 把当前位姿定义为零位，仅限已知位姿执行） |
+| `/a3/arm/enable` | `std_srvs/Trigger` | 使能 7 电机，状态 → `READY`。F48：使能前读数限位门禁——越限（疑似断电多圈环绕）或无 /joint_states 一律拒绝并点名关节（`enable_position_check`） |
 | `/a3/arm/disable` | `std_srvs/Trigger` | 失能 7 电机，状态 → `IDLE` |
 | `/a3/arm/goto_named_pose` | `a3_msgs/srv/GotoNamedPose` | `pose_name` 按 `named_poses.yaml` 插值下发 |
 | `/a3/arm/set_joint_positions` | `a3_msgs/srv/SetJointPositions` | 设 7 关节目标位置（`positions[7]` + `duration`），限位 clamp 后短插值下发；节流连续下发以覆盖语义衔接 |
@@ -241,7 +241,7 @@ Web 端单电机调试页（deep-trace `rk3588_motor` 模块）依赖的 ROS 侧
 | `has_feedback` / `fresh` | bool | 是否收到过反馈 / 最近反馈在 `feedback_fresh_timeout_s` 内 |
 | `enabled` | bool | `mode_status` 为闭环（尽力而为） |
 
-### 服务（4 个新增）
+### 服务（F32/F47 新增）
 
 | 服务 | 类型 | 说明 |
 |------|------|------|
@@ -249,12 +249,15 @@ Web 端单电机调试页（deep-trace `rk3588_motor` 模块）依赖的 ROS 侧
 | `/a3/motor/mit_command` | `a3_can_bridge/srv/MotorMitCommand` | 单电机 MIT 直驱（`motor_id` 禁止 0 广播）：`hold_duration_s<=0` 单发一帧；`>0` ROS 侧定时保持（`hold_hz` 上限 `min(200, max_tx_rate_per_motor_hz)`，时长上限 `max_hold_duration_s` 默认 30 s；新保持替换旧保持）。数值越界自动 clamp |
 | `/a3/motor/stop` | `a3_can_bridge/srv/MotorStop` | 取消该电机（0=全部）MIT 保持，并逐电机发一帧 `kp=kd=t=0` 卸力帧（p=最近反馈角） |
 | `/a3/motor/set_mode` | `a3_can_bridge/srv/MotorSetMode` | 写 0x7005 运行模式：`mit`=0/`position`=1/`speed`=2；position 追加写 0x7016（目标位置）+0x7017（限速），speed 追加写 0x700A（目标速度）。切换取消该电机保持 |
+| `/a3/motor/get_param` | `a3_can_bridge/srv/GetMotorParam` | F47 读参数（通信类型 17）：`motor_id` 1..127 单电机、0=广播到全臂映射电机并聚合；`param_id` 如 0x7029 zero_sta；收集应答直至 `timeout_s`（默认 0.4 s）。返回 `motor_ids[]`/`values_u8[]`（uint8 参数）/`values_f32[]`（float 参数，两数组同序同时返回）。无应答 `success=false`；busy 拒绝；限时返回不挂起 |
+| `/a3/motor/set_param_u8` | `a3_can_bridge/srv/SetMotorParamU8` | F47 写 uint8 参数（通信类型 18 u8 形式，值写 data[4]）：`motor_id` 0=广播。float 参数继续用 `/a3/motor/set_param` |
+| `/a3/motor/save_param` | `a3_can_bridge/srv/MotorCommand` | F47 保存参数到 flash（通信类型 22），`command=5`，`motor_id` 0=广播 |
 
 **保持（hold）语义**：`hold_duration_s>0` 时由 `motor_protocol_node` 内部 5 ms tick 定时发帧（前端不做 setInterval 流式发送）；到时长自动停；`motor_stop` 手动取消；**`/power_sequence/gate_open` 由关→开的瞬间自动取消**（并记 WARN）。
 
 ### 互锁（gate 关闭才可调试写）
 
-`gate_open=true`（电源序列运行中）时，以下**调试写操作**被 C++ 侧拒绝并返回带 gate 文案的 `success=false`：`/a3/motor/enable`（command=1）、`/a3/motor/reset`（command=2）、`/a3/motor/set_zero`（command=3）、`/a3/motor/set_param`、`/a3/motor/mit_command`、`/a3/motor/set_mode`、`/a3/motor/set_can_id`。**扫描、读类（get_device_id/request_version）、`/a3/motor/stop` 永不拦截**。a3_mqtt_bridge 不做前置 gate 预检（有意为之）：C++ 是权威拦截点，拒绝文案经 `cmd_result` 回传；预检会破坏 sim 闭环（`sim_power_sequence_node` 的 gate 恒 true，仿真有意不实现互锁）。
+`gate_open=true`（电源序列运行中）时，以下**调试写操作**被 C++ 侧拒绝并返回带 gate 文案的 `success=false`：`/a3/motor/enable`（command=1）、`/a3/motor/reset`（command=2）、`/a3/motor/set_zero`（command=3）、`/a3/motor/save_param`（command=5）、`/a3/motor/set_param`、`/a3/motor/set_param_u8`、`/a3/motor/mit_command`、`/a3/motor/set_mode`、`/a3/motor/set_can_id`。**扫描、读类（get_device_id/request_version/get_param）、`/a3/motor/stop` 永不拦截**。a3_mqtt_bridge 不做前置 gate 预检（有意为之）：C++ 是权威拦截点，拒绝文案经 `cmd_result` 回传；预检会破坏 sim 闭环（`sim_power_sequence_node` 的 gate 恒 true，仿真有意不实现互锁）。
 
 ### MQTT 下行指令（a3_mqtt_bridge ↔ Web，需求 F32）
 

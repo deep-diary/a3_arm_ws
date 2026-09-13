@@ -24,7 +24,9 @@ public:
   static constexpr uint8_t kMotorCmdReset = 0x04;        // 停止（data[1]=0xC0 触发返回软件版本）
   static constexpr uint8_t kMotorCmdSetZero = 0x06;      // 设置零点（data[0]=1）
   static constexpr uint8_t kMotorCmdSetCanId = 0x07;     // 设置电机 CAN_ID（立即生效）
+  static constexpr uint8_t kMotorCmdGetParam = 0x11;     // 读取参数（17）
   static constexpr uint8_t kMotorCmdSetParam = 0x12;     // 设置参数（18）
+  static constexpr uint8_t kMotorCmdSaveParam = 0x16;    // 保存参数到 flash（22）
   static constexpr uint8_t kMotorCmdVersion = 0x17;      // 获取软件版本号（23）
   /// 手册通信类型 24：主动周期上报，29bit ID 高 5 位为 0x18，8B 数据域与 0x02 反馈相同
   static constexpr uint8_t kMotorCmdActiveReport = 0x18;
@@ -46,6 +48,7 @@ public:
   static constexpr uint16_t kParamSpdKp = 0x701F;
   static constexpr uint16_t kParamSpdKi = 0x7020;
   static constexpr uint16_t kParamEpScanTime = 0x7026;
+  static constexpr uint16_t kParamZeroSta = 0x7029;    // 零点标志位（uint8）：0=0~2π 重建，1=-π~π 重建
 
   static constexpr float kPMin = -12.57f;
   static constexpr float kPMax = 12.57f;
@@ -173,6 +176,35 @@ public:
     return out;
   }
 
+  static CanFrameMessage BuildGetParamFrame(CanBus bus, uint8_t motor_id, uint16_t param_id)
+  {
+    auto out = BuildCommandFrame(bus, motor_id, kMotorCmdGetParam);
+    out.data[0] = static_cast<uint8_t>(param_id & 0xFF);
+    out.data[1] = static_cast<uint8_t>((param_id >> 8) & 0xFF);
+    return out;
+  }
+
+  /// 设置参数（uint8 形式，F47）：值写 data[4]（如 0x7029 zero_sta、0x7005 运行模式）
+  static CanFrameMessage BuildSetParamU8Frame(
+    CanBus bus, uint8_t motor_id, uint16_t param_id, uint8_t value)
+  {
+    auto out = BuildCommandFrame(bus, motor_id, kMotorCmdSetParam);
+    out.data[0] = static_cast<uint8_t>(param_id & 0xFF);
+    out.data[1] = static_cast<uint8_t>((param_id >> 8) & 0xFF);
+    out.data[4] = value;
+    return out;
+  }
+
+  static CanFrameMessage BuildSaveParamFrame(CanBus bus, uint8_t motor_id)
+  {
+    auto out = BuildCommandFrame(bus, motor_id, kMotorCmdSaveParam);
+    // 通信类型 22 数据域固定 01 02 03 04 05 06 07 08（电机通信协议汇总.md 通信类型22）；
+    // 全零数据不会触发保存——2026-09-13 实测：全零 save 后断电重上参数回退（LL-019）
+    constexpr uint8_t kSaveParamData[8] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+    std::copy(std::begin(kSaveParamData), std::end(kSaveParamData), out.data.begin());
+    return out;
+  }
+
   static CanFrameMessage BuildActiveReportFrame(CanBus bus, uint8_t motor_id, bool enable)
   {
     auto out = BuildCommandFrame(bus, motor_id, kMotorCmdActiveReport);
@@ -236,6 +268,31 @@ public:
     for (int i = 0; i < 8; ++i) {
       rsp.mcu_uid = (rsp.mcu_uid << 8) | frame.data[i];
     }
+    return rsp;
+  }
+
+  /// 读参数应答（通信类型 17）：data[0..1]=参数索引小端，data[4]=u8 值 / data[4..7]=float32 小端
+  static std::optional<GetParamResponse> DecodeGetParamResponse(const CanFrameMessage & frame)
+  {
+    const uint8_t cmd_type = static_cast<uint8_t>((frame.can_id >> 24) & 0x1F);
+    if (cmd_type != kMotorCmdGetParam) {
+      return std::nullopt;
+    }
+    // 应答帧 bit0-7=主机号 0xFD、bit8-15=电机 ID；请求帧反之（bit8-15=0xFD），
+    // 请求回环时低字节非 0xFD 自然排除
+    if (static_cast<uint8_t>(frame.can_id & 0xFF) != kMasterIdDefault) {
+      return std::nullopt;
+    }
+    GetParamResponse rsp;
+    rsp.motor_id = static_cast<uint8_t>((frame.can_id >> 8) & 0xFF);
+    rsp.param_id =
+      static_cast<uint16_t>(frame.data[0] | (static_cast<uint16_t>(frame.data[1]) << 8));
+    rsp.value_u8 = frame.data[4];
+    rsp.value_f32 = FloatFromBits(
+      static_cast<uint32_t>(frame.data[4]) |
+      (static_cast<uint32_t>(frame.data[5]) << 8) |
+      (static_cast<uint32_t>(frame.data[6]) << 16) |
+      (static_cast<uint32_t>(frame.data[7]) << 24));
     return rsp;
   }
 
@@ -328,6 +385,13 @@ private:
     uint32_t bits = 0;
     std::memcpy(&bits, &value, sizeof(bits));
     return bits;
+  }
+
+  static float FloatFromBits(uint32_t bits)
+  {
+    float value = 0.0f;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
   }
 
   static uint16_t FloatToUint16(float x, float x_min, float x_max, int bits)

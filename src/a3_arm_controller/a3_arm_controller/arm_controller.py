@@ -125,6 +125,11 @@ class ArmController(Node):
         self.declare_parameter("temp_protect_c", 65.0)
         self.declare_parameter("temp_hysteresis_c", 5.0)
         self.declare_parameter("fault_mask_reset_on_fault", True)
+        # F48: 使能前读数限位门禁（环绕读数超限时拒绝使能，见 LL-019）
+        self.declare_parameter("enable_position_check", True)
+        # 限位比较裕量：set_zero 后编码器量化噪声 ±0.0002（L2/L3/L7 下界为 0），
+        # 1e-6 不够；0.001 rad ≈ 0.057°，远小于环绕量 2π
+        self.declare_parameter("position_check_margin_rad", 0.001)
 
         self._joint_names: List[str] = list(
             self.get_parameter("joint_names").get_parameter_value().string_array_value
@@ -386,6 +391,28 @@ class ArmController(Node):
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warn(f"cannot load joint limits from URDF: {exc}")
         return limits
+
+    def _check_positions_in_limits(self) -> Tuple[bool, List[str]]:
+        """F48: 使能前读数限位检查。
+
+        返回 (全部在限位内, 违规描述列表)。未收到 /joint_states 或限位未加载
+        也视为不通过——宁可拒绝使能也不盲使（LL-019 红线：断电多圈环绕读数
+        超限时 kp×误差会瞬间猛拉）。
+        """
+        if not self._have_js:
+            return False, ["no /joint_states received yet"]
+        if not self._joint_limits:
+            return False, ["joint limits not loaded from URDF"]
+        margin = float(self.get_parameter("position_check_margin_rad").value)
+        viol: List[str] = []
+        for jn, p in zip(self._joint_names, self._positions):
+            lo_hi = self._joint_limits.get(jn)
+            if lo_hi is None:
+                viol.append(f"{jn} no limits in URDF")
+                continue
+            if p < lo_hi[0] - margin or p > lo_hi[1] + margin:
+                viol.append(f"{jn}={p:+.4f} limit={lo_hi[0]:.4f}..{lo_hi[1]:.4f}")
+        return not viol, viol
 
     def _set_state(self, state: str, message: str = "") -> None:
         with self._lock:
@@ -748,6 +775,17 @@ class ArmController(Node):
                 resp.message = why
                 return resp
 
+        # F48: init 是恢复路径（set_zero 重建零位帧后再使能），限位检查只 WARN
+        # 不阻断。环绕读数下 init 会把「当前位姿」定义为零位——仅当臂确实摆在
+        # 已知位姿（如工装摆 URDF 零位）时才应这样恢复，否则位姿帧无意义。
+        if self.get_parameter("enable_position_check").value:
+            ok_lim, viol = self._check_positions_in_limits()
+            if not ok_lim:
+                self.get_logger().warn(
+                    "init with readings out of URDF limits: " + "; ".join(viol)
+                    + " — set_zero defines CURRENT pose as zero; only valid at a known pose"
+                )
+
         self._set_state(STATE_INIT, "init: set_zero")
         ok, msg = self._motor_command(self._motor_cli, 3)  # set_zero
         if not ok:
@@ -797,6 +835,18 @@ class ArmController(Node):
             if not can_cool:
                 resp.success = False
                 resp.message = why
+                return resp
+        # F48: 使能前读数限位门禁——环绕读数（断电多圈 +2π 推算，LL-019）超
+        # URDF 限位时 kp×误差会瞬间猛拉，拒绝使能；恢复零位走 /a3/arm/init。
+        if self.get_parameter("enable_position_check").value:
+            ok_lim, viol = self._check_positions_in_limits()
+            if not ok_lim:
+                resp.success = False
+                resp.message = (
+                    "position check failed: " + "; ".join(viol)
+                    + " (possible multi-turn wrap after power cycle — restore URDF"
+                    " zero pose then /a3/arm/init)"
+                )
                 return resp
         ok, msg = self._motor_command(self._enable_cli, 1)
         if ok:

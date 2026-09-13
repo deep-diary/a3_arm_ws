@@ -1,0 +1,8 @@
+# 设置 uint8 型电机参数（通信类型 18 的 u8 形式，需求 F47）：值写 data[4]，data[5..7]=0
+# （0x7029 zero_sta、0x7005 运行模式等 1 字节参数；float 参数请用 /a3/motor/set_param）
+uint8 motor_id            # 目标电机 CAN_ID（0=广播到全臂映射电机）
+uint16 param_id           # 参数索引（如 0x7029）
+uint8 value               # 参数值
+---
+bool success
+string message

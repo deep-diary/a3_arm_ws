@@ -39,6 +39,8 @@
 #include "a3_can_bridge/srv/motor_stop.hpp"
 #include "a3_can_bridge/srv/motor_set_mode.hpp"
 #include "a3_can_bridge/srv/motor_scan_collect.hpp"
+#include "a3_can_bridge/srv/get_motor_param.hpp"
+#include "a3_can_bridge/srv/set_motor_param_u8.hpp"
 
 using diagnostic_msgs::msg::DiagnosticArray;
 using diagnostic_msgs::msg::DiagnosticStatus;
@@ -60,6 +62,8 @@ using a3_can_bridge::srv::MotorMitCommand;
 using a3_can_bridge::srv::MotorStop;
 using a3_can_bridge::srv::MotorSetMode;
 using a3_can_bridge::srv::MotorScanCollect;
+using a3_can_bridge::srv::GetMotorParam;
+using a3_can_bridge::srv::SetMotorParamU8;
 
 namespace a3_can_bridge
 {
@@ -154,6 +158,16 @@ struct ScanCollectState
   std::shared_ptr<rmw_request_id_t> header;
   std::shared_ptr<MotorScanCollect::Response> pending;
   std::map<uint8_t, uint64_t> found;
+};
+
+/// 读参数收集状态（需求 F47）：发 0x11 请求后收集应答直至 deadline，再填充挂起的服务响应
+struct PendingGetParamState
+{
+  bool active{false};
+  int64_t deadline_ns{0};
+  std::shared_ptr<rmw_request_id_t> header;
+  std::shared_ptr<GetMotorParam::Response> pending;
+  std::map<uint8_t, GetParamResponse> found;
 };
 
 class MotorProtocolNode : public rclcpp::Node
@@ -422,6 +436,8 @@ public:
     set_zero_srv_ = make_cmd_srv("/a3/motor/set_zero", 3);
     get_device_id_srv_ = make_cmd_srv("/a3/motor/get_device_id", 0);
     request_version_srv_ = make_cmd_srv("/a3/motor/request_version", 4);
+    // F47：保存参数到 flash（通信类型 22），0=广播；写操作受 gate 互锁
+    save_param_srv_ = make_cmd_srv("/a3/motor/save_param", 5);
 
     set_can_id_srv_ = this->create_service<SetCanId>(
       "/a3/motor/set_can_id",
@@ -471,6 +487,20 @@ public:
       [this](const std::shared_ptr<rmw_request_id_t> header,
              const std::shared_ptr<MotorScanCollect::Request> req) {
         HandleScanCollectService(header, req);
+      });
+
+    // F47：读参数（通信类型 17）同样走 DeferResponse —— 收集应答直至超时后显式响应
+    get_param_srv_ = this->create_service<GetMotorParam>(
+      "/a3/motor/get_param",
+      [this](const std::shared_ptr<rmw_request_id_t> header,
+             const std::shared_ptr<GetMotorParam::Request> req) {
+        HandleGetParamService(header, req);
+      });
+    set_param_u8_srv_ = this->create_service<SetMotorParamU8>(
+      "/a3/motor/set_param_u8",
+      [this](const std::shared_ptr<SetMotorParamU8::Request> req,
+             std::shared_ptr<SetMotorParamU8::Response> resp) {
+        HandleSetParamU8Service(req, resp);
       });
 
     if (enable_trajectory_interpolation_ && trajectory_interp_rate_hz_ > 1e-3) {
@@ -1151,6 +1181,9 @@ private:
     if (scan_collect_.active && now_ns >= scan_collect_.deadline_ns) {
       FinishScanCollect();
     }
+    if (pending_get_param_.active && now_ns >= pending_get_param_.deadline_ns) {
+      FinishGetParam();
+    }
   }
 
   void LogTxWindowStats()
@@ -1310,9 +1343,9 @@ private:
       resp->message = "motor_id must be 0..127";
       return;
     }
-    // 互锁（F32）：enable/reset/set_zero 为写操作，gate 打开（电源序列 Running）时拒绝；
+    // 互锁（F32）：enable/reset/set_zero/save_param 为写操作，gate 打开（电源序列 Running）时拒绝；
     // 0=get_device_id / 4=request_version 为读操作，不受限
-    if (command == 1 || command == 2 || command == 3) {
+    if (command == 1 || command == 2 || command == 3 || command == 5) {
       std::string why;
       if (DebugOpBlockedByGate(&why)) {
         resp->success = false;
@@ -1349,6 +1382,9 @@ private:
           break;
         case 4:
           frame = ProtocolCodec::BuildRequestVersionFrame(bus, mid);
+          break;
+        case 5:
+          frame = ProtocolCodec::BuildSaveParamFrame(bus, mid);
           break;
         default:
           continue;
@@ -1406,6 +1442,132 @@ private:
       BusForMotorId(req->motor_id), req->motor_id, req->param_id, req->value));
     resp->success = true;
     resp->message = "ok";
+  }
+
+  // ---- F47：0x7029 zero_sta 等 uint8 参数读写 ----
+
+  void HandleGetParamService(
+    const std::shared_ptr<rmw_request_id_t> & header,
+    const std::shared_ptr<GetMotorParam::Request> & req)
+  {
+    // DeferResponse 回调没有现成 Response 对象，由本服务创建并持有至收集窗口结束
+    auto resp = std::make_shared<GetMotorParam::Response>();
+    if (pending_get_param_.active) {
+      resp->success = false;
+      resp->message = "get_param busy";
+      get_param_srv_->send_response(*header, *resp);
+      return;
+    }
+    if (req->motor_id > 127) {
+      resp->success = false;
+      resp->message = "motor_id must be 0..127";
+      get_param_srv_->send_response(*header, *resp);
+      return;
+    }
+    // 读操作不受 gate 互锁（与 get_device_id/request_version 同语义）
+    std::vector<uint8_t> ids;
+    if (req->motor_id == 0) {
+      ids.reserve(DogMapper::kTemporaryIndexMap.size());
+      for (const auto & route : DogMapper::kTemporaryIndexMap) {
+        ids.push_back(route.motor_id);
+      }
+    } else {
+      ids.push_back(req->motor_id);
+    }
+    uint32_t sent = 0;
+    for (const uint8_t mid : ids) {
+      PublishFrame(ProtocolCodec::BuildGetParamFrame(
+        BusForMotorId(mid), mid, req->param_id));
+      ++sent;
+    }
+    const double timeout_s = req->timeout_s > 0.0 ? static_cast<double>(req->timeout_s) : 0.4;
+    pending_get_param_.active = true;
+    pending_get_param_.deadline_ns =
+      this->now().nanoseconds() + static_cast<int64_t>(timeout_s * 1e9);
+    pending_get_param_.header = header;
+    pending_get_param_.pending = resp;
+    pending_get_param_.found.clear();
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Get param: %u probes param=%u on %s, window %.2f s",
+      sent, static_cast<unsigned>(req->param_id),
+      (ArmMapper::ArmBus() == CanBus::CAN1 ? "can1" : "can0"), timeout_s);
+    // 响应在 OnDebugTickTimer 收集窗口结束后经 FinishGetParam 显式发送
+  }
+
+  void FeedGetParamCollector(const GetParamResponse & rsp)
+  {
+    if (!pending_get_param_.active) {
+      return;
+    }
+    pending_get_param_.found[static_cast<uint8_t>(rsp.motor_id)] = rsp;
+  }
+
+  void FinishGetParam()
+  {
+    pending_get_param_.active = false;
+    if (!pending_get_param_.pending || !pending_get_param_.header) {
+      pending_get_param_.pending.reset();
+      pending_get_param_.header.reset();
+      return;
+    }
+    auto resp = pending_get_param_.pending;
+    auto header = pending_get_param_.header;
+    pending_get_param_.pending.reset();
+    pending_get_param_.header.reset();
+    std::ostringstream oss;
+    for (const auto & kv : pending_get_param_.found) {
+      if (oss.tellp() > 0) {
+        oss << "; ";
+      }
+      oss << "id=" << static_cast<int>(kv.first) << " u8=" << static_cast<int>(kv.second.value_u8);
+      resp->motor_ids.push_back(kv.first);
+      resp->values_u8.push_back(kv.second.value_u8);
+      resp->values_f32.push_back(kv.second.value_f32);
+    }
+    if (pending_get_param_.found.empty()) {
+      resp->success = false;
+      resp->message = "no response (timeout)";
+    } else {
+      resp->success = true;
+      resp->message = "got " + std::to_string(pending_get_param_.found.size()) + ": " + oss.str();
+    }
+    get_param_srv_->send_response(*header, *resp);
+    RCLCPP_INFO(this->get_logger(), "Get param: %s", resp->message.c_str());
+  }
+
+  void HandleSetParamU8Service(
+    const std::shared_ptr<SetMotorParamU8::Request> & req,
+    const std::shared_ptr<SetMotorParamU8::Response> & resp)
+  {
+    if (req->motor_id > 127) {
+      resp->success = false;
+      resp->message = "motor_id must be 0..127";
+      return;
+    }
+    std::string why;
+    if (DebugOpBlockedByGate(&why)) {
+      resp->success = false;
+      resp->message = why;
+      return;
+    }
+    std::vector<uint8_t> ids;
+    if (req->motor_id == 0) {
+      ids.reserve(DogMapper::kTemporaryIndexMap.size());
+      for (const auto & route : DogMapper::kTemporaryIndexMap) {
+        ids.push_back(route.motor_id);
+      }
+    } else {
+      ids.push_back(req->motor_id);
+    }
+    size_t sent = 0;
+    for (const uint8_t mid : ids) {
+      PublishFrame(ProtocolCodec::BuildSetParamU8Frame(
+        BusForMotorId(mid), mid, req->param_id, req->value));
+      ++sent;
+    }
+    resp->success = true;
+    resp->message = "ok (" + std::to_string(sent) + " frame(s))";
   }
 
   void HandleScanService(
@@ -1756,6 +1918,11 @@ private:
     }
     if (ProtocolCodec::IsSoftwareVersionResponse(can)) {
       PublishSoftwareVersion(can);
+      return;
+    }
+    // F47：读参数应答（类型 17，低字节 0xFD）——与反馈帧（类型 2/24）互斥，命中即消费
+    if (const auto prsp = ProtocolCodec::DecodeGetParamResponse(can); prsp.has_value()) {
+      FeedGetParamCollector(prsp.value());
       return;
     }
 
@@ -2510,8 +2677,12 @@ private:
   rclcpp::Service<MotorStop>::SharedPtr motor_stop_srv_;
   rclcpp::Service<MotorSetMode>::SharedPtr set_mode_srv_;
   rclcpp::Service<MotorScanCollect>::SharedPtr scan_collect_srv_;
+  rclcpp::Service<GetMotorParam>::SharedPtr get_param_srv_;
+  rclcpp::Service<SetMotorParamU8>::SharedPtr set_param_u8_srv_;
+  rclcpp::Service<MotorCommand>::SharedPtr save_param_srv_;
   MitHoldState mit_hold_;
   ScanCollectState scan_collect_;
+  PendingGetParamState pending_get_param_;
   rclcpp::Publisher<MotorStates>::SharedPtr motor_states_pub_;
   rclcpp::Publisher<UInt8MultiArray>::SharedPtr tx_pub_;
   rclcpp::Publisher<String>::SharedPtr feedback_pub_;

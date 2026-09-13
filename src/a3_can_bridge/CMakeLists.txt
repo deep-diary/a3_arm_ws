@@ -26,6 +26,8 @@ set(srv_files
   "srv/MotorStop.srv"
   "srv/MotorSetMode.srv"
   "srv/MotorScanCollect.srv"
+  "srv/GetMotorParam.srv"
+  "srv/SetMotorParamU8.srv"
 )
 
 set(msg_files

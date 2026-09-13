@@ -450,6 +450,34 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F23（set_joint_positions 滑动条 jog，保持 URDF clamp 语义不变）、F38（通用臂流程）；[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（arm 服务表）；[QUICKSTART.md](QUICKSTART.md)（通用臂验证流程节）
 - **状态：** `implemented`（2026-09-11 通用 6 关节臂真机验证中）
 
+### F47 — 0x7029 zero_sta 参数读写协议（断电多圈窗口选择）
+
+- **说明：** 真机 7 关节臂实测：断电后手动转动关节再上电，多圈计数在默认 zero_sta=0（0~2π 重建）下会环绕——负向转 ~22° 的 L6 上电读 +5.8994 rad（=+338°，+2π 环绕），用户担心的「-10° 变 350°」真实发生；环绕读数超关节限位时严禁使能（kp×误差会瞬间猛拉）。固件参数 0x7029 `zero_sta`（uint8，1 字节，默认 0）选择上电位置重建窗口：0=0~2π，1=-π~π。置 1 后 ±180° 内的断电转动可被正确记录（L2/L3 行程超 π，超 ±180° 的大转动仍会环绕）。本需求为 a3_can_bridge 新增三个协议能力（均为 EL05 通信类型，单电机或广播）：
+  1. **`/a3/motor/get_param`**（新 srv `GetMotorParam`）：通信类型 17（0x11）读参数——发请求后收集应答直至超时（默认 0.4 s），`motor_id=0` 时广播到全臂映射电机并聚合；应答 data[4] 为 u8 值、data[4..7] 为 float32 小端，两数组同时返回（uint8 参数看 `values_u8`，float 参数看 `values_f32`）。
+  2. **`/a3/motor/set_param_u8`**（新 srv `SetMotorParamU8`）：通信类型 18（0x12）的 uint8 形式（值写 data[4]），`motor_id=0` 广播；float 参数继续用既有 `/a3/motor/set_param`。
+  3. **`/a3/motor/save_param`**（MotorCommand `command=5`）：通信类型 22（0x16）保存参数到 flash，0=广播。
+  读操作不受 power-sequence gate 互锁（与 get_device_id/request_version 同语义）；set/save 为写操作，gate 打开时拒绝。
+- **验收标准：**
+  1. 上电后 `get_param`（motor_id=0, param_id=0x7029）读到 7 关节 `values_u8` 全为 0（出厂默认）
+  2. `set_param_u8` 广播置 1 → `save_param` 广播 → 断电重启后 `get_param` 读回全为 1（flash 持久）
+  3. zero_sta=1 后断电手动转动各关节 ±（<180°）再上电：probe 读数与转动方向/幅度一致，负向转动不再 +2π 环绕（L6 类场景回归）
+  4. 读参数无应答时返回 `success=false` + `"no response (timeout)"`；忙时拒绝（"get_param busy"）
+- **关联：** F32（扫描收集 DeferResponse 模式，复用同一实现路径）；[QUICKSTART.md](QUICKSTART.md)（真机断电记忆验证流程）；[lessons_learned/](../lessons_learned/)（断电多圈环绕 LL 条目）
+- **状态：** `implemented`（2026-09-13 真机 7 关节臂验证通过：2/4/5/6/7 读回=1 且跨断电保留；断电负转后 L5/L6/L7/L1/L3 读数全部连续——L5=-0.8361、L6=-1.6068、L1=-0.6055、L3=-0.5200 不再环绕（L3 旧固件行为验证通过，无需升级）；L1/L3 旧固件 0.0.3.4 读回恒 0 但写+保存生效。save 帧数据域须 `01 02 03 04 05 06 07 08`，全零不触发保存，见 LL-019）
+
+## F48 开机零位校验（读数限位硬检查 + 期望位姿软检查 + 使能门禁）
+
+- **说明：** F47 之后正常断电（断电间不超 ±180° 转动）读数跨上电保持连续，但环绕（+2π 多圈推算）仍可能发生（L2/L3 行程超 π；zero_sta 丢失、超范围转动等异常）。上电后校验通过前**不使能**。本需求两层：
+  1. **编排层使能门禁**（arm_controller）：`/a3/arm/enable` 发 enable 前检查 7 关节读数全部落在 URDF 限位内（参数 `enable_position_check: true`，默认开启；未收到 /joint_states 也拒绝）——环绕读数超限时 kp×误差会瞬间猛拉（LL-019），越限拒绝并点名关节与限位，恢复零位走 `/a3/arm/init`。`init` 是恢复路径（set_zero 重建零位帧后再使能），越限只 WARN 不阻断——WARN 指明「当前位姿将被定义为零位，仅在已知位姿（工装摆 URDF 零位）执行」。
+  2. **独立开机校验脚本** `scripts/a3_check_zero_frame.py`：读 /joint_states 对照 URDF 限位（硬检查，任一越限或超时无消息 exit 1——判断是否环绕的唯一标准）；再对照期望位姿模板软检查（L2/L3/L5/L6/L7 ≈ 0、L4 ≈ 0（URDF 零位）或 ≈ 0.34（折叠自然下垂）、L1 自由——水平转动 ±178° 由机械限位约束；默认容差 0.35 rad ≈ ±20°，仅提示性、不改变退出码）。
+- **验收标准：**
+  1. 正常上电（读数在限位内）→ `/a3/arm/enable` 放行进入电机使能流程
+  2. 人为构造越限读数（仿真注入 L6=5.9）→ enable 拒绝，message 点名关节与限位；init 放行但 WARN
+  3. 未收到 /joint_states（桥未起）→ enable 拒绝并提示
+  4. 脚本：真机正常位 → 硬检查 PASS exit 0（软检查打印位姿匹配结论）；越限注入 → FAIL exit 1
+- **关联：** F47（zero_sta 窗口，本需求是其开机侧兜底）；[lessons_learned/](../lessons_learned/)（环绕机理与「使能前必须 probe 校验」红线）；F45（状态机使能路径）
+- **状态：** `implemented`（2026-09-13 真机验证：零位帧恢复后 7/7≈0，脚本硬检查 PASS exit 0 且软检查匹配「URDF 零位」；隔离域仿真验证 enable 门禁三场景——无 /joint_states 拒绝、L6=5.9 越限拒绝并点名、限内放行；init 越限 WARN 放行。限位比较需裕量（编码器量化噪声 ±0.0002，L2/L3/L7 下界为 0），参数 `position_check_margin_rad: 0.001`）
+
 ## 非功能需求
 
 | 指标 | 要求 |

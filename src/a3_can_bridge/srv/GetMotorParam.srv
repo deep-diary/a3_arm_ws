@@ -1,0 +1,10 @@
+# 读取电机参数（通信类型 17，需求 F47）：发 0x11 请求后收集应答直至超时
+uint8 motor_id            # 1..127 单电机；0=广播到全臂映射电机并聚合
+uint16 param_id           # 参数索引（如 0x7029 zero_sta、0x7005 运行模式）
+float32 timeout_s         # 收集窗口（默认 0.4 s；<=0 用默认）
+---
+bool success
+string message            # 例如 "got 7: id=1 u8=0 ..." / "no response (timeout)"
+uint8[] motor_ids         # 应答电机 CAN_ID（与值数组同序）
+uint8[] values_u8         # uint8 型参数值（float 型参数时此数组同位置为 0，看 values_f32）
+float32[] values_f32      # float32 型参数值（uint8 型参数时此数组同位置为 NaN）

@@ -55,4 +55,13 @@ struct SoftwareVersion
   std::string version;
 };
 
+/// 读参数应答（类型 17，F47）：data[0..1]=参数索引小端，data[4]=u8 值 / data[4..7]=float32 小端
+struct GetParamResponse
+{
+  uint8_t motor_id{0};
+  uint16_t param_id{0};
+  uint8_t value_u8{0};
+  float value_f32{0.0f};
+};
+
 }  // namespace a3_can_bridge
