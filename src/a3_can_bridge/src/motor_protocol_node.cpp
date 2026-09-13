@@ -1092,17 +1092,35 @@ private:
       if ((is_front && !tx_enable_can0_) || (!is_front && !tx_enable_can1_)) {
         continue;
       }
-      const double mapped_position =
+      double mapped_position =
         route.motor_id < last_commanded_mit_rad_.size() ? last_commanded_mit_rad_[route.motor_id] :
         std::numeric_limits<double>::quiet_NaN();
+      bool seeded = false;
       if (!std::isfinite(mapped_position)) {
-        continue;
+        // F48 播种：桥（重）启后从未下发过轨迹时 refresh 无目标可发 → 总线静默 →
+        // 电机不主动上报反馈（LL-018）→ /joint_states 冻结（stamp 陈旧）。
+        // 仅当模式未知（上电从未收到反馈）或已知失能（mode 0）时播种零增益保活
+        // 帧（p=反馈位或 0，kp=kd=tau=0——任何模式下都无力矩）；已知使能
+        // （mode != 0，如夹爪力控经轨迹路径驱动）不播种：其自身帧流已激发反馈，
+        // 播种零增益帧会与其抢总线。
+        const int mode =
+          idx < last_feedback_mode_status_.size() ? last_feedback_mode_status_[idx] : -1;
+        if (mode != -1 && mode != 0) {
+          continue;
+        }
+        if (route.motor_id < last_feedback_mit_rad_.size() &&
+            std::isfinite(last_feedback_mit_rad_[route.motor_id])) {
+          mapped_position = last_feedback_mit_rad_[route.motor_id];
+        } else {
+          mapped_position = 0.0;
+        }
+        seeded = true;
       }
       const double bus_kp = is_front ? runtime_kp_can0_ : runtime_kp_can1_;
       const double bus_kd = is_front ? runtime_kd_can0_ : runtime_kd_can1_;
-      const double use_kp = ResolveKp(static_cast<int>(route.motor_id), bus_kp);
-      const double use_kd = ResolveKd(static_cast<int>(route.motor_id), bus_kd);
-      const double use_tau = ComputeMitTorqueFf(idx, is_front);
+      const double use_kp = seeded ? 0.0 : ResolveKp(static_cast<int>(route.motor_id), bus_kp);
+      const double use_kd = seeded ? 0.0 : ResolveKd(static_cast<int>(route.motor_id), bus_kd);
+      const double use_tau = seeded ? 0.0 : ComputeMitTorqueFf(idx, is_front);
       const auto frame = ProtocolCodec::BuildMitControlFrame(
         ArmMapper::ArmBus(),
         route.motor_id,

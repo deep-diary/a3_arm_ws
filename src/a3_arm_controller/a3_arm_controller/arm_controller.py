@@ -130,6 +130,9 @@ class ArmController(Node):
         # 限位比较裕量：set_zero 后编码器量化噪声 ±0.0002（L2/L3/L7 下界为 0），
         # 1e-6 不够；0.001 rad ≈ 0.057°，远小于环绕量 2π
         self.declare_parameter("position_check_margin_rad", 0.001)
+        # /joint_states 最大陈旧时长：桥异常（refresh 停发）时 js 会冻结在旧值
+        # （LL-020），旧值校验形同虚设——超过此时长视为不新鲜，拒绝使能
+        self.declare_parameter("js_max_stale_s", 1.0)
 
         self._joint_names: List[str] = list(
             self.get_parameter("joint_names").get_parameter_value().string_array_value
@@ -152,6 +155,7 @@ class ArmController(Node):
         self._velocities: List[float] = [0.0] * self._n_joints
         self._efforts: List[float] = [0.0] * self._n_joints
         self._have_js = False
+        self._last_js_stamp = None  # F48: /joint_states 新鲜度检查（LL-020）
         # jog（滑动条直驱）进行中标志：区分 TRAJ 是 jog 还是 goto/playback
         self._jogging = False
 
@@ -403,6 +407,13 @@ class ArmController(Node):
             return False, ["no /joint_states received yet"]
         if not self._joint_limits:
             return False, ["joint limits not loaded from URDF"]
+        # LL-020：桥异常时 js 冻结在旧值（stamp 陈旧），旧值校验形同虚设——
+        # 必须检查消息新鲜度（桥正常时 50 Hz 发布，1 s 内必有新值）。
+        if self._last_js_stamp is None:
+            return False, ["no /joint_states received yet"]
+        age = (self.get_clock().now() - self._last_js_stamp).nanoseconds * 1e-9
+        if age > float(self.get_parameter("js_max_stale_s").value):
+            return False, [f"stale /joint_states ({age:.1f}s old) — CAN feedback not flowing"]
         margin = float(self.get_parameter("position_check_margin_rad").value)
         viol: List[str] = []
         for jn, p in zip(self._joint_names, self._positions):
@@ -650,6 +661,8 @@ class ArmController(Node):
             if jn in name_to_idx and name_to_idx[jn] < len(msg.effort):
                 self._efforts[i] = float(msg.effort[name_to_idx[jn]])
         self._have_js = True
+        # F48: 记录消息时间戳用于新鲜度检查（LL-020）
+        self._last_js_stamp = self.get_clock().now()
 
         if self._recording:
             now = time.monotonic()

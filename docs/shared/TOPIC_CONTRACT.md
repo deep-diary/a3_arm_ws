@@ -162,7 +162,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 
 | 接口 | 类型 | 方向 | 说明 |
 |------|------|------|------|
-| `/a3/gripper/command` | `a3_msgs/srv/GripperCommand` | 服务 | `mode=position`（`position` 0–1）/ `force`（`torque_nm` 目标握力，`timeout_s`）/ `release` / `stop` |
+| `/a3/gripper/command` | `a3_msgs/srv/GripperCommand` | 服务 | `mode=position`（`position` 0–1）/ `force`（`torque_nm` 目标握力，`timeout_s` —— 超时仅约束进入 GRASPED 前的时限，曾抓稳后滑脱振荡不触发，LL-021）/ `release` / `stop` |
 | `/a3/gripper/set_config` | `a3_msgs/srv/GripperSetConfig` | 服务 | 下发 `max_torque_nm` 等；校验 `≤ max_grasp_torque_nm` 且在 ±6 Nm 内，越界 `success=false` |
 | `/a3/gripper_cmd` | `std_msgs/Float32` | 订阅 | 归一化开合（0 闭…1 开），POSITION 模式输入 |
 | `/a3/gripper_status` | `a3_msgs/msg/GripperStatus` | 发布 | 状态快照，默认 10 Hz，力控期间 50 Hz |

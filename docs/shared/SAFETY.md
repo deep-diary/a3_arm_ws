@@ -75,7 +75,7 @@ MIT 电机上电用单圈编码器 + 多圈推算恢复绝对角：zero_sta=1（
 
 1. **使能门禁（自动）**：`/a3/arm/enable` 发 enable 前检查 7 关节读数全部落在 URDF 限位内（`enable_position_check: true` 默认；未收到 /joint_states 也拒绝），越限拒绝并点名关节与限位。
 2. **恢复路径**：`/a3/arm/init` 越限只 WARN 不阻断——set_zero 把**当前位姿**定义为零位，仅当臂确实摆在已知位姿（工装摆 URDF 零位）时执行，否则位姿帧无意义。
-3. **开机检查脚本（人工）**：`scripts/a3_check_zero_frame.py`——限位硬检查（exit 1 严禁使能，判断是否环绕的唯一标准）+ 期望位姿软检查（L2/L3/L5/L6/L7 ≈ 0、L4 ≈ 0 或 0.34 下垂、L1 自由；默认容差 ±20°，仅提示性）。
+3. **开机检查脚本（人工）**：`scripts/a3_check_zero_frame.py`——限位硬检查（exit 1 严禁使能，判断是否环绕的唯一标准）+ 期望位姿软检查（L2/L3/L5/L6/L7 ≈ 0、L4 ≈ 0 或 0.34 下垂、L1 自由；默认容差 ±20°，仅提示性）。**硬检查同时验 /joint_states 新鲜度**（stamp ≤1 s）：桥异常时 js 冻结旧值，读旧值校验形同虚设（LL-020）。
 
 ## 夹爪力控安全（L7，需求 F24–F26）
 
@@ -87,7 +87,7 @@ MIT 电机上电用单圈编码器 + 多圈推算恢复绝对角：zero_sta=1（
 2. **参数下发校验：** web/服务下发的目标力或最大握力必须 `≤ max_grasp_torque_nm`；越界一律拒绝（`error_code=5`），不执行、不落盘。合法值落盘 `data/gripper_overrides.yaml`，重启加载。
 3. **超力保护：** 力控中实测力矩瞬时超过硬限 × `overtorque_ratio`（1.5，瞬态带；固件 0x700B 仍硬钳 1.0 Nm），立即停止积分、停止下发并回退/停机，置 `FAULT`（`error_code=4`）。
 4. **看门狗：** `feedback_fresh_timeout_s`（默认 0.30 s）内无新鲜 `eff_L7` 反馈，停止力环并置 `FAULT`（`error_code=3`）；节点退出/断连不得让电机维持夹紧力。
-5. **抓取超时：** `force` 命令带 `timeout_s`，在时限内未进入 `GRASPED`（力矩入目标带 ±10% 并维持 settle 时间）则安全停止（`error_code=2`）。
+5. **抓取超时：** `force` 命令带 `timeout_s`，在时限内未进入 `GRASPED`（力矩入目标带 ±10% 并维持 settle 时间）则安全停止（`error_code=2`）。**超时仅约束「进入 GRASPED 前」的时限**：曾抓稳后滑脱（软物体带内带外振荡、状态回退 FORCE_CLOSING 再闭合）是正常调节，不得触发超时（LL-021）；滑脱失控仍由超硬限与看门狗兜底。命令传 `timeout_s` 时建议不短于配置默认 15 s（软物体收敛实测，LL-013）。
 6. **力环仅边缘：** PI 力环必须在 Edge（RK3588）/ CloudEdge ESP32 固件本地闭环；**禁止**云端以 50–200 Hz 闭环力控，网络只下发目标力/档位等稀疏参数。
 7. **模式互锁：** gate 关闭或臂处于 `TRAJ_RUNNING`/`SERVO`/`ZERO_TORQUE`/`GRAVITY_COMP` 时拒绝 `force`（`error_code=1`）；力控运行中臂侧轨迹/Servo 启动须先终止力环。
 8. **位置安全：** 力环输出的 L7 位置目标始终钳位在 `joint_cmd_min/max_rad` 内，位置增量变化率受限，防止积分饱和导致猛夹。

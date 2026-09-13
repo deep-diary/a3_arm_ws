@@ -202,6 +202,7 @@ class GripperControllerNode(Node):
         # 力环积分/计时
         self._integral = 0.0
         self._contact_detected = False
+        self._grasped_ever = False  # 本次力控是否曾进入 GRASPED（超时只约束进入前，见 LL-021）
         self._force_active = False
         self._force_start_time = 0.0
         self._force_timeout_s = float(self._p("grasp_timeout_s"))
@@ -535,6 +536,7 @@ class GripperControllerNode(Node):
         self._integral = 0.0
         self._contact = False
         self._contact_detected = False
+        self._grasped_ever = False
         self._error_code = ERR_NONE
         self._force_active = True
         self._state = ST_FORCE_CLOSING
@@ -704,6 +706,7 @@ class GripperControllerNode(Node):
                     )
                 self._state = ST_GRASPED
                 self._contact = True
+                self._grasped_ever = True  # 曾抓稳即关闭超时（LL-021）
         else:
             self._in_band_since = 0.0
             if self._state == ST_GRASPED:
@@ -711,8 +714,14 @@ class GripperControllerNode(Node):
                 self._state = ST_FORCE_CLOSING
                 self._contact = False
 
-        # 抓取超时（以命令传入的 timeout_s 为准，默认回落配置 grasp_timeout_s）
-        if self._state != ST_GRASPED and (now - self._force_start_time) > self._force_timeout_s:
+        # 抓取超时（以命令传入的 timeout_s 为准，默认回落配置 grasp_timeout_s）。
+        # 只约束「进入 GRASPED 前」的时限：曾抓稳后（软物体滑脱再闭合属正常调节，LL-021）
+        # 超时不得把已建立的抓取判死——滑脱失控仍有超硬限/看门狗兜底。
+        if (
+            not self._grasped_ever
+            and self._state != ST_GRASPED
+            and (now - self._force_start_time) > self._force_timeout_s
+        ):
             self._fault(
                 ERR_GRASP_TIMEOUT,
                 f"grasp timeout > {self._force_timeout_s:.1f}s (meas={self._meas_torque:.2f})",

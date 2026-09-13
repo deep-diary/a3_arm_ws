@@ -274,7 +274,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   5. 反馈超时（停发 `/joint_states`）≤ 看门狗时限内进入 `FAULT` 且停止下发；人为造成瞬时超硬限立即停机回退
   6. 力控期间 L7 位置目标不越过 `joint_cmd` 软限位；退出 FORCE 时恢复夹爪专用 kp/kd 之外不影响 L1–L6
 - **关联：** [shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)（关节层 MIT 力控，非 L8 末端六维力）；[shared/SAFETY.md](../shared/SAFETY.md)；F24（参数）、F26（接口）；`a3_gripper_controller`
-- **状态：** `implemented`（仿真软/硬物体闭环 ±10% 且 GRASPED、超力/看门狗 FAULT 均通过；真机物体抓取板测中）
+- **状态：** `implemented`（仿真软/硬物体闭环 ±10% 且 GRASPED、超力/看门狗 FAULT 均通过；真机 2026-09-13 软泡棉 0.3 N 力控抓取通过：~10 s 进入 GRASPED（contact=true、meas=0.30）、随后 20 s+ 稳态保持 0.30±0.01 Nm、release 干净回全开。同日修复抓取超时误判：曾 GRASPED 后滑脱振荡（软物体带内带外往返）不得再触发超时——超时只约束进入 GRASPED 前的时限，见 LL-021）
 
 ### F26 — 夹爪服务/话题契约与 MQTT 桥接
 
@@ -468,15 +468,17 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 ## F48 开机零位校验（读数限位硬检查 + 期望位姿软检查 + 使能门禁）
 
 - **说明：** F47 之后正常断电（断电间不超 ±180° 转动）读数跨上电保持连续，但环绕（+2π 多圈推算）仍可能发生（L2/L3 行程超 π；zero_sta 丢失、超范围转动等异常）。上电后校验通过前**不使能**。本需求两层：
-  1. **编排层使能门禁**（arm_controller）：`/a3/arm/enable` 发 enable 前检查 7 关节读数全部落在 URDF 限位内（参数 `enable_position_check: true`，默认开启；未收到 /joint_states 也拒绝）——环绕读数超限时 kp×误差会瞬间猛拉（LL-019），越限拒绝并点名关节与限位，恢复零位走 `/a3/arm/init`。`init` 是恢复路径（set_zero 重建零位帧后再使能），越限只 WARN 不阻断——WARN 指明「当前位姿将被定义为零位，仅在已知位姿（工装摆 URDF 零位）执行」。
-  2. **独立开机校验脚本** `scripts/a3_check_zero_frame.py`：读 /joint_states 对照 URDF 限位（硬检查，任一越限或超时无消息 exit 1——判断是否环绕的唯一标准）；再对照期望位姿模板软检查（L2/L3/L5/L6/L7 ≈ 0、L4 ≈ 0（URDF 零位）或 ≈ 0.34（折叠自然下垂）、L1 自由——水平转动 ±178° 由机械限位约束；默认容差 0.35 rad ≈ ±20°，仅提示性、不改变退出码）。
+  1. **编排层使能门禁**（arm_controller）：`/a3/arm/enable` 发 enable 前检查 7 关节读数全部落在 URDF 限位内**且 /joint_states 新鲜**（stamp 距今 ≤ `js_max_stale_s: 1.0`，参数 `enable_position_check: true` 默认开启；未收到 /joint_states 也拒绝）——环绕读数超限时 kp×误差会瞬间猛拉（LL-019），越限拒绝并点名关节与限位，恢复零位走 `/a3/arm/init`。`init` 是恢复路径（set_zero 重建零位帧后再使能），越限只 WARN 不阻断——WARN 指明「当前位姿将被定义为零位，仅在已知位姿（工装摆 URDF 零位）执行」。
+  2. **独立开机校验脚本** `scripts/a3_check_zero_frame.py`：读 /joint_states 对照 URDF 限位（硬检查，任一越限、消息陈旧（>1 s）或超时无消息 exit 1——判断是否环绕的唯一标准）；再对照期望位姿模板软检查（L2/L3/L5/L6/L7 ≈ 0、L4 ≈ 0（URDF 零位）或 ≈ 0.34（折叠自然下垂）、L1 自由——水平转动 ±178° 由机械限位约束；默认容差 0.35 rad ≈ ±20°，仅提示性、不改变退出码）。
+  3. **桥保活播种（执行层配套）**：refresh 流在无指令历史（last_commanded 为 NaN）且电机模式未知/失能时播种零增益保活帧（p=反馈位或 0，kp=kd=tau=0），保证开机后总线有帧流、反馈持续上送——否则 js 冻结旧值（LL-020，真机实测）。
 - **验收标准：**
   1. 正常上电（读数在限位内）→ `/a3/arm/enable` 放行进入电机使能流程
   2. 人为构造越限读数（仿真注入 L6=5.9）→ enable 拒绝，message 点名关节与限位；init 放行但 WARN
   3. 未收到 /joint_states（桥未起）→ enable 拒绝并提示
   4. 脚本：真机正常位 → 硬检查 PASS exit 0（软检查打印位姿匹配结论）；越限注入 → FAIL exit 1
+  5. 桥重启后无任何指令下发：5 s 内 /joint_states 持续新鲜发布且读数跟踪手动拖动（播种生效）；停桥后脚本报 stale FAIL
 - **关联：** F47（zero_sta 窗口，本需求是其开机侧兜底）；[lessons_learned/](../lessons_learned/)（环绕机理与「使能前必须 probe 校验」红线）；F45（状态机使能路径）
-- **状态：** `implemented`（2026-09-13 真机验证：零位帧恢复后 7/7≈0，脚本硬检查 PASS exit 0 且软检查匹配「URDF 零位」；隔离域仿真验证 enable 门禁三场景——无 /joint_states 拒绝、L6=5.9 越限拒绝并点名、限内放行；init 越限 WARN 放行。限位比较需裕量（编码器量化噪声 ±0.0002，L2/L3/L7 下界为 0），参数 `position_check_margin_rad: 0.001`）
+- **状态：** `implemented`（2026-09-13 真机验证：零位帧恢复后 7/7≈0，脚本硬检查 PASS exit 0 且软检查匹配「URDF 零位」；隔离域仿真验证 enable 门禁三场景——无 /joint_states 拒绝、L6=5.9 越限拒绝并点名、限内放行；init 越限 WARN 放行。限位比较需裕量（编码器量化噪声 ±0.0002，L2/L3/L7 下界为 0），参数 `position_check_margin_rad: 0.001`。补充：真机发现桥无指令历史时 js 冻结旧值（LL-020）——新增 refresh 零增益播种 + 脚本/门禁 stamp 新鲜度检查，软检查容差按用户反馈放宽至 ±20°）
 
 ## 非功能需求
 

@@ -152,7 +152,7 @@
     ```
     - 参数：`a3_gripper_controller/config/gripper_config.yaml`（最大握力 `max_grasp_torque_nm` 出厂硬上限 1.0 Nm（2026-09-07 由 2.0 下调，见 LL-014）、弱/中/强档位、PI（2026-09-07 减半为 kp=0.25/ki=0.3）、接触阈值、超时/看门狗；超硬限 FAULT 阈值 = 1.0 × `overtorque_ratio`(1.5) = 1.5 Nm 瞬态带，固件 0x700B 仍硬钳 1.0）；下发的最大握力落盘 `~/.a3/gripper/gripper_overrides.yaml`，重启保留，越界（超硬上限/±6 Nm）拒绝。
     - 遥测：`grip_target_position` 为最近 position/release 命令目标（未命令前跟随实测）；web 面板曲线已合并为单图双轴（F37：`group_by_unit` 轴模式，力矩对左轴 Nm、位置对右轴 0–1，图例点击隐藏）。桥接层对非有限浮点（NaN/±Inf）统一清洗为 null 并以 `allow_nan=False` 兜底，telemetry JSON 恒合法（见 [LL-011](../../lessons_learned/LL-011-nan-poisons-json-telemetry.md)）。
-    - 真机：`A3_GRIPPER_TEST_MODE=hw ./scripts/a3_test/a3_test.sh gripper` 做服务/配置/开合安全检查；力控阶跃需人工在夹爪放置海绵（软）/木块（硬阻挡），观察 `grip_actual_torque` 收敛到目标 ±10% 且 `GRASPED`，握力不超硬上限。
+    - 真机：`A3_GRIPPER_TEST_MODE=hw ./scripts/a3_test/a3_test.sh gripper` 做服务/配置/开合安全检查；力控阶跃需人工在夹爪放置海绵（软）/木块（硬阻挡），观察 `grip_actual_torque` 收敛到目标 ±10% 且 `GRASPED`，握力不超硬上限。2026-09-13 真机软泡棉 0.3 N 实测：~10 s GRASPED、稳态 0.30±0.01 Nm。抓取超时只约束「进入 GRASPED 前」，抓稳后滑脱振荡不会再触发 FAULT（[LL-021](../../lessons_learned/LL-021-grasp-timeout-kills-established-grasp.md)）；命令传 `timeout_s` 建议 ≥ 默认 15 s。
     - 力控与臂运动互锁：gate 关闭或臂处于 `TRAJ_RUNNING`/`SERVO`/`ZERO_TORQUE`/`GRAVITY_COMP` 时拒绝力控；安全条款见 [shared/SAFETY.md](../shared/SAFETY.md)「夹爪力控安全」。
 
 15. **单电机调试页（F32，跨仓 deep-trace）：**
@@ -259,10 +259,11 @@ python3 scripts/a3_check_zero_frame.py        # exit 0 = 限位内，可 enable
 ros2 service call /a3/arm/enable std_srvs/srv/Trigger "{}"
 ```
 
-- **硬检查（决定 exit code）**：7 关节读数全部落在 URDF 限位内（默认裕量 0.001 rad 吸收编码器量化噪声 ±0.0002）；越限 = 疑似断电多圈环绕（LL-019）。
+- **硬检查（决定 exit code）**：7 关节读数全部落在 URDF 限位内（默认裕量 0.001 rad 吸收编码器量化噪声 ±0.0002）**且消息新鲜**（stamp 距今 ≤1 s）；越限 = 疑似断电多圈环绕（LL-019）；陈旧 = 桥异常/refresh 停发（LL-020，读旧值校验形同虚设）。
 - **软检查（仅 WARN，默认容差 ±20°）**：L2/L3/L5/L6/L7 ≈ 0、L4 ≈ 0（URDF 零位）或 ≈ 0.34（折叠下垂）、L1 自由（±178° 机械限位）——模板外说明臂被留在其它位姿；判断是否环绕的唯一标准是硬检查，软检查不阻断。
 - **越限恢复**：把臂摆回 URDF 零位（工装/泡沫垫）→ `/a3/arm/init`（set_zero 重建零位帧；init 是恢复路径，越限只 WARN 不阻断，见 REQUIREMENTS F48）。
-- **enable 门禁参数**：`enable_position_check: true`（默认）、`position_check_margin_rad: 0.001`（arm_controller.yaml / arm_controller_6j.yaml）。
+- **enable 门禁参数**：`enable_position_check: true`（默认）、`position_check_margin_rad: 0.001`、`js_max_stale_s: 1.0`（arm_controller.yaml / arm_controller_6j.yaml）。
+- **桥保活播种（LL-020）**：桥重启后即使从未下发轨迹，refresh 流也会以零增益保活帧（kp=kd=tau=0）保持总线帧流与反馈上送——开机后 js 应当持续更新（可用 `candump can1` 看到 ~350 帧/s）。
 
 ## 相关文档
 

@@ -39,3 +39,5 @@ LL-NNN-short-slug.md
 | [LL-017](LL-017-mit-hold-end-refresh-kp80.md) | MIT hold 结束后 refresh 以默认增益 kp=80 续推旧目标角：止位处被固件钳 1 Nm 持续顶死发热（33→56°C）；stop 后残余力矩是楔入止位的回弹外载 | Edge | 2026-09-07 |
 | [LL-018](LL-018-generic-arm-bringup-three-pits.md) | 通用 N 关节臂接入三坑：电机不主动上报反馈须先播种轨迹；新增 yaml 配置须清 build 目录重编（glob 对 build 副本生效）；/joint_states 是 BEST_EFFORT 订阅要同 QoS | Edge | 2026-09-11 |
 | [LL-019](LL-019-multiturn-wrap-zero-sta-firmware-split.md) | 断电转动丢多圈：zero_sta(0x7029)=0 默认 0~2π 窗口致负转 +2π 环绕（-22° 读 +338°，机器狗暴动机理）；窗口仅上电时生效；save 帧数据域须 01..08 否则不保存；RS00 固件 0.0.3.4 读回恒 0 但写+保存生效（判断以断电行为为准）；环绕读数超限严禁使能（F48 已加使能门禁） | Edge | 2026-09-13 |
+| [LL-020](LL-020-bridge-no-seed-stale-js.md) | 桥无指令历史时 refresh 不播种 → 总线静默 → /joint_states 冻结旧值（数值对但数据旧）；修复：零增益保活帧播种（模式未知/失能时）+ 校验脚本与使能门禁查 stamp 新鲜度（max 1 s）；任何读 js 判状态的流程先验新鲜度 | Edge | 2026-09-13 |
+| [LL-021](LL-021-grasp-timeout-kills-established-grasp.md) | 力控抓取超时把已 GRASPED 的抓取判死：软泡棉滑脱振荡使状态在 GRASPED↔FORCE_CLOSING 往返，超时只问「当前是否 GRASPED」不问「是否曾抓稳」；修复 `_grasped_ever`——超时仅约束进入 GRASPED 前的时限；命令别传短于默认 15 s 的 timeout | Edge | 2026-09-13 |

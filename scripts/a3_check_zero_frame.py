@@ -5,8 +5,10 @@
 （-π~π 窗口）下正常断电不丢，但超 ±180° 的断电转动或参数异常仍会 +2π 环绕，
 读数远超关节限位。此时使能会 kp×误差瞬间猛拉——所以上电后、使能前跑本脚本。
 
-  硬检查（决定退出码）：7 关节读数全部落在 URDF 限位内；任一越限或超时无
-    /joint_states → FAIL exit 1。越限 = 疑似环绕，先恢复 URDF 零位再 init。
+  硬检查（决定退出码）：7 关节读数全部落在 URDF 限位内且 /joint_states 消息
+    新鲜（stamp 距今 ≤ --max-age，默认 1 s）；任一越限、消息陈旧或超时无消息
+    → FAIL exit 1。越限 = 疑似环绕，先恢复 URDF 零位再 init；陈旧 = 桥异常
+    （refresh 停发，LL-020），旧值校验形同虚设。
   软检查（仅 WARN，默认容差 ±20°）：期望位姿模板——L2/L3/L5/L6/L7 ≈ 0；
     L4 ≈ 0（URDF 零位，泡沫垫水平）或 ≈ 0.34（折叠自然下垂）；L1 自由（水平
     转动 ±178° 由机械限位约束）。模板外说明臂被留在其它位姿，注意 poses/FK
@@ -29,6 +31,7 @@ import rclpy
 from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
 from sensor_msgs.msg import JointState
 
 # 期望位姿模板（软检查）：(关节名, [允许值列表])；L1 自由不检查。
@@ -95,6 +98,9 @@ def main() -> int:
     parser.add_argument(
         "--margin", type=float, default=0.001,
         help="硬检查限位裕量 (rad)——编码器量化噪声 ±0.0002（L2/L3/L7 下界为 0）",)
+    parser.add_argument(
+        "--max-age", type=float, default=1.0,
+        help="/joint_states 最大陈旧时长 (s)——桥异常时 js 冻结旧值（LL-020），旧值校验形同虚设",)
     args = parser.parse_args()
 
     rclpy.init()
@@ -109,6 +115,15 @@ def main() -> int:
     msg = node.wait_for_js()
     if msg is None:
         print(f"FAIL: no {args.topic} within {args.timeout}s — is a3_can_bridge running?")
+        print("DO NOT ENABLE the arm.")
+        return 1
+
+    # 新鲜度检查（LL-020）：桥 refresh 停发时 js 冻结在旧值，旧值校验形同虚设
+    stamp = Time.from_msg(msg.header.stamp)
+    age = (node.get_clock().now() - stamp).nanoseconds * 1e-9
+    if age > args.max_age:
+        print(f"FAIL: stale {args.topic}: stamp {age:.1f}s old (max {args.max_age}s) — "
+              "CAN feedback not flowing, check a3_can_bridge")
         print("DO NOT ENABLE the arm.")
         return 1
 
@@ -151,7 +166,7 @@ def main() -> int:
         print("臂被留在模板外位姿——poses.yaml / FK 按 URDF 零位或折叠 home 语义使用前先确认实际位姿。")
     else:
         l4 = positions.get("L4_joint", 0.0)
-        pose = "URDF 零位" if abs(l4) <= args.tol else "折叠 home（L4 重力下垂）"
+        pose = "URDF 零位" if abs(l4) <= abs(l4 - 0.34) else "折叠 home（L4 重力下垂）"
         print(f"\n软检查 PASS：位姿匹配「{pose}」")
     print("\nPASS：读数全部在 URDF 限位内，可以 /a3/arm/enable。")
     return 0
