@@ -45,3 +45,4 @@ LL-NNN-short-slug.md
 | [LL-023](LL-023-temp-threshold-65-too-low.md) | F44 温度阈值 65°C 过低：真机 ready 位 L3 保位 1.26 Nm 几分钟即 63→65°C 触发 overtemp park（保护路径真机首触发工作正常）；官方电机自带 130°C 兜底，阈值调 warn=90/protect=95；记录位姿必须以新鲜反馈为准 | Edge | 2026-09-13 |
 | [LL-024](LL-024-codec-per-motor-torque-scale.md) | 力矩/速度编解码统一 ±6 Nm/±50 rad/s：RS00（L1-L3）反馈力矩少报 2.333 倍、τ_ff 反向放大 2.333 倍；按电机型号量程编解码（RS00 ±14/±33，EL05 ±6/±50，config motor_torque_range_nm/motor_speed_range_rad_s）；F42 钳位阈值同步按型号（RS00 5 Nm） | Edge | 2026-09-13 |
 | [LL-025](LL-025-zero-torque-frozen-model-shove.md) | 零力矩启动 1.5s 推飞机械臂：gravity 节点 RELIABLE 订 BEST_EFFORT 的 /joint_states 致模型冻结全零（常数前馈）+ 单点位经验增益外推 + _pin 初始化顺序致官方标定参数从未加载；启动前验证协议：τ_g 必须随姿态变化 | Edge | 2026-09-13 |
+| [LL-026](LL-026-txstats-window-and-torque-latch-release.md) | F46 tx_stats 5s 窗口旋转切分轨迹尾巴（瞬时读 tx_traj_total=7 vs 实际 4098，读帧率须对照同时段桥日志）+ F42 latch 释放余量 0.02 rad 在慢速跟踪（滞后 ~0.006 rad）中不可达 → 残留 latch 钉死新轨迹（回程/park 卡死超时 FAULT）→ 新轨迹清 latch 修复 | Edge | 2026-09-13 |

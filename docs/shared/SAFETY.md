@@ -108,6 +108,44 @@ Web 端单电机调试（CAN 扫描 / MIT 直驱 / 保持）的安全边界：
 5. **保持与轨迹互斥：** 调试保持仅限 gate 关闭期间（此时轨迹插值与 refresh 均被 gate 阻断），保持是唯一 CAN 发送者，无总线争用；gate 打开瞬间保持即取消。
 6. **仿真有意分歧：** sim 闭环不实现互锁（`sim_power_sequence_node` gate 恒 true），互锁只真机验证；前端在 `gate_open=true` 时展示提示横幅但不自行拦截（拒绝文案经 `cmd_result` 回传）。
 
+## 失能保护（F40）
+
+`/a3/arm/disable` 不在 home 容差（`disable_home_tol_rad: 0.15`）内时，先自动平滑回 home（`SAFE_PARK`，3 s/150 点轨迹）并连续确认收敛（`disable_home_confirm_s: 0.5`）再失能，防止 ready 位直接掉臂：
+
+1. **park 超时 → FAULT 且不 reset**：保持使能、停在半途，需人工介入——宁停在半途也不盲目失能掉臂。
+2. **reset 受 gate 互锁**：电源序列 Running 时 `/a3/motor/reset` 被 C++ 权威拒绝（MOTOR_DEBUG 互锁同一张表）——park 前拒绝 → `disable` 返回失败 + 原文（先 stop power sequence）；park 完成后被拒 → 回 READY（已在 home 位，安全）。
+3. **紧急失能保留**：`/a3/motor/reset` 直达（通信类型 4）仍是急停链路，不经 park。
+4. **DISABLED 下运动命令被拒**：`_can_move()`/`_set_joint_positions_cb` 拒绝表含 DISABLED/COOLING/SAFE_PARK——disable 后 move_to/goto/playback/set_joint_positions 均被拒，须显式 enable（原 IDLE 允许运动的语义混乱消除）。
+5. **无反馈兜底**：无 `/joint_states` 时 disable 直达 reset + WARN（旧行为保留）。
+
+## 力矩方向钳位（F42）
+
+执行层（`motor_protocol_node`，权威）在每条指令帧对每个关节做方向性碰撞保护（阈值 `torque_protection_limit_nm: [5,5,5,3,3,3,3]`，RS00 5 / EL05 3，与 LL-024 codec 量程同源）：
+
+1. **trip + latch**：反馈力矩 |τ| ≥ 阈值 → 冻结该关节目标在反馈位（τ>0 → target=min(target, fb)；τ<0 → target=max(target, fb)）并 latch τ 符号——无 latch 会形成 0→3 Nm 周期极限环。
+2. **反向放行**：目标越过反馈位反向侧且超 `release_margin`（0.02 rad）才释放——「增矩方向冻结、反向自由」。
+3. **新轨迹清 latch**：收到新轨迹即清空全部 latch（新轨迹 = 新意图）。**残留 latch 会把新轨迹钉在旧 trip 位**——慢速跟踪滞后 ~0.006 rad 永远到不了 release margin，回程/park 会被钉死超时 → FAULT（LL-026 真机实测）；保护不减弱——阻力仍在时钳位在一个 tick 内按反馈力矩重新 trip。
+4. **例外不钳**：kp≤0.01（zero_torque/播种）或反馈不新鲜时清 latch 不钳位。
+5. **兜底**：固件 0x700B 力矩硬限独立于本软件层。钳位只拦「增矩方向」；个别姿态保持力矩超阈时该姿态增矩方向运动受限（语义符合预期）。不做「持续超限 → FAULT」升级（执行层无状态机；编排层可观测 `mtq_L{n}` 扩展）。
+
+## 温度策略（F44）
+
+`temp_warn_c: 90.0` / `temp_protect_c: 95.0`（2026-09-13 由 65 上调——官方电机自带 130°C 兜底；65 使 ready 位保位发热几分钟即误触，LL-023）、迟滞 `temp_hysteresis_c: 5.0`：
+
+1. **warn**（≥90）：仅置标志 + `arm_temp_warn` 遥测 + WARN 日志，不打断运动。
+2. **protect**（≥95）：READY/TRAJ → 复用 F40 流程 safe park → **COOLING**（message 带关节与温度）；IDLE/DISABLED/COOLING → 直接 COOLING；SAFE_PARK 进行中不打断；reset 被 gate 拒 → FAULT（温度保护不可放弃）。
+3. **降温恢复**：COOLING 下 enable/init 先查**全 fresh 关节** < protect−hysteresis 才放行；无 fresh 关节不阻碍 + WARN。
+4. **fresh 门控**：温度判读一律以 `MotorState.fresh` 为准——无反馈时温度=0.0（不是 NaN），断连不得被误判「已冷却」放行使能。
+5. **固件故障监视**：fault_mask≠0（含固件过温锁存 bit3）→ reset 广播 + FAULT。
+
+## TX 帧率监视（F46）
+
+`/a3/motor/tx_stats`（5 s 窗口，先发布再清零）：每电机 `tx_hz`、`tx_traj_total`/`tx_refresh_total`、跳过计数（`skip_max_rate`/`skip_bus_disabled`/`skip_power_gate`，定位帧丢失）、`tx_rate_ok`。
+
+- 口径：轨迹期间理想帧率 = min(200, `max_tx_rate_per_motor_hz`)；`tx_rate_ok` 仅当本窗口有轨迹帧时校验 ≥90% 理想帧率——静止期只有 refresh 帧（~50 Hz）属正常，不误报。
+- **读帧率须对照同时段桥日志**：5 s 窗口旋转会把轨迹尾巴切到下一窗口（瞬时读 tx_traj_total 可能是 7 而非 4098，LL-026）。
+- 示教卡顿/帧丢失定位：先看三个 skip 计数器（限速丢弃 / 总线禁用 / gate 关闭）再查 CAN 层。
+
 ## 产品线实现差异
 
 | 安全能力 | A3 Edge | A3 CloudEdge |

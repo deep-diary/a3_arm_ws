@@ -265,6 +265,32 @@ ros2 service call /a3/arm/enable std_srvs/srv/Trigger "{}"
 - **enable 门禁参数**：`enable_position_check: true`（默认）、`position_check_margin_rad: 0.001`、`js_max_stale_s: 1.0`（arm_controller.yaml / arm_controller_6j.yaml）。
 - **桥保活播种（LL-020）**：桥重启后即使从未下发轨迹，refresh 流也会以零增益保活帧（kp=kd=tau=0）保持总线帧流与反馈上送——开机后 js 应当持续更新（可用 `candump can1` 看到 ~350 帧/s）。
 
+### 安全保护与状态监控验证（F40–F46，真机 7 关节臂）
+
+F40–F46 于 2026-09-13 在 can1 真机 7 关节臂（含夹爪）全部验收通过（需求与验收标准见 [REQUIREMENTS.md](REQUIREMENTS.md)，安全语义见 [shared/SAFETY.md](../shared/SAFETY.md)）。验证命令与结论：
+
+```bash
+# F41 时长兜底：0.5s 请求 → 响应回显 "(3.0s, 150 pts)"
+ros2 service call /a3/arm/move_to a3_msgs/srv/MoveToJointPositions "{positions: [0,0,0,0,0,0,0], duration_s: 0.5}"
+
+# F46 帧率：3s/150 点 move_to 期间读 tx_stats（注意 5s 窗口旋转，对照同时段桥日志）
+ros2 topic echo /a3/motor/tx_stats --once
+
+# F40 失能保护：READY 位 disable → 自动 safe park 回 home → DISABLED
+ros2 service call /a3/arm/disable std_srvs/srv/Trigger "{}"
+
+# F43 持久化证据（MQTT mtqmax_L1..L7 同步上行）
+cat ~/.a3/stats/torque_stats.yaml
+```
+
+- **F40 失能保护**：容差外 disable → `safe park -> disabled (0.9s)`，最终位姿全 ≈ home、7/7 失能；park 超时 → FAULT 不 reset。参数：`disable_home_tol_rad: 0.15`、`disable_home_duration_s: 3.0`、`disable_home_confirm_s: 0.5`（arm_controller.yaml）。
+- **F41 move_to**：最短 3 s + ≥50 Hz 插值（`move_to_min_duration_s`/`move_to_points_hz`）；goto/playback ramp 同口径。
+- **F42 力矩方向钳位**：手扶顶关节（L4 力臂长，~20 N 手力可顶 3 Nm）→ trip 冻结在反馈位、反向放行；**新轨迹自动清 latch**（LL-026）。阈值 `[5,5,5,3,3,3,3]` Nm（RS00 5 / EL05 3）。
+- **F43 最大力矩**：当日两次 trip 已写入 torque_stats.yaml 并上行 mtqmax（与桥日志时间戳吻合）。
+- **F44 温度**：warn=90/protect=95/迟滞 5（官方电机 130°C 兜底）；超限自动 park → COOLING，降温至保护阈−迟滞才可 enable；无反馈（fresh=false）温度判读不生效。
+- **F45 状态机**：11 态（IDLE/INIT/READY/TRAJ/SERVO/TEACH/AI/SAFE_PARK/DISABLED/COOLING/FAULT）；disable/温度保护路径转移实测，arm_state 遥测一致。
+- **F46 帧率**：轨迹期 195 Hz/关节（4098 帧/3 s ≈99% 交付、限速丢弃 0.7%）、静止对照 47.2 Hz/关节、`tx_rate_ok=true`；**tx_stats 5 s 窗口旋转会切分轨迹尾巴，读帧率须对照同时段桥日志**（LL-026）。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

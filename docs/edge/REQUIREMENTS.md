@@ -481,6 +481,72 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F47（zero_sta 窗口，本需求是其开机侧兜底）；[lessons_learned/](../lessons_learned/)（环绕机理与「使能前必须 probe 校验」红线）；F45（状态机使能路径）
 - **状态：** `implemented`（2026-09-13 真机验证：零位帧恢复后 7/7≈0，脚本硬检查 PASS exit 0 且软检查匹配「URDF 零位」；隔离域仿真验证 enable 门禁三场景——无 /joint_states 拒绝、L6=5.9 越限拒绝并点名、限内放行；init 越限 WARN 放行。限位比较需裕量（编码器量化噪声 ±0.0002，L2/L3/L7 下界为 0），参数 `position_check_margin_rad: 0.001`。补充：真机发现桥无指令历史时 js 冻结旧值（LL-020）——新增 refresh 零增益播种 + 脚本/门禁 stamp 新鲜度检查，软检查容差按用户反馈放宽至 ±20°）
 
+### F40 — 失能保护（disable → 自动回 home → 失能）
+
+- **说明：** `/a3/arm/disable` 不再是「无条件直接失能」——不在 home 容差内时先平滑回 home 再失能，防止 ready 位直接掉臂。新增参数：`disable_home_pose_name: "home"`、`disable_home_tol_rad: 0.15`、`disable_home_duration_s: 3.0`、`disable_home_confirm_s: 0.5`、`disable_park_timeout_s: 8.0`。新辅助 `_at_home()`（全关节 |q−home| ≤ tol）与 `_safe_park_then_disable()`（同步阻塞：发布 home 轨迹抢占活跃轨迹——执行层 OnTrajectory 天然支持替换，无需排队 → `SAFE_PARK`（期间拒绝新运动指令）→ 轮询连续 `confirm_s` 收敛 → reset → `DISABLED`）。服务语义（同步阻塞返回，`success=true ⟺ 已失能`）：READY/TRAJ 容差内 → 直达 reset → DISABLED；容差外 → safe park → reset → DISABLED（message 含耗时）；IDLE → 直达 reset；DISABLED/COOLING → 幂等不动电机；FAULT → 紧急直达 reset；INIT/TEACH/SERVO/AI → 拒绝 busy；SAFE_PARK → 拒绝「already safe parking」。park 超时 → **FAULT 不 reset**（保持使能、停在半途，人工介入）；reset 被 gate 拒 → park 前 `success=false` + 原文 + "(stop power sequence first)"，park 完成后被拒 → 回 READY（已在 home 位，安全）；`_have_js==False` → 直达 reset + WARN（保持旧行为）。`/a3/motor/reset` 直达保留作紧急失能。
+- **验收标准：**
+  1. 容差外 disable：`READY → SAFE_PARK`（`_traj_done_at` 清零防旧 TRAJ 时间戳误回 READY）→ 收敛连续 0.5 s → reset → `DISABLED`，最终位姿全部在 home ±0.15 rad 内
+  2. 容差内 disable：跳过 park 直达 reset；park 超时：FAULT 且电机保持使能、不 reset
+  3. disable 后 7 电机 mode_status=0；DISABLED 下运动命令被拒（`_can_move` 拒绝表，F45）
+- **关联：** F45（SAFE_PARK/DISABLED 状态）、F41（park 轨迹复用统一插值）；[shared/SAFETY.md](../shared/SAFETY.md)（失能保护）；[LL-026](../../lessons_learned/LL-026-txstats-window-and-torque-latch-release.md)（park 被残留力矩 latch 钉死风险）
+- **状态：** `completed`（2026-09-13 真机验收：READY 位 disable → `[state change] READY -> SAFE_PARK (safe park -> home (3.0s, 150 pts))` → `disable -> success=True 'safe park -> disabled (0.9s)'` → `SAFE_PARK -> DISABLED`；最终位姿 [-0.0044, -0.0006, -0.0171, +0.3336, +0.0125, +0.0056, -0.0002] 全 ≈ home、7/7 失能。实测 0.9 s 即返回——tol 判据在 park 中途即满足、提前 reset、重力把臂荡回平衡位，符合设计）
+
+### F41 — move_to 时长兜底 + 插值密度（≥50 Hz）
+
+- **说明：** move_to 允许 0.05 s 极短时长时插值仅 ~21 点（≈8 Hz，阶跃感明显）——新增参数 `move_to_min_duration_s: 3.0`、`move_to_points_hz: 50.0`、`move_to_max_points: 5000`；新辅助 `_traj_point_count(duration_s)` = max(goto_waypoints, min(ceil(duration×hz), max_points))，三处统一：`_move_to_cb`（duration=max(duration, min) 再 clamp 0.05..60，3 s → 150 点）、`_goto_cb`（goto_duration_s）、`_playback_cb` F38b ramp 段（2.5 s → 125 点）。150 点×7 关节 reliable QoS 无压力。
+- **验收标准：**
+  1. move_to 请求 0.5 s → 响应回显 `(3.0s, 150 pts)`
+  2. goto 3.0 s → 150 点；playback ramp 2.5 s → 125 点；全部 ≥50 Hz
+- **关联：** F40（park 轨迹复用同一插值）、F38b（ramp 段）；F46（帧率实测同轨迹）
+- **状态：** `completed`（2026-09-13 真机验收：0.5 s 请求回显 3.0s/150 pts；goto/ramp 点数达标；同轨迹 F46 帧率实测 195 Hz/关节）
+
+### F42 — 力矩方向钳位（执行层 latch，碰撞保护）
+
+- **说明：** 执行层（`motor_protocol_node`，权威，插在 ClampMotorCommand 之后）按**方向性判据**做碰撞保护：反馈力矩 |τ| ≥ 阈值（`torque_protection_limit_nm: [5,5,5,3,3,3,3]`，RS00 5 / EL05 3，与 LL-024 codec 量程同源）→ trip 并 latch τ 符号；冻结 = 把目标钉在反馈位（τ>0 → target=min(target, fb)；τ<0 → target=max(target, fb)，MIT 约定 τ≈kp×(target−actual)）；释放 = (mapped−fb)×latch_sign < 0 且 |mapped−fb| > `release_margin`(0.02 rad)——即「增矩方向冻结、反向放行」（无 latch 会形成 0→3 Nm 周期极限环）。kp≤0.01（zero_torque/播种）、反馈不新鲜时清 latch 不钳位；**收到新轨迹时清空全部 latch**（新轨迹 = 新意图；保护不减弱——阻力仍在时钳位会在一个 tick 内按反馈力矩重新 trip）。WARN 日志关键字 `F42 torque clamp trip: motor=%u tau=%.2f limit=%.2f fb=%.4f`（1000 ms 节流）。与 refresh 流天然兼容：refresh 持有钳位后的 `last_commanded_mit_rad_` → 轨迹结束后自动保持冻结位；zero_torque/stop 重锚定不冲突。不做「持续超限 → FAULT」升级（执行层无状态机；编排层可观测 `mtq_L{n}` 扩展）。
+- **验收标准：**
+  1. 手扶顶住关节（反馈力矩 ≥ 阈值）时该关节目标冻结在反馈位、不再朝阻力方向推进；反向目标放行
+  2. 阻力消失后关节继续跟踪轨迹；新轨迹不受残留 latch 影响
+  3. kp≤0.01（zero_torque 拖动）或反馈不新鲜时不钳位
+- **关联：** [shared/SAFETY.md](../shared/SAFETY.md)（力矩方向钳位）；LL-024（阈值按型号）；固件 0x700B 硬钳兜底
+- **状态：** `completed`（2026-09-13 真机验收：L4 手扶受控 trip −3.01 Nm 冻结在反馈位、力矩塌陷后释放继续走完；L6 自然 trip −3.01 同语义（WARN 日志两条与 ~/.a3/stats/torque_stats.yaml 时间戳吻合）。**期间发现并修复 LL-026 缺陷**——慢速跟踪滞后仅 ~0.006 rad < release margin 0.02，残留 latch 把新轨迹钉死（回程 L4/L6 各只动 ~0.03 rad 即停、日志无新 trip）→ 新轨迹清 latch 修复后同一回程完整走完（L4→0.1605、L6→+0.0002））
+
+### F43 — 最大力矩持久化 + MQTT mtqmax
+
+- **说明：** 编排层新增订阅 `/a3/motor/states`（QoS 复用 js_qos best_effort），记录每关节历史最大力矩（`max_abs`/`max_pos`/`max_neg` + 时间戳，仅 fresh+finite 更新），dirty 且 ≥ `torque_stats_save_interval_s`(10 s) 节流落盘 `~/.a3/stats/torque_stats.yaml`（启动恢复、destroy 落盘，复用 gripper_overrides 模式）。`ArmStatus.msg` 追加 `float64[] max_torques`（无数据 0.0，不用 NaN）。MQTT（bridge.yaml）：`/a3/arm_status` 第二条 rule，`flatten: joint_state, fields: [max_torques], prefixes: [mtqmax]` → `mtqmax_L1..L7`（同话题多 rule 支持）。
+- **验收标准：**
+  1. 运动/保位后 yaml 有值且节点重启恢复
+  2. telemetry `mtqmax_L1..L7` 上行与 yaml 一致
+- **关联：** F42（trip 事件的持久化证据）；[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（ArmStatus 字段）
+- **状态：** `completed`（2026-09-13 真机验收：当日两次 F42 trip 已持久化——L4 max_abs 2.995@13:09:05、L6 max_abs 2.997@13:09:11 与桥日志 WARN 时间戳吻合；MQTT mtqmax 全键上行验证通过）
+
+### F44 — 温度管理（warn / protect / COOLING）
+
+- **说明：** 参数 `temp_protect_enabled: true`、`temp_warn_c: 90.0`、`temp_protect_c: 95.0`（2026-09-13 由 65 上调——官方电机自带 130°C 兜底，65 使 ready 位保位发热几分钟即误触，LL-023）、`temp_hysteresis_c: 5.0`。warn（≥90，fresh 门控）：置 `temp_warn` + WARN 日志 + `arm_temp_warn` 遥测，不动状态机。protect（≥95 任一 fresh 关节）：READY/TRAJ → 复用 F40 流程 safe park → **COOLING**（message 带关节与温度）；IDLE/DISABLED/COOLING → 直接 COOLING；SAFE_PARK 进行中不打断；reset 被 gate 拒 → **FAULT**(overtemp reset refused)（温度保护不可放弃）。重新使能：COOLING 下 `_enable_cb`/`_init_cb` 先查全 fresh 关节 < protect−hysteresis 才放行；无 fresh 关节不阻碍 + WARN。顺带电机故障监视：fault_mask≠0（含固件过温锁存 bit3）→ reset 广播 + FAULT。`ArmStatus.msg` 追加 `float64[] temperatures`、`bool temp_warn`；MQTT scalar rule fields 扩展 `temp_warn` → `arm_temp_warn`。
+- **验收标准：**
+  1. 超保护阈 → 自动回 home → 失能 → COOLING；降温至保护阈−迟滞前 enable 被拒
+  2. warn 级仅告警不打断运动
+  3. 无反馈（fresh=false）时温度判读不生效——温度=0.0 不是 NaN，断连不得被误判「已冷却」放行使能（LL-011 教训）
+- **关联：** F40（复用 safe park）、F45（COOLING 态）；[shared/SAFETY.md](../shared/SAFETY.md)（温度策略）；LL-023（阈值放宽）
+- **状态：** `completed`（2026-09-13：阈值上调后两 yaml + 代码默认值同步、重编重启回读 95.0/90.0 确认；保护路径（overtemp → safe park 回 home 落点误差 <0.003 rad → 7/7 失能 → COOLING → L3 卸力快速降温）已于 65°C 旧阈值时代真机触发并二次复现，状态转移与遥测一致）
+
+### F45 — 状态机增强（11 态）
+
+- **说明：** 状态全集扩为 11 态：`IDLE/INIT/READY/TRAJ/SERVO/TEACH/AI/SAFE_PARK/DISABLED/COOLING/FAULT`。转移：disable 非 home → SAFE_PARK→DISABLED；温度保护 → SAFE_PARK→COOLING；park 超时/reset 被拒/motor fault → FAULT(reason)；enable（COOLING 已降温）→ READY。`_can_move()`/`_set_joint_positions_cb` 拒绝表加 SAFE_PARK/DISABLED/COOLING（disable 后 move_to 被拒，原 IDLE 允许的语义混乱消除）；`_publish_mode` 兜底：SAFE_PARK→TRAJ_RUNNING、DISABLED/COOLING→IDLE（防互锁锁存，F29 教训）；`_publish_status` 填 temperatures/max_torques/temp_warn。IDLE 语义收窄为「上电未初始化」，DISABLED =「曾使能已失能须显式 enable」。
+- **验收标准：**
+  1. 完整转移链实测：READY→SAFE_PARK→DISABLED→enable→READY；READY→SAFE_PARK→COOLING→降温→enable→READY
+  2. DISABLED/COOLING/SAFE_PARK 下运动命令被拒；arm_state 遥测与状态一致
+- **关联：** F40/F44；[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（11 态转移表）
+- **状态：** `completed`（2026-09-13 真机：F40 路径 READY→SAFE_PARK→DISABLED 与 F44 路径 overtemp→SAFE_PARK→COOLING 实测转移、MQTT arm_state 遥测一致；`_publish_mode` 兜底经 F29 路径回归）
+
+### F46 — TX 帧率监视（TxStats + MQTT txhz）
+
+- **说明：** 新 msg `a3_can_bridge/msg/TxStats`（CMake 注册）；`motor_protocol_node` 按电机计数发送帧（SendMitFrame/OnTxRefreshTimer/mit_hold 路径递增），5 s 窗口定时器**先发布 `/a3/motor/tx_stats`（SensorDataQoS）再清零**（`window_s` 用实测 tick 间隔）：`tx_traj_total`/`tx_refresh_total`（及 can0/can1 拆分）、跳过计数 `skip_max_rate`/`skip_bus_disabled`/`skip_power_gate`（定位帧丢失）、`float64[] tx_hz`（count/window_s）、`bool tx_rate_ok`（仅 `tx_traj_total>0` 时校验 `tx_hz[i] ≥ tx_rate_ok_ratio(0.9)×min(200, max_tx_rate_per_motor_hz)`——静止期只有 refresh 属正常）、`string[] joint_names`。参数 `publish_tx_stats: true`、`tx_stats_topic`、`tx_rate_ok_ratio: 0.9`。MQTT：两条 rule（joint_state 展平 `txhz_L1..L7`；scalar 展平 `tx_window_s`/`tx_traj_total`/`tx_refresh_total`/`tx_rate_ok`）。不做 `ip -s link` berr 计数（can_transport 职责，二期）。
+- **验收标准：**
+  1. 3 s/150 点 move_to 期间 `tx_hz ≈ min(200, max_rate)` 且 `tx_rate_ok=true`；静止保持期 `tx_hz ≈ refresh 频率`（对照 ~50 Hz/关节）且不误报 `tx_rate_ok=false`
+  2. `ros2 topic echo /a3/motor/tx_stats` 可读全部字段
+- **关联：** [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（/a3/motor/tx_stats + MQTT 展平）；F22 示教卡顿定位（skip 计数器）；[LL-026](../../lessons_learned/LL-026-txstats-window-and-torque-latch-release.md)（窗口旋转误读）
+- **状态：** `completed`（2026-09-13 真机验收：3 s/150 点轨迹 tx_traj=4098 帧 ≈195 Hz/关节（99% 交付、限速丢弃 46 帧 0.7%）、refresh 1652/5s 并行、静止对照 47.2 Hz/关节、`tx_rate_ok=true`；**注意 tx_stats 5 s 窗口旋转会把轨迹尾巴切到下一窗口**（首次读 tx_traj_total=7 误导），读帧率须对照同时段桥日志 TX window 行，LL-026）
+
 ## 非功能需求
 
 | 指标 | 要求 |

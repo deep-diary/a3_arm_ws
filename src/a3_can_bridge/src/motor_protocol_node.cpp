@@ -772,6 +772,13 @@ private:
       return;
     }
 
+    // LL-026: 新轨迹 = 新意图，清空全部力矩钳位 latch。残留 latch 会把目标钉在
+    // 上一次 trip 的反馈位：若新轨迹（如 F40/F44 safe-park 回 home）要往钉住侧
+    // 运动，关节会卡到 park 超时 → FAULT。保护不减弱：阻力仍在时钳位会在一个
+    // tick 内按反馈力矩重新触发。
+    torque_latch_active_.fill(false);
+    torque_latch_sign_.fill(0.0);
+
     if (enable_trajectory_interpolation_) {
       std::lock_guard<std::mutex> lock(traj_mutex_);
       active_traj_ = *msg;

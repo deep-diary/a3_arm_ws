@@ -18,7 +18,7 @@ home 位（真实重力负载 ≈0.5 Nm）使能保位中调用 `/a3/zero_torque
 
 `gravity_torque_node.py` 两处：①订阅改 `QoSProfile(depth=10, reliability=BEST_EFFORT)`；②`self._pin = pin` 移到 `_apply_calibrated_inertia` 调用之前。经验增益还原全 1。验证：重启后 "Applied calibrated inertia to 5 links"、发布的 position 跟随真实姿态、effort 与离线标定模型计算吻合。ament_python 代码 symlink 生效，无需重编。
 
-**残留问题（待办）**：inertia_params.yaml 是**装夹爪前的 6J 数据**——home 位模型仍报 L3 τ_g ≈2.9 Nm vs 真实 ≈0.55（夹爪质量缺失），零力矩正式启用前必须重标定（复刻官方 dynamics_calibration.py 或 gravity_calibration.py，见 [[LL-026]] 规划中）。
+**残留问题（待办）**：inertia_params.yaml 是**装夹爪前的 6J 数据**——home 位模型仍报 L3 τ_g ≈2.9 Nm vs 真实 ≈0.55（夹爪质量缺失），零力矩正式启用前必须重标定（复刻官方 dynamics_calibration.py 或 gravity_calibration.py；含夹爪 7J 重标定已立项为任务，规划中）。
 
 ## 注意
 

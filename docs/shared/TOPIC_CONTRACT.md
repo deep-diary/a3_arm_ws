@@ -97,7 +97,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 |------|------|------|
 | `/a3/arm/init` | `std_srvs/Trigger` | 设零 → 异步确认 7 电机到位 → 使能；`message` 携带 `n/7`。F48：读数越限只 WARN 不阻断（恢复路径——set_zero 把当前位姿定义为零位，仅限已知位姿执行） |
 | `/a3/arm/enable` | `std_srvs/Trigger` | 使能 7 电机，状态 → `READY`。F48：使能前读数限位门禁——越限（疑似断电多圈环绕）或无 /joint_states 一律拒绝并点名关节（`enable_position_check`） |
-| `/a3/arm/disable` | `std_srvs/Trigger` | 失能 7 电机，状态 → `IDLE` |
+| `/a3/arm/disable` | `std_srvs/Trigger` | 失能保护（F40）：不在 home 容差内先自动平滑回 home（SAFE_PARK）再失能，状态 → `SAFE_PARK → DISABLED`；容差内直达。`success=true ⟺ 已失能`；park 超时 → FAULT 不 reset；reset 被 gate 拒 → 失败/回 READY（语义表见 [SAFETY.md](SAFETY.md)「失能保护」） |
 | `/a3/arm/goto_named_pose` | `a3_msgs/srv/GotoNamedPose` | `pose_name` 按 `named_poses.yaml` 插值下发 |
 | `/a3/arm/set_joint_positions` | `a3_msgs/srv/SetJointPositions` | 设 7 关节目标位置（`positions[7]` + `duration`），限位 clamp 后短插值下发；节流连续下发以覆盖语义衔接 |
 | `/a3/arm/start_teach` | `std_srvs/Trigger` | 切零力矩拖动 + 开始记录 |
@@ -111,7 +111,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 
 | 话题 | 类型 | 说明 |
 |------|------|------|
-| `/a3/arm_status` | `a3_msgs/msg/ArmStatus` | 聚合状态快照（`state` + `mode` + 7 关节位置 + 时间戳），默认 10 Hz，作为前端唯一状态入口 |
+| `/a3/arm_status` | `a3_msgs/msg/ArmStatus` | 聚合状态快照（`state` + `mode` + 7 关节位置 + `temperatures`（F44）+ `max_torques`（F43，无数据 0.0）+ `temp_warn`（F44）+ 时间戳），默认 10 Hz，作为前端唯一状态入口 |
 
 ### MQTT 下行指令与回执（a3_mqtt_bridge ↔ Web，需求 F23）
 
@@ -145,14 +145,28 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 
 - `op`：回显指令 op；`ok`：服务 `success`（未知 op / 服务不可用 / 调用异常均为 `false`）；`message`：服务返回文本或错误原因（如 `init` 的 `n/7`）；`ts`：本地 ISO8601 时间戳。
 - 未知 op 不抛异常，回 `ok=false, message="unknown op ..."`；服务未就绪回 `ok=false, message="<op> service unavailable"`。
-- `/a3/arm_status` 经 `bridge.yaml` 的 `scalar` 展平上报为 telemetry `points.arm_state`（=`state`）、`points.arm_mode`（=`mode`）、`points.arm_message`（=`message`），前端据此渲染状态，不另开话题。
+- `/a3/arm_status` 经 `bridge.yaml` 的 `scalar` 展平上报为 telemetry `points.arm_state`（=`state`）、`points.arm_mode`（=`mode`）、`points.arm_message`（=`message`）、`points.arm_temp_warn`（=`temp_warn`，F44），前端据此渲染状态，不另开话题。`max_torques` 经同话题第二条 rule（`flatten: joint_state`）展平为 `points.mtqmax_L1..L7`（F43，历史最大力矩，Nm）。
 
 **遥测发布速率（F35）：** telemetry 按源话题速率聚合不发布——各话题回调只更新缓存，由桥内 flusher 按 `telemetry_min_interval_sec`（默认 0.2 s = 5 Hz 上限）统一发布全量 points，**最新值胜出**。`cmd_result`/`device/status`/`device/info` 不受节流、永不丢（遥测队列满时只丢遥测）；发布经独立线程，broker 慢不影响 cmd 处理。前端绘制曲线无需 50 Hz 原始采样，若曲线不平滑属正常（降频预期）。
 
 ### 状态机与仲裁
 
-- 状态：`IDLE → INIT → READY`；`READY ↔ TRAJ / SERVO / TEACH / AI`；`READY → FAULT`。
-- 运动类命令（`goto_named_pose` / `playback`）在 `mode ∈ {ZERO_TORQUE, SERVO, GRAVITY_COMP}` 或 gate 关闭（`require_gate:=true` 时）拒绝。
+11 态状态机（F45）：`IDLE → INIT → READY`；`READY ↔ TRAJ / SERVO / TEACH / AI`；保护路径 `READY/TRAJ → SAFE_PARK → DISABLED`（disable 非 home，F40）或 `→ COOLING`（温度保护，F44）；`SAFE_PARK 超时 / reset 被拒 / motor fault → FAULT`；`enable（COOLING 已降温）→ READY`。IDLE = 上电未初始化；DISABLED = 曾使能已失能、须显式 enable。
+
+| 状态 | 含义 | 运动命令 |
+|------|------|----------|
+| `IDLE` | 上电未初始化 | 允许（历史语义；gate/mode 互锁仍生效） |
+| `INIT` | 初始化中 | 拒绝（busy） |
+| `READY` | 已使能待命 | 允许（受 mode/gate 互锁） |
+| `TRAJ` | 轨迹执行中 | 新轨迹替换活跃轨迹（F40 park 抢占） |
+| `SERVO` / `TEACH` / `AI` | 专项模式 | 拒绝（busy） |
+| `SAFE_PARK` | 回 home 中（disable/温度保护） | 拒绝「already safe parking」 |
+| `DISABLED` | 已失能（在 home） | 拒绝，须显式 enable |
+| `COOLING` | 温度保护后降温 | 拒绝，降温至保护阈−迟滞后方可 enable |
+| `FAULT` | 不可恢复事件 | 拒绝（`disable` 直达 reset 恢复） |
+
+- 运动类命令在 `mode ∈ {ZERO_TORQUE, SERVO, GRAVITY_COMP}` 或 gate 关闭（`require_gate:=true` 时）拒绝。
+- `_publish_mode` 兜底：`SAFE_PARK → TRAJ_RUNNING`；`DISABLED/COOLING → IDLE`（防互锁锁存，F29 教训）。
 
 ## 夹爪力控（a3_gripper_controller，需求 F24–F27）
 
@@ -227,6 +241,7 @@ Web 端单电机调试页（deep-trace `rk3588_motor` 模块）依赖的 ROS 侧
 | 接口 | 类型 | 方向 | 说明 |
 |------|------|------|------|
 | `/a3/motor/states` | `a3_can_bridge/msg/MotorStates` | 发布 | 7 条 `MotorState`（`header` + `states[]`），50 Hz，SensorDataQoS（best_effort） |
+| `/a3/motor/tx_stats` | `a3_can_bridge/msg/TxStats` | 发布 | 发送帧率统计（F46），5 s 窗口（先发布再清零），SensorDataQoS：`window_s`、`traj_cb_count`、`tx_traj_total`/`tx_refresh_total`（及 can0/can1 拆分）、跳过计数 `skip_max_rate`/`skip_bus_disabled`/`skip_power_gate`、`float64[] tx_hz`（每电机实测帧率）、`bool tx_rate_ok`、`string[] joint_names` |
 
 `MotorState` 字段：
 
@@ -290,6 +305,13 @@ Web 端单电机调试页（deep-trace `rk3588_motor` 模块）依赖的 ROS 侧
 | `mp_Ln` | `position_rad` | float（rad，MIT 原始角） |
 
 信号 code 须与 deep-trace 设备 YAML `HOME-DEMO.RK3588.yaml` 的 `points[].code` 完全对齐。
+
+### TX 帧率遥测（F46）
+
+`/a3/motor/tx_stats` 经 `bridge.yaml` 展平上报 telemetry points：`txhz_L1..L7`（`tx_hz`，joint_state 展平）与 `tx_window_s`/`tx_traj_total`/`tx_refresh_total`/`tx_rate_ok`（scalar 展平）。
+
+- `tx_rate_ok` 仅当窗口内有轨迹帧（`tx_traj_total>0`）时校验：每电机 `tx_hz ≥ 0.9 × min(200, max_tx_rate_per_motor_hz)`；静止期只有 refresh 帧（~50 Hz）属正常，不校验、不误报。
+- **窗口为 5 s 滚动（先发布再清零）**：轨迹尾巴会落入下一窗口——瞬时读 `tx_traj_total` 可能远小于轨迹实际帧数，读帧率须对照同时段桥日志 TX window 行（LL-026）。
 
 ## 关节名
 
