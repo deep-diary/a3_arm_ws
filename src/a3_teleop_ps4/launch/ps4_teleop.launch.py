@@ -13,7 +13,8 @@ def _launch_nodes(context, *args, **kwargs):
     share = get_package_share_directory("a3_teleop_ps4")
     mapping = LaunchConfiguration("mapping").perform(context)
     mapping_file = os.path.join(share, "config", "mappings", f"{mapping}.yaml")
-    layout_file = os.path.join(share, "config", "ds4_linux.yaml")
+    layout = LaunchConfiguration("layout").perform(context)
+    layout_file = os.path.join(share, "config", f"{layout}.yaml")
     registry_file = os.path.join(share, "config", "action_registry.yaml")
 
     auto_start = LaunchConfiguration("auto_start_servo").perform(context).lower() in (
@@ -82,6 +83,11 @@ def generate_launch_description():
             "mapping",
             default_value="simple",
             description="config/mappings/<name>.yaml；simple=无 L1 组合键",
+        ),
+        DeclareLaunchArgument(
+            "layout",
+            default_value="ds4_linux",
+            description="config/<name>.yaml；ds4_linux=蓝牙 hid-sony，ds4_linux_usb=USB 有线（ds4_generic 兜底布局）",
         ),
         OpaqueFunction(function=_launch_nodes),
     ])

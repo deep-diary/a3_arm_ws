@@ -43,11 +43,15 @@ static const struct hid_device_id ds4_generic_table[] = {
 ## 注意
 
 - 拔插后 HID 设备号会变（`000E`→`000F`→……），任何 sysfs 操作前先 `ls /sys/bus/hid/devices/ | grep -i 054c`
-- hid-generic 式布局的轴/键索引与 hid-sony **不同**：必须先用 `ros2 run a3_teleop_ps4 joy_dump` 重新校准 `config/ds4_linux.yaml`，否则按钮错位，严禁直接遥控机械臂
+- hid-generic 式布局的轴/键索引与 hid-sony **不同**：有线布局已校准为新文件 `config/ds4_linux_usb.yaml`（2026-09-13 板上实测），launch 用 `layout:=ds4_linux_usb`；蓝牙仍用默认 `ds4_linux.yaml`
+- **校准必须对着 `/joy`（joy_node 输出），不是 `/dev/input/js0` 原始值**：joy_node 会把 joydev 轴统一取反（实测 js0 上=-32767 → /joy 上=+1.0；扳机 js0 静息 -1 → /joy 静息 +1）。直接抓 js0 校准会得到上下/左右全反的布局——症状是十字键上触发 zero、扳机静息即满行程。校准流程：`ros2 run a3_teleop_ps4 joy_dump` 或直订 /joy 打印，逐轴逐键确认
+- 有线布局要点（/joy 空间）：轴 3/4=扳机（静息 +1、按满 -1，与蓝牙同）；hat 轴 6/7 符号与蓝牙**相反**（左=+1/右=-1、上=+1/下=-1），virtual_buttons 的 op/阈值要相应互换；按钮 0-3=□×○△（蓝牙是 ×○△□），4/5=L1/R1，8-13=Share/Options/L3/R3/PS/触摸板（全部 14 键都暴露）
 - 有线模式插上即用、无需按 PS 键；必须是数据线（纯充电线不出设备）；手柄底部 EXT 口不是 USB 不能接
 - 持久化（复制 .ko 到 `/lib/modules/6.1.84/extra/` + `depmod -a` + `/etc/modules-load.d/`）需板主确认后执行
 
 ## 相关路径
 
 - `~/ds4_drv/ds4_generic.c`
-- `src/a3_teleop_ps4/config/ds4_linux.yaml`
+- `src/a3_teleop_ps4/config/ds4_linux.yaml`（蓝牙）
+- `src/a3_teleop_ps4/config/ds4_linux_usb.yaml`（有线，已校准）
+- `src/a3_teleop_ps4/launch/ps4_teleop.launch.py`（`layout` 启动参数）

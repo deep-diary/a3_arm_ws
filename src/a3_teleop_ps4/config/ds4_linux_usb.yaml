@@ -1,0 +1,76 @@
+# DualShock 4 v2 USB 有线（ds4_generic.ko 兜底驱动，hid-generic 式布局）。
+# 与蓝牙 hid-sony 布局（ds4_linux.yaml）不同，勿混用。
+#
+# 校准注意：本文件按 **/joy 消息空间** 校准（ps4_mapper 消费 /joy），不是 /dev/input/js0 原始值！
+# joy_node 会对 joydev 轴统一取反（实测：原始 js0 上=-32767 → /joy 上=+1.0）。
+# 2026-09-13 板上实测（joy_dump 直订 /joy）：
+#   摇杆：左 X 左=+1；左 Y 上=+1；右 X 右=-1；右 Y 上=+1；
+#   扳机：L2/R2 静息 +1.0、按满 -1.0（同蓝牙约定）；
+#   十字键 hat：轴 6 左=+1/右=-1，轴 7 上=+1/下=-1；
+#   按钮：0-3=□×○△，4/5=L1/R1，6/7=L2/R2，8/9=Share/Options，10/11=L3/R3，12/13=PS/触摸板。
+#
+# invert 目标：base_link 系（x 前 / y 左 / z 上）自然方向——
+#   左摇杆上推=+x 前进、右摇杆右推=-y 右移、右摇杆上推=+z 上升。
+
+deadzone: 0.12
+
+# /joy 空间：扳机静息 +1.0、按满 -1.0（与蓝牙布局一致）
+trigger_rest: 1.0
+trigger_pressed: -1.0
+
+# /joy 空间：左 Y 上=+1 → 不反转；右 X 右=-1 → 反转得 +1（配合 mapping 再反转成右移）
+invert_axes:
+  left_x: false
+  left_y: false
+  right_x: true
+  right_y: false
+  dpad_y: false
+
+buttons:
+  square: 0
+  cross: 1
+  circle: 2
+  triangle: 3
+  l1: 4
+  r1: 5
+  l2: 6
+  r2: 7
+  share: 8
+  options: 9
+  l3: 10
+  r3: 11
+  ps: 12
+  touchpad: 13
+
+axes:
+  left_x: 0
+  left_y: 1
+  right_x: 2
+  l2: 3
+  r2: 4
+  right_y: 5
+  dpad_x: 6
+  dpad_y: 7
+
+# 十字键虚拟按钮（/joy 空间 hat：上=+1、下=-1、左=+1、右=-1，与蓝牙布局符号相反）
+virtual_buttons:
+  dpad_up:
+    axis: dpad_y
+    op: gt
+    threshold: 0.6
+    release_threshold: 0.35
+  dpad_down:
+    axis: dpad_y
+    op: lt
+    threshold: -0.6
+    release_threshold: 0.35
+  dpad_left:
+    axis: dpad_x
+    op: gt
+    threshold: 0.6
+    release_threshold: 0.35
+  dpad_right:
+    axis: dpad_x
+    op: lt
+    threshold: -0.6
+    release_threshold: 0.35
