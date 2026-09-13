@@ -23,6 +23,7 @@ setup(
     entry_points={
         "console_scripts": [
             "arm_controller = a3_arm_controller.arm_controller:main",
+            "arm_monitor = a3_arm_controller.arm_monitor_node:main",
         ],
     },
 )

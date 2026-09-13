@@ -1,0 +1,39 @@
+# F50 故障监视看门狗参数（a3_arm_monitor）
+a3_arm_monitor:
+  ros__parameters:
+    # 话题
+    joint_states_topic: /joint_states
+    arm_status_topic: /a3/arm_status
+    motor_states_topic: /a3/motor/states
+    traj_topic: /joint_group_effort_controller/joint_trajectory
+    monitor_status_topic: /a3/monitor/status
+    # 服务
+    motor_stop_service: /a3/motor/stop
+    motor_reset_service: /a3/motor/reset
+    arm_disable_service: /a3/arm/disable
+    # 节拍与通用
+    tick_hz: 20.0
+    startup_grace_s: 3.0
+    service_timeout_s: 1.0
+    escalation_cooldown_s: 5.0
+    clear_hold_s: 2.0
+    ladder_stop_to_reset_s: 3.0
+    # FOLLOW_STUCK：运动窗口内跟随误差
+    follow_error_max_rad: 0.25
+    follow_error_sustain_s: 0.5
+    # HOLD_DRIFT：READY 保持期漂移
+    hold_error_max_rad: 0.30
+    hold_error_sustain_s: 1.0
+    # STALE_JS：js 过期
+    stale_js_s: 1.0
+    # UNEXPECTED_DISABLE：编排层在跑但电机失能
+    unexpected_disable_sustain_s: 1.0
+    # TEMP_UNRESPONSIVE：温度兜底（F44 失灵）
+    temp_escalate_c: 95.0
+    temp_grace_s: 3.0
+    # 故障类 → 处置动作（report/stop/disable/reset）
+    follow_stuck_action: stop
+    hold_drift_action: stop
+    stale_js_action: reset
+    unexpected_disable_action: report
+    temp_unresponsive_action: reset

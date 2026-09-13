@@ -20,6 +20,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/GripperSetConfig.srv"
   "msg/ArmStatus.msg"
   "msg/GripperStatus.msg"
+  "msg/MonitorStatus.msg"
   "action/MoveToPose.action"
   DEPENDENCIES geometry_msgs std_msgs builtin_interfaces action_msgs
 )

@@ -146,6 +146,15 @@ Web 端单电机调试（CAN 扫描 / MIT 直驱 / 保持）的安全边界：
 - **读帧率须对照同时段桥日志**：5 s 窗口旋转会把轨迹尾巴切到下一窗口（瞬时读 tx_traj_total 可能是 7 而非 4098，LL-026）。
 - 示教卡顿/帧丢失定位：先看三个 skip 计数器（限速丢弃 / 总线禁用 / gate 关闭）再查 CAN 层。
 
+## 故障监视看门狗（F50）
+
+`a3_arm_monitor`（20 Hz，独立节点，随编排层默认启动）：**分层保护的最后一层兜底**——F42（200 Hz 力矩钳位）、F44/F40（编排层温度/失能保护）保留原位，看门狗只做它们覆盖不到的**跨数据源比对**（js vs 轨迹 vs 电机状态 vs 编排状态），动作只走公开服务（stop → 升级 reset），不直接改任何节点内部状态。
+
+- 故障类：FOLLOW_STUCK / HOLD_DRIFT（stop → 3 s 未消升级 reset）、STALE_JS（reset）、UNEXPECTED_DISABLE（仅报告，避免 F40 park 在失能电机上失败）、TEMP_UNRESPONSIVE（reset，F44 失灵兜底）。阈值与阶梯见 [TOPIC_CONTRACT.md](TOPIC_CONTRACT.md)「故障监视看门狗」。
+- 抑制规则：零力矩/重力补偿模式、失能态、启动宽限、触发 cooldown、清除保持——设计目标是**零误报**（误报会让操作者关掉看门狗）。
+- 期望位置用自建轨迹插值器（time_from_start 线性插值），不依赖 ArmStatus.positions（目标快照语义）。
+- 实现要点：服务客户端必须挂独立 ReentrantCallbackGroup + MultiThreadedExecutor + 纯轮询等 future，回调内 `spin_until_future_complete` 会死锁自身（LL-034）；过期判据用接收时刻 monotonic 时间戳，不可与消息墙钟 stamp 混减（LL-034）。
+
 ## 产品线实现差异
 
 | 安全能力 | A3 Edge | A3 CloudEdge |

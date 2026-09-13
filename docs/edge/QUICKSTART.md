@@ -265,7 +265,7 @@ ros2 service call /a3/arm/enable std_srvs/srv/Trigger "{}"
 - **enable 门禁参数**：`enable_position_check: true`（默认）、`position_check_margin_rad: 0.001`、`js_max_stale_s: 1.0`（arm_controller.yaml / arm_controller_6j.yaml）。
 - **桥保活播种（LL-020）**：桥重启后即使从未下发轨迹，refresh 流也会以零增益保活帧（kp=kd=tau=0）保持总线帧流与反馈上送——开机后 js 应当持续更新（可用 `candump can1` 看到 ~350 帧/s）。
 
-### 安全保护与状态监控验证（F40–F46，真机 7 关节臂）
+### 安全保护与状态监控验证（F40–F50，真机 7 关节臂）
 
 F40–F46 于 2026-09-13 在 can1 真机 7 关节臂（含夹爪）全部验收通过（需求与验收标准见 [REQUIREMENTS.md](REQUIREMENTS.md)，安全语义见 [shared/SAFETY.md](../shared/SAFETY.md)）。验证命令与结论：
 
@@ -290,6 +290,7 @@ cat ~/.a3/stats/torque_stats.yaml
 - **F44 温度**：warn=90/protect=95/迟滞 5（官方电机 130°C 兜底）；超限自动 park → COOLING，降温至保护阈−迟滞才可 enable；无反馈（fresh=false）温度判读不生效。
 - **F45 状态机**：11 态（IDLE/INIT/READY/TRAJ/SERVO/TEACH/AI/SAFE_PARK/DISABLED/COOLING/FAULT）；disable/温度保护路径转移实测，arm_state 遥测一致。
 - **F46 帧率**：轨迹期 195 Hz/关节（4098 帧/3 s ≈99% 交付、限速丢弃 0.7%）、静止对照 47.2 Hz/关节、`tx_rate_ok=true`；**tx_stats 5 s 窗口旋转会切分轨迹尾巴，读帧率须对照同时段桥日志**（LL-026）。
+- **F50 故障监视看门狗**（`a3_arm_monitor`，随 arm_controller.launch.py 默认启动，`enable_monitor:=false` 可关）：跨源比对 js/轨迹/电机状态/编排状态，故障走 stop → 升级 reset 阶梯（阈值与抑制规则见 [TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)「故障监视看门狗」）。2026-09-13 仿真验收（ROS_DOMAIN_ID=55 sim 闭环 + 故障注入）：健康 move_to 零触发（max err 0.0004 rad）；斜坡轨迹注入 → FOLLOW_STUCK → stop → +3 s 升级 reset；SIGSTOP sim_motor → STALE_JS → reset；ZERO_TORQUE 模式注入跳变零触发（抑制生效）。**5 次触发全为注入诱导，零误报**；真机观察随 F49 重力采集同场进行（`ros2 topic echo /a3/monitor/status`）。
 
 ### URDF 方向校验（RViz 双模型，臂不失能）
 

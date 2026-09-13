@@ -113,6 +113,29 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 |------|------|------|
 | `/a3/arm_status` | `a3_msgs/msg/ArmStatus` | 聚合状态快照（`state` + `mode` + 7 关节位置 + `temperatures`（F44）+ `max_torques`（F43，无数据 0.0）+ `temp_warn`（F44）+ 时间戳），默认 10 Hz，作为前端唯一状态入口 |
 
+## 故障监视看门狗（a3_arm_monitor，需求 F50）
+
+独立看门狗节点，`arm_controller.launch.py` 默认随编排层一起启动（`enable_monitor:=false` 可关）。**分层保护原则：不接管现有保护，不直接改任何节点内部状态**——只做跨数据源比对，通过公开服务动作（F42 仍在执行层 200 Hz 钳位、F44/F40 仍在编排层状态机，位置不动）。
+
+### 订阅 / 发布
+
+- **订阅**：`/joint_states` 与 `/a3/motor/states`（均双 QoS：BEST_EFFORT + RELIABLE，LL-030）、`/a3/arm_status`、`/joint_group_effort_controller/joint_trajectory`
+- **发布**：`/a3/monitor/status`（`a3_msgs/msg/MonitorStatus`，20 Hz）：`status`(OK/TRIGGERED)、`fault`、`action`、`tracking_errors[7]`、`max_tracking_error`、`last_event`
+
+### 故障类 → 处置阶梯
+
+| 故障类 | 触发条件 | 处置 |
+|--------|----------|------|
+| `FOLLOW_STUCK` | 运动窗口内 max\|q_d−q_actual\| > 0.25 rad 持续 0.5 s | `stop` → 3 s 未消升级 `reset` |
+| `HOLD_DRIFT` | READY 保持期末点 vs 实际 > 0.30 rad 持续 1.0 s | `stop` → 升级 `reset` |
+| `STALE_JS` | js 过期 > 1.0 s 且 state ∈ {READY,TRAJ,SAFE_PARK,SERVO,TEACH,AI} | `reset`（反馈死亡） |
+| `UNEXPECTED_DISABLE` | state ∈ {READY,TRAJ,SAFE_PARK} 但电机 enabled=false 持续 1.0 s | **仅报告**（电机已失能） |
+| `TEMP_UNRESPONSIVE` | 温度 ≥95 °C 且 state ∉ {COOLING,SAFE_PARK,FAULT} 持续 3 s | `reset`（F44 失灵兜底） |
+
+- **期望位置不依赖 ArmStatus.positions**：自建轨迹插值器（按 `time_from_start` 线性插值，与执行层一致；运动窗口 = [t0, t_end+2 s]，窗口关闭后以末点作保持位——不用 control_mode 判运动期，LL-009）
+- **抑制（防误报）**：mode ∈ {ZERO_TORQUE, GRAVITY_COMP} 跳过跟随/保持；state ∈ {IDLE,INIT,DISABLED,COOLING,FAULT} 跳过运动类检查；启动 3 s 宽限；触发后 5 s cooldown；条件消失 + 2 s 回 OK
+- **动作服务**：`/a3/motor/stop`（MotorStop motor_id=0）、`/a3/motor/reset`（MotorCommand motor_id=0 command=2）、`/a3/arm/disable`（Trigger）
+
 ### MQTT 下行指令与回执（a3_mqtt_bridge ↔ Web，需求 F23）
 
 桥接节点 `a3_mqtt_bridge` 订阅 `<prefix>/cmd`（`prefix = deep-trace/HOME-DEMO/RK3588`），按白名单 op 调用上节 `/a3/arm/*` 服务，并把结果回发到 `<prefix>/cmd_result`。指令通道为浏览器 mqtt.js 直连 EMQX（WS 8083），Django 后端不经手。
@@ -360,3 +383,8 @@ ros2 topic pub --once /a3/joint_trajectory trajectory_msgs/msg/JointTrajectory \
 ```
 
 须在 `/power_sequence/gate_open` 为 `true` 后执行（Edge 主线）。
+
+```bash
+# 看门狗状态观察（F50，20 Hz）
+ros2 topic echo /a3/monitor/status
+```
