@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Dual-domain Wave A sim: Edge (DOMAIN 10) + CloudEdge-style executor (DOMAIN 20).
-# Same zero→work trajectory fan-out (independent publishers, identical params).
+# Same zero→ready trajectory fan-out (independent publishers, identical params).
 set -eo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -39,8 +39,8 @@ ros2 run a3_bringup sim_executor --ros-args \
   >"${LOG_DIR}/cloud_edge_executor.log" 2>&1 &
 PIDS+=($!)
 sleep 2
-ros2 run a3_bringup zero_to_work_publisher --ros-args \
-  -r __node:=ce_zero_to_work \
+ros2 run a3_bringup zero_to_ready_publisher --ros-args \
+  -r __node:=ce_zero_to_ready \
   -p duration_s:="${DURATION}" -p delay_s:=0.5 -p num_waypoints:=11 \
   >"${LOG_DIR}/cloud_edge_traj.log" 2>&1 &
 PIDS+=($!)

@@ -62,12 +62,12 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** [shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md) C2；CloudEdge mock/ESP32 插值语义对齐
 - **状态：** `implemented`（仿真验收，见 [WAVE_A_SIM_TEST_REPORT.md](../dev/WAVE_A_SIM_TEST_REPORT.md)）
 
-### F7 — 命名姿态 zero→work 仿真闭环（C1）
+### F7 — 命名姿态 zero→ready 仿真闭环（C1）
 
-- **说明：** 支持命名姿态 `zero`（上电全零）与 `work`（目标工作位）；无真机 CAN 时可通过仿真执行器完成 Plan/下发与 `/joint_states` 跟踪
+- **说明：** 支持命名姿态 `zero`（上电全零）与 `ready`（悬空工作位）；无真机 CAN 时可通过仿真执行器完成 Plan/下发与 `/joint_states` 跟踪。原 `work` 与 `ready` 语义重叠，2026-09-13 统一为 `ready`（`work` 全仓删除；真机 `ready` 实测值在用户层 `~/.a3/poses.yaml` 覆盖包级值）
 - **验收标准：**
-  1. SRDF/`named_poses.yaml` 含 `work`（L2≈51°, L3≈-57°）
-  2. 仿真 launch 下从 `zero` 运动到 `work`，最终关节误差在容差内
+  1. SRDF/`named_poses.yaml` 含 `ready`（悬空工作位）
+  2. 仿真 launch 下从 `zero` 运动到 `ready`，最终关节误差在容差内
   3. 文档化 launch/脚本命令（见 QUICKSTART / WAVE_A 测试报告）
   4. `use_rviz:=true` 启动 `el_a3_view.rviz` 可视化模型（默认 `false`，无屏验收不启 GUI）
 - **关联：** [shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md) C1；[shared/ROBOT_MODEL.md](../shared/ROBOT_MODEL.md)
@@ -77,8 +77,8 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 
 - **说明：** 基于模型（Pinocchio 优先，否则标定惯量解析近似）按当前 `joint_states` 计算重力补偿力矩并发布；提供启停服务骨架，与轨迹模式互斥标志
 - **验收标准：**
-  1. 在 `zero` 与 `work` 稳态可采样到有限力矩
-  2. `work` 下 L2/L3 重力力矩量级大于腕部小关节（抬臂）
+  1. 在 `zero` 与 `ready` 稳态可采样到有限力矩
+  2. `ready` 下 L2/L3 重力力矩量级大于腕部小关节（抬臂）
   3. 报告注明：仿真验算 ≠ 真机拖动示教
 - **关联：** [shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md) C3；[shared/SAFETY.md](../shared/SAFETY.md)
 - **状态：** `implemented`（仿真 + Pinocchio 全关节；真机拖动待板测）
@@ -159,7 +159,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   2. 改 `config/mappings/*.yaml` 即可换绑，不必改 Python
   3. 仿真 `edge_teleop_sim.launch.py`（`simple`）：右摇杆基座系左右/上下；左摇杆 Y 前后；松杆停止
   4. `simple`：L2→L6、R2→L7 模拟量；Square/Circle 夹爪开/合；`default`：L1+R2 夹爪
-  5. D-pad 上/下/左/右分别到 `work` / `zero` / `home` / `ready`
+  5. D-pad 上/下/左/右分别到 `ready` / `zero` / `home` / `ready`（上键暂与右键同）
   6. Cross 立即停；Square/Triangle/Options 长按电源语义与 F3 一致（`default` 映射）
   7. 无 `/joy` 或 1 s 无更新时 mapper 不发任何轨迹/Servo 令
 - **关联：** [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)；[shared/SAFETY.md](../shared/SAFETY.md)；`a3_teleop_ps4`
@@ -243,7 +243,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   1. 设备 YAML `topics.cmd_result` 存在；`nodes` 含 `a3_arm_controller`（话题 `/a3/arm_status`，信号 `arm_state`/`arm_mode`/`arm_message`）；`points` 含上述 3 个 `discrete` 信号；`load_device_config` 后 `GET /auth/my-lines` 的 `edge.nodes`/`edge.topics` 体现
   2. RK3588 页出现「机械臂编排节点」卡片，点击展开控制面板；选中其它节点保持现有遥测曲线联动
   3. 面板状态区显示 `arm_state`（READY=绿/FAULT=红/其余蓝或黄）、`arm_mode`、`arm_message`，随 `/a3/arm_status` 实时刷新
-  4. 10 个动作可下发：初始化/使能/失能、示教开始/结束、保存/回放（带轨迹名输入）、goto（zero/home/ready/work 下拉）、进入/退出 AI；点击先弹二次确认，确认后才 publish
+  4. 10 个动作可下发：初始化/使能/失能、示教开始/结束、保存/回放（带轨迹名输入）、goto（zero/home/ready 下拉）、进入/退出 AI；点击先弹二次确认，确认后才 publish
   5. 收到 `cmd_result` 后：`ok=true` 弹成功 toast、`ok=false` 弹失败 toast 并在消息列表标红；消息列表保留最近约 20 条（时间、op、成败 tag、message）
   6. MQTT 未连接/断网时所有动作按钮禁用；轨迹名为空或 goto 未选姿态时本地拦截提示，不下发
   7. `bridge.yaml` 新增 `/a3/arm_status` 展平后 `colcon build --packages-select a3_mqtt_bridge`，telemetry 的 `points.arm_state/arm_mode/arm_message` 随编排节点发布
@@ -470,13 +470,14 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **说明：** F47 之后正常断电（断电间不超 ±180° 转动）读数跨上电保持连续，但环绕（+2π 多圈推算）仍可能发生（L2/L3 行程超 π；zero_sta 丢失、超范围转动等异常）。上电后校验通过前**不使能**。本需求两层：
   1. **编排层使能门禁**（arm_controller）：`/a3/arm/enable` 发 enable 前检查 7 关节读数全部落在 URDF 限位内**且 /joint_states 新鲜**（stamp 距今 ≤ `js_max_stale_s: 1.0`，参数 `enable_position_check: true` 默认开启；未收到 /joint_states 也拒绝）——环绕读数超限时 kp×误差会瞬间猛拉（LL-019），越限拒绝并点名关节与限位，恢复零位走 `/a3/arm/init`。`init` 是恢复路径（set_zero 重建零位帧后再使能），越限只 WARN 不阻断——WARN 指明「当前位姿将被定义为零位，仅在已知位姿（工装摆 URDF 零位）执行」。
   2. **独立开机校验脚本** `scripts/a3_check_zero_frame.py`：读 /joint_states 对照 URDF 限位（硬检查，任一越限、消息陈旧（>1 s）或超时无消息 exit 1——判断是否环绕的唯一标准）；再对照期望位姿模板软检查（L2/L3/L5/L6/L7 ≈ 0、L4 ≈ 0（URDF 零位）或 ≈ 0.34（折叠自然下垂）、L1 自由——水平转动 ±178° 由机械限位约束；默认容差 0.35 rad ≈ ±20°，仅提示性、不改变退出码）。
-  3. **桥保活播种（执行层配套）**：refresh 流在无指令历史（last_commanded 为 NaN）且电机模式未知/失能时播种零增益保活帧（p=反馈位或 0，kp=kd=tau=0），保证开机后总线有帧流、反馈持续上送——否则 js 冻结旧值（LL-020，真机实测）。
+  3. **桥保活播种（执行层配套，三态语义，LL-020/LL-022）**：refresh 流在无指令历史（last_commanded 为 NaN）时按电机模式播种：①模式未知/失能 → 零增益保活帧（p=反馈位或 0，kp=kd=tau=0）；②已知使能且反馈新鲜 → 目标一次性锚定到最新反馈位，以 runtime kp/kd/tau 真实保位（服务直驱使能后无轨迹流的掉臂修复，LL-022 真机实测）；③已知使能但反馈陈旧 → 不盲发。保证开机/使能后总线有帧流、反馈持续上送——否则 js 冻结旧值（LL-020），或已使能电机静默无力矩（LL-022）。
 - **验收标准：**
   1. 正常上电（读数在限位内）→ `/a3/arm/enable` 放行进入电机使能流程
   2. 人为构造越限读数（仿真注入 L6=5.9）→ enable 拒绝，message 点名关节与限位；init 放行但 WARN
   3. 未收到 /joint_states（桥未起）→ enable 拒绝并提示
   4. 脚本：真机正常位 → 硬检查 PASS exit 0（软检查打印位姿匹配结论）；越限注入 → FAIL exit 1
   5. 桥重启后无任何指令下发：5 s 内 /joint_states 持续新鲜发布且读数跟踪手动拖动（播种生效）；停桥后脚本报 stale FAIL
+  6. 服务直驱使能（/a3/motor/enable）后无轨迹下发：已使能关节被锚定保位（runtime 增益），/a3/motor/states 全关节 fresh=true、tx_stats.tx_hz≈refresh 频率×7；02 反馈帧扩展 ID bit22-23 解析 mode=2（LL-022 真机验证）
 - **关联：** F47（zero_sta 窗口，本需求是其开机侧兜底）；[lessons_learned/](../lessons_learned/)（环绕机理与「使能前必须 probe 校验」红线）；F45（状态机使能路径）
 - **状态：** `implemented`（2026-09-13 真机验证：零位帧恢复后 7/7≈0，脚本硬检查 PASS exit 0 且软检查匹配「URDF 零位」；隔离域仿真验证 enable 门禁三场景——无 /joint_states 拒绝、L6=5.9 越限拒绝并点名、限内放行；init 越限 WARN 放行。限位比较需裕量（编码器量化噪声 ±0.0002，L2/L3/L7 下界为 0），参数 `position_check_margin_rad: 0.001`。补充：真机发现桥无指令历史时 js 冻结旧值（LL-020）——新增 refresh 零增益播种 + 脚本/门禁 stamp 新鲜度检查，软检查容差按用户反馈放宽至 ±20°）
 

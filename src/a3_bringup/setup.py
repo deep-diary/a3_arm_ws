@@ -28,7 +28,7 @@ setup(
             "sim_executor = a3_bringup.sim_executor:main",
             "sim_motor_node = a3_bringup.sim_motor_node:main",
             "sim_power_sequence_node = a3_bringup.sim_power_sequence_node:main",
-            "zero_to_work_publisher = a3_bringup.zero_to_work_publisher:main",
+            "zero_to_ready_publisher = a3_bringup.zero_to_ready_publisher:main",
             "gravity_torque_node = a3_bringup.gravity_torque_node:main",
             "follow_joint_trajectory_action = a3_bringup.follow_joint_trajectory_action:main",
             "move_to_pose_ik_node = a3_bringup.move_to_pose_ik_node:main",

@@ -61,20 +61,25 @@ public:
   static constexpr float kTMin = -6.0f;
   static constexpr float kTMax = 6.0f;
 
+  // 力矩/速度量程按电机型号区分（官方协议「通信数据映射范围对照表」）：
+  //   EL05: ±6 Nm / ±50 rad/s；RS00: ±14 Nm / ±33 rad/s
+  // 统一用 ±6/±50 时 RS00 反馈力矩少报 2.333 倍、τ_ff 编码反向放大 2.333 倍（LL-024）。
+  // 调用方按 motor_id 传入 ±torque_max / ±speed_max；缺省保持 ±6/±50 兼容。
   static CanFrameMessage BuildMitControlFrame(
     CanBus bus, uint8_t motor_id, float position, float velocity,
-    float kp, float kd, float torque_ff)
+    float kp, float kd, float torque_ff,
+    float torque_max = kTMax, float speed_max = kVMax)
   {
     CanFrameMessage out;
     out.bus = bus;
     out.is_extended = true;
     out.dlc = 8;
 
-    const uint16_t torque_u16 = FloatToUint16(torque_ff, kTMin, kTMax, 16);
+    const uint16_t torque_u16 = FloatToUint16(torque_ff, -torque_max, torque_max, 16);
     out.can_id = BuildMitControlCanId(motor_id, torque_u16);
 
     const uint16_t pos_u16 = FloatToUint16(position, kPMin, kPMax, 16);
-    const uint16_t vel_u16 = FloatToUint16(velocity, kVMin, kVMax, 16);
+    const uint16_t vel_u16 = FloatToUint16(velocity, -speed_max, speed_max, 16);
     const uint16_t kp_u16 = FloatToUint16(kp, kKpMin, kKpMax, 16);
     const uint16_t kd_u16 = FloatToUint16(kd, kKdMin, kKdMax, 16);
 
@@ -89,7 +94,9 @@ public:
     return out;
   }
 
-  static std::optional<MotorFeedback> DecodeFeedback(const CanFrameMessage & frame)
+  static std::optional<MotorFeedback> DecodeFeedback(
+    const CanFrameMessage & frame,
+    float torque_max = kTMax, float speed_max = kVMax)
   {
     const uint8_t cmd_type = static_cast<uint8_t>((frame.can_id >> 24) & 0x1F);
     if (cmd_type != kMotorCmdFeedback && cmd_type != kMotorCmdActiveReport) {
@@ -108,8 +115,8 @@ public:
     fb.voltage_error = static_cast<bool>((frame.can_id >> 16) & 0x01);
     fb.mode_status = static_cast<uint8_t>((frame.can_id >> 22) & 0x03);
     fb.current_angle = UintToFloat(U16Be(frame.data[0], frame.data[1]), kPMin, kPMax, 16);
-    fb.current_speed = UintToFloat(U16Be(frame.data[2], frame.data[3]), kVMin, kVMax, 16);
-    fb.current_torque = UintToFloat(U16Be(frame.data[4], frame.data[5]), kTMin, kTMax, 16);
+    fb.current_speed = UintToFloat(U16Be(frame.data[2], frame.data[3]), -speed_max, speed_max, 16);
+    fb.current_torque = UintToFloat(U16Be(frame.data[4], frame.data[5]), -torque_max, torque_max, 16);
     fb.current_temp = static_cast<float>(U16Be(frame.data[6], frame.data[7])) / 10.0f;
     fb.source_bus = (frame.bus == CanBus::CAN0) ? "can0" : "can1";
     return fb;

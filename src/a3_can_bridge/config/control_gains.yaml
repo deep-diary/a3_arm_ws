@@ -70,9 +70,15 @@
     joint_offsets_rad: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     # F42: 力矩方向钳位（τ 超阈且目标增量与 sign(τ) 同向 → 钉在反馈位，反向放行）
     enable_torque_protection: true
-    torque_protection_limit_nm: [3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
+    # LL-024: 钳位阈值按电机型号连续额定（RS00 L1-L3 = 5 Nm，EL05 L4-L7 = 3 Nm）。
+    # 原 3.0 对 RS00 过低——L3 真实保位 3.4 Nm > 3.0 会 latch 下爬（codec 修复后此值才显真）。
+    torque_protection_limit_nm: [5.0, 5.0, 5.0, 3.0, 3.0, 3.0, 3.0]
     torque_protection_release_margin_rad: 0.02
     torque_protection_log_throttle_ms: 1000
+    # LL-024: 力矩/速度编解码量程按电机型号（motor_id 1..7；RS00 ±14 Nm/±33 rad/s，
+    # EL05 ±6 Nm/±50 rad/s）。统一 ±6/±50 时 RS00 反馈力矩少报 2.333 倍、τ_ff 反向放大 2.333 倍。
+    motor_torque_range_nm: [14.0, 14.0, 14.0, 6.0, 6.0, 6.0, 6.0]
+    motor_speed_range_rad_s: [33.0, 33.0, 33.0, 50.0, 50.0, 50.0, 50.0]
     # F46: TX 帧率监视（5s 窗口发布 /a3/motor/tx_stats）
     publish_tx_stats: true
     tx_stats_topic: /a3/motor/tx_stats

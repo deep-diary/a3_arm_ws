@@ -46,7 +46,7 @@ export PYTHONNOUSERSITE=1
 ros2 launch a3_bringup edge_web_sim.launch.py use_gripper:=true
 ```
 
-其他常用入口：`edge_sim_wave_a.launch.py`（zero→work 轨迹）、`edge_moveit_execute.launch.py`（FJT/IK/重力/demo）、`servo.launch.py`（笛卡尔速度）、`a3_moveit_config demo.launch.py`（MoveIt 拖动球）。真机：`sudo systemctl start can-up.service` 后 `ros2 launch a3_bringup a3_bringup.launch.py`。完整验证步骤见 [docs/edge/QUICKSTART.md](docs/edge/QUICKSTART.md)。
+其他常用入口：`edge_sim_wave_a.launch.py`（zero→ready 轨迹）、`edge_moveit_execute.launch.py`（FJT/IK/重力/demo）、`servo.launch.py`（笛卡尔速度）、`a3_moveit_config demo.launch.py`（MoveIt 拖动球）。真机：`sudo systemctl start can-up.service` 后 `ros2 launch a3_bringup a3_bringup.launch.py`。完整验证步骤见 [docs/edge/QUICKSTART.md](docs/edge/QUICKSTART.md)。
 
 ## 测试
 

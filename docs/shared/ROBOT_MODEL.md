@@ -34,9 +34,8 @@ reBot 工具链可能使用 `joint1`..`joint7`；`a3_bringup/trajectory_bridge` 
 | 名称 | 含义 | 备注 |
 |------|------|------|
 | `zero` | 上电 / 机械零（全 0） | 仿真与真机默认起点 |
-| `work` | 目标工作位 | L2≈51°, L3≈-57°；Wave A 验收路径 `zero`→`work` |
+| `ready` | 悬空工作位 | 原 `work`（L2≈51°, L3≈-57°）与 `ready`（含 L5 抬腕）语义重叠，2026-09-13 统一为 `ready`；包级值为近似位，真机实测值在用户层 `~/.a3/poses.yaml` 覆盖 |
 | `home` | 半抬起（EDULITE 遗留） | L2=L3=±45° |
-| `ready` | 另一就绪姿态（遗留） | 含 L5 抬腕 |
 | `open` / `close` | 夹爪 | 仅 gripper 组 |
 
 ## 电机与 CAN

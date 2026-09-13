@@ -19,10 +19,6 @@ poses:
   home:
     positions: [0.0, 0.785, -0.785, 0.0, 0.0, 0.0, 0.0]
 
-  # Legacy ready
+  # Ready (suspended working pose; real-machine value lives in ~/.a3/poses.yaml override)
   ready:
     positions: [0.0, 0.785, -1.57, 0.0, 0.785, 0.0, 0.0]
-
-  # Target work pose: L2=51 deg, L3=-57 deg (operator screenshot)
-  work:
-    positions: [0.0, 0.8901179, -0.9948377, 0.0, 0.0, 0.0, 0.0]

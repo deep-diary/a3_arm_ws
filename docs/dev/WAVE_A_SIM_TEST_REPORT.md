@@ -1,5 +1,6 @@
 # Wave A 仿真测试报告（对齐 reBot 控制能力 · 双链路）
 
+> **注：** 2026-09-13 `work` 与 `ready` 语义重叠，已全仓统一为 `ready`。本报告为当时测试快照，表中 `ready` 值是测试时的实测位型；现包级 `ready` 与真机实测值（`~/.a3/poses.yaml`）均与此不同，重新验收请以 `scripts/verify_wave_a_sim.sh` 当前断言为准。
 > **Status:** completed (simulation)  
 > **更新日期：** 2026-08-26  
 > **环境：** LubanCat aarch64 · Ubuntu 22.04 · ROS 2 Humble · **Pinocchio 4.0.0**（`ros-humble-pinocchio`）· 无真机 SocketCAN  
@@ -12,7 +13,7 @@
 | ID | 目标 | 结果 |
 |----|------|------|
 | F6 / C2 | 多点轨迹按 `time_from_start` 插值（非首点阶跃） | **PASS** |
-| F7 / C1 | `zero` → `work` 闭环到目标姿态 | **PASS**（Edge + CloudEdge-style） |
+| F7 / C1 | `zero` → `ready` 闭环到目标姿态 | **PASS**（Edge + CloudEdge-style） |
 | F8 / C3 | Pinocchio 全关节重力力矩 + start/stop 互锁 | **PASS**（`backend=pinocchio`） |
 | 双链路并行 | 不同 `ROS_DOMAIN_ID`（默认 10 / 20） | **PASS** |
 
@@ -21,7 +22,7 @@
 | 名称 | 用途 | 关节 (L1…L7 rad) |
 |------|------|------------------|
 | `zero` | 上电起点 | 全 0 |
-| `work` | 目标工作位（L2=51°, L3=-57°） | `[0, 0.8901179, -0.9948377, 0, 0, 0, 0]` |
+| `ready` | 目标工作位（测试当时值；L2=51°, L3=-57°） | `[0, 0.8901179, -0.9948377, 0, 0, 0, 0]` |
 
 ## 3. 命令
 
@@ -38,12 +39,12 @@ source /opt/ros/humble/setup.bash && source install/setup.bash
 ros2 launch a3_bringup edge_sim_wave_a.launch.py duration_s:=3.0 use_rviz:=true
 
 # 双 domain（Edge=10, CloudEdge-style=20；均为 ROS_DOMAIN_ID）
-./scripts/dual_domain_zero_to_work.sh
+./scripts/dual_domain_zero_to_ready.sh
 ```
 
 **注意：** 同一 `ROS_DOMAIN_ID` 不可并行 Edge + CloudEdge（会抢 `/joint_states`）。
 
-## 4. Pinocchio 重力结果 @ `work`
+## 4. Pinocchio 重力结果 @ `ready`（测试当时值）
 
 | 关节 | τ_g (Nm) | 说明 |
 |------|----------|------|
@@ -65,7 +66,7 @@ ros2 launch a3_bringup edge_sim_wave_a.launch.py duration_s:=3.0 use_rviz:=true
 | reBot 能力 | A3 仿真平替 | 状态 |
 |------------|-------------|------|
 | 整轨时间跟踪 | `motor_protocol` 插值 + `sim_executor` | ✅ |
-| Plan/轨迹到执行 | `zero_to_work_publisher` + sim | ✅（真机 MoveIt 统一 launch 板测另排） |
+| Plan/轨迹到执行 | `zero_to_ready_publisher` + sim | ✅（真机 MoveIt 统一 launch 板测另排） |
 | `/gravity_compensation/start\|stop` | `/a3/gravity_compensation/*` | ✅ |
 | Pinocchio `g(q)` 全关节 | `gravity_torque_node` | ✅ |
 | 轨迹↔重力模式互锁 | `/a3/control_mode` | ✅（仿真） |
@@ -80,11 +81,11 @@ ros2 launch a3_bringup edge_sim_wave_a.launch.py duration_s:=3.0 use_rviz:=true
 |------|------|
 | 轨迹插值 | `a3_can_bridge/.../trajectory_interpolator.hpp` + `motor_protocol_node` |
 | 仿真执行器 | `a3_bringup/sim_executor` |
-| zero→work | `a3_bringup/zero_to_work_publisher` |
+| zero→ready | `a3_bringup/zero_to_ready_publisher` |
 | Pinocchio 重力 | `a3_bringup/gravity_torque_node` |
 | Edge launch | `a3_bringup/launch/edge_sim_wave_a.launch.py` |
 | 验收脚本 | `scripts/verify_wave_a_sim.sh` |
-| 双 domain | `scripts/dual_domain_zero_to_work.sh` |
+| 双 domain | `scripts/dual_domain_zero_to_ready.sh` |
 
 ## 7. 已知限制
 

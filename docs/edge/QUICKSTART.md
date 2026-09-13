@@ -16,14 +16,14 @@
    ros2 topic pub --once /a3/joint_trajectory trajectory_msgs/msg/JointTrajectory "{joint_names: [L1_joint,L2_joint,L3_joint,L4_joint,L5_joint,L6_joint,L7_joint], points: [{positions: [0,0.5,-0.5,0,0,0,0], time_from_start: {sec: 2}}]}"
    ```
 6. reBot shell: clone in `a3_arm_vendor`; remap via `ros2 run a3_bringup rebot_remap_info`
-7. **Wave A 无 CAN 仿真（zero→work + Pinocchio 重力）：**
+7. **Wave A 无 CAN 仿真（zero→ready + Pinocchio 重力）：**
    ```bash
    sudo apt install -y ros-humble-pinocchio   # 一次
    ./scripts/verify_wave_a_sim.sh             # 推荐全量验收
    # 或：
    ros2 launch a3_bringup edge_sim_wave_a.launch.py duration_s:=3.0 use_rviz:=true
    # 无屏验收省略 use_rviz（默认 false）
-   ./scripts/dual_domain_zero_to_work.sh      # Edge=10 / CloudEdge=20 均为 ROS_DOMAIN_ID
+   ./scripts/dual_domain_zero_to_ready.sh      # Edge=10 / CloudEdge=20 均为 ROS_DOMAIN_ID
    ```
    报告：[dev/WAVE_A_SIM_TEST_REPORT.md](../dev/WAVE_A_SIM_TEST_REPORT.md)
 
@@ -60,7 +60,7 @@
     # 默认 mapping:=simple（无 L1 组合键）；恢复 L1 死人开关：mapping:=default
     ```
     - **simple（默认）**：右摇杆基座系左右/上下；左摇杆 Y 前后；L2→L6、R2→夹爪力控（F36：松开全开，按过 0.2 后 0.2..1 → 0.1..1.0 Nm）；Square/Circle 夹爪开/合
-    - D-pad 上/下/左/右：`work` / `zero` / `home` / `ready`；Cross 急停
+    - D-pad 上/下/左/右：`ready` / `zero` / `home` / `ready`（上键暂与右键同，work 已并入 ready）；Cross 急停
     - 改映射只编 `config/mappings/*.yaml`；轴序校准见 `ds4_linux.yaml`
     - 真机：`a3_bringup.launch.py use_teleop:=true mapping:=default` 起 mapper；笛卡尔还需另开 `servo.launch.py`（板测待办）
 
@@ -75,8 +75,8 @@
     # 使能 / 失能：
     ros2 service call /a3/arm/enable std_srvs/srv/Trigger
     ros2 service call /a3/arm/disable std_srvs/srv/Trigger
-    # 运行到预设点（zero/home/ready/work）：
-    ros2 service call /a3/arm/goto_named_pose a3_msgs/srv/GotoNamedPose "{pose_name: work}"
+    # 运行到预设点（zero/home/ready；work 已并入 ready）：
+    ros2 service call /a3/arm/goto_named_pose a3_msgs/srv/GotoNamedPose "{pose_name: ready}"
     # 状态聚合（唯一状态入口）：
     ros2 topic echo /a3/arm_status
     # 示教（拖动）→ 保存 → 回放：
@@ -91,7 +91,7 @@
     ```
     - 编排层复用 `/a3/motor/{set_zero,enable,reset}`、`/a3/zero_torque/*`、`/joint_states`，自身不做 CAN/插值/规划。
     - 运动命令在 `ZERO_TORQUE`/`SERVO`/`GRAVITY_COMP` 时被拒；`require_gate:=true` 时还需 gate 打开。
-    - 前端控制：`a3_mqtt_bridge` 订阅 MQTT `.../cmd`（`{"op":"goto","args":{"pose":"work"}}` 等），回发 `.../cmd_result`。
+    - 前端控制：`a3_mqtt_bridge` 订阅 MQTT `.../cmd`（`{"op":"goto","args":{"pose":"ready"}}` 等），回发 `.../cmd_result`。
 
 12. **单电机分层回归测试套件（F22，can1 / ID7 空载）：**
     ```bash

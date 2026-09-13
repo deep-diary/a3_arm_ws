@@ -69,32 +69,32 @@ cd ~/a3_arm_ws
 
 一次依赖：`sudo apt install -y ros-humble-pinocchio ros-humble-moveit-servo ros-humble-ros2-control ros-humble-controller-manager ros-humble-pick-ik ros-humble-moveit-planners-ompl ros-humble-moveit-simple-controller-manager ros-humble-moveit-ros-visualization wmctrl`
 
-### 1) Wave A：zero→work + 重力（自动下发一条轨迹）
+### 1) Wave A：zero→ready + 重力（自动下发一条轨迹）
 
 ```bash
-# 接显示器时看机械臂从 zero 运动到 work（el_a3_view.rviz）
+# 接显示器时看机械臂从 zero 运动到 ready（el_a3_view.rviz）
 ros2 launch a3_bringup edge_sim_wave_a.launch.py duration_s:=3.0 use_rviz:=true
 # 无屏 / 脚本验收：省略 use_rviz（默认 false）
 ```
 
-`use_rviz` 默认 `false`。SSH 进板子看 HDMI：`export DISPLAY=:0`。约 2 s 后自动下发轨迹，RViz 里应看到从竖直 `zero` 运动到 `work`（此配置 **没有** 拖动球 / Plan / Execute，见第 4 节）。
+`use_rviz` 默认 `false`。SSH 进板子看 HDMI：`export DISPLAY=:0`。约 2 s 后自动下发轨迹，RViz 里应看到从竖直 `zero` 运动到 `ready`（此配置 **没有** 拖动球 / Plan / Execute，见第 4 节）。
 
 另开终端观察：
 
 ```bash
-ros2 topic echo /joint_states --once          # 应变到 work
-ros2 topic echo /a3/gravity_torque --once     # L3 约 −2.48 Nm，L4 非零
+ros2 topic echo /joint_states --once          # 应变到 ready
+ros2 topic echo /a3/gravity_torque --once     # L2/L3 重力力矩明显大于腕部（抬臂）
 ros2 topic echo /a3/control_mode --once       # IDLE / TRAJ_RUNNING / GRAVITY_COMP
 ros2 service call /a3/gravity_compensation/start std_srvs/srv/Trigger {}
 ros2 service call /a3/gravity_compensation/stop  std_srvs/srv/Trigger {}
 ```
 
-到位期望：`work = [0, 0.8901179, -0.9948377, 0, 0, 0, 0]`（容差 0.02 rad）。`duration_s` 为轨迹时长（秒）。
+到位期望：包级 `ready = [0, 0.785, -1.57, 0, 0.785, 0, 0]`（容差 0.02 rad）。`duration_s` 为轨迹时长（秒）。
 
 双 ROS domain（互不抢 `/joint_states`）：
 
 ```bash
-./scripts/dual_domain_zero_to_work.sh          # 默认 EDGE_DOMAIN=10 CE_DOMAIN=20 DURATION_S=3.0
+./scripts/dual_domain_zero_to_ready.sh          # 默认 EDGE_DOMAIN=10 CE_DOMAIN=20 DURATION_S=3.0
 ```
 
 ### 2) Wave B：执行栈（FJT / IK / 重力 / 可选画矩形）

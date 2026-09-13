@@ -120,9 +120,10 @@ class ArmController(Node):
         self.declare_parameter("torque_stats_file", "~/.a3/stats/torque_stats.yaml")
         self.declare_parameter("torque_stats_save_interval_s", 10.0)
         # F44: 温度管理（warn 仅告警；protect 自动回 home 失能降温；迟滞恢复）
+        # 默认阈值 2026-09-13 调高：官方电机自带 130°C 保护兜底，初版 65°C 过低（LL-023）
         self.declare_parameter("temp_protect_enabled", True)
-        self.declare_parameter("temp_warn_c", 60.0)
-        self.declare_parameter("temp_protect_c", 65.0)
+        self.declare_parameter("temp_warn_c", 90.0)
+        self.declare_parameter("temp_protect_c", 95.0)
         self.declare_parameter("temp_hysteresis_c", 5.0)
         self.declare_parameter("fault_mask_reset_on_fault", True)
         # F48: 使能前读数限位门禁（环绕读数超限时拒绝使能，见 LL-019）

@@ -92,7 +92,7 @@ docs/
 | 文档 | 说明 |
 |------|------|
 | [dev/WSL2_SETUP.md](dev/WSL2_SETUP.md) | WSL2 + Humble mock/MoveIt 搭建 |
-| [dev/WAVE_A_SIM_TEST_REPORT.md](dev/WAVE_A_SIM_TEST_REPORT.md) | Wave A 双链路仿真验收（zero→work） |
+| [dev/WAVE_A_SIM_TEST_REPORT.md](dev/WAVE_A_SIM_TEST_REPORT.md) | Wave A 双链路仿真验收（zero→ready） |
 | [lessons_learned/README.md](lessons_learned/README.md) | 踩坑与换机备忘索引 |
 
 ### 包内文档

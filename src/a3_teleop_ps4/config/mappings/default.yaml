@@ -38,7 +38,7 @@ axes:
 buttons:
   dpad_up:
     fn: goto_named_pose
-    kwargs: {name: work}
+    kwargs: {name: ready}
     edge: rising
   dpad_down:
     fn: goto_named_pose

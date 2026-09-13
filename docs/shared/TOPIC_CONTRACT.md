@@ -19,7 +19,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | 笛卡尔运动 | `a3_msgs/action/MoveToPose` | IK + 轨迹执行 |
 | Servo 速度 | `geometry_msgs/TwistStamped` | MoveIt Servo 输入 |
 | 手柄 | `sensor_msgs/Joy` | `joy_node` 轴/按键 |
-| 命名姿态 | `std_msgs/String` | `zero` / `work` / `home` / `ready` |
+| 命名姿态 | `std_msgs/String` | `zero` / `home` / `ready`（`work` 已并入 `ready`，2026-09-13） |
 | 夹爪开合 | `std_msgs/Float32` | 0 闭合 … 1 张开（POSITION 模式输入） |
 | 夹爪力控命令 | `a3_msgs/srv/GripperCommand` | `mode`：`position`/`force`/`release`/`stop`；`position` 0–1；`torque_nm` 目标握力；`timeout_s` |
 | 夹爪配置 | `a3_msgs/srv/GripperSetConfig` | 键值下发（`max_torque_nm` 等），返回是否接受与原因 |
@@ -58,7 +58,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/move_to_pose_ik` | `a3_msgs/srv/MoveToPoseIK` | 仅 IK |
 | `/a3/move_to_pose` | `a3_msgs/action/MoveToPose` | IK + 执行 |
 | `/a3/gravity_torque` | `sensor_msgs/JointState` | URDF 系重力力矩（effort） |
-| `/a3/goto_named_pose` | `std_msgs/String` | 命名姿态（`zero`/`work`/`home`/`ready`） |
+| `/a3/goto_named_pose` | `std_msgs/String` | 命名姿态（`zero`/`home`/`ready`） |
 | `/a3/gripper_cmd` | `std_msgs/Float32` | 夹爪归一化 0–1（POSITION 模式，web 直驱与遗留路径；由 `gripper_controller_node` 订阅执行）。PS4 R2 自 F36 起不再走此话题，改走 `/a3/gripper/command` 力控服务 |
 | `/a3/gripper_status` | `a3_msgs/msg/GripperStatus` | 夹爪力控状态快照（模式/目标与实际力矩/目标与实际位置/接触标志/错误码），默认 10 Hz，力控期间 50 Hz |
 | `/a3/gripper/command` | `a3_msgs/srv/GripperCommand` | 夹爪命令：`position`（开合 0–1）/ `force`（按 `torque_nm` 抓取）/ `release` / `stop` |
@@ -128,7 +128,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `init` | `{}` | `/a3/arm/init`（Trigger） |
 | `enable` | `{}` | `/a3/arm/enable` |
 | `disable` | `{}` | `/a3/arm/disable` |
-| `goto` | `{"pose": "zero\|home\|ready\|work"}` | `/a3/arm/goto_named_pose`（`pose_name=args.pose`） |
+| `goto` | `{"pose": "zero\|home\|ready"}` | `/a3/arm/goto_named_pose`（`pose_name=args.pose`） |
 | `set_joints` | `{"positions": [7 个 rad], "duration": 0.3}` | `/a3/arm/set_joint_positions`（`SetJointPositions`，滑动条 jog 直驱，限位 clamp + 短插值） |
 | `teach_start` | `{}` | `/a3/arm/start_teach` |
 | `teach_stop` | `{}` | `/a3/arm/stop_teach` |

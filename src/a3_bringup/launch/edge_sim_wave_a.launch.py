@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Edge Wave A simulation: sim_executor + gravity + zero→work trajectory (no CAN)."""
+"""Edge Wave A simulation: sim_executor + gravity + zero→ready trajectory (no CAN)."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, TimerAction
@@ -53,13 +53,13 @@ def generate_launch_description():
         actions=[
             Node(
                 package="a3_bringup",
-                executable="zero_to_work_publisher",
-                name="zero_to_work_publisher",
+                executable="zero_to_ready_publisher",
+                name="zero_to_ready_publisher",
                 output="screen",
                 parameters=[
                     {
                         "start_pose": "zero",
-                        "goal_pose": "work",
+                        "goal_pose": "ready",
                         "duration_s": duration_s,
                         "num_waypoints": 11,
                         "delay_s": 0.5,

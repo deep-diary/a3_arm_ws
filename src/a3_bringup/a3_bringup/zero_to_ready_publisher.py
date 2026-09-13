@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish a multi-point JointTrajectory from named pose A to B (default zero→work)."""
+"""Publish a multi-point JointTrajectory from named pose A to B (default zero→ready)."""
 
 from __future__ import annotations
 
@@ -29,14 +29,14 @@ def _duration(sec: float) -> Duration:
     return d
 
 
-class ZeroToWorkPublisher(Node):
+class ZeroToReadyPublisher(Node):
     def __init__(self) -> None:
-        super().__init__("zero_to_work_publisher")
+        super().__init__("zero_to_ready_publisher")
         self.declare_parameter(
             "trajectory_topic", "/joint_group_effort_controller/joint_trajectory"
         )
         self.declare_parameter("start_pose", "zero")
-        self.declare_parameter("goal_pose", "work")
+        self.declare_parameter("goal_pose", "ready")
         self.declare_parameter("duration_s", 3.0)
         self.declare_parameter("num_waypoints", 11)
         self.declare_parameter("publish_once", True)
@@ -86,7 +86,7 @@ class ZeroToWorkPublisher(Node):
 
 def main() -> None:
     rclpy.init()
-    node = ZeroToWorkPublisher()
+    node = ZeroToReadyPublisher()
     try:
         rclpy.spin(node)
     finally:

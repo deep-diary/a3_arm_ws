@@ -7,7 +7,7 @@ functions:
   goto_named_pose:
     kind: discrete
     kwargs: {name: string}
-    description: Interpolate current joints to named pose (zero/work/home/ready)
+    description: Interpolate current joints to named pose (zero/home/ready)
 
   power_start:
     kind: discrete

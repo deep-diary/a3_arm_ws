@@ -251,13 +251,13 @@ cleanup
 echo "=== 8. Wave A regression (subset DOMAIN=78) ==="
 export ROS_DOMAIN_ID=78
 if timeout 120 "${ROOT}/scripts/verify_wave_a_sim.sh" >/tmp/wave_b_wave_a.log 2>&1; then
-  if grep -q 'PASS: zero→work' /tmp/wave_b_wave_a.log && grep -q 'PASS: Pinocchio' /tmp/wave_b_wave_a.log; then
+  if grep -q 'PASS: zero→ready' /tmp/wave_b_wave_a.log && grep -q 'PASS: Pinocchio' /tmp/wave_b_wave_a.log; then
     pass "Wave A regression"
   else
     fail "Wave A incomplete"; tail -40 /tmp/wave_b_wave_a.log
   fi
 else
-  if grep -q 'PASS: zero→work' /tmp/wave_b_wave_a.log; then
+  if grep -q 'PASS: zero→ready' /tmp/wave_b_wave_a.log; then
     pass "Wave A edge core (script may have timed on dual)"
   else
     fail "Wave A regression"; tail -40 /tmp/wave_b_wave_a.log

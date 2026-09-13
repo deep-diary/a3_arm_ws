@@ -33,9 +33,11 @@
     torque_stats_file: "~/.a3/stats/torque_stats.yaml"
     torque_stats_save_interval_s: 10.0
     # F44: 温度管理（warn 仅告警；protect 自动回 home 失能降温；迟滞恢复）
+    # 阈值 2026-09-13 真机调高：官方电机自带 130°C 保护兜底，初版 65°C 过低
+    # （ready 位 L3 保位 1.26 Nm 几分钟即触发 overtemp park，LL-023）
     temp_protect_enabled: true
-    temp_warn_c: 60.0
-    temp_protect_c: 65.0
+    temp_warn_c: 90.0
+    temp_protect_c: 95.0
     temp_hysteresis_c: 5.0
     fault_mask_reset_on_fault: true
     # F48: 使能前读数限位门禁（环绕读数超限时拒绝使能，见 LL-019）

@@ -23,6 +23,7 @@ import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
@@ -102,7 +103,11 @@ class GravityTorqueNode(Node):
         mode_topic = self.get_parameter("control_mode_topic").value
         traj_topic = self.get_parameter("trajectory_topic").value
 
-        self._sub = self.create_subscription(JointState, js_topic, self._on_js, 10)
+        # LL-025: 桥发布的 /joint_states 是 BEST_EFFORT（LL-005/LL-018），默认 RELIABLE
+        # 订阅收不到任何消息 → _q 冻结全零 → τ_g 变成与姿态无关的常数前馈。
+        # 零力矩模式启动瞬间被该常数推飞（2026-09-13 真机事故根因之一）。
+        js_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self._sub = self.create_subscription(JointState, js_topic, self._on_js, js_qos)
         self._traj_sub = self.create_subscription(
             JointTrajectory, traj_topic, self._on_traj, 10
         )
@@ -152,10 +157,12 @@ class GravityTorqueNode(Node):
                 return "approx_inertia"
 
             model = pin.buildModelFromUrdf(urdf_path)
+            # LL-025: self._pin 必须先赋值——_apply_calibrated_inertia 内部用
+            # self._pin.Inertia()，原顺序导致标定参数全部跳过（"Applied 0 links"）。
+            self._pin = pin
             if bool(self.get_parameter("apply_calibrated_inertia").value):
                 self._apply_calibrated_inertia(model)
 
-            self._pin = pin
             self._pin_model = model
             self._pin_data = model.createData()
             self._iq_map = []

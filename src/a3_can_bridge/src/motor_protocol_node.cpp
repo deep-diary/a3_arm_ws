@@ -262,6 +262,13 @@ public:
       "torque_protection_release_margin_rad", 0.02);
     torque_protection_log_throttle_ms_ = this->declare_parameter<int>(
       "torque_protection_log_throttle_ms", 1000);
+    // LL-024: 力矩/速度编解码量程按电机型号区分（官方协议「通信数据映射范围对照表」：
+    // RS00 ±14 Nm/±33 rad/s，EL05 ±6 Nm/±50 rad/s）。统一 ±6/±50 时 RS00 反馈力矩
+    // 少报 2.333 倍、τ_ff 编码反向放大 2.333 倍。按 motor_id-1 索引（A3: 1-3 RS00, 4-7 EL05）。
+    motor_torque_range_nm_ = this->declare_parameter<std::vector<double>>(
+      "motor_torque_range_nm", std::vector<double>(kNumArmJoints, ProtocolCodec::kTMax));
+    motor_speed_range_rad_s_ = this->declare_parameter<std::vector<double>>(
+      "motor_speed_range_rad_s", std::vector<double>(kNumArmJoints, ProtocolCodec::kVMax));
     // F46: TX 帧率监视——5s 窗口统计发布 /a3/motor/tx_stats
     publish_tx_stats_ = this->declare_parameter<bool>("publish_tx_stats", true);
     tx_stats_topic_ = this->declare_parameter<std::string>(
@@ -1030,7 +1037,9 @@ private:
       static_cast<float>(default_velocity_),
       static_cast<float>(use_kp),
       static_cast<float>(use_kd),
-      static_cast<float>(use_tau));
+      static_cast<float>(use_tau),
+      static_cast<float>(TorqueRangeNmFor(route.motor_id)),
+      static_cast<float>(SpeedRangeRadSFor(route.motor_id)));
 
     auto packed = FrameCodec::Pack(frame);
     tx_pub_->publish(packed);
@@ -1097,24 +1106,43 @@ private:
         std::numeric_limits<double>::quiet_NaN();
       bool seeded = false;
       if (!std::isfinite(mapped_position)) {
-        // F48 播种：桥（重）启后从未下发过轨迹时 refresh 无目标可发 → 总线静默 →
-        // 电机不主动上报反馈（LL-018）→ /joint_states 冻结（stamp 陈旧）。
-        // 仅当模式未知（上电从未收到反馈）或已知失能（mode 0）时播种零增益保活
-        // 帧（p=反馈位或 0，kp=kd=tau=0——任何模式下都无力矩）；已知使能
-        // （mode != 0，如夹爪力控经轨迹路径驱动）不播种：其自身帧流已激发反馈，
-        // 播种零增益帧会与其抢总线。
+        // F48/LL-022 播种：桥（重）启后从未下发过轨迹时 refresh 无目标可发 →
+        // 总线静默 → 电机不主动上报反馈（LL-018）→ /joint_states 冻结（stamp 陈旧）。
+        // 三种情况：
+        // 1) 模式未知（上电从未收到反馈）或已知失能（mode 0）：播种零增益保活
+        //    帧（p=反馈位或 0，kp=kd=tau=0——任何模式下都无力矩）；
+        // 2) 已知使能且反馈新鲜（如 /a3/motor/enable 服务直驱使能后从未下发轨迹，
+        //    LL-022 真机掉臂教训）：把目标一次性锚定到最新反馈位，以 runtime
+        //    kp/kd/tau 真实保持——恢复帧流/反馈新鲜度并保位；零增益播种会让已
+        //    使能电机完全卸力掉臂；
+        // 3) 已知使能但反馈陈旧：不盲发（不知实际位置，kp 保持会拉错位）。
         const int mode =
           idx < last_feedback_mode_status_.size() ? last_feedback_mode_status_[idx] : -1;
         if (mode != -1 && mode != 0) {
-          continue;
-        }
-        if (route.motor_id < last_feedback_mit_rad_.size() &&
-            std::isfinite(last_feedback_mit_rad_[route.motor_id])) {
+          const bool fb_finite =
+            route.motor_id < last_feedback_mit_rad_.size() &&
+            std::isfinite(last_feedback_mit_rad_[route.motor_id]);
+          const bool fb_fresh =
+            idx < last_feedback_stamp_ns_.size() &&
+            (now_ns - last_feedback_stamp_ns_[idx]) <
+              static_cast<int64_t>(feedback_fresh_timeout_s_ * 1e9);
+          if (!fb_finite || !fb_fresh) {
+            continue;
+          }
           mapped_position = last_feedback_mit_rad_[route.motor_id];
+          if (route.motor_id < last_commanded_mit_rad_.size()) {
+            last_commanded_mit_rad_[route.motor_id] = mapped_position;
+          }
+          // seeded=false → 用 runtime kp/kd/tau 保持（一次性锚定，不随反馈蠕动）
         } else {
-          mapped_position = 0.0;
+          if (route.motor_id < last_feedback_mit_rad_.size() &&
+              std::isfinite(last_feedback_mit_rad_[route.motor_id])) {
+            mapped_position = last_feedback_mit_rad_[route.motor_id];
+          } else {
+            mapped_position = 0.0;
+          }
+          seeded = true;
         }
-        seeded = true;
       }
       const double bus_kp = is_front ? runtime_kp_can0_ : runtime_kp_can1_;
       const double bus_kd = is_front ? runtime_kd_can0_ : runtime_kd_can1_;
@@ -1128,7 +1156,9 @@ private:
         static_cast<float>(default_velocity_),
         static_cast<float>(use_kp),
         static_cast<float>(use_kd),
-        static_cast<float>(use_tau));
+        static_cast<float>(use_tau),
+        static_cast<float>(TorqueRangeNmFor(route.motor_id)),
+        static_cast<float>(SpeedRangeRadSFor(route.motor_id)));
       auto packed = FrameCodec::Pack(frame);
       tx_pub_->publish(packed);
       ++tx_refresh_total_window_;
@@ -1165,7 +1195,9 @@ private:
             last_feedback_mit_rad_[mit_hold_.motor_id] : 0.0;
           PublishFrame(ProtocolCodec::BuildMitControlFrame(
             ArmMapper::ArmBus(), mit_hold_.motor_id,
-            static_cast<float>(p), 0.0f, 0.0f, 0.0f, 0.0f));
+            static_cast<float>(p), 0.0f, 0.0f, 0.0f, 0.0f,
+            static_cast<float>(TorqueRangeNmFor(mit_hold_.motor_id)),
+            static_cast<float>(SpeedRangeRadSFor(mit_hold_.motor_id))));
           mit_hold_.active = false;
         }
       }
@@ -1179,7 +1211,9 @@ private:
         PublishFrame(ProtocolCodec::BuildMitControlFrame(
           ArmMapper::ArmBus(), mit_hold_.motor_id,
           mit_hold_.position, mit_hold_.velocity,
-          mit_hold_.kp, mit_hold_.kd, mit_hold_.torque));
+          mit_hold_.kp, mit_hold_.kd, mit_hold_.torque,
+          static_cast<float>(TorqueRangeNmFor(mit_hold_.motor_id)),
+          static_cast<float>(SpeedRangeRadSFor(mit_hold_.motor_id))));
         mit_hold_.next_tx_ns += static_cast<int64_t>(1e9 / mit_hold_.hz);
         if (mit_hold_.motor_id < last_commanded_mit_rad_.size()) {
           last_commanded_mit_rad_[mit_hold_.motor_id] = mit_hold_.position;
@@ -1644,14 +1678,17 @@ private:
     }
     const double p = Clamp(
       static_cast<double>(req->position_rad), ProtocolCodec::kPMin, ProtocolCodec::kPMax);
+    // LL-024: 速度/力矩按该电机型号量程钳位（RS00 ±33/±14，EL05 ±50/±6）
     const double v = Clamp(
-      static_cast<double>(req->velocity_rad_s), ProtocolCodec::kVMin, ProtocolCodec::kVMax);
+      static_cast<double>(req->velocity_rad_s),
+      -SpeedRangeRadSFor(req->motor_id), SpeedRangeRadSFor(req->motor_id));
     const double kp = Clamp(
       static_cast<double>(req->kp), ProtocolCodec::kKpMin, ProtocolCodec::kKpMax);
     const double kd = Clamp(
       static_cast<double>(req->kd), ProtocolCodec::kKdMin, ProtocolCodec::kKdMax);
     const double t = Clamp(
-      static_cast<double>(req->torque_ff_nm), ProtocolCodec::kTMin, ProtocolCodec::kTMax);
+      static_cast<double>(req->torque_ff_nm),
+      -TorqueRangeNmFor(req->motor_id), TorqueRangeNmFor(req->motor_id));
     const double duration = req->hold_duration_s > 0.0 ?
       std::min(static_cast<double>(req->hold_duration_s), max_hold_duration_s_) : 0.0;
 
@@ -1659,7 +1696,9 @@ private:
       PublishFrame(ProtocolCodec::BuildMitControlFrame(
         ArmMapper::ArmBus(), req->motor_id,
         static_cast<float>(p), static_cast<float>(v),
-        static_cast<float>(kp), static_cast<float>(kd), static_cast<float>(t)));
+        static_cast<float>(kp), static_cast<float>(kd), static_cast<float>(t),
+        static_cast<float>(TorqueRangeNmFor(req->motor_id)),
+        static_cast<float>(SpeedRangeRadSFor(req->motor_id))));
       resp->success = true;
       resp->message = "one-shot sent motor=" + std::to_string(static_cast<int>(req->motor_id));
       return;
@@ -1745,7 +1784,9 @@ private:
         std::isfinite(last_feedback_mit_rad_[mid])) ?
         last_feedback_mit_rad_[mid] : 0.0;
       PublishFrame(ProtocolCodec::BuildMitControlFrame(
-        ArmMapper::ArmBus(), mid, static_cast<float>(p), 0.0f, 0.0f, 0.0f, 0.0f));
+        ArmMapper::ArmBus(), mid, static_cast<float>(p), 0.0f, 0.0f, 0.0f, 0.0f,
+        static_cast<float>(TorqueRangeNmFor(mid)),
+        static_cast<float>(SpeedRangeRadSFor(mid))));
       ++sent;
     }
     resp->success = true;
@@ -1944,7 +1985,11 @@ private:
       return;
     }
 
-    const auto feedback = ProtocolCodec::DecodeFeedback(can);
+    // LL-024: 反馈解码按该帧电机 ID 的量程（RS00 ±14/±33，EL05 ±6/±50）
+    const uint8_t fb_motor_id = static_cast<uint8_t>((can.can_id >> 8) & 0xFF);
+    const auto feedback = ProtocolCodec::DecodeFeedback(
+      can, static_cast<float>(TorqueRangeNmFor(fb_motor_id)),
+      static_cast<float>(SpeedRangeRadSFor(fb_motor_id)));
     if (!feedback.has_value()) {
       return;
     }
@@ -2192,6 +2237,21 @@ private:
     feedback_joint_states_pub_->publish(js);
   }
 
+  // LL-024: 按电机 ID 取力矩/速度编解码量程（配置缺项或非法时回退 ±6/±50）。
+  double TorqueRangeNmFor(uint8_t motor_id) const
+  {
+    const size_t i = (motor_id > 0) ? static_cast<size_t>(motor_id - 1) : 0;
+    return (i < motor_torque_range_nm_.size() && motor_torque_range_nm_[i] > 0.0) ?
+      motor_torque_range_nm_[i] : ProtocolCodec::kTMax;
+  }
+
+  double SpeedRangeRadSFor(uint8_t motor_id) const
+  {
+    const size_t i = (motor_id > 0) ? static_cast<size_t>(motor_id - 1) : 0;
+    return (i < motor_speed_range_rad_s_.size() && motor_speed_range_rad_s_[i] > 0.0) ?
+      motor_speed_range_rad_s_[i] : ProtocolCodec::kVMax;
+  }
+
   double ComputeMitTorqueFf(size_t idx, bool is_front)
   {
     const double bus_tau = is_front ? runtime_tau_can0_ : runtime_tau_can1_;
@@ -2222,7 +2282,10 @@ private:
       }
     }
 
-    return Clamp(tau, ProtocolCodec::kTMin, ProtocolCodec::kTMax);
+    const uint8_t motor_id = idx < DogMapper::kTemporaryIndexMap.size() ?
+      DogMapper::kTemporaryIndexMap[idx].motor_id : 0;
+    const double tmax = TorqueRangeNmFor(motor_id);
+    return Clamp(tau, -tmax, tmax);
   }
 
   bool IsEnabledMode(int mode_status) const
@@ -2645,6 +2708,9 @@ private:
   std::vector<double> torque_protection_limit_nm_;
   double torque_protection_release_margin_rad_{0.02};
   int torque_protection_log_throttle_ms_{1000};
+  // LL-024: 力矩/速度编解码量程（按 motor_id-1 索引，默认 ±6 Nm/±50 rad/s）
+  std::vector<double> motor_torque_range_nm_;
+  std::vector<double> motor_speed_range_rad_s_;
   std::array<bool, 12> torque_latch_active_{};
   std::array<double, 12> torque_latch_sign_{};
   // F46: TX 帧率监视

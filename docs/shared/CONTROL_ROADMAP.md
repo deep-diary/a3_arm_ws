@@ -289,7 +289,7 @@ flowchart LR
 | L2 轨迹插值 | ✅ | ✅ 驱动内整轨执行 | ✅ `motor_protocol` 时间插值（仿真+生产代码） |
 | L3 模型/FK·IK | ✅ | ✅ MoveIt IK + Pinocchio 动力学 | ✅ MoveIt kinematics + **Pinocchio `g(q)`** |
 | L4 规划 | ✅ | ✅ MoveIt demo | ✅ MoveIt demo（mock） |
-| L5 真机 Plan+Execute | ✅ | ✅ `hardware.launch` | ✅ 仿真 `zero→work`；真机统一 launch 板测中 |
+| L5 真机 Plan+Execute | ✅ | ✅ `hardware.launch` | ✅ 仿真 `zero→ready`；真机统一 launch 板测中 |
 | L6 Servo | ✅ | ❌ | ⚠️ 仿真 F14+F16 已集成；真机 CAN 待验 |
 | L7 重力补偿/示教 | ✅ | ✅ Pinocchio 服务 | ✅ 仿真 Pinocchio + 模式互锁；真机拖动板测中 |
 | L8 力控柔顺 | ✅（末端 F/T） | ❌ | ❌ |
@@ -306,7 +306,7 @@ flowchart LR
 | 轨迹时间插值 / 整轨跟踪 | ✅ | ✅ | Wave A **已齐（仿真+代码）** | C2 / F6 |
 | `FollowJointTrajectory` 或等价 | ✅ Action | ✅ Action Server + 话题桥 | Wave B **F10** | C1 |
 | MoveIt Plan（mock） | ✅ | ✅ | — 已齐 | — |
-| MoveIt Execute / zero→work | ✅ | ✅ 仿真 | Wave A **仿真已齐**；统一 launch **F11** | C1 / F7/F11 |
+| MoveIt Execute / zero→ready | ✅ | ✅ 仿真 | Wave A **仿真已齐**；统一 launch **F11** | C1 / F7/F11 |
 | 重力补偿服务 | ✅ | ✅ `/a3/gravity_compensation/*` | Wave A **仿真已齐** | C3 / F8 |
 | Pinocchio 全关节 `g(q)` | ✅ | ✅ | Wave A **已齐** | C3 |
 | 轨迹↔重力模式互锁 | ✅ | ✅ `/a3/control_mode` | Wave A **仿真已齐**；扩展 ZERO_TORQUE/SERVO | C3/C5/C4 |
@@ -412,7 +412,7 @@ flowchart TD
 **Wave A 对齐验收（规划用 DoD）：**
 
 - [x] 多点轨迹时间跟踪（`sim_executor` / `motor_protocol` 插值）
-- [x] 仿真 launch 完成 `zero`→`work`（Edge + 双 domain）
+- [x] 仿真 launch 完成 `zero`→`ready`（Edge + 双 domain）
 - [x] **Pinocchio 全关节**重力力矩可启停；`/a3/control_mode` 与轨迹互锁
 - [x] 相关需求已写入 `docs/edge/REQUIREMENTS.md`（F6–F9）
 - [x] `motor_protocol` 订阅重力力矩并按 `joint_signs` 写入 MIT `tau`（配置开关）

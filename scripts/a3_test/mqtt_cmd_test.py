@@ -20,7 +20,7 @@ CASES = [
     ("init", {}, "init"),
     ("enable", {}, "enable"),
     ("disable", {}, "disable"),
-    ("goto", {"pose": "work"}, "pose_name=work"),
+    ("goto", {"pose": "ready"}, "pose_name=ready"),
     ("teach_start", {}, "start_teach"),
     ("teach_stop", {}, "stop_teach"),
     ("save", {"name": "demo"}, "name=demo"),

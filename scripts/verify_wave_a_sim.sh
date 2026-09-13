@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wave A full simulation verification (Pinocchio gravity + zero→work + dual domain).
+# Wave A full simulation verification (Pinocchio gravity + zero→ready + dual domain).
 set -eo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -59,19 +59,19 @@ else
   fail "expected pinocchio backend"
 fi
 
-# Sample at start (near zero) then after motion (work)
+# Sample at start (near zero) then after motion (ready)
 sleep 1
 timeout 3 ros2 topic echo /a3/gravity_torque --once >"${LOG_DIR}/verify_grav_early.txt" 2>&1 || true
 sleep 5
 timeout 3 ros2 topic echo /joint_states --once >"${LOG_DIR}/verify_js_final.txt" 2>&1 || true
-timeout 3 ros2 topic echo /a3/gravity_torque --once >"${LOG_DIR}/verify_grav_work.txt" 2>&1 || true
+timeout 3 ros2 topic echo /a3/gravity_torque --once >"${LOG_DIR}/verify_grav_ready.txt" 2>&1 || true
 timeout 3 ros2 topic echo /a3/control_mode --once >"${LOG_DIR}/verify_mode.txt" 2>&1 || true
 
 python3 - <<'PY' | tee -a "${REPORT_SNIP}"
 import re, pathlib, sys
 log = pathlib.Path("docs/dev/_wave_a_sim_logs")
 js = (log / "verify_js_final.txt").read_text()
-grav = (log / "verify_grav_work.txt").read_text()
+grav = (log / "verify_grav_ready.txt").read_text()
 
 def positions(text):
     m = re.search(r"position:\n((?:- .*\n)+)", text)
@@ -86,21 +86,21 @@ def efforts(text):
     return [float(x[2:]) for x in m.group(1).strip().splitlines()]
 
 q = positions(js)
-work = [0.0, 0.8901179, -0.9948377, 0.0, 0.0, 0.0, 0.0]
-err = max(abs(a-b) for a,b in zip(q, work))
+ready = [0.0, 0.785, -1.57, 0.0, 0.785, 0.0, 0.0]
+err = max(abs(a-b) for a,b in zip(q, ready))
 print(f"final q={q}")
-print(f"max |q-work|={err:.6f}")
+print(f"max |q-ready|={err:.6f}")
 if err > 0.02:
-    print("FAIL: did not reach work"); sys.exit(1)
-print("PASS: zero→work tracking")
+    print("FAIL: did not reach ready"); sys.exit(1)
+print("PASS: zero→ready tracking")
 
 tau = efforts(grav)
-print(f"tau@work={tau}")
+print(f"tau@ready={tau}")
 if len(tau) < 7:
     print("FAIL: expected 7 efforts"); sys.exit(1)
 if any(abs(t) > 50 for t in tau):
     print("FAIL: torque magnitude unreasonable"); sys.exit(1)
-# L3 typically largest magnitude for this arm at work; L4 should be non-zero with Pinocchio
+# L3 typically largest magnitude for this arm at ready; L4 should be non-zero with Pinocchio
 if abs(tau[3]) < 1e-6 and abs(tau[2]) < 0.01:
     print("FAIL: L3/L4 look like approx stub"); sys.exit(1)
 print(f"PASS: Pinocchio gravity all joints (L2={tau[1]:.4f} L3={tau[2]:.4f} L4={tau[3]:.4f} Nm)")
@@ -125,7 +125,7 @@ trap - EXIT
 PIDS=()
 
 echo "=== 3. Dual domain ==="
-EDGE_DOMAIN=10 CE_DOMAIN=20 DURATION_S=2.5 bash "${ROOT}/scripts/dual_domain_zero_to_work.sh" \
+EDGE_DOMAIN=10 CE_DOMAIN=20 DURATION_S=2.5 bash "${ROOT}/scripts/dual_domain_zero_to_ready.sh" \
   | tee -a "${REPORT_SNIP}"
 
 python3 - <<'PY' | tee -a "${REPORT_SNIP}"
@@ -138,13 +138,13 @@ def pos(path):
     return [float(x[2:]) for x in m.group(1).strip().splitlines()]
 qe = pos(log / "edge_joint_states.txt")
 qc = pos(log / "cloud_edge_joint_states.txt")
-work = [0.0, 0.8901179, -0.9948377, 0.0, 0.0, 0.0, 0.0]
-ee = max(abs(a-b) for a,b in zip(qe, work))
-ec = max(abs(a-b) for a,b in zip(qc, work))
+ready = [0.0, 0.785, -1.57, 0.0, 0.785, 0.0, 0.0]
+ee = max(abs(a-b) for a,b in zip(qe, ready))
+ec = max(abs(a-b) for a,b in zip(qc, ready))
 print(f"Edge err={ee:.6f} CloudEdge err={ec:.6f}")
 if ee > 0.02 or ec > 0.02:
     print("FAIL: dual domain tracking"); sys.exit(1)
-print("PASS: dual-domain zero→work")
+print("PASS: dual-domain zero→ready")
 PY
 
 pass "all Wave A simulation checks"
