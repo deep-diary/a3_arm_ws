@@ -501,10 +501,10 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   1. FOLLOW_STUCK：运动窗口内 max|q_d−q_actual| > 0.25 rad 持续 0.5 s → stop；3 s 未消 → 升级 reset
   2. HOLD_DRIFT：state=READY 保持期（窗口已关）末点 vs 实际 > 0.30 rad 持续 1.0 s → stop → 升级 reset
   3. STALE_JS：js stamp 过期 > 1.0 s 且 state ∈ {READY, TRAJ, SAFE_PARK, SERVO, TEACH, AI} → reset（反馈死亡，无法验证，最安全处置）
-  4. UNEXPECTED_DISABLE：state ∈ {READY, TRAJ, SAFE_PARK} 但 MotorStates 任一电机 enabled=false 持续 1.0 s → **仅报告**（电机已失能，不动作——避免 F40 park 在失能电机上失败进 FAULT）
+  4. UNEXPECTED_DISABLE：state ∈ {READY, TRAJ, SAFE_PARK} 但 MotorStates 任一电机 enabled=false 持续 **0.5 s**（2026-09-14 由 1.0 s 下调，**必须短于编排层本地兜底 1.0 s**，否则编排层先转 DISABLED 会让本节点持续窗清零、真故障永远报不出来——F51）→ **仅报告**（电机已失能，不动作——避免 F40 park 在失能电机上失败进 FAULT）
   5. TEMP_UNRESPONSIVE：ArmStatus.temperatures ≥95°C 且 state ∉ {COOLING, SAFE_PARK, FAULT} 持续 3 s → reset（F44 失灵的兜底）
 - **抑制（防误报，LL-020 教训）：** mode ∈ {ZERO_TORQUE, GRAVITY_COMP} 跳过 1/2（零力矩臂悬浮是设计行为）；state ∈ {IDLE, INIT, DISABLED, COOLING, FAULT} 跳过 1/2/3（失能期 js 冻结合法）；无 MotorStates 数据跳过 4（仿真早期/桥未起）；启动 3 s 宽限（订阅发现）；触发后 5 s cooldown 防刷屏；条件消失 + 2 s clear_hold 回 OK。
-- **输出：** /a3/monitor/status（新 msg a3_msgs/MonitorStatus：status/fault/action/tracking_errors/max_tracking_error/last_event，20 Hz）+ WARN/ERROR 日志；MQTT 上行二期。launch：arm_controller.launch.py 追加 `enable_monitor:=true`（默认开，可用 `enable_monitor:=false` 关）。
+- **输出：** /a3/monitor/status（msg a3_msgs/MonitorStatus：status/**pending_faults**/fault/action/tracking_errors/max_tracking_error/last_event，20 Hz）+ WARN/ERROR 日志；MQTT 上行二期。launch：arm_controller.launch.py 追加 `enable_monitor:=true`（默认开，可用 `enable_monitor:=false` 关）。**status 语义（F51 起）**：OK / PENDING（条件已成立但未达持续阈值，瞬时抖动，不动作）/ TRIGGERED（已确认），`fault` 只表示已确认故障。
 - **验收标准：**
   1. 仿真：健康 move_to 全程零触发（无误报）
   2. 仿真：SIGSTOP sim_motor → FOLLOW_STUCK → /a3/motor/stop 被调用（服务返回 success）
@@ -513,7 +513,18 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   5. 仿真：sim 电机 reset 而 state 仍 READY → UNEXPECTED_DISABLE 事件上报
   6. 真机：挂载观察（与 F49 真机采集同场），零误报；阈值按真机跟踪误差微调
 - **关联：** F42/F44/F40（保留原位的分层保护）；LL-030（js QoS）；LL-020（js 冻结判据）；LL-009（control_mode 语义）；F49（重力标定采集期间依赖本看门狗）
-- **状态：** `implemented`（2026-09-13 仿真验收通过：健康 move_to 零触发 max err 0.0004 rad；斜坡注入 → FOLLOW_STUCK → stop → +3 s 升级 reset；SIGSTOP 冻结 → STALE_JS → reset；sim reset 而 READY → UNEXPECTED_DISABLE 报告；ZERO_TORQUE 抑制生效。5 次触发全为注入诱导、零误报，验收标准 1–5 全过。实现踩坑 LL-034：回调内 sync 服务死锁 + 时间纪元混用。**真机观察（验收 6）进行中**：2026-09-14 F49 采集全程（约 1 h，68 点链式轨迹 + 2 次降温）fault **动作**零次（日志无任何 `[monitor] <fault>: success=...` 行 ⇒ 无 stop/reset），仅 19:32:02 出现一次 `FOLLOW_STUCK recovered -> OK` 的**状态抖动**。**已知语义**：MonitorStatus 的 status/fault 反映**瞬时**条件（`active` 非空即置 `_fault`），动作才要求持续过 sustain（0.25 rad/0.5 s）；故该抖动未触发任何动作，但 status 通道会短暂显示 FOLLOW_STUCK——对消费 status 的上层（web/MQTT）是噪声，是否把 status 也改为「确认后置位」（瞬时量仍见 tracking_errors）待用户裁定；真机长跑（≥30 min 含 move_to/goto/零力矩）与阈值微调仍未做）
+- **状态：** `implemented`（2026-09-13 仿真验收通过：健康 move_to 零触发 max err 0.0004 rad；斜坡注入 → FOLLOW_STUCK → stop → +3 s 升级 reset；SIGSTOP 冻结 → STALE_JS → reset；sim reset 而 READY → UNEXPECTED_DISABLE 报告；ZERO_TORQUE 抑制生效。5 次触发全为注入诱导、零误报，验收标准 1–5 全过。实现踩坑 LL-034：回调内 sync 服务死锁 + 时间纪元混用。**真机观察（验收 6）进行中**：2026-09-14 F49 采集全程（约 1 h，68 点链式轨迹 + 2 次降温）fault **动作**零次（日志无任何 `[monitor] <fault>: success=...` 行 ⇒ 无 stop/reset），仅 19:32:02 出现一次 `FOLLOW_STUCK recovered -> OK` 的**状态抖动**。**已知语义**：MonitorStatus 的 status/fault 曾反映**瞬时**条件（`active` 非空即置 `_fault`），动作才要求持续过 sustain（0.25 rad/0.5 s）；故该抖动未触发任何动作，但 status 通道会短暂显示 FOLLOW_STUCK——对消费 status 的上层（web/MQTT）是噪声。**2026-09-14 已按 F51 第 6 条改为「确认后置位」**（status 分 OK/PENDING/TRIGGERED，`fault` 只表示已确认，瞬时量见 `pending_faults` 与 tracking_errors）——该抖动今后显示为 PENDING 而非 TRIGGERED。真机长跑（≥30 min 含 move_to/goto/零力矩）与阈值微调仍未做）
+
+## F51 使能安全门禁（三层修复：保持抑制 latch / 使能重锚 / 意图边界重基准）
+
+- **说明：** LL-039 真机事故（2026-09-14，甩断 L6 打印关节）的三层修复。**执行层**（`motor_protocol_node.cpp`）：(1) `hold_suppressed_[motor_id]` **保持抑制 latch**——`/a3/motor/stop` 与 reset/set_zero 置位，refresh 播种分支从此只发**零增益保活帧**（p=反馈位、kp=kd=τ=0），停止后不得再把目标锚回旧位姿；显式新意图才解除（新轨迹 / MIT 直驱 / 零力矩退出 / 使能 / park）。(2) **使能 = 保当前位置**：`command==1` 逐电机校验反馈 finite + 新鲜（`require_fresh_feedback_on_enable`），任一缺失/陈旧则**整体拒绝使能**（`success=false`，不发任何帧）；通过则把 MIT 目标无条件重锚到反馈位，陈旧目标丢弃并 WARN，丢弃距离回传在响应里（`F51 重锚 N 电机…最大丢弃目标距离 X rad`）。(3) **使能软起步**：`enable_kp_ramp`（默认 on）+ `enable_ramp_duration_s`（0.8 s），使能后 kp/kd 从 0 线性升到额定（τ_ff 重力前馈不受影响）。(4) 失能态下 `|目标−反馈| > enable_reanchor_tolerance_rad`(0.15) 时限频 WARN（事故时该差值 1.956 rad 静默保留 2 分钟）。**看门狗**（`arm_monitor_node.py`）：(5) `_maybe_rebaseline()` 在「意图边界」（control_mode 转出 ZERO_TORQUE/GRAVITY_COMP、整臂 none→all 使能沿）把 `_last_goal ← 当前实际位姿`、清 `_traj`、`hold_rebaseline_grace_s`(2.0 s) 宽限——示教拖动改写实际位姿后执行层 F38 会重锚目标，看门狗参照必须同步；(6) `MonitorStatus` status 分 OK/**PENDING**/TRIGGERED + 新增 `pending_faults`，`fault` 只表示**已确认**（持续达阈值）——消除 2026-09-14 记录的状态抖动噪声（见 F50 状态栏）；(7) `unexpected_disable_sustain_s` 0.5 s **必须短于编排层本地兜底 1.0 s**，否则编排层先转 DISABLED 会让看门狗持续窗清零、真故障永远报不出来。**编排层**（`arm_controller.py`）：(8) 消费 `MonitorStatus`（只认 TRIGGERED，PENDING 不动作）→ READY/TRAJ 下转 DISABLED；另有**不依赖看门狗在跑**的本地兜底（fresh 电机全部报关闭持续 `unexpected_disable_sustain_s` 1.0 s）。参数：`monitor_status_topic`、`unexpected_disable_guard`、`unexpected_disable_sustain_s`。
+- **验收标准：**
+  1. 事故回归 `./scripts/a3_test/a3_test.sh incident` 两段全绿：执行层（mock 电机，不经 SocketCAN）stop 后零增益保活、使能重锚 + kp 软起步、关节不被甩动；看门狗/编排层示教拖动退出零触发、带外失能必被抓到
+  2. **回归有牙**：把源码换回 HEAD 旧版重编，两个脚本必须失败（旧执行层 stop 后仍发 p=1.98/kp=80、使能甩到 1.98；旧看门狗示教退出 1.4 s 触发 FOLLOW_STUCK→stop→reset）
+  3. 真机：使能前执行层对任何反馈陈旧电机拒绝使能；使能后 0.8 s 内 kp 单调升到额定、无甩动；stop 后总线上不再出现 kp>0 的目标帧
+  4. 带外失能（`/a3/motor/reset` 直调）→ 看门狗 UNEXPECTED_DISABLE + 编排层 DISABLED（两个通道都要，模拟真机事故前置）
+- **关联：** [LL-039](../../lessons_learned/LL-039-teach-exit-reanchor-false-trip-enable-snap.md)（事故复盘与判据教训）；F38（示教退出重锚——本需求第 5 条与之配套）；F50（看门狗）；F42（力矩钳位是防撞不防甩）；[shared/SAFETY.md](../shared/SAFETY.md)（使能前置校验条款）
+- **状态：** `implemented`（2026-09-14 仿真回归验收通过：`incident_regression_test.py` T0–T4 与 `incident_monitor_regression_test.py` M1–M4 全绿，且两脚本对 HEAD 旧版均失败——修复前执行层 stop 后仍续发 `(p=1.98, kp=80)`、使能后命令位置偏离反馈位 1.950 rad、mock 关节被拖到 1.98；修复前看门狗示教退出 1.4 s 触发 FOLLOW_STUCK→stop→3 s→reset、带外失能无人报。**真机验收（第 3/4 条）未做**——L6 打印关节与腕部 CAN 线在事故中损坏，臂待修，按约束不得使能）
 
 ### F40 — 失能保护（disable → 自动回 home → 失能）
 

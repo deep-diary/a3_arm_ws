@@ -27,7 +27,10 @@ a3_arm_monitor:
     # STALE_JS：js 过期
     stale_js_s: 1.0
     # UNEXPECTED_DISABLE：编排层在跑但电机失能
-    unexpected_disable_sustain_s: 1.0
+    # LL-039：必须比编排层本地兜底（arm_controller.yaml 同名参数 1.0s）短，
+    # 否则编排层先转 DISABLED、脱离检查状态窗 → 看门狗持续窗被清零 → 真故障永远
+    # 报不出来（只有 report 动作，缩短持续窗不增加误动作风险；它是布尔量、无噪声）。
+    unexpected_disable_sustain_s: 0.5
     # TEMP_UNRESPONSIVE：温度兜底（F44 失灵）
     temp_escalate_c: 95.0
     temp_grace_s: 3.0

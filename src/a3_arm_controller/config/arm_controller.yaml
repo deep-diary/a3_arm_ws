@@ -47,5 +47,13 @@
     # /joint_states 最大陈旧时长：桥异常时 js 冻结旧值（LL-020），超过拒绝使能
     js_max_stale_s: 1.0
 
+    # F51/LL-039：带外失能（电机被看门狗/别人失能，编排层仍以为在跑）兜底检测。
+    # 本地兜底不依赖看门狗在跑；持续窗 1.0s 用于抑制本节点自身 park→reset 竞态。
+    # 注意：看门狗侧同名参数必须更短（arm_monitor.yaml 0.5s）——否则本节点先转
+    # DISABLED 会让看门狗的持续窗清零，UNEXPECTED_DISABLE 永远报不出来。
+    monitor_status_topic: /a3/monitor/status
+    unexpected_disable_guard: true
+    unexpected_disable_sustain_s: 1.0
+
     trajectories_dir: "~/.a3/trajectories"
     named_poses_pkg: a3_description

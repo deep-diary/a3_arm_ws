@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # A3 机械臂单电机分层回归测试套件（F22）统一入口。
-# 用法: ./a3_test.sh {env|hw|telemetry|mqtt_cmd|servo|gripper|motor_debug|web|force_web|all}
+# 用法: ./a3_test.sh {env|hw|telemetry|mqtt_cmd|servo|gripper|motor_debug|incident|web|force_web|all}
 #
 # 真机阶段默认 can1 / CAN_ID=7 / L7_joint，空载、24V 锂电池供电。
 # 所有真机运动经 safety_limits.py 限幅，结束自动失能。
@@ -208,6 +208,15 @@ EOF
   wait
 }
 
+# ---- 阶段八：LL-039 事故回归（纯仿真 + mock 电机，无需硬件/root）----
+# 两个脚本各自拉起被测栈并跑在独立 ROS_DOMAIN_ID=57，与真机栈（domain 0）DDS 隔离。
+stage_incident() {
+  log "阶段八a 执行层 F51 事故回归（mock 电机 ↔ motor_protocol_node）"
+  PYTHONNOUSERSITE=1 python3 "$DIR/incident_regression_test.py" || return 1
+  log "阶段八b 看门狗 F50/编排层事故回归（sim 栈 + arm_controller/arm_monitor）"
+  PYTHONNOUSERSITE=1 python3 "$DIR/incident_monitor_regression_test.py" || return 1
+}
+
 # ---- 阶段七：web 路径力控阶梯验收（真机 + 生产 MQTT 桥，F34）----
 # 不启动任何节点：走已在运行的生产栈（can_bridge + gripper_controller + mqtt_bridge）。
 # 前置：泡棉在夹爪中、电机使能、gate 关。不进 `all`（需要人工放置泡棉/在线监督）。
@@ -224,6 +233,7 @@ case "${1:-}" in
   servo)     stage_servo ;;
   gripper)   stage_gripper ;;
   motor_debug) stage_motor_debug ;;
+  incident)  stage_incident ;;
   web)       stage_web ;;
   force_web) stage_force_web ;;
   all)
@@ -234,10 +244,11 @@ case "${1:-}" in
     stage_mqtt_cmd;   r3=$?; cleanup_stage
     stage_servo;      r4=$?; cleanup_stage
     stage_motor_debug; r5=$?; cleanup_stage
-    log "汇总: gripper=$r0 hw=$r1 telemetry=$r2 mqtt_cmd=$r3 servo=$r4 motor_debug=$r5 (0=PASS)"
-    [ $((r0+r1+r2+r3+r4+r5)) -eq 0 ] ;;
+    stage_incident;   r6=$?; cleanup_stage
+    log "汇总: gripper=$r0 hw=$r1 telemetry=$r2 mqtt_cmd=$r3 servo=$r4 motor_debug=$r5 incident=$r6 (0=PASS)"
+    [ $((r0+r1+r2+r3+r4+r5+r6)) -eq 0 ] ;;
   *)
     grep '^#' "$0" | head -n 6
-    echo "用法: $0 {env|hw|telemetry|mqtt_cmd|servo|gripper|motor_debug|web|force_web|all}"
+    echo "用法: $0 {env|hw|telemetry|mqtt_cmd|servo|gripper|motor_debug|incident|web|force_web|all}"
     exit 2 ;;
 esac

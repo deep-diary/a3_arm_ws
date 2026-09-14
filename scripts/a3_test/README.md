@@ -20,10 +20,23 @@
 ./scripts/a3_test/a3_test.sh servo      # 阶段四 仿真：MoveIt Servo 六方向直线 jog
 ./scripts/a3_test/a3_test.sh gripper    # 阶段五 夹爪力控（默认 sim 闭环，无硬件可跑）
 ./scripts/a3_test/a3_test.sh motor_debug # 阶段六 单电机调试下行（sim 闭环，9 个电机 op，无硬件可跑）
+./scripts/a3_test/a3_test.sh incident   # 阶段八 LL-039 事故回归（F51，纯仿真/mock 电机，无硬件/root）
 ./scripts/a3_test/a3_test.sh web        # 网页人工确认（保持遥测栈运行，打印操作清单）
 ./scripts/a3_test/a3_test.sh force_web  # 阶段七 web 路径力控阶梯验收 0.3→0.5→0（真机，见下）
-./scripts/a3_test/a3_test.sh all        # env→gripper→hw→telemetry→mqtt_cmd→servo→motor_debug
+./scripts/a3_test/a3_test.sh all        # env→gripper→hw→telemetry→mqtt_cmd→servo→motor_debug→incident
 ```
+
+LL-039 事故回归（F51，`incident`）：
+- 八a **执行层**：Python mock 电机（对接 `/can_tx_frames` ↔ `/can_rx_frames`，**不走 SocketCAN**，无需 root）
+  对接真 `motor_protocol_node`；脚本按事故时间线注入：使能 → 零力矩 → 拖到 1.98 rad → 退出零力矩（执行层 F38 重锚）
+  → `/a3/motor/stop`（断言此后**无** kp>0 帧）→ reset → 搬回 0.03 rad → 使能（断言命令位≈反馈位、kp 0.8 s 斜坡、关节未被甩动）。
+- 八b **看门狗/编排层**：`sim_motor_node` 冒充执行层 + 真 `arm_controller`/`arm_monitor`；
+  用 `/a3/motor/mit_command` 改仿真臂位姿等价「人手拖动」。断言 M1–M4：初始化无触发、jog 无触发、
+  **示教退出后 4 s 零触发**（假阳性修复）、带外 reset **必须**被判 `UNEXPECTED_DISABLE` 且编排层转 DISABLED（真阳性）。
+- **两个脚本各自拉起被测栈并跑在独立 `ROS_DOMAIN_ID=57`**，与真机栈（domain 0）DDS 隔离——mock 伪造全部反馈，
+  同域运行等于让测试的 enable 打到真电机上。被测进程用 `start_new_session=True` 起、按**进程组** `killpg` 收
+  （`ros2 run` 只是包装器，`terminate()` 杀不掉它孵化的节点）。
+- 有牙验证法：`git show HEAD:<file> > <file>` 还原修复前版本重启被测栈，脚本**必须失败**。
 
 夹爪力控（F28）两种模式：
 - 默认（`sim`）：脚本在独立 `ROS_DOMAIN_ID=77` 自起 `gripper_controller` + 假「电机+物体」植物
@@ -52,6 +65,7 @@ web 路径力控阶梯验收（F34，`force_web`）：
 | mqtt_cmd | EMQX `cmd` → mqtt_bridge → **mock** `/a3/arm/*` | 网页下行的 10 个 op 映射到编排层服务；用 mock 做确定性断言（路由+参数+`cmd_result`），不依赖 7 电机 |
 | servo | 仿真 `servo.launch.py`（sim_executor 闭环，不碰 CAN） | Servo 笛卡尔 jog 作用于 L1–L6（arm 组），ID=7 是夹爪不在 arm 组；且真机有 SERVO 模式互锁（CONTROL_ROADMAP 待办） |
 | motor_debug | EMQX `cmd` → mqtt_bridge → sim `/a3/motor/*`（独立 `ROS_DOMAIN_ID=44`） | 9 个电机调试 op 全链路（扫描 JSON 列表/MIT 单发与保持/停止/模式/参数 + 非法拒绝），hold 期间断言 `mp_L1` 收敛与 `temp/mode/online` 遥测；sim 有意不实现 gate 互锁（真机才验证） |
+| incident | 八a：mock 电机 ↔ 真 `motor_protocol_node`；八b：sim 栈 + 真 `arm_controller`/`arm_monitor`（独立 `ROS_DOMAIN_ID=57`） | LL-039 事故回归（F51）。仿真栈的 `sim_motor_node` **替换了整个 C++ 执行层**，覆盖不到本次改动的 C++ 路径 → 八a 用真执行层对接 Python mock 电机（不走 SocketCAN，无需 root）；八b 用 `/a3/motor/mit_command` 改仿真臂位姿来等价「人手拖动」。**必须与真机栈 DDS 隔离**：mock 伪造全部反馈、同名 `/a3/motor/*` 服务在真机栈上存在 |
 | web | 真机遥测 + deep-trace 网页 | 前端 RK3588 页只读、无控制按钮；控制链路用 mqtt_cmd 阶段的 MQTT CLI 等价验证，网页确认曲线/3D 渲染 |
 
 ## 安全
@@ -72,4 +86,6 @@ web 路径力控阶梯验收（F34，`force_web`）：
 - `mock_arm_services.py` / `mqtt_cmd_test.py` — 阶段二 MQTT 下行
 - `servo_sim_test.py` — 阶段四 Servo 仿真
 - `motor_debug_test.py` — 阶段六 单电机调试下行（F32）
+- `incident_regression_test.py` — 阶段八a 执行层 F51 事故回归（mock 电机 ↔ 真 motor_protocol_node）
+- `incident_monitor_regression_test.py` — 阶段八b 看门狗/编排层 F51 事故回归（sim 栈 + 真 arm_controller/arm_monitor）
 - `mqtt_force_ladder_test.py` — 阶段七 web 路径力控阶梯验收（F34，纯 paho，走生产 MQTT 桥）

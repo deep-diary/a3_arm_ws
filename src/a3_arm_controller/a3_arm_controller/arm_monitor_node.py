@@ -52,6 +52,9 @@ STALE_JS_STATES = {"READY", "TRAJ", "SAFE_PARK", "SERVO", "TEACH", "AI"}
 ENABLED_EXPECTED_STATES = {"READY", "TRAJ", "SAFE_PARK"}
 # 零力矩/重力补偿下臂悬浮是设计行为，跳过跟随/保持检查
 SUSPENDED_MODES = {"ZERO_TORQUE", "GRAVITY_COMP"}
+# LL-039：示教/零力矩退出、整臂失能→使能都是「意图边界」——执行层在这些边界把
+# 目标重锚到反馈位，看门狗的保持参照必须同步跟到当前实际位姿，否则 HOLD_DRIFT 假触发
+# （2026-09-14 真机事故：示教退出后 1.2 s 误判保持漂移 → stop → reset → 甩断 L6）。
 # 温度兜底触发的例外状态（F44 自己会处理这些）
 TEMP_EXEMPT_STATES = {"COOLING", "SAFE_PARK", "FAULT"}
 
@@ -117,13 +120,18 @@ class ArmMonitorNode(Node):
             Trigger, p("arm_disable_service"), callback_group=self._client_group)
 
         # ---- 故障状态机 ----
-        self._fault = None            # 当前故障类（无则 None）
+        self._fault = None            # 当前“已确认”故障类（无则 None）
+        self._pending = []            # 瞬时成立但未确认的条件（诊断用，不动作）
         self._fault_clear_since = 0.0  # 条件消失时间（回 OK 用）
         self._cond_since = {}         # fault -> 条件最早出现 mono
         self._armed = {f: True for f in FAULT_DEFAULTS}   # 一次触发后须条件消失才再触发
         self._escalated = {f: False for f in FAULT_DEFAULTS}
         self._act_done = {}           # fault -> (action, mono)（每故障独立动作跟踪）
         self._last_event = ""
+        # ---- LL-039 意图边界重基准 ----
+        self._prev_mode = None        # 上一拍 control_mode（SUSPENDED 退出沿检测）
+        self._prev_motors_state = None  # 上一拍整臂使能态：None/all/none/partial
+        self._hold_grace_until = 0.0  # 重基准宽限窗截止（窗内不判保持漂移）
         self._actions = {
             f: str(self.get_parameter(f"{f.lower()}_action").value)
             for f in FAULT_DEFAULTS
@@ -154,6 +162,7 @@ class ArmMonitorNode(Node):
         d("hold_error_sustain_s", 1.0)
         d("stale_js_s", 1.0)
         d("unexpected_disable_sustain_s", 1.0)
+        d("hold_rebaseline_grace_s", 2.0)   # LL-039：意图边界后免判保持漂移的宽限窗
         d("temp_escalate_c", 95.0)
         d("temp_grace_s", 3.0)
         d("escalation_cooldown_s", 5.0)
@@ -191,6 +200,52 @@ class ArmMonitorNode(Node):
             return
         self._traj = (time.monotonic(), list(msg.joint_names), pts, pts[-1][0])
         self._last_goal = dict(zip(msg.joint_names, pts[-1][1]))
+
+    # -------------------------------------------------------------- 意图边界重基准
+
+    def _motors_enable_state(self):
+        """整臂使能态：None=无新鲜数据 / 'none' / 'partial' / 'all'。"""
+        fresh = [s for s in self._motor.values() if s.fresh]
+        if not fresh:
+            return None
+        on = sum(1 for s in fresh if s.enabled)
+        if on == 0:
+            return "none"
+        return "all" if on == len(fresh) else "partial"
+
+    def _maybe_rebaseline(self, now: float):
+        """LL-039：在「意图边界」把保持参照重基准为当前实际位姿。
+
+        边界①：control_mode 从 ZERO_TORQUE/GRAVITY_COMP 转出——示教拖动改写了实际
+        位姿，执行层退出示教时把 MIT 目标重锚到反馈位（F38）；看门狗参照若仍停在
+        上一条轨迹末点，就会把「合法的新位姿」判成保持漂移（真机事故根因）。
+        边界②：整臂 none→all 使能上升沿——执行层 F51 使能重锚同样改写目标位。
+        宽限窗内一律不判保持漂移（人在拖、臂在重力下缓降都属边界效应）。
+        """
+        status = self._arm_status
+        mode = status.mode if status else ""
+        edges = []
+        if self._prev_mode in SUSPENDED_MODES and mode not in SUSPENDED_MODES:
+            edges.append(f"mode {self._prev_mode}->{mode or '?'}")
+        self._prev_mode = mode
+
+        mstate = self._motors_enable_state()
+        if mstate == "all" and self._prev_motors_state == "none":
+            edges.append("motors none->all(使能沿)")
+        if mstate is not None:
+            self._prev_motors_state = mstate
+
+        if not edges:
+            return
+        if self._js:
+            self._last_goal = dict(self._js)
+        # 边界前的运动窗口参照一并作废（那是对旧意图的期望）
+        self._traj = None
+        grace = float(self.get_parameter("hold_rebaseline_grace_s").value)
+        self._hold_grace_until = now + grace
+        self.get_logger().info(
+            f"[monitor] 保持参照重基准（{'；'.join(edges)}）：last_goal ← 当前实际位姿，"
+            f"宽限 {grace:.1f}s")
 
     # ------------------------------------------------------------------ 期望位置
 
@@ -292,10 +347,11 @@ class ArmMonitorNode(Node):
         )
         out["FOLLOW_STUCK"] = follow_ok
 
-        # 2. READY 保持期漂移（窗口已关，参照最近轨迹末点）
+        # 2. READY 保持期漂移（窗口已关，参照最近轨迹末点 / 意图边界重基准后的实际位姿）
         hold_errs = self._errs(self._last_goal) if not win else []
         hold_ok = (
             state == "READY" and mode not in SUSPENDED_MODES and hold_errs
+            and now >= self._hold_grace_until
             and max(hold_errs) > float(self.get_parameter("hold_error_max_rad").value)
         )
         out["HOLD_DRIFT"] = hold_ok
@@ -331,8 +387,19 @@ class ArmMonitorNode(Node):
         if self._arm_status is None or not self._js:
             return  # 数据未齐（启动期），只等
 
+        # LL-039：先处理意图边界（示教退出/使能沿）——重基准参照并开宽限窗
+        self._maybe_rebaseline(now)
+
         checks, errs, _win = self._check(now)
         active = [f for f, ok in checks.items() if ok]
+        # LL-039：fault 状态与动作同口径——条件持续达阈值才「确认」；瞬时成立只进
+        # pending（真机事故前的 19:32 FOLLOW_STUCK 状态抖动就是未确认条件被当故障报）
+        confirmed = [
+            f for f in active
+            if self._cond_since.get(f) is not None
+            and now - self._cond_since[f] >= self._sustain_for(f)
+        ]
+        self._pending = [f for f in active if f not in confirmed]
 
         # 条件时间戳维护
         for f, ok in checks.items():
@@ -369,10 +436,10 @@ class ArmMonitorNode(Node):
                 self._escalated[f] = True
                 self._execute(f, "reset")
 
-        # 全局 fault 状态维护（回 OK 需条件消失 + clear_hold）
-        if active:
+        # 全局 fault 状态维护（LL-039：只认「已确认」故障；回 OK 需条件消失 + clear_hold）
+        if confirmed:
             if self._fault is None:
-                self._fault = active[0]
+                self._fault = confirmed[0]
         else:
             if self._fault is not None:
                 if self._fault_clear_since == 0.0:
@@ -406,8 +473,14 @@ class ArmMonitorNode(Node):
     def _publish_status(self, now, errs):
         st = MonitorStatus()
         st.header.stamp = self.get_clock().now().to_msg()
-        st.status = "OK" if self._fault is None else "TRIGGERED"
+        if self._fault is not None:
+            st.status = "TRIGGERED"
+        elif self._pending:
+            st.status = "PENDING"
+        else:
+            st.status = "OK"
         st.fault = self._fault or ""
+        st.pending_faults = list(self._pending)
         st.action = max(self._act_done.values(), key=lambda x: x[1], default=("", 0.0))[0]
         st.tracking_errors = [float(e) for e in errs] if errs else [0.0] * 7
         st.max_tracking_error = max(errs) if errs else 0.0

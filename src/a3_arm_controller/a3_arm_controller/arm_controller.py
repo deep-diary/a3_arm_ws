@@ -31,7 +31,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from a3_can_bridge.msg import MotorStates
 from a3_can_bridge.srv import MotorCommand
-from a3_msgs.msg import ArmStatus
+from a3_msgs.msg import ArmStatus, MonitorStatus
 from a3_msgs.srv import (
     GotoNamedPose,
     MoveToJointPositions,
@@ -93,6 +93,10 @@ class ArmController(Node):
         self.declare_parameter("joint_states_topic", "/joint_states")
         self.declare_parameter("control_mode_topic", "/a3/control_mode")
         self.declare_parameter("arm_status_topic", "/a3/arm_status")
+        # F51/LL-039：消费看门狗确认故障（电机被带外失能 → 编排层不得停在 READY/TRAJ）
+        self.declare_parameter("monitor_status_topic", "/a3/monitor/status")
+        self.declare_parameter("unexpected_disable_guard", True)
+        self.declare_parameter("unexpected_disable_sustain_s", 1.0)
         self.declare_parameter("gate_topic", "/power_sequence/gate_open")
         self.declare_parameter("power_state_topic", "/power_sequence/state")
         self.declare_parameter("traj_topic", "/joint_group_effort_controller/joint_trajectory")
@@ -150,6 +154,9 @@ class ArmController(Node):
         self._message = ""
         self._traj_done_at = 0.0
         self._lock = threading.Lock()
+        # F51/LL-039: 电机被带外失能（看门狗 stop/reset、外部直接调 /a3/motor/reset）
+        self._pending_unexpected_disable = ""   # 待处置原因（空=无）
+        self._all_disabled_since = 0.0          # 整臂失能起始（本地兜底持续窗）
 
         # 关节状态缓存
         self._positions: List[float] = [0.0] * self._n_joints
@@ -214,6 +221,12 @@ class ArmController(Node):
         self.create_subscription(
             MotorStates, str(self.get_parameter("motor_states_topic").value), self._on_motor_states,
             js_qos, callback_group=self._cb_group,
+        )
+        # F51/LL-039: 看门狗状态（消费 UNEXPECTED_DISABLE——本节点在电机被带外失能后
+        # 不得继续停在 READY/TRAJ 并保留陈旧保持目标）
+        self.create_subscription(
+            MonitorStatus, str(self.get_parameter("monitor_status_topic").value),
+            self._on_monitor_status, 10, callback_group=self._cb_group,
         )
 
         # 发布
@@ -560,6 +573,15 @@ class ArmController(Node):
 
         converge_start = 0.0
         while time.monotonic() - t0 < duration + timeout_s and rclpy.ok():
+            # F51/LL-039: 电机已带外失能 → park 不可能收敛，立即退出（保持“已失能”事实）
+            if self._pending_unexpected_disable:
+                why = self._pending_unexpected_disable
+                self._pending_unexpected_disable = ""
+                self._all_disabled_since = 0.0
+                self._publish_mode("IDLE")
+                self._set_state(STATE_DISABLED, f"safe park aborted：{why}")
+                self.get_logger().error(f"[arm_controller] safe park aborted: {why}")
+                return False, f"safe park aborted: {why}"
             at_home, _ = self._at_home(tol)
             if at_home:
                 if converge_start == 0.0:
@@ -729,6 +751,36 @@ class ArmController(Node):
                     self._fault_reset_pending = True
                     break
 
+        # F51/LL-039 本地兜底（不依赖看门狗在跑）：READY/TRAJ/SAFE_PARK 期间整臂报告
+        # 「已失能」且持续 ≥ sustain → 电机被带外失能。持续窗用于抑制本节点自身
+        # park→reset 的竞态（reset 后电机先报 mode 0、状态机随后才转 DISABLED）。
+        if not self.get_parameter("unexpected_disable_guard").value:
+            return
+        if self._state not in (STATE_READY, STATE_TRAJ, STATE_SAFE_PARK):
+            self._all_disabled_since = 0.0
+            return
+        fresh_motors = [st for st in msg.states if st.fresh]
+        if fresh_motors and all(not st.enabled for st in fresh_motors):
+            now = time.monotonic()
+            if self._all_disabled_since == 0.0:
+                self._all_disabled_since = now
+            elif now - self._all_disabled_since >= float(
+                    self.get_parameter("unexpected_disable_sustain_s").value):
+                if not self._pending_unexpected_disable:
+                    self._pending_unexpected_disable = (
+                        f"电机带外失能（{len(fresh_motors)} 个 fresh 电机均报关闭，持续 "
+                        f"{now - self._all_disabled_since:.1f}s）")
+        else:
+            self._all_disabled_since = 0.0
+
+    def _on_monitor_status(self, msg: MonitorStatus) -> None:
+        """F51/LL-039：消费看门狗「已确认」故障——只认 TRIGGERED（瞬时 PENDING 不动作）。"""
+        if not self.get_parameter("unexpected_disable_guard").value:
+            return
+        if msg.status == "TRIGGERED" and msg.fault == "UNEXPECTED_DISABLE":
+            if not self._pending_unexpected_disable:
+                self._pending_unexpected_disable = "看门狗确认 UNEXPECTED_DISABLE"
+
     # ------------------------------------------------------------------ status
 
     def _publish_status(self) -> None:
@@ -740,6 +792,19 @@ class ArmController(Node):
         ):
             self._traj_done_at = 0.0
             self._back_to_ready()
+
+        # F51/LL-039: 电机被带外失能 → 立刻离开 READY/TRAJ（不再保留保持目标与后续指令）
+        if self._pending_unexpected_disable and self._state in (STATE_READY, STATE_TRAJ):
+            why = self._pending_unexpected_disable
+            self._pending_unexpected_disable = ""
+            self._all_disabled_since = 0.0
+            self._traj_done_at = 0.0
+            self._jogging = False
+            self._publish_mode("IDLE")
+            self._set_state(
+                STATE_DISABLED,
+                f"{why} → DISABLED（恢复：/a3/arm/enable；执行层 F51 使能会重锚到当前位姿）")
+            self.get_logger().error(f"[arm_controller] {why} → state=DISABLED")
 
         # F44: 超温/故障保护在状态节拍执行（订阅回调只置 pending 标记）
         if self._temp_protect_pending:
@@ -865,6 +930,10 @@ class ArmController(Node):
         ok, msg = self._motor_command(self._enable_cli, 1)
         if ok:
             self._set_state(STATE_READY, "enabled")
+            # F51：执行层把目标重锚到当前反馈位（丢弃任何陈旧目标），摘要随响应返回
+            self.get_logger().info(f"enable ok: {msg}")
+        else:
+            self.get_logger().error(f"enable refused: {msg}")
         resp.success = ok
         resp.message = msg
         return resp

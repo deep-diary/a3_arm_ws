@@ -278,6 +278,13 @@ public:
     motor_states_topic_ = this->declare_parameter<std::string>(
       "motor_states_topic", "/a3/motor/states");
     max_hold_duration_s_ = this->declare_parameter<double>("max_hold_duration_s", 30.0);
+    // F51（LL-039 使能安全）：使能 = 保当前位置，绝不执行历史目标
+    require_fresh_feedback_on_enable_ = this->declare_parameter<bool>(
+      "require_fresh_feedback_on_enable", true);
+    enable_reanchor_tolerance_rad_ = this->declare_parameter<double>(
+      "enable_reanchor_tolerance_rad", 0.15);
+    enable_kp_ramp_ = this->declare_parameter<bool>("enable_kp_ramp", true);
+    enable_ramp_duration_s_ = this->declare_parameter<double>("enable_ramp_duration_s", 0.8);
     joint_signs_ = this->declare_parameter<std::vector<double>>(
       "joint_signs", std::vector<double>(kNumArmJoints, 1.0));
 
@@ -420,6 +427,13 @@ public:
             if (mid < last_feedback_mit_rad_.size() &&
                 std::isfinite(last_feedback_mit_rad_[mid])) {
               last_commanded_mit_rad_[mid] = last_feedback_mit_rad_[mid];
+            }
+            // F51/LL-039：示教退出是显式新意图——解除 motor_stop 的保持抑制
+            if (mid < hold_suppressed_.size()) {
+              hold_suppressed_[mid] = false;
+            }
+            if (mid < enable_ramp_start_ns_.size()) {
+              enable_ramp_start_ns_[mid] = 0;
             }
           }
           zero_torque_active_ = false;
@@ -778,6 +792,9 @@ private:
     // tick 内按反馈力矩重新触发。
     torque_latch_active_.fill(false);
     torque_latch_sign_.fill(0.0);
+    // F51/LL-039：新轨迹 = 新意图——解除 motor_stop 的保持抑制与使能软起步斜坡
+    hold_suppressed_.fill(false);
+    enable_ramp_start_ns_.fill(0);
 
     if (enable_trajectory_interpolation_) {
       std::lock_guard<std::mutex> lock(traj_mutex_);
@@ -1125,7 +1142,10 @@ private:
         // 3) 已知使能但反馈陈旧：不盲发（不知实际位置，kp 保持会拉错位）。
         const int mode =
           idx < last_feedback_mode_status_.size() ? last_feedback_mode_status_[idx] : -1;
-        if (mode != -1 && mode != 0) {
+        // F51/LL-039：motor_stop/reset 置位的抑制标志——停止后不得再把目标锚回旧位姿
+        const bool suppressed =
+          route.motor_id < hold_suppressed_.size() && hold_suppressed_[route.motor_id];
+        if (!suppressed && mode != -1 && mode != 0) {
           const bool fb_finite =
             route.motor_id < last_feedback_mit_rad_.size() &&
             std::isfinite(last_feedback_mit_rad_[route.motor_id]);
@@ -1149,12 +1169,37 @@ private:
             mapped_position = 0.0;
           }
           seeded = true;
+          if (suppressed && mode != -1 && mode != 0) {
+            RCLCPP_WARN_THROTTLE(
+              this->get_logger(), *this->get_clock(), 2000,
+              "F51 hold suppressed after motor_stop: motor=%u 零增益保活，不重锚旧目标",
+              static_cast<unsigned>(route.motor_id));
+          }
         }
       }
       const double bus_kp = is_front ? runtime_kp_can0_ : runtime_kp_can1_;
       const double bus_kd = is_front ? runtime_kd_can0_ : runtime_kd_can1_;
-      const double use_kp = seeded ? 0.0 : ResolveKp(static_cast<int>(route.motor_id), bus_kp);
-      const double use_kd = seeded ? 0.0 : ResolveKd(static_cast<int>(route.motor_id), bus_kd);
+      // F51/LL-039 使能软起步：使能后 kp/kd 从 0 线性升到额定（τ_ff 重力前馈照常，
+      // 不受斜坡影响），使能瞬间的任何残余误差都不会被满增益放大成甩动。
+      double enable_ramp = 1.0;
+      if (enable_kp_ramp_ && route.motor_id < enable_ramp_start_ns_.size()) {
+        const int64_t ramp_t0_ns = enable_ramp_start_ns_[route.motor_id];
+        if (ramp_t0_ns > 0) {
+          const int64_t ramp_ns = static_cast<int64_t>(enable_ramp_duration_s_ * 1e9);
+          const int64_t dt_ns = now_ns - ramp_t0_ns;
+          if (ramp_ns <= 0 || dt_ns >= ramp_ns) {
+            enable_ramp_start_ns_[route.motor_id] = 0;
+          } else if (dt_ns > 0) {
+            enable_ramp = static_cast<double>(dt_ns) / static_cast<double>(ramp_ns);
+          } else {
+            enable_ramp = 0.0;
+          }
+        }
+      }
+      const double use_kp =
+        (seeded ? 0.0 : ResolveKp(static_cast<int>(route.motor_id), bus_kp)) * enable_ramp;
+      const double use_kd =
+        (seeded ? 0.0 : ResolveKd(static_cast<int>(route.motor_id), bus_kd)) * enable_ramp;
       const double use_tau = seeded ? 0.0 : ComputeMitTorqueFf(idx, is_front);
       const auto frame = ProtocolCodec::BuildMitControlFrame(
         ArmMapper::ArmBus(),
@@ -1422,6 +1467,88 @@ private:
       ids.push_back(req->motor_id);
     }
 
+    // F51（LL-039）：使能 = 保当前位置，绝不执行历史目标。
+    // 真机事故（2026-09-14）：motor_stop 后 refresh 播种把 NaN 目标重锚回拖动位姿，
+    // 人工把臂搬回 home 后 /a3/arm/enable → runtime kp 对 ~2 rad 误差满增益输出
+    // → 3 s 甩到位，甩断 L6 打印关节。因此：
+    //   ① 使能前逐电机把 MIT 目标重锚到新鲜反馈位（陈旧目标丢弃并 WARN 出距离）；
+    //   ② 反馈缺失/不新鲜 → 整体拒绝使能（不知实际位置就使能 = 盲拉，LL-018/LL-022）；
+    //   ③ 使能后 kp/kd 走软起步斜坡（在 OnTxRefreshTimer 中应用）。
+    size_t enable_reanchored = 0;
+    double enable_max_delta = 0.0;
+    if (command == 1) {
+      const int64_t now_ns = this->now().nanoseconds();
+      std::vector<std::string> missing;
+      for (const uint8_t mid : ids) {
+        const bool fb_finite =
+          mid < last_feedback_mit_rad_.size() && std::isfinite(last_feedback_mit_rad_[mid]);
+        bool fb_fresh = !require_fresh_feedback_on_enable_;
+        if (const auto route = GetRouteByMotorId(mid); route.has_value()) {
+          const size_t idx = std::min(
+            route->trajectory_index,
+            static_cast<size_t>(ArmMapper::kTemporaryIndexMap.size() - 1));
+          fb_fresh = fb_fresh ||
+            (idx < last_feedback_stamp_ns_.size() && last_feedback_stamp_ns_[idx] > 0 &&
+            (now_ns - last_feedback_stamp_ns_[idx]) <
+            static_cast<int64_t>(feedback_fresh_timeout_s_ * 1e9));
+        }
+        if (!fb_finite || !fb_fresh) {
+          missing.push_back(
+            "motor=" + std::to_string(static_cast<int>(mid)) +
+            (fb_finite ? "(反馈陈旧)" : "(无反馈)"));
+          continue;
+        }
+        const double fb = last_feedback_mit_rad_[mid];
+        const double prev = last_commanded_mit_rad_[mid];
+        if (std::isfinite(prev)) {
+          const double delta = std::fabs(prev - fb);
+          enable_max_delta = std::max(enable_max_delta, delta);
+          if (delta > enable_reanchor_tolerance_rad_) {
+            RCLCPP_WARN(
+              this->get_logger(),
+              "F51 enable re-anchor: motor=%u 丢弃陈旧目标 p=%.5f → 反馈位 %.5f (Δ=%.4f rad)",
+              static_cast<unsigned>(mid), prev, fb, delta);
+          }
+        } else {
+          RCLCPP_INFO(
+            this->get_logger(),
+            "F51 enable re-anchor: motor=%u 无历史目标 → 锚定反馈位 %.5f",
+            static_cast<unsigned>(mid), fb);
+        }
+        // 无条件锚定到当前位置：使能语义 = 保当前位
+        last_commanded_mit_rad_[mid] = fb;
+        hold_suppressed_[mid] = false;
+        if (enable_kp_ramp_) {
+          enable_ramp_start_ns_[mid] = now_ns;
+        }
+        ++enable_reanchored;
+      }
+      if (!missing.empty()) {
+        std::string msg = "enable refused（F51 安全门禁）：反馈缺失/陈旧 — ";
+        for (size_t i = 0; i < missing.size(); ++i) {
+          msg += (i ? ", " : "") + missing[i];
+        }
+        resp->success = false;
+        resp->message = msg;
+        RCLCPP_ERROR(this->get_logger(), "%s", msg.c_str());
+        return;
+      }
+    } else if (command == 2 || command == 3) {
+      // reset/set_zero 是带外状态变更（失能/零点平移）：清目标 + 置抑制，
+      // 失能期间不得再向总线续发旧目标保持帧。
+      for (const uint8_t mid : ids) {
+        if (mid < hold_suppressed_.size()) {
+          hold_suppressed_[mid] = true;
+        }
+        if (mid < last_commanded_mit_rad_.size()) {
+          last_commanded_mit_rad_[mid] = std::numeric_limits<double>::quiet_NaN();
+        }
+        if (mid < enable_ramp_start_ns_.size()) {
+          enable_ramp_start_ns_[mid] = 0;
+        }
+      }
+    }
+
     size_t sent = 0;
     for (const uint8_t mid : ids) {
       const CanBus bus = BusForMotorId(mid);
@@ -1458,7 +1585,14 @@ private:
       return;
     }
     resp->success = true;
-    resp->message = "ok (" + std::to_string(sent) + " frame(s))";
+    if (command == 1) {
+      // F51：把重锚结果回给调用方（编排层/CLI 都能看到「丢弃了多远的陈旧目标」）
+      resp->message = "ok (" + std::to_string(sent) + " enable frame(s)); F51 重锚 " +
+        std::to_string(enable_reanchored) + " 电机到反馈位, 最大丢弃目标距离 " +
+        std::to_string(enable_max_delta) + " rad";
+    } else {
+      resp->message = "ok (" + std::to_string(sent) + " frame(s))";
+    }
   }
 
   void HandleSetCanIdService(
@@ -1683,6 +1817,13 @@ private:
       resp->message = why;
       return;
     }
+    // F51/LL-039：MIT 直驱是显式新意图——解除 motor_stop 的保持抑制与软起步斜坡
+    if (req->motor_id < hold_suppressed_.size()) {
+      hold_suppressed_[req->motor_id] = false;
+    }
+    if (req->motor_id < enable_ramp_start_ns_.size()) {
+      enable_ramp_start_ns_[req->motor_id] = 0;
+    }
     const double p = Clamp(
       static_cast<double>(req->position_rad), ProtocolCodec::kPMin, ProtocolCodec::kPMax);
     // LL-024: 速度/力矩按该电机型号量程钳位（RS00 ±33/±14，EL05 ±50/±6）
@@ -1782,6 +1923,14 @@ private:
       if (mid < last_commanded_mit_rad_.size()) {
         // NaN 使 OnTxRefreshTimer 不再为该电机续发旧目标保持帧
         last_commanded_mit_rad_[mid] = std::numeric_limits<double>::quiet_NaN();
+      }
+      // F51/LL-039：NaN 只挡「续发」，挡不住播种分支把目标重锚回旧位姿（事故二级根因）
+      // ——必须同时置抑制标志，直到出现显式新意图（轨迹/MIT 直驱/零力矩退出/使能）。
+      if (mid < hold_suppressed_.size()) {
+        hold_suppressed_[mid] = true;
+      }
+      if (mid < enable_ramp_start_ns_.size()) {
+        enable_ramp_start_ns_[mid] = 0;
       }
     }
     size_t sent = 0;
@@ -2009,6 +2158,19 @@ private:
       ++error_sample_count_;
       error_abs_sum_ += abs_err;
       error_abs_max_ = std::max(error_abs_max_, abs_err);
+      // F51/LL-039：失能态下的「陈旧目标」= 使能后的甩动隐患。真机事故时该差值已达
+      // 2 rad（日志里有 abs_err 却无人看见）——这里显式告警，别再靠人肉读日志。
+      if (!IsEnabledMode(static_cast<int>(feedback->mode_status)) &&
+          abs_err > enable_reanchor_tolerance_rad_)
+      {
+        RCLCPP_WARN_THROTTLE(
+          this->get_logger(), *this->get_clock(), 5000,
+          "F51 stale target while disabled: motor=%u mode=%d cmd=%.5f fb=%.5f Δ=%.4f rad"
+          "（使能时将重锚到反馈位，不再执行该目标）",
+          static_cast<unsigned>(feedback->motor_id),
+          static_cast<int>(feedback->mode_status),
+          expected_mit, feedback->current_angle, abs_err);
+      }
     }
 
     if (const auto route = GetRouteByMotorId(feedback->motor_id); route.has_value()) {
@@ -2655,6 +2817,16 @@ private:
   std::string mit_mapped_topic_;
   rclcpp::Publisher<JointState>::SharedPtr mapped_positions_pub_;
   std::array<double, 256> last_commanded_mit_rad_{};
+  // F51（LL-039）：motor_stop/reset 后置位——禁止 refresh 播种把 NaN 目标重锚回
+  // 旧位姿（本次真机事故的二级根因）。清零时机 = 新意图：轨迹 / MIT 直驱 /
+  // 零力矩退出重锚 / 使能重锚。
+  std::array<bool, 256> hold_suppressed_{};
+  // F51：使能软起步——每电机 ramp 起始时刻（0=无斜坡），kp/kd 从 0 升到额定
+  std::array<int64_t, 256> enable_ramp_start_ns_{};
+  bool require_fresh_feedback_on_enable_{true};
+  double enable_reanchor_tolerance_rad_{0.15};
+  bool enable_kp_ramp_{true};
+  double enable_ramp_duration_s_{0.8};
   std::array<double, 256> last_feedback_mit_rad_{};
   std::array<double, 256> last_feedback_mit_vel_rad_s_{};
   std::array<uint8_t, 256> last_feedback_master_id_{};

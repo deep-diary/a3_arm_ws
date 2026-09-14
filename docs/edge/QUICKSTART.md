@@ -102,9 +102,10 @@
     ./scripts/a3_test/a3_test.sh mqtt_cmd   # MQTT 下行：mock 编排层，10 个 op 全链路
     ./scripts/a3_test/a3_test.sh servo      # 仿真：MoveIt Servo 六方向直线 jog
     ./scripts/a3_test/a3_test.sh gripper    # 夹爪力控闭环（默认 sim 无硬件；hw 见第 14 节）
+    ./scripts/a3_test/a3_test.sh incident   # LL-039 事故回归（纯仿真/mock 电机，无需硬件/root，F51）
     ./scripts/a3_test/a3_test.sh web        # 启动 deep-trace 网页，人工确认曲线/3D（操作清单）
     ./scripts/a3_test/a3_test.sh force_web  # web 路径力控阶梯验收 0.3→0.5→0（真机+泡棉+生产 MQTT 桥，F34）
-    ./scripts/a3_test/a3_test.sh all        # 顺序跑 env→gripper→hw→telemetry→mqtt_cmd→servo
+    ./scripts/a3_test/a3_test.sh all        # 顺序跑 env→gripper→hw→telemetry→mqtt_cmd→servo→motor_debug→incident
     ```
     - **跑 `mqtt_cmd` 前先停真机 `a3_mqtt_bridge`**（`pkill -f bridge.launch.py`）：测试桥与真机桥共享 `deep-trace/HOME-DEMO/RK3588/cmd` 话题，两边的 `cmd_result` 会互相覆盖（2026-09-07 实测 15/18 串扰，且测试指令会被真机夹爪执行）；跑完重启真机桥。
     - 真机直连底层 `/a3/motor/*`（`motor_id:=7`），**不**走 `/a3/arm/init`（需 7 电机齐全）；脚本以 `use_power_sequence:=false` 起 can_bridge。
@@ -291,6 +292,26 @@ cat ~/.a3/stats/torque_stats.yaml
 - **F45 状态机**：11 态（IDLE/INIT/READY/TRAJ/SERVO/TEACH/AI/SAFE_PARK/DISABLED/COOLING/FAULT）；disable/温度保护路径转移实测，arm_state 遥测一致。
 - **F46 帧率**：轨迹期 195 Hz/关节（4098 帧/3 s ≈99% 交付、限速丢弃 0.7%）、静止对照 47.2 Hz/关节、`tx_rate_ok=true`；**tx_stats 5 s 窗口旋转会切分轨迹尾巴，读帧率须对照同时段桥日志**（LL-026）。
 - **F50 故障监视看门狗**（`a3_arm_monitor`，随 arm_controller.launch.py 默认启动，`enable_monitor:=false` 可关）：跨源比对 js/轨迹/电机状态/编排状态，故障走 stop → 升级 reset 阶梯（阈值与抑制规则见 [TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)「故障监视看门狗」）。2026-09-13 仿真验收（ROS_DOMAIN_ID=55 sim 闭环 + 故障注入）：健康 move_to 零触发（max err 0.0004 rad）；斜坡轨迹注入 → FOLLOW_STUCK → stop → +3 s 升级 reset；SIGSTOP sim_motor → STALE_JS → reset；ZERO_TORQUE 模式注入跳变零触发（抑制生效）。**5 次触发全为注入诱导，零误报**；真机观察随 F49 重力采集同场进行（`ros2 topic echo /a3/monitor/status`）。
+
+### 使能安全与事故回归（F51，仿真已验证 / 真机待验）
+
+来源：2026-09-14 真机事故（示教退出后看门狗假触发 → stop 的 NaN 被 refresh 播种覆盖 → 失能期陈旧目标满增益使能 → **甩断 L6**）。完整复盘见 [LL-039](../lessons_learned/LL-039-teach-exit-reanchor-false-trip-enable-snap.md)，条款见 [shared/SAFETY.md](../shared/SAFETY.md)「使能安全」。使能语义现在是：
+
+- **使能 = 保当前位置**：`/a3/motor/enable`、`/a3/arm/enable` 逐电机校验反馈新鲜度（缺失/陈旧 → **整体拒绝**），并把 MIT 目标无条件重锚到反馈位；响应里回传「F51 重锚 N 电机…最大丢弃目标距离 X rad」。
+- **使能软起步**：kp/kd 在 `enable_ramp_duration_s`（0.8 s）内线性升到额定，使能瞬间残余误差不会被满增益放大成甩动（τ_ff 重力前馈不受影响）。
+- **stop/reset 有保持抑制 latch**：卸力后 refresh 只发零增益保活帧（p=反馈位、kp=kd=τ=0），**不再**把旧目标锚回去续推；只有新轨迹 / MIT 直驱 / 零力矩 / 使能 / park 才解除。
+- **失能期陈旧目标告警**：`!enabled && |cmd−fb| > 0.15 rad` 时限频 WARN（事故时该差值 1.956 rad 静默保留了 2 分钟）。
+- **看门狗**：意图边界（示教/零力矩退出、整臂使能沿）重基准保持参照 + 2 s 宽限；`status` 分 OK/PENDING/TRIGGERED（只对 TRIGGERED 动作）；编排层消费 `UNEXPECTED_DISABLE`，另有不依赖看门狗的本地兜底。
+
+```bash
+# 仿真回归（有牙：旧代码必失败）——两个脚本各自起被测栈，独立 ROS_DOMAIN_ID=57 与真机栈 DDS 隔离
+./scripts/a3_test/a3_test.sh incident
+#   八a 执行层：mock 电机 ↔ 真 motor_protocol_node，断言 stop 后无 kp>0 帧、使能命令位≈反馈位、kp 斜坡
+#   八b 看门狗：sim 栈 + 真 arm_controller/arm_monitor，断言示教退出 4 s 零触发（真阳性另验：带外失能必须被抓到）
+```
+
+- 真机验收（**未做**，臂待修）：使能前反馈陈旧时被拒、kp 0.8 s 斜坡无甩动、stop 后无 kp>0 帧、带外失能双通道都能抓到。
+- **测试必须跑在独立 `ROS_DOMAIN_ID`**：mock 会伪造全部反馈，而同名 `/a3/motor/*` 服务在真机栈上存在——同域运行等于把测试的 enable 打到真电机上（LL-039 判据教训 3）。
 
 ### 重力标定（F49，真机 7 关节臂）
 

@@ -120,7 +120,9 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 ### 订阅 / 发布
 
 - **订阅**：`/joint_states` 与 `/a3/motor/states`（均双 QoS：BEST_EFFORT + RELIABLE，LL-030）、`/a3/arm_status`、`/joint_group_effort_controller/joint_trajectory`
-- **发布**：`/a3/monitor/status`（`a3_msgs/msg/MonitorStatus`，20 Hz）：`status`(OK/TRIGGERED)、`fault`、`action`、`tracking_errors[7]`、`max_tracking_error`、`last_event`
+- **发布**：`/a3/monitor/status`（`a3_msgs/msg/MonitorStatus`，20 Hz）：`status`(OK/PENDING/TRIGGERED)、`fault`、`pending_faults`、`action`、`tracking_errors[7]`、`max_tracking_error`、`last_event`
+  - `status=PENDING` 表示「条件已满足但持续窗未满（未确认）」；`fault` 只填**已确认**（达持续阈值）的故障类。
+    调用方只应对 `TRIGGERED` 动作（F51/LL-039：之前瞬时条件即报 TRIGGERED，抖动与确认不可分）。
 
 ### 故障类 → 处置阶梯
 
@@ -129,11 +131,13 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `FOLLOW_STUCK` | 运动窗口内 max\|q_d−q_actual\| > 0.25 rad 持续 0.5 s | `stop` → 3 s 未消升级 `reset` |
 | `HOLD_DRIFT` | READY 保持期末点 vs 实际 > 0.30 rad 持续 1.0 s | `stop` → 升级 `reset` |
 | `STALE_JS` | js 过期 > 1.0 s 且 state ∈ {READY,TRAJ,SAFE_PARK,SERVO,TEACH,AI} | `reset`（反馈死亡） |
-| `UNEXPECTED_DISABLE` | state ∈ {READY,TRAJ,SAFE_PARK} 但电机 enabled=false 持续 1.0 s | **仅报告**（电机已失能） |
+| `UNEXPECTED_DISABLE` | state ∈ {READY,TRAJ,SAFE_PARK} 但电机 enabled=false 持续 0.5 s | **仅报告**（电机已失能）→ 编排层转 DISABLED |
 | `TEMP_UNRESPONSIVE` | 温度 ≥95 °C 且 state ∉ {COOLING,SAFE_PARK,FAULT} 持续 3 s | `reset`（F44 失灵兜底） |
 
 - **期望位置不依赖 ArmStatus.positions**：自建轨迹插值器（按 `time_from_start` 线性插值，与执行层一致；运动窗口 = [t0, t_end+2 s]，窗口关闭后以末点作保持位——不用 control_mode 判运动期，LL-009）
 - **抑制（防误报）**：mode ∈ {ZERO_TORQUE, GRAVITY_COMP} 跳过跟随/保持；state ∈ {IDLE,INIT,DISABLED,COOLING,FAULT} 跳过运动类检查；启动 3 s 宽限；触发后 5 s cooldown；条件消失 + 2 s 回 OK
+- **意图边界重基准（F51/LL-039）**：control_mode 从 ZERO_TORQUE/GRAVITY_COMP 转出、整臂 none→all 使能沿时，保持参照 `_last_goal` ← 当前实际位姿、清运动窗口，并给 `hold_rebaseline_grace_s`（2 s）宽限。缺了它，示教退出后执行层已合法重锚、看门狗仍拿上一条轨迹末点当参照 → 1 s 后假报 HOLD_DRIFT（LL-039 事故触发源）
+- **UNEXPECTED_DISABLE 持续窗须 < 编排层本地兜底**：看门狗 0.5 s < `arm_controller.yaml` 的 `unexpected_disable_sustain_s` 1.0 s。编排层先转 DISABLED 会使其检查状态窗失效、持续窗清零 → 真故障永远报不出来
 - **动作服务**：`/a3/motor/stop`（MotorStop motor_id=0）、`/a3/motor/reset`（MotorCommand motor_id=0 command=2）、`/a3/arm/disable`（Trigger）
 
 ### MQTT 下行指令与回执（a3_mqtt_bridge ↔ Web，需求 F23）
