@@ -68,7 +68,23 @@ using a3_can_bridge::srv::SetMotorParamU8;
 namespace a3_can_bridge
 {
 
-static constexpr size_t kNumArmJoints = DogMapper::kTemporaryIndexMap.size();
+/// F52：当前档位关节数（运行期；默认 7J，可由 motor_map.yaml 覆盖成 5J 等）。
+/// 原为编译期常量 kNumArmJoints = kTemporaryIndexMap.size()。
+static size_t NumArmJoints()
+{
+  return ArmMapper::NumJoints();
+}
+
+/// F52：当前档位路由表 / 关节名表（运行期，顺序 = 轨迹下标顺序）。
+static const std::vector<MotorRoute> & ArmRoutes()
+{
+  return ArmMapper::Routes();
+}
+
+static const std::vector<std::string> & ArmJointNames()
+{
+  return ArmMapper::JointNames();
+}
 // 平滑收敛判定阈值（rad）：|平滑输出 - 限幅目标| <= 该值视为到达
 static constexpr double kSmoothingConvergeTol = 1e-3;
 // 单点 jog 轨迹在采样结束后的最大保持时长（s）：覆盖启动平滑 2 s + 全行程速度限幅
@@ -80,7 +96,7 @@ static std::vector<double> BuildMirrorJointOffsetsRad(double hip, double thigh, 
   (void)hip;
   (void)thigh;
   (void)calf_mag;
-  return std::vector<double>(kNumArmJoints, 0.0);
+  return std::vector<double>(NumArmJoints(), 0.0);
 }
 
 enum class TuneScope
@@ -127,7 +143,7 @@ static TuneScope ParseScope(const std::string & text)
 
 static std::optional<MotorRoute> GetRouteByMotorId(uint8_t motor_id)
 {
-  for (const auto & route : DogMapper::kTemporaryIndexMap) {
+  for (const auto & route : ArmRoutes()) {
     if (route.motor_id == motor_id) {
       return route;
     }
@@ -176,7 +192,10 @@ public:
   MotorProtocolNode()
   : Node("motor_protocol_node")
   {
+    ConfigureJointProfile();
+
     kp_ = this->declare_parameter<double>("kp", 30.0);
+    // 注意：以下逐关节参数的默认长度/校验都以 ConfigureJointProfile() 定下的档位为准。
     kd_ = this->declare_parameter<double>("kd", 1.5);
     default_velocity_ = this->declare_parameter<double>("default_velocity", 0.0);
     default_tau_ff_ = this->declare_parameter<double>("default_tau_ff", 0.0);
@@ -192,7 +211,7 @@ public:
     enable_joint_tau_ff_ = this->declare_parameter<bool>("enable_joint_tau_ff", false);
     gravity_ff_scale_ = this->declare_parameter<double>("gravity_ff_scale", 1.0);
     tau_ff_nominal_nm_ = this->declare_parameter<std::vector<double>>(
-      "tau_ff_nominal_nm", std::vector<double>(kNumArmJoints, 0.0));
+      "tau_ff_nominal_nm", std::vector<double>(NumArmJoints(), 0.0));
     // Pinocchio gravity feedforward (EDULITE-aligned): URDF-frame τ_g * joint_signs → MIT tau
     enable_gravity_compensation_ = this->declare_parameter<bool>(
       "enable_gravity_compensation", false);
@@ -203,19 +222,19 @@ public:
     gravity_fresh_timeout_s_ = this->declare_parameter<double>(
       "gravity_fresh_timeout_s", 0.5);
     gravity_joint_scale_ = this->declare_parameter<std::vector<double>>(
-      "gravity_joint_scale", std::vector<double>(kNumArmJoints, 1.0));
+      "gravity_joint_scale", std::vector<double>(NumArmJoints(), 1.0));
     use_joint_cmd_limits_ = this->declare_parameter<bool>("use_joint_cmd_limits", true);
     joint_cmd_min_rad_ = this->declare_parameter<std::vector<double>>(
-      "joint_cmd_min_rad", std::vector<double>(kNumArmJoints, -3.14));
+      "joint_cmd_min_rad", std::vector<double>(NumArmJoints(), -3.14));
     joint_cmd_max_rad_ = this->declare_parameter<std::vector<double>>(
-      "joint_cmd_max_rad", std::vector<double>(kNumArmJoints, 3.14));
+      "joint_cmd_max_rad", std::vector<double>(NumArmJoints(), 3.14));
     use_motor_domain_limits_ = this->declare_parameter<bool>("use_motor_domain_limits", true);
     derive_motor_limits_from_joint_cmd_ = this->declare_parameter<bool>(
       "derive_motor_limits_from_joint_cmd", true);
     joint_mit_min_rad_ = this->declare_parameter<std::vector<double>>(
-      "joint_mit_min_rad", std::vector<double>(kNumArmJoints, ProtocolCodec::kPMin));
+      "joint_mit_min_rad", std::vector<double>(NumArmJoints(), ProtocolCodec::kPMin));
     joint_mit_max_rad_ = this->declare_parameter<std::vector<double>>(
-      "joint_mit_max_rad", std::vector<double>(kNumArmJoints, ProtocolCodec::kPMax));
+      "joint_mit_max_rad", std::vector<double>(NumArmJoints(), ProtocolCodec::kPMax));
     enable_startup_smoothing_ = this->declare_parameter<bool>("enable_startup_smoothing", true);
     startup_smoothing_duration_s_ = this->declare_parameter<double>("startup_smoothing_duration_s", 1.5);
     command_max_velocity_rad_s_ = this->declare_parameter<double>("command_max_velocity_rad_s", 6.0);
@@ -257,7 +276,7 @@ public:
     // 把目标钉在反馈位（冻结），反向放行；latch 防 200Hz 极限环。
     enable_torque_protection_ = this->declare_parameter<bool>("enable_torque_protection", true);
     torque_protection_limit_nm_ = this->declare_parameter<std::vector<double>>(
-      "torque_protection_limit_nm", std::vector<double>(kNumArmJoints, 3.0));
+      "torque_protection_limit_nm", std::vector<double>(NumArmJoints(), 3.0));
     torque_protection_release_margin_rad_ = this->declare_parameter<double>(
       "torque_protection_release_margin_rad", 0.02);
     torque_protection_log_throttle_ms_ = this->declare_parameter<int>(
@@ -266,9 +285,9 @@ public:
     // RS00 ±14 Nm/±33 rad/s，EL05 ±6 Nm/±50 rad/s）。统一 ±6/±50 时 RS00 反馈力矩
     // 少报 2.333 倍、τ_ff 编码反向放大 2.333 倍。按 motor_id-1 索引（A3: 1-3 RS00, 4-7 EL05）。
     motor_torque_range_nm_ = this->declare_parameter<std::vector<double>>(
-      "motor_torque_range_nm", std::vector<double>(kNumArmJoints, ProtocolCodec::kTMax));
+      "motor_torque_range_nm", std::vector<double>(NumArmJoints(), ProtocolCodec::kTMax));
     motor_speed_range_rad_s_ = this->declare_parameter<std::vector<double>>(
-      "motor_speed_range_rad_s", std::vector<double>(kNumArmJoints, ProtocolCodec::kVMax));
+      "motor_speed_range_rad_s", std::vector<double>(NumArmJoints(), ProtocolCodec::kVMax));
     // F46: TX 帧率监视——5s 窗口统计发布 /a3/motor/tx_stats
     publish_tx_stats_ = this->declare_parameter<bool>("publish_tx_stats", true);
     tx_stats_topic_ = this->declare_parameter<std::string>(
@@ -286,10 +305,10 @@ public:
     enable_kp_ramp_ = this->declare_parameter<bool>("enable_kp_ramp", true);
     enable_ramp_duration_s_ = this->declare_parameter<double>("enable_ramp_duration_s", 0.8);
     joint_signs_ = this->declare_parameter<std::vector<double>>(
-      "joint_signs", std::vector<double>(kNumArmJoints, 1.0));
+      "joint_signs", std::vector<double>(NumArmJoints(), 1.0));
 
     joint_offsets_rad_ = this->declare_parameter<std::vector<double>>(
-      "joint_offsets_rad", std::vector<double>(kNumArmJoints, 0.0));
+      "joint_offsets_rad", std::vector<double>(NumArmJoints(), 0.0));
 
     const double off_hip = this->declare_parameter<double>("joint_offset_hip_rad", 0.0);
     const double off_thigh = this->declare_parameter<double>("joint_offset_thigh_rad", 0.0);
@@ -305,27 +324,27 @@ public:
         off_hip, off_thigh, off_calf);
     }
 
-    if (joint_signs_.size() != kNumArmJoints || joint_offsets_rad_.size() != kNumArmJoints) {
+    if (joint_signs_.size() != NumArmJoints() || joint_offsets_rad_.size() != NumArmJoints()) {
       RCLCPP_WARN(
         this->get_logger(),
-        "joint_signs/joint_offsets_rad size mismatch, reset to kNumArmJoints defaults.");
-      joint_signs_ = std::vector<double>(kNumArmJoints, 1.0);
-      joint_offsets_rad_ = std::vector<double>(kNumArmJoints, 0.0);
+        "joint_signs/joint_offsets_rad size mismatch, reset to NumArmJoints() defaults.");
+      joint_signs_ = std::vector<double>(NumArmJoints(), 1.0);
+      joint_offsets_rad_ = std::vector<double>(NumArmJoints(), 0.0);
     }
-    if (torque_protection_limit_nm_.size() != kNumArmJoints) {
+    if (torque_protection_limit_nm_.size() != NumArmJoints()) {
       RCLCPP_WARN(
         this->get_logger(),
         "torque_protection_limit_nm size != %zu, padding/truncating to 3.0.",
-        kNumArmJoints);
-      torque_protection_limit_nm_.resize(kNumArmJoints, 3.0);
+        NumArmJoints());
+      torque_protection_limit_nm_.resize(NumArmJoints(), 3.0);
     }
-    if (tau_ff_nominal_nm_.size() != kNumArmJoints) {
-      RCLCPP_WARN(this->get_logger(), "tau_ff_nominal_nm size != %zu, padding/truncating.", kNumArmJoints);
-      tau_ff_nominal_nm_.resize(kNumArmJoints, 0.0);
+    if (tau_ff_nominal_nm_.size() != NumArmJoints()) {
+      RCLCPP_WARN(this->get_logger(), "tau_ff_nominal_nm size != %zu, padding/truncating.", NumArmJoints());
+      tau_ff_nominal_nm_.resize(NumArmJoints(), 0.0);
     }
-    if (gravity_joint_scale_.size() != kNumArmJoints) {
+    if (gravity_joint_scale_.size() != NumArmJoints()) {
       RCLCPP_WARN(this->get_logger(), "gravity_joint_scale size mismatch, reset to 1.0");
-      gravity_joint_scale_ = std::vector<double>(kNumArmJoints, 1.0);
+      gravity_joint_scale_ = std::vector<double>(NumArmJoints(), 1.0);
     }
     gravity_tau_urdf_.fill(0.0);
     has_gravity_sample_ = false;
@@ -422,7 +441,7 @@ public:
           // F38: 零力矩期间 refresh 流仍按旧目标位持续发帧；停止时把目标重锚定到
           // 当前反馈位（MIT 原始角，与 last_commanded_mit_rad_ 同域），避免恢复
           // kp 后手臂被拉回示教前的旧位姿（防弹回）。
-          for (const auto & route : DogMapper::kTemporaryIndexMap) {
+          for (const auto & route : ArmRoutes()) {
             const uint8_t mid = route.motor_id;
             if (mid < last_feedback_mit_rad_.size() &&
                 std::isfinite(last_feedback_mit_rad_[mid])) {
@@ -629,15 +648,15 @@ public:
     latest_input_champ_rad_.fill(0.0);
     has_latest_input_.fill(false);
 
-    if (joint_cmd_min_rad_.size() != kNumArmJoints || joint_cmd_max_rad_.size() != kNumArmJoints) {
+    if (joint_cmd_min_rad_.size() != NumArmJoints() || joint_cmd_max_rad_.size() != NumArmJoints()) {
       RCLCPP_WARN(this->get_logger(), "joint_cmd_min_rad/max size mismatch, using default [-3.14, 3.14]x12");
-      joint_cmd_min_rad_ = std::vector<double>(kNumArmJoints, -3.14);
-      joint_cmd_max_rad_ = std::vector<double>(kNumArmJoints, 3.14);
+      joint_cmd_min_rad_ = std::vector<double>(NumArmJoints(), -3.14);
+      joint_cmd_max_rad_ = std::vector<double>(NumArmJoints(), 3.14);
     }
-    if (joint_mit_min_rad_.size() != kNumArmJoints || joint_mit_max_rad_.size() != kNumArmJoints) {
+    if (joint_mit_min_rad_.size() != NumArmJoints() || joint_mit_max_rad_.size() != NumArmJoints()) {
       RCLCPP_WARN(this->get_logger(), "joint_mit_min_rad/max size mismatch, using protocol default range x12");
-      joint_mit_min_rad_ = std::vector<double>(kNumArmJoints, ProtocolCodec::kPMin);
-      joint_mit_max_rad_ = std::vector<double>(kNumArmJoints, ProtocolCodec::kPMax);
+      joint_mit_min_rad_ = std::vector<double>(NumArmJoints(), ProtocolCodec::kPMin);
+      joint_mit_max_rad_ = std::vector<double>(NumArmJoints(), ProtocolCodec::kPMax);
     }
     RebuildMotorLimitTable();
 
@@ -700,7 +719,7 @@ private:
           return out;
         }
         const auto v = p.as_double_array();
-        if (v.size() != kNumArmJoints) {
+        if (v.size() != NumArmJoints()) {
           out.successful = false;
           out.reason = "tau_ff_nominal_nm must have 7 elements";
           return out;
@@ -714,7 +733,7 @@ private:
           return out;
         }
         const auto v = p.as_double_array();
-        if (v.size() != kNumArmJoints) {
+        if (v.size() != NumArmJoints()) {
           out.successful = false;
           out.reason = "gravity_joint_scale must have 7 elements";
           return out;
@@ -726,20 +745,76 @@ private:
     return out;
   }
 
+  /// F52（缺电机降级档）：从 motor_map.yaml 读 `joint_names` + `motor_ids_by_index`
+  /// 配置 ArmMapper 档位，必须在任何逐关节参数声明之前调用。
+  /// 缺省 = 编译期 7J 表（L1..L7 → 电机 1..7）；配置非法（为空 / 长度不符 / 超上限）
+  /// 时**保持默认档位**并报 ERROR——缺电机档必须显式配置，不允许静默降级。
+  void ConfigureJointProfile()
+  {
+    std::vector<std::string> default_names(
+      ArmMapper::kChampJointNames.begin(), ArmMapper::kChampJointNames.end());
+    std::vector<int64_t> default_ids;
+    default_ids.reserve(ArmMapper::kTemporaryIndexMap.size());
+    for (const auto & r : ArmMapper::kTemporaryIndexMap) {
+      default_ids.push_back(static_cast<int64_t>(r.motor_id));
+    }
+
+    const auto names = this->declare_parameter<std::vector<std::string>>(
+      "joint_names", default_names);
+    const auto ids = this->declare_parameter<std::vector<int64_t>>(
+      "motor_ids_by_index", default_ids);
+
+    std::vector<uint8_t> motor_ids;
+    motor_ids.reserve(ids.size());
+    bool ids_ok = true;
+    for (const auto v : ids) {
+      if (v < 1 || v > 255) {
+        ids_ok = false;
+        motor_ids.push_back(0);
+        continue;
+      }
+      motor_ids.push_back(static_cast<uint8_t>(v));
+    }
+
+    if (!ids_ok || !ArmMapper::Configure(names, motor_ids)) {
+      ArmMapper::ResetToDefault();
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "F52 档位配置非法（joint_names %zu 项 / motor_ids_by_index %zu 项，上限 %zu）"
+        "→ 保持默认档位 %zu 关节",
+        names.size(), ids.size(), ArmMapper::kMaxArmJoints, ArmMapper::NumJoints());
+      return;
+    }
+
+    std::string joined;
+    const auto & jnames = ArmMapper::JointNames();
+    const auto & routes = ArmMapper::Routes();
+    for (size_t i = 0; i < jnames.size(); ++i) {
+      joined += jnames[i] + "→motor" + std::to_string(routes[i].motor_id);
+      if (i + 1 < jnames.size()) {
+        joined += ", ";
+      }
+    }
+    RCLCPP_INFO(
+      this->get_logger(),
+      "F52 档位：%zu 关节 [%s]（由 motor_map_file 的 joint_names/motor_ids_by_index 配置）",
+      ArmMapper::NumJoints(), joined.c_str());
+  }
+
   void OnGravityTorque(const JointState::SharedPtr msg)
   {
     if (msg->effort.empty()) {
       return;
     }
     // Prefer named mapping (L1_joint..); fall back to index order.
-    std::array<double, kNumArmJoints> tau{};
+    std::array<double, ArmMapper::kMaxArmJoints> tau{};
     tau.fill(0.0);
     bool any = false;
     if (!msg->name.empty()) {
       for (size_t i = 0; i < msg->name.size() && i < msg->effort.size(); ++i) {
         const auto & name = msg->name[i];
-        for (size_t j = 0; j < DogMapper::kChampJointNames.size(); ++j) {
-          if (name == DogMapper::kChampJointNames[j]) {
+        for (size_t j = 0; j < NumArmJoints(); ++j) {
+          if (name == ArmJointNames()[j]) {
             tau[j] = msg->effort[i];
             any = true;
             break;
@@ -748,7 +823,7 @@ private:
       }
     }
     if (!any) {
-      const size_t n = std::min(msg->effort.size(), kNumArmJoints);
+      const size_t n = std::min(msg->effort.size(), NumArmJoints());
       for (size_t i = 0; i < n; ++i) {
         tau[i] = msg->effort[i];
       }
@@ -875,19 +950,19 @@ private:
     const std::vector<double> & positions,
     const std::vector<std::string> & joint_names)
   {
-    traj_joint_count_window_ += std::min(positions.size(), DogMapper::kTemporaryIndexMap.size());
+    traj_joint_count_window_ += std::min(positions.size(), NumArmJoints());
     uint32_t front_count = 0;
     uint32_t rear_count = 0;
     size_t total_sent = 0;
     bool all_converged = true;
 
-    std::array<double, DogMapper::kTemporaryIndexMap.size()> mapped_rad{};
+    std::array<double, ArmMapper::kMaxArmJoints> mapped_rad{};
     mapped_rad.fill(std::numeric_limits<double>::quiet_NaN());
 
     const bool use_names = prefer_joint_name_mapping_ && !joint_names.empty();
 
-    for (size_t i = 0; i < DogMapper::kTemporaryIndexMap.size(); ++i) {
-      const auto route = DogMapper::GetRouteByTrajectoryIndex(i);
+    for (size_t i = 0; i < NumArmJoints(); ++i) {
+      const auto route = ArmMapper::GetRouteByTrajectoryIndex(i);
       if (!route.has_value()) {
         continue;
       }
@@ -895,7 +970,7 @@ private:
       double target = 0.0;
       bool got = false;
       if (use_names) {
-        const char * jn = DogMapper::kChampJointNames[i];
+        const std::string & jn = ArmJointNames()[i];
         for (size_t j = 0; j < joint_names.size(); ++j) {
           if (joint_names[j] == jn && j < positions.size()) {
             target = positions[j];
@@ -935,8 +1010,8 @@ private:
     if (publish_mit_mapped_ && mapped_positions_pub_) {
       JointState js;
       js.header.stamp = this->now();
-      js.name.reserve(DogMapper::kChampJointNames.size());
-      for (const char * jn : DogMapper::kChampJointNames) {
+      js.name.reserve(NumArmJoints());
+      for (const auto & jn : ArmJointNames()) {
         js.name.emplace_back(jn);
       }
       js.position.assign(mapped_rad.begin(), mapped_rad.end());
@@ -1007,9 +1082,9 @@ private:
   void SendMitFrame(
     const MotorRoute & route, double champ_position_raw,
     uint32_t & front_count, uint32_t & rear_count,
-    std::array<double, DogMapper::kTemporaryIndexMap.size()> * mapped_out = nullptr)
+    std::array<double, ArmMapper::kMaxArmJoints> * mapped_out = nullptr)
   {
-    const size_t idx = std::min(route.trajectory_index, static_cast<size_t>(ArmMapper::kTemporaryIndexMap.size() - 1));
+    const size_t idx = std::min(route.trajectory_index, static_cast<size_t>(NumArmJoints() - 1));
     const int64_t now_ns = this->now().nanoseconds();
     if (
       enable_max_tx_rate_limit_ &&
@@ -1087,7 +1162,7 @@ private:
     RCLCPP_DEBUG(
       this->get_logger(),
       "MIT TX joint=%s motor=%u raw=%.4f lim=%.4f smooth=%.4f %s",
-      route.joint_hint,
+      route.joint_hint.c_str(),
       route.motor_id,
       champ_position_raw,
       champ_limited,
@@ -1113,8 +1188,8 @@ private:
     }
     const int64_t now_ns = this->now().nanoseconds();
     const int64_t refresh_ns = static_cast<int64_t>(min_tx_refresh_interval_s_ * 1e9);
-    for (const auto & route : DogMapper::kTemporaryIndexMap) {
-      const size_t idx = std::min(route.trajectory_index, static_cast<size_t>(ArmMapper::kTemporaryIndexMap.size() - 1));
+    for (const auto & route : ArmRoutes()) {
+      const size_t idx = std::min(route.trajectory_index, static_cast<size_t>(NumArmJoints() - 1));
       if (idx >= last_refresh_stamp_ns_.size()) {
         continue;
       }
@@ -1235,7 +1310,7 @@ private:
       bool fault_aborted = false;
       if (const auto hr = GetRouteByMotorId(mit_hold_.motor_id); hr.has_value()) {
         const size_t fidx = std::min(
-          hr->trajectory_index, static_cast<size_t>(ArmMapper::kTemporaryIndexMap.size() - 1));
+          hr->trajectory_index, static_cast<size_t>(NumArmJoints() - 1));
         if (fidx < last_feedback_fault_mask_.size() && last_feedback_fault_mask_[fidx] != 0) {
           fault_aborted = true;
           RCLCPP_WARN(
@@ -1272,7 +1347,7 @@ private:
         }
         if (const auto route = GetRouteByMotorId(mit_hold_.motor_id); route.has_value()) {
           const size_t idx = std::min(
-            route->trajectory_index, static_cast<size_t>(ArmMapper::kTemporaryIndexMap.size() - 1));
+            route->trajectory_index, static_cast<size_t>(NumArmJoints() - 1));
           if (idx < last_tx_pub_stamp_ns_.size()) {
             last_tx_pub_stamp_ns_[idx] = now_ns;
           }
@@ -1310,8 +1385,8 @@ private:
       st.skip_max_rate = skip_max_rate_limit_window_;
       st.skip_bus_disabled = skip_bus_disabled_window_;
       st.skip_power_gate = skip_power_gate_window_;
-      for (size_t i = 0; i < DogMapper::kTemporaryIndexMap.size(); ++i) {
-        st.joint_names.emplace_back(DogMapper::kChampJointNames[i]);
+      for (size_t i = 0; i < NumArmJoints(); ++i) {
+        st.joint_names.emplace_back(ArmJointNames()[i]);
         st.tx_hz.push_back(static_cast<double>(tx_frame_count_per_motor_window_[i]) / window_s);
       }
       // 仅窗口内有轨迹帧时校验达标（静止窗口只有 refresh ~50Hz/电机属正常）。
@@ -1459,8 +1534,8 @@ private:
     }
     std::vector<uint8_t> ids;
     if (req->motor_id == 0) {
-      ids.reserve(DogMapper::kTemporaryIndexMap.size());
-      for (const auto & route : DogMapper::kTemporaryIndexMap) {
+      ids.reserve(NumArmJoints());
+      for (const auto & route : ArmRoutes()) {
         ids.push_back(route.motor_id);
       }
     } else {
@@ -1486,7 +1561,7 @@ private:
         if (const auto route = GetRouteByMotorId(mid); route.has_value()) {
           const size_t idx = std::min(
             route->trajectory_index,
-            static_cast<size_t>(ArmMapper::kTemporaryIndexMap.size() - 1));
+            static_cast<size_t>(NumArmJoints() - 1));
           fb_fresh = fb_fresh ||
             (idx < last_feedback_stamp_ns_.size() && last_feedback_stamp_ns_[idx] > 0 &&
             (now_ns - last_feedback_stamp_ns_[idx]) <
@@ -1518,6 +1593,17 @@ private:
         // 无条件锚定到当前位置：使能语义 = 保当前位
         last_commanded_mit_rad_[mid] = fb;
         hold_suppressed_[mid] = false;
+        // F51 补洞（真机验收前排查发现，LL-039 同类）：latest_input_champ_rad_ 是
+        // 「Named 轨迹未点名某关节时的回退目标」（ApplyPositionTargets 的 else 分支）。
+        // 它同样属于「历史目标」：使能前示教拖动/失能期人工搬运都会让它停在旧位姿，
+        // 使能后若来一条**只点名部分关节**的轨迹（如夹爪 L7 单关节轨迹），未点名关节
+        // 会被回退到使能前的旧值 → 又是一次「使能执行历史」。这里随重锚一起清掉：
+        // 未点名关节此后不再被回退驱动，而是由 refresh 保持在重锚位（= 当前位）。
+        if (const auto route = GetRouteByMotorId(mid); route.has_value() &&
+          route->trajectory_index < has_latest_input_.size())
+        {
+          has_latest_input_[route->trajectory_index] = false;
+        }
         if (enable_kp_ramp_) {
           enable_ramp_start_ns_[mid] = now_ns;
         }
@@ -1660,8 +1746,8 @@ private:
     // 读操作不受 gate 互锁（与 get_device_id/request_version 同语义）
     std::vector<uint8_t> ids;
     if (req->motor_id == 0) {
-      ids.reserve(DogMapper::kTemporaryIndexMap.size());
-      for (const auto & route : DogMapper::kTemporaryIndexMap) {
+      ids.reserve(NumArmJoints());
+      for (const auto & route : ArmRoutes()) {
         ids.push_back(route.motor_id);
       }
     } else {
@@ -1746,8 +1832,8 @@ private:
     }
     std::vector<uint8_t> ids;
     if (req->motor_id == 0) {
-      ids.reserve(DogMapper::kTemporaryIndexMap.size());
-      for (const auto & route : DogMapper::kTemporaryIndexMap) {
+      ids.reserve(NumArmJoints());
+      for (const auto & route : ArmRoutes()) {
         ids.push_back(route.motor_id);
       }
     } else {
@@ -1890,8 +1976,8 @@ private:
     }
     std::vector<uint8_t> ids;
     if (req->motor_id == 0) {
-      ids.reserve(DogMapper::kTemporaryIndexMap.size());
-      for (const auto & route : DogMapper::kTemporaryIndexMap) {
+      ids.reserve(NumArmJoints());
+      for (const auto & route : ArmRoutes()) {
         ids.push_back(route.motor_id);
       }
     } else {
@@ -2174,7 +2260,7 @@ private:
     }
 
     if (const auto route = GetRouteByMotorId(feedback->motor_id); route.has_value()) {
-      const size_t idx = std::min(route->trajectory_index, static_cast<size_t>(ArmMapper::kTemporaryIndexMap.size() - 1));
+      const size_t idx = std::min(route->trajectory_index, static_cast<size_t>(NumArmJoints() - 1));
       const double sign = std::fabs(joint_signs_[idx]) < 1e-6 ? 1.0 : joint_signs_[idx];
       const double champ_feedback = (feedback->current_angle - joint_offsets_rad_[idx]) / sign;
       const rclcpp::Time now = this->now();
@@ -2286,12 +2372,12 @@ private:
     }
     MotorStates out;
     out.header.stamp = this->now();
-    out.states.reserve(DogMapper::kTemporaryIndexMap.size());
+    out.states.reserve(NumArmJoints());
     const int64_t now_ns = this->now().nanoseconds();
     const int64_t fresh_ns = static_cast<int64_t>(feedback_fresh_timeout_s_ * 1e9);
-    for (const auto & route : DogMapper::kTemporaryIndexMap) {
+    for (const auto & route : ArmRoutes()) {
       const size_t idx = std::min(
-        route.trajectory_index, static_cast<size_t>(ArmMapper::kTemporaryIndexMap.size() - 1));
+        route.trajectory_index, static_cast<size_t>(NumArmJoints() - 1));
       MotorState st;
       st.motor_id = route.motor_id;
       st.master_id = last_feedback_master_id_[route.motor_id];
@@ -2327,10 +2413,10 @@ private:
     }
     DiagnosticArray da;
     da.header.stamp = this->now();
-    for (size_t i = 0; i < DogMapper::kChampJointNames.size(); ++i) {
+    for (size_t i = 0; i < NumArmJoints(); ++i) {
       DiagnosticStatus st;
-      st.name = std::string("a3_can_bridge:motor_feedback:") + DogMapper::kChampJointNames[i];
-      st.hardware_id = std::to_string(static_cast<int>(DogMapper::kTemporaryIndexMap[i].motor_id));
+      st.name = std::string("a3_can_bridge:motor_feedback:") + ArmJointNames()[i];
+      st.hardware_id = std::to_string(static_cast<int>(ArmRoutes()[i].motor_id));
       st.level = DiagnosticStatus::OK;
       st.message = "feedback";
 
@@ -2378,11 +2464,11 @@ private:
     }
     JointState js;
     js.header.stamp = this->now();
-    const size_t n = DogMapper::kChampJointNames.size();
+    const size_t n = NumArmJoints();
     js.name.reserve(n);
     js.position.reserve(n);
     for (size_t i = 0; i < n; ++i) {
-      js.name.emplace_back(DogMapper::kChampJointNames[i]);
+      js.name.emplace_back(ArmJointNames()[i]);
       const double pos = std::isfinite(last_feedback_champ_rad_[i]) ? last_feedback_champ_rad_[i] : 0.0;
       js.position.emplace_back(pos);
     }
@@ -2434,7 +2520,7 @@ private:
 
     // Live Pinocchio gravity (EDULITE): τ_mit = τ_g_urdf * joint_signs (apply once).
     // /a3/gravity_torque.effort is URDF-frame when gravity_torque_node joint_direction=1.
-    if (enable_gravity_compensation_ && has_gravity_sample_ && idx < kNumArmJoints) {
+    if (enable_gravity_compensation_ && has_gravity_sample_ && idx < NumArmJoints()) {
       const int64_t age_ns = this->now().nanoseconds() - last_gravity_stamp_ns_;
       const double age_s = static_cast<double>(age_ns) * 1e-9;
       if (age_s <= gravity_fresh_timeout_s_) {
@@ -2451,8 +2537,8 @@ private:
       }
     }
 
-    const uint8_t motor_id = idx < DogMapper::kTemporaryIndexMap.size() ?
-      DogMapper::kTemporaryIndexMap[idx].motor_id : 0;
+    const uint8_t motor_id = idx < NumArmJoints() ?
+      ArmRoutes()[idx].motor_id : 0;
     const double tmax = TorqueRangeNmFor(motor_id);
     return Clamp(tau, -tmax, tmax);
   }
@@ -2601,7 +2687,7 @@ private:
   void RebuildMotorLimitTable()
   {
     const size_t n = std::min<size_t>(
-      kNumArmJoints, runtime_joint_mit_min_rad_.size());
+      NumArmJoints(), runtime_joint_mit_min_rad_.size());
     if (!derive_motor_limits_from_joint_cmd_) {
       for (size_t i = 0; i < n; ++i) {
         const double lo = std::min(joint_mit_min_rad_[i], joint_mit_max_rad_[i]);
@@ -2775,7 +2861,7 @@ private:
   std::string gravity_compensation_topic_;
   std::vector<double> tau_ff_nominal_nm_;
   std::vector<double> gravity_joint_scale_;
-  std::array<double, kNumArmJoints> gravity_tau_urdf_{};
+  std::array<double, ArmMapper::kMaxArmJoints> gravity_tau_urdf_{};
   bool has_gravity_sample_{false};
   int64_t last_gravity_stamp_ns_{0};
   bool use_joint_cmd_limits_{true};
@@ -2785,8 +2871,8 @@ private:
   bool derive_motor_limits_from_joint_cmd_{true};
   std::vector<double> joint_mit_min_rad_;
   std::vector<double> joint_mit_max_rad_;
-  std::array<double, DogMapper::kTemporaryIndexMap.size()> runtime_joint_mit_min_rad_{};
-  std::array<double, DogMapper::kTemporaryIndexMap.size()> runtime_joint_mit_max_rad_{};
+  std::array<double, ArmMapper::kMaxArmJoints> runtime_joint_mit_min_rad_{};
+  std::array<double, ArmMapper::kMaxArmJoints> runtime_joint_mit_max_rad_{};
   bool enable_startup_smoothing_{true};
   double startup_smoothing_duration_s_{1.5};
   double command_max_velocity_rad_s_{6.0};
@@ -2830,15 +2916,15 @@ private:
   std::array<double, 256> last_feedback_mit_rad_{};
   std::array<double, 256> last_feedback_mit_vel_rad_s_{};
   std::array<uint8_t, 256> last_feedback_master_id_{};
-  std::array<double, DogMapper::kTemporaryIndexMap.size()> last_feedback_champ_rad_{};
-  std::array<double, DogMapper::kTemporaryIndexMap.size()> last_feedback_joint_vel_rad_s_{};
-  std::array<double, DogMapper::kTemporaryIndexMap.size()> last_feedback_effort_nm_{};
+  std::array<double, ArmMapper::kMaxArmJoints> last_feedback_champ_rad_{};
+  std::array<double, ArmMapper::kMaxArmJoints> last_feedback_joint_vel_rad_s_{};
+  std::array<double, ArmMapper::kMaxArmJoints> last_feedback_effort_nm_{};
   std::array<int, 12> last_feedback_mode_status_{};
-  std::array<double, DogMapper::kTemporaryIndexMap.size()> last_feedback_temp_c_{};
+  std::array<double, ArmMapper::kMaxArmJoints> last_feedback_temp_c_{};
   std::array<uint32_t, 12> last_feedback_fault_mask_{};
-  std::array<double, DogMapper::kTemporaryIndexMap.size()> last_sent_champ_rad_{};
-  std::array<double, DogMapper::kTemporaryIndexMap.size()> latest_input_champ_rad_{};
-  std::array<double, DogMapper::kTemporaryIndexMap.size()> boot_feedback_champ_rad_{};
+  std::array<double, ArmMapper::kMaxArmJoints> last_sent_champ_rad_{};
+  std::array<double, ArmMapper::kMaxArmJoints> latest_input_champ_rad_{};
+  std::array<double, ArmMapper::kMaxArmJoints> boot_feedback_champ_rad_{};
   std::array<bool, 12> has_latest_input_{};
   std::array<bool, 12> boot_feedback_captured_{};
   std::array<bool, 12> has_last_sent_{};
@@ -2852,7 +2938,7 @@ private:
   // 避免 refresh 每 20 ms 盖戳使 5 ms 限速检查误吞轨迹帧。
   std::array<int64_t, 12> last_refresh_stamp_ns_{};
   // 各关节最近一次平滑输出是否已收敛到限幅后目标（单点 jog 轨迹保持到收敛用）
-  std::array<bool, DogMapper::kTemporaryIndexMap.size()> smoothing_converged_{};
+  std::array<bool, ArmMapper::kMaxArmJoints> smoothing_converged_{};
   size_t error_sample_count_{0};
   double error_abs_sum_{0.0};
   double error_abs_max_{0.0};

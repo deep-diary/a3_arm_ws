@@ -1,0 +1,64 @@
+# F52 缺电机降级档（5J，L1–L5）：事故后 can1 上只剩电机 1..5 时配套 motor_map_5j.yaml +
+# control_gains_5j.yaml 使用。与 arm_controller.yaml 的差异**只有** joint_names（去掉 L6/L7），
+# 其余参数（含 F51 的 monitor_status_topic / unexpected_disable_guard / sustain 1.0s）逐字相同——
+# 注意别照抄 arm_controller_6j.yaml，那份早于 F51、缺这三个参数。
+# 用法：ros2 launch a3_arm_controller arm_controller.launch.py config_file:=<本文件>
+/**:
+  ros__parameters:
+    joint_names: [L1_joint, L2_joint, L3_joint, L4_joint, L5_joint]
+    joint_states_topic: /joint_states
+    control_mode_topic: /a3/control_mode
+    arm_status_topic: /a3/arm_status
+    gate_topic: /power_sequence/gate_open
+    power_state_topic: /power_sequence/state
+    traj_topic: /joint_group_effort_controller/joint_trajectory
+
+    status_hz: 10.0
+    init_zero_tol_rad: 0.05
+    init_timeout_s: 5.0
+    # 运动命令是否要求 gate_open（仿真/无电源序列时设 false）
+    require_gate: false
+
+    goto_duration_s: 3.0
+    goto_waypoints: 21
+    # 回放前从当前位姿插值到首记录点的时长（s）；≤0.05 关闭插值（F38）
+    playback_ramp_duration_s: 2.5
+    # F41: move_to/goto/ramp 兜底——最短时长 + ≥50Hz 插值点
+    move_to_min_duration_s: 3.0
+    move_to_points_hz: 50.0
+    move_to_max_points: 5000
+    # F40: 失能保护（不在 home 容差内先平滑回 home 再失能，防掉臂）
+    disable_home_pose_name: home
+    disable_home_tol_rad: 0.15
+    disable_home_duration_s: 3.0
+    disable_home_confirm_s: 0.5
+    disable_park_timeout_s: 8.0
+    # F43: 最大力矩持久化
+    motor_states_topic: /a3/motor/states
+    torque_stats_file: "~/.a3/stats/torque_stats.yaml"
+    torque_stats_save_interval_s: 10.0
+    # F44: 温度管理（warn 仅告警；protect 自动回 home 失能降温；迟滞恢复）
+    # 阈值 2026-09-13 真机调高：官方电机自带 130°C 保护兜底，初版 65°C 过低
+    # （ready 位 L3 保位 1.26 Nm 几分钟即触发 overtemp park，LL-023）
+    temp_protect_enabled: true
+    temp_warn_c: 90.0
+    temp_protect_c: 95.0
+    temp_hysteresis_c: 5.0
+    fault_mask_reset_on_fault: true
+    # F48: 使能前读数限位门禁（环绕读数超限时拒绝使能，见 LL-019）
+    enable_position_check: true
+    # 限位比较裕量：编码器量化噪声 ±0.0002（L2/L3/L7 下界为 0），0.001 rad 足够
+    position_check_margin_rad: 0.001
+    # /joint_states 最大陈旧时长：桥异常时 js 冻结旧值（LL-020），超过拒绝使能
+    js_max_stale_s: 1.0
+
+    # F51/LL-039：带外失能（电机被看门狗/别人失能，编排层仍以为在跑）兜底检测。
+    # 本地兜底不依赖看门狗在跑；持续窗 1.0s 用于抑制本节点自身 park→reset 竞态。
+    # 注意：看门狗侧同名参数必须更短（arm_monitor.yaml 0.5s）——否则本节点先转
+    # DISABLED 会让看门狗的持续窗清零，UNEXPECTED_DISABLE 永远报不出来。
+    monitor_status_topic: /a3/monitor/status
+    unexpected_disable_guard: true
+    unexpected_disable_sustain_s: 1.0
+
+    trajectories_dir: "~/.a3/trajectories"
+    named_poses_pkg: a3_description

@@ -1,0 +1,14 @@
+/**:
+  ros__parameters:
+    # F52 缺电机降级档（5J）：事故后 can1 上只剩 L1–L5（电机 1..5），L6/L7 腕部断裂、
+    # 无新鲜反馈。用 can_bridge.launch.py 的 motor_map_file:=... 选档。
+    #
+    # 这两项是**运行期档位**（默认是编译期 7J 表 L1..L7 → 电机 1..7）：
+    #   joint_names[i] ↔ motor_ids_by_index[i]，下标即轨迹关节位。
+    # 全栈的 /joint_states 名字表、MotorStates 条数、tx_stats、广播 id 展开、
+    # F51 使能新鲜度门禁范围、逐关节参数长度校验都以本表为准。
+    # 必须与 control_gains_5j.yaml 的逐关节数组（5 项）配对，否则节点报
+    # 「F52 档位配置非法」并退回 7J 默认档。
+    arm_bus: can1
+    joint_names: [L1_joint, L2_joint, L3_joint, L4_joint, L5_joint]
+    motor_ids_by_index: [1, 2, 3, 4, 5]

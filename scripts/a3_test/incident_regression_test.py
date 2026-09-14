@@ -46,6 +46,9 @@ from std_msgs.msg import UInt8MultiArray
 from std_srvs.srv import Trigger
 
 MOTORS = [1, 2, 3, 4, 5, 6, 7]
+JOINTS7 = [
+    "L1_joint", "L2_joint", "L3_joint", "L4_joint", "L5_joint", "L6_joint", "L7_joint",
+]
 TORQUE_MAX = {1: 14.0, 2: 14.0, 3: 14.0, 4: 6.0, 5: 6.0, 6: 6.0, 7: 6.0}
 SPEED_MAX = {1: 33.0, 2: 33.0, 3: 33.0, 4: 50.0, 5: 50.0, 6: 50.0, 7: 50.0}
 P_MIN, P_MAX = -12.57, 12.57
@@ -90,8 +93,10 @@ def pack_frame(bus, can_id, data):
 class Harness(Node):
     """mock 电机组 + 场景驱动（同一节点，便于直接读写内部状态）。"""
 
-    def __init__(self):
+    def __init__(self, motors=None):
         super().__init__("f51_incident_test")
+        # F52：mock 电机的集合 = 当前档位在线电机（默认 7 台）。5J 档传 [1..5]。
+        self.motors = list(motors) if motors else list(MOTORS)
         be = QoSProfile(
             depth=400, reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST)
@@ -101,13 +106,13 @@ class Harness(Node):
         self._rx_pub = self.create_publisher(UInt8MultiArray, "/can_rx_frames", be)
 
         self._lock = threading.Lock()
-        self.mode = {m: 0 for m in MOTORS}
-        self.pos = {m: 0.0 for m in MOTORS}
-        self.vel = {m: 0.0 for m in MOTORS}
-        self.torque = {m: 0.0 for m in MOTORS}
-        self.temp = {m: 35.0 for m in MOTORS}
-        self.cmd_p = {m: 0.0 for m in MOTORS}
-        self.cmd_kp = {m: 0.0 for m in MOTORS}
+        self.mode = {m: 0 for m in self.motors}
+        self.pos = {m: 0.0 for m in self.motors}
+        self.vel = {m: 0.0 for m in self.motors}
+        self.torque = {m: 0.0 for m in self.motors}
+        self.temp = {m: 35.0 for m in self.motors}
+        self.cmd_p = {m: 0.0 for m in self.motors}
+        self.cmd_kp = {m: 0.0 for m in self.motors}
         self.frames = []     # (t, motor, kind, p, kp, kd, tau)
         self._t0 = time.monotonic()
 
@@ -161,7 +166,7 @@ class Harness(Node):
     def _plant_tick(self):
         dt = 1.0 / FEEDBACK_HZ
         with self._lock:
-            for m in MOTORS:
+            for m in self.motors:
                 if self.mode[m] != 2 or self.cmd_kp[m] <= 0.5:
                     continue
                 err = self.cmd_p[m] - self.pos[m]
@@ -171,7 +176,7 @@ class Harness(Node):
 
     def _feedback_tick(self):
         with self._lock:
-            for m in MOTORS:
+            for m in self.motors:
                 can_id = (CMD_FEEDBACK << 24) | (self.mode[m] << 22) | (m << 8) | 0xFD
                 pu = f2u(self.pos[m], P_MIN, P_MAX)
                 vu = f2u(self.vel[m], -SPEED_MAX[m], SPEED_MAX[m])
@@ -220,6 +225,52 @@ def wait_for_publisher(node, topic, timeout=5.0):
     return False
 
 
+INSTALL_CFG = "install/a3_can_bridge/share/a3_can_bridge/config"
+GAINS_7J = f"{INSTALL_CFG}/control_gains.yaml"
+MAP_7J = f"{INSTALL_CFG}/motor_map.yaml"
+
+
+def spawn_exec_node(gains_file=GAINS_7J, map_file=MAP_7J, log_path="/tmp/f51_regression_exec.log",
+                    extra_args=()):
+    """拉起真执行层（motor_protocol_node）。
+
+    LL-039 判据教训 4：`ros2 run` 只是包装器，terminate() 杀不掉它孵化的节点
+    （实测残留 PPID=1）——必须 start_new_session + 按进程组 killpg 收尸。
+    返回 (proc, log_file_handle)；调用方负责 killpg 与关文件。
+    """
+    cmd = [
+        "ros2", "run", "a3_can_bridge", "motor_protocol_node", "--ros-args",
+        "--params-file", gains_file,
+        "--params-file", map_file,
+        "-p", "enable_power_sequence_gate:=false",
+        "-p", "enable_gravity_compensation:=false",
+        "-p", "enable_rx_decode_log:=false",
+        "-p", "publish_feedback_joint_states:=true",
+        *extra_args,
+    ]
+    fh = open(log_path, "w")
+    proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, start_new_session=True)
+    return proc, fh
+
+
+def kill_exec_node(proc, fh):
+    """按进程组收尸（见 spawn_exec_node 说明）。"""
+    if proc is not None:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+    if fh is not None:
+        fh.close()
+
+
 def main():
     no_spawn = "--no-spawn" in sys.argv
     domain = "57"
@@ -245,23 +296,8 @@ def main():
             log("✗ /can_tx_frames 上已有发布者（残留执行层？）——先清理再跑本测试")
             return 2
         if not no_spawn:
-            cmd = [
-                "ros2", "run", "a3_can_bridge", "motor_protocol_node", "--ros-args",
-                "--params-file",
-                "install/a3_can_bridge/share/a3_can_bridge/config/control_gains.yaml",
-                "--params-file",
-                "install/a3_can_bridge/share/a3_can_bridge/config/motor_map.yaml",
-                "-p", "enable_power_sequence_gate:=false",
-                "-p", "enable_gravity_compensation:=false",
-                "-p", "enable_rx_decode_log:=false",
-                "-p", "publish_feedback_joint_states:=true",
-            ]
-            exec_log = open("/tmp/f51_regression_exec.log", "w")
             log("→ 拉起执行层（日志见 /tmp/f51_regression_exec.log）")
-            # start_new_session：ros2 run 只是包装器，SIGTERM 不会转发给子节点
-            # （实测 terminate() 后执行层 PPID=1 继续跑）——必须整组杀。
-            proc = subprocess.Popen(
-                cmd, stdout=exec_log, stderr=subprocess.STDOUT, start_new_session=True)
+            proc, exec_log = spawn_exec_node()
         if not wait_for_publisher(node, "/can_tx_frames", 10.0):
             log("✗ 执行层未就绪（/can_tx_frames 无发布者）")
             return 2
@@ -282,7 +318,7 @@ def main():
         log("→ 服务就绪")
 
         # 初始位姿：home，全部失能
-        for m in MOTORS:
+        for m in node.motors:
             node.set_pose(m, Q_HOME)
         time.sleep(1.0)   # 等 refresh 保活帧 + 反馈新鲜度建立
 
@@ -372,25 +408,77 @@ def main():
         else:
             log(f"T4 关节未被甩动：L2 实际位置 {q_after:.4f} ✓")
 
+        # ---- T5 部分点名轨迹不得复活「使能前的历史输入」（LL-039 同类补洞）----
+        # 场景：先跑一条满关节轨迹（把 latest_input 写成 0.6）→ stop/reset → 人工搬回
+        # 0.03 → 使能 → 来一条**只点名 L1** 的轨迹（真机对应夹爪 L7 单关节轨迹）。
+        # 修复前：未点名关节回退到使能前的 latest_input=0.6，又被驱动成一次「执行历史」；
+        # 修复后：使能时随重锚一起清掉回退目标，未点名关节由 refresh 保持在重锚位。
+        from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint  # noqa: PLC0415
+        Q_STALE = 0.6
+        traj_pub = node.create_publisher(
+            JointTrajectory, "/joint_group_effort_controller/joint_trajectory", 10)
+
+        def publish(names, positions):
+            msg = JointTrajectory()
+            msg.joint_names = list(names)
+            pt = JointTrajectoryPoint()
+            pt.positions = list(positions)
+            msg.points = [pt]
+            for _ in range(3):
+                traj_pub.publish(msg)
+                time.sleep(0.1)
+
+        t_sub = time.monotonic()
+        while traj_pub.get_subscription_count() < 1 and time.monotonic() - t_sub < 5.0:
+            time.sleep(0.1)
+        home7 = [Q_HOME] * 7
+        publish(JOINTS7, home7[:1] + [Q_STALE] + home7[2:])
+        # 到位要等启动平滑走完（startup_smoothing_duration_s=2 s，起点 = 使能时反馈位），
+        # 不是轨迹一发布就到位：轮询收敛，最多 8 s
+        t_wait = time.monotonic()
+        while time.monotonic() - t_wait < 8.0:
+            fr = node.mit_frames(2)
+            if fr and abs(fr[-1][3] - Q_STALE) <= 0.05:
+                break
+            time.sleep(0.2)
+        stale_cmd = node.mit_frames(2)
+        if not stale_cmd or abs(stale_cmd[-1][3] - Q_STALE) > 0.10:
+            failures.append(f"T5 前置失败：满关节轨迹未把 L2 目标带到 {Q_STALE}: {stale_cmd[-1:]}")
+        else:
+            # 失能 + 人工搬回 home（与事故时间线一致）
+            call(node, cli["stop"], MotorStop.Request(motor_id=0))
+            call(node, cli["reset"], MotorCommand.Request(motor_id=0, command=2))
+            time.sleep(0.4)
+            for m in node.motors:
+                node.set_pose(m, Q_HOME)
+            time.sleep(0.4)
+            r = call(node, cli["enable"], MotorCommand.Request(motor_id=0))
+            if r is None or not r.success:
+                failures.append(f"T5 使能失败: {getattr(r, 'message', None)}")
+            time.sleep(0.8)
+            t_partial = node.t()
+            publish(["L1_joint"], [Q_HOME + 0.05])   # 只点名 L1（≈ 夹爪单关节轨迹）
+            time.sleep(1.5)
+            bad = []
+            for m in range(2, 8):
+                fr = node.mit_frames(m, t_from=t_partial)
+                if fr and abs(fr[-1][3] - Q_HOME) > 0.10:
+                    bad.append((m, round(fr[-1][3], 3)))
+            dragged = [(m, round(node.pos[m], 3)) for m in range(2, 8)
+                       if abs(node.pos[m] - Q_HOME) > 0.10]
+            if bad:
+                failures.append(
+                    f"T5 F51 失败：部分点名轨迹把未点名关节驱动到历史输入 {bad}"
+                    f"（实际位 {dragged}）")
+            else:
+                log(f"T5 只点名 L1 的轨迹未动未点名关节（L2..L7 目标保持 ≈{Q_HOME}）✓")
+
         # ---- 收尾：失能 ----
         call(node, cli["reset"], MotorCommand.Request(motor_id=0, command=2))
 
     finally:
         log("→ 收尾")
-        if proc is not None:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    proc.kill()
-        if exec_log is not None:
-            exec_log.close()
+        kill_exec_node(proc, exec_log)
         ex.shutdown()
         spin_thread.join(timeout=2.0)   # 不等 spin 线程退出，rclpy 会打印 Destroyable 竞态告警
         node.destroy_node()

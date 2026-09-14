@@ -215,6 +215,8 @@ stage_incident() {
   PYTHONNOUSERSITE=1 python3 "$DIR/incident_regression_test.py" || return 1
   log "阶段八b 看门狗 F50/编排层事故回归（sim 栈 + arm_controller/arm_monitor）"
   PYTHONNOUSERSITE=1 python3 "$DIR/incident_monitor_regression_test.py" || return 1
+  log "阶段八c F52 缺电机降级档（5J 可用 / 7J 遇缺电机必拒 / 非法档位不静默降级）"
+  PYTHONNOUSERSITE=1 python3 "$DIR/f52_profile_test.py" || return 1
 }
 
 # ---- 阶段七：web 路径力控阶梯验收（真机 + 生产 MQTT 桥，F34）----

@@ -1,0 +1,90 @@
+# F52 缺电机降级档（5J，L1–L5）：事故后 can1 上只剩电机 1..5 时用这份。
+# 与 control_gains.yaml（7J 默认档）的差异**只有**逐关节数组的长度与取值（各取前 5 项）；
+# 标量参数完全一致。用 can_bridge.launch.py 的 gains_file:=... 选档。
+# 注意：必须与 motor_map_5j.yaml 的 joint_names/motor_ids_by_index 配对，
+# 否则 motor_protocol_node 启动时按 F52 判非法并退回 7J 默认档。
+/**:
+  ros__parameters:
+    kp: 80.0
+    kd: 2.0
+    default_velocity: 0.0
+    default_tau_ff: 0.0
+    runtime_tune_topic: /mit_gains_cmd
+    tx_enable_can0: true
+    tx_enable_can1: true
+    enable_min_tx_refresh: true
+    min_tx_refresh_interval_s: 0.02
+    enable_max_tx_rate_limit: true
+    max_tx_rate_per_motor_hz: 200.0
+    # 限速容差（LL-023）：200Hz 节拍 + 回调耗时抖动会让相邻 tick 间隔在 5ms 上下摆动，
+    # 无容差时 ~45% 帧被误丢。间隔 < min_interval×0.8 才丢弃。
+    max_tx_rate_limit_tolerance_ratio: 0.8
+    can_tx_frames_qos_depth: 4000
+    enable_power_sequence_gate: true
+    power_sequence_gate_topic: /power_sequence/gate_open
+    publish_feedback_joint_states: true
+    feedback_joint_states_topic: /joint_states
+    feedback_joint_states_timer_hz: 50.0
+    publish_feedback_velocity_effort: true
+    feedback_joint_fill_nan: true
+    publish_motor_diagnostics: false
+    motor_diagnostics_topic: /diagnostics
+    # Static nominal FF (legacy). Prefer enable_gravity_compensation + /a3/gravity_torque.
+    enable_joint_tau_ff: false
+    tau_ff_nominal_nm: [0.0, 0.0, 0.0, 0.0, 0.0]
+    # Live Pinocchio gravity → MIT tau (EDULITE): τ_mit = scale * signs * τ_g_urdf
+    # Official joint directions (DEFAULT_JOINT_DIRECTIONS / joint_signs):
+    #   L1:-1 L2:+1 L3:-1 L4:+1 L5:-1 L6:+1 L7:+1
+    # Apply signs ONCE here; do not also multiply in gravity_torque_node (keep its joint_direction=1).
+    enable_gravity_compensation: false
+    gravity_compensation_topic: /a3/gravity_torque
+    gravity_apply_joint_signs: true
+    gravity_ff_scale: 1.0
+    gravity_fresh_timeout_s: 0.5
+    gravity_joint_scale: [1.0, 1.0, 1.0, 1.0, 1.0]
+    enable_trajectory_interpolation: true
+    trajectory_interp_rate_hz: 200.0
+    trajectory_interpolation_method: auto
+    zero_torque_kp: 0.0
+    zero_torque_kd: 1.0
+    control_mode_topic: /a3/control_mode
+    enable_startup_smoothing: true
+    startup_smoothing_duration_s: 2.0
+    command_max_velocity_rad_s: 1.5
+    limit_velocity_only_during_smoothing: true
+    enable_mode_rising_smoothing: false
+    motor_enabled_mode_status: 2
+    enable_feedback_step_limit: false
+    feedback_step_limit_rad: 2.0
+    feedback_fresh_timeout_s: 0.30
+    use_joint_cmd_limits: true
+    # L7（末位）：2026-09-06 标定全开位设零、闭合为正，实测行程 1.7945 rad → [0, 1.8]
+    joint_cmd_min_rad: [-2.79253, 0.0, -4.01426, -1.5708, -1.5708]
+    joint_cmd_max_rad: [2.79253, 3.66519, 0.0, 1.5708, 1.5708]
+    use_motor_domain_limits: true
+    derive_motor_limits_from_joint_cmd: true
+    joint_mit_min_rad: [-12.57, -12.57, -12.57, -12.57, -12.57]
+    joint_mit_max_rad: [12.57, 12.57, 12.57, 12.57, 12.57]
+    enable_rx_decode_log: true
+    prefer_joint_name_mapping: true
+    joint_signs: [-1.0, 1.0, -1.0, 1.0, -1.0]
+    expand_joint_offsets_from_mirror: false
+    joint_offset_hip_rad: 0.0
+    joint_offset_thigh_rad: 0.0
+    joint_offset_calf_rad: 0.0
+    joint_offsets_rad: [0.0, 0.0, 0.0, 0.0, 0.0]
+    # F42: 力矩方向钳位（τ 超阈且目标增量与 sign(τ) 同向 → 钉在反馈位，反向放行）
+    enable_torque_protection: true
+    # LL-024: 钳位阈值按电机型号连续额定（RS00 L1-L3 = 5 Nm，EL05 L4-L7 = 3 Nm）。
+    # 原 3.0 对 RS00 过低——L3 真实保位 3.4 Nm > 3.0 会 latch 下爬（codec 修复后此值才显真）。
+    torque_protection_limit_nm: [5.0, 5.0, 5.0, 3.0, 3.0]
+    torque_protection_release_margin_rad: 0.02
+    torque_protection_log_throttle_ms: 1000
+    # LL-024: 力矩/速度编解码量程按电机型号（motor_id 1..7；RS00 ±14 Nm/±33 rad/s，
+    # EL05 ±6 Nm/±50 rad/s）。统一 ±6/±50 时 RS00 反馈力矩少报 2.333 倍、τ_ff 反向放大 2.333 倍。
+    motor_torque_range_nm: [14.0, 14.0, 14.0, 6.0, 6.0]
+    motor_speed_range_rad_s: [33.0, 33.0, 33.0, 50.0, 50.0]
+    # F46: TX 帧率监视（5s 窗口发布 /a3/motor/tx_stats）
+    publish_tx_stats: true
+    tx_stats_topic: /a3/motor/tx_stats
+    tx_rate_ok_ratio: 0.9

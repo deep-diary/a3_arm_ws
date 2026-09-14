@@ -63,6 +63,8 @@ public:
   PowerSequenceNode()
   : Node("power_sequence_node")
   {
+    ConfigureJointProfile();
+
     gate_topic_ = this->declare_parameter<std::string>("gate_topic", "/power_sequence/gate_open");
     state_topic_ = this->declare_parameter<std::string>("state_topic", "/power_sequence/state");
     tx_topic_ = this->declare_parameter<std::string>("tx_topic", "/can_tx_frames");
@@ -599,7 +601,7 @@ private:
   {
     const uint8_t p_lo = static_cast<uint8_t>(kParamEpScanTime & 0xFF);
     const uint8_t p_hi = static_cast<uint8_t>((kParamEpScanTime >> 8) & 0xFF);
-    for (const auto & route : DogMapper::kTemporaryIndexMap) {
+    for (const auto & route : ArmMapper::Routes()) {
       CanFrameMessage frame = BuildCmdFrame(ArmMapper::ArmBus(), route.motor_id, kCmdSetParam, motor_master_id_);
       frame.data[0] = p_lo;
       frame.data[1] = p_hi;
@@ -617,7 +619,7 @@ private:
   {
     static constexpr std::array<uint8_t, 6> kReportPrefix{0x01, 0x02, 0x03, 0x04, 0x05, 0x06};
     const int rmaster = ReportMasterForCanId();
-    for (const auto & route : DogMapper::kTemporaryIndexMap) {
+    for (const auto & route : ArmMapper::Routes()) {
       CanFrameMessage frame = BuildCmdFrame(ArmMapper::ArmBus(), route.motor_id, kCommActiveReport, rmaster);
       for (size_t i = 0; i < kReportPrefix.size(); ++i) {
         frame.data[i] = kReportPrefix[i];
@@ -672,9 +674,49 @@ private:
     return true;
   }
 
+  /// F52（缺电机降级档）：与 motor_protocol_node 读同一份 motor_map.yaml
+  /// （`joint_names` + `motor_ids_by_index`），使 set_zero/save/参数广播只发给当前档位电机。
+  /// 缺省 = 编译期 7J 表；配置非法时保持默认并报 ERROR。
+  void ConfigureJointProfile()
+  {
+    std::vector<std::string> default_names(
+      ArmMapper::kChampJointNames.begin(), ArmMapper::kChampJointNames.end());
+    std::vector<int64_t> default_ids;
+    default_ids.reserve(ArmMapper::kTemporaryIndexMap.size());
+    for (const auto & r : ArmMapper::kTemporaryIndexMap) {
+      default_ids.push_back(static_cast<int64_t>(r.motor_id));
+    }
+    const auto names = this->declare_parameter<std::vector<std::string>>(
+      "joint_names", default_names);
+    const auto ids = this->declare_parameter<std::vector<int64_t>>(
+      "motor_ids_by_index", default_ids);
+
+    std::vector<uint8_t> motor_ids;
+    motor_ids.reserve(ids.size());
+    bool ids_ok = true;
+    for (const auto v : ids) {
+      if (v < 1 || v > 255) {
+        ids_ok = false;
+        motor_ids.push_back(0);
+        continue;
+      }
+      motor_ids.push_back(static_cast<uint8_t>(v));
+    }
+    if (!ids_ok || !ArmMapper::Configure(names, motor_ids)) {
+      ArmMapper::ResetToDefault();
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "F52 档位配置非法（joint_names %zu 项 / motor_ids_by_index %zu 项）→ 保持默认 %zu 关节",
+        names.size(), ids.size(), ArmMapper::NumJoints());
+      return;
+    }
+    RCLCPP_INFO(
+      this->get_logger(), "F52 档位：%zu 关节（set_zero/save 广播范围）", ArmMapper::NumJoints());
+  }
+
   void SendSetZeroAll()
   {
-    for (const auto & route : DogMapper::kTemporaryIndexMap) {
+    for (const auto & route : ArmMapper::Routes()) {
       CanFrameMessage frame = BuildCmdFrame(ArmMapper::ArmBus(), route.motor_id, kCmdSetZero, motor_master_id_);
       frame.data[0] = 0x01;
       tx_pub_->publish(FrameCodec::Pack(frame));
@@ -683,14 +725,14 @@ private:
 
   void SendCmdAll(uint8_t cmd)
   {
-    for (const auto & route : DogMapper::kTemporaryIndexMap) {
+    for (const auto & route : ArmMapper::Routes()) {
       tx_pub_->publish(FrameCodec::Pack(BuildCmdFrame(ArmMapper::ArmBus(), route.motor_id, cmd, motor_master_id_)));
     }
   }
 
   void SendMitZeroAll()
   {
-    for (const auto & route : DogMapper::kTemporaryIndexMap) {
+    for (const auto & route : ArmMapper::Routes()) {
       auto frame = ProtocolCodec::BuildMitControlFrame(
         ArmMapper::ArmBus(),
         route.motor_id,

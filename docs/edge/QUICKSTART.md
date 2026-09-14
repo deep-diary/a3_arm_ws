@@ -293,7 +293,7 @@ cat ~/.a3/stats/torque_stats.yaml
 - **F46 帧率**：轨迹期 195 Hz/关节（4098 帧/3 s ≈99% 交付、限速丢弃 0.7%）、静止对照 47.2 Hz/关节、`tx_rate_ok=true`；**tx_stats 5 s 窗口旋转会切分轨迹尾巴，读帧率须对照同时段桥日志**（LL-026）。
 - **F50 故障监视看门狗**（`a3_arm_monitor`，随 arm_controller.launch.py 默认启动，`enable_monitor:=false` 可关）：跨源比对 js/轨迹/电机状态/编排状态，故障走 stop → 升级 reset 阶梯（阈值与抑制规则见 [TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)「故障监视看门狗」）。2026-09-13 仿真验收（ROS_DOMAIN_ID=55 sim 闭环 + 故障注入）：健康 move_to 零触发（max err 0.0004 rad）；斜坡轨迹注入 → FOLLOW_STUCK → stop → +3 s 升级 reset；SIGSTOP sim_motor → STALE_JS → reset；ZERO_TORQUE 模式注入跳变零触发（抑制生效）。**5 次触发全为注入诱导，零误报**；真机观察随 F49 重力采集同场进行（`ros2 topic echo /a3/monitor/status`）。
 
-### 使能安全与事故回归（F51，仿真已验证 / 真机待验）
+### 使能安全与事故回归（F51，仿真 + 真机已验证）
 
 来源：2026-09-14 真机事故（示教退出后看门狗假触发 → stop 的 NaN 被 refresh 播种覆盖 → 失能期陈旧目标满增益使能 → **甩断 L6**）。完整复盘见 [LL-039](../lessons_learned/LL-039-teach-exit-reanchor-false-trip-enable-snap.md)，条款见 [shared/SAFETY.md](../shared/SAFETY.md)「使能安全」。使能语义现在是：
 
@@ -310,8 +310,34 @@ cat ~/.a3/stats/torque_stats.yaml
 #   八b 看门狗：sim 栈 + 真 arm_controller/arm_monitor，断言示教退出 4 s 零触发（真阳性另验：带外失能必须被抓到）
 ```
 
-- 真机验收（**未做**，臂待修）：使能前反馈陈旧时被拒、kp 0.8 s 斜坡无甩动、stop 后无 kp>0 帧、带外失能双通道都能抓到。
+- **真机验收（2026-09-14 夜完成，事故后 5J 档 L1–L5）**：`scripts/a3_test/f51_real_arm_acceptance.py`，P0–P8 全绿——使能重锚（`最大丢弃目标距离 0.000000 rad`、命令位 vs 反馈位 0.0004 rad、沉降 0.0004 rad）、kp 0.35→80.0/0.74 s 软起步、stop 后 570 帧全零增益保活、带外 reset 双通道（看门狗 `TRIGGERED/UNEXPECTED_DISABLE` 0.61 s + 编排层 `DISABLED` 0.71 s）、保持期无 HOLD_DRIFT 误报。运行方式见下方「缺电机降级档（F52）5J 档起栈」。
 - **测试必须跑在独立 `ROS_DOMAIN_ID`**：mock 会伪造全部反馈，而同名 `/a3/motor/*` 服务在真机栈上存在——同域运行等于把测试的 enable 打到真电机上（LL-039 判据教训 3）。
+
+### 缺电机降级档（F52，5J 档起栈 / 真机已验证）
+
+can1 上只剩部分电机时（事故后只剩 L1–L5），用**档位**整套替换——`motor_map_file` 与 `gains_file` **必须配对**（逐关节数组长度 = `joint_names` 长度），否则执行层报「F52 档位配置非法」并退回 7J 默认档（不静默降级）：
+
+```bash
+# 真机 5J 档（L6/L7 缺失）：停掉 7J 栈后
+source scripts/a3_shell_env.sh
+CFG=$HOME/a3_arm_ws/install/a3_can_bridge/share/a3_can_bridge/config
+ros2 launch a3_bringup a3_bringup.launch.py use_power_sequence:=false use_teleop:=false \
+    gains_file:=$CFG/control_gains_5j.yaml motor_map_file:=$CFG/motor_map_5j.yaml
+ros2 launch a3_arm_controller arm_controller.launch.py \
+    config_file:=$HOME/a3_arm_ws/install/a3_arm_controller/share/a3_arm_controller/config/arm_controller_5j.yaml
+# 起栈自检：执行层日志 "F52 档位：5 关节 [...]"、/joint_states 恰好 5 个名字、MotorStates 5 条、
+#           控制器日志 "a3_arm_controller ready: joints=5"、看门狗 /a3/monitor/status = OK
+```
+
+- **真机验收脚本**（只驱动档位内电机；唯一运动项是 `--move` 时的小幅 `move_to`，增量经 `safety_limits.clamp_delta` ≤0.30 rad、≥3 s，结束必定失能）：
+  ```bash
+  A3_REAL_ARM_ACCEPT=1 python3 scripts/a3_test/f51_real_arm_acceptance.py \
+      --bridge-log /tmp/a3_hw_5j.log --move        # 不带 A3_REAL_ARM_ACCEPT=1 会拒绝运行
+  ```
+- **若 P5（`/a3/arm/enable`）被 F48 拒**（`position check failed: L4_joint=… limit=…`）：说明某个关节静置在 URDF 限位外，这是设计行为，**不要**放宽限位或关 `enable_position_check`——按 [LL-041](../lessons_learned/LL-041-rest-pose-outside-urdf-limit-f48-refuses-enable.md) 处置：失能态手动抬回限位内，或加 `--nudge-delta 0.15`（执行层先使能 + F51 保护下 2.5 s 小幅插值把 L4 挪回限位内，随后在使能态调 `/a3/arm/enable`）。
+- **起栈方式**：真机栈要长时间无人监护时**别挂在 agent 会话的后台任务上**——2026-09-15 00:21 系统内存告紧，harness 把 5J 整栈 6 个进程一次性回收（当时臂失能，无损失）。用 `setsid nohup … &` 脱离会话，或做成 systemd unit（同 `can-up.service`）。**臂使能中被杀 = 看门狗与轨迹层同时消失**（执行层进程死亡后电机是保持最后一条 MIT 命令还是超时失能，尚未实测）。
+- **7J 档默认行为不变**：不传这两个参数即 `control_gains.yaml` + `motor_map.yaml`。
+- 注意 `/a3/motor/enable`（执行层）**不查 URDF 限位**，只有编排层 `/a3/arm/enable` 查——「一个拒一个过」不是 bug。
 
 ### 重力标定（F49，真机 7 关节臂）
 

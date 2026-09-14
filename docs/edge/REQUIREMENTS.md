@@ -523,8 +523,25 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   2. **回归有牙**：把源码换回 HEAD 旧版重编，两个脚本必须失败（旧执行层 stop 后仍发 p=1.98/kp=80、使能甩到 1.98；旧看门狗示教退出 1.4 s 触发 FOLLOW_STUCK→stop→reset）
   3. 真机：使能前执行层对任何反馈陈旧电机拒绝使能；使能后 0.8 s 内 kp 单调升到额定、无甩动；stop 后总线上不再出现 kp>0 的目标帧
   4. 带外失能（`/a3/motor/reset` 直调）→ 看门狗 UNEXPECTED_DISABLE + 编排层 DISABLED（两个通道都要，模拟真机事故前置）
-- **关联：** [LL-039](../../lessons_learned/LL-039-teach-exit-reanchor-false-trip-enable-snap.md)（事故复盘与判据教训）；F38（示教退出重锚——本需求第 5 条与之配套）；F50（看门狗）；F42（力矩钳位是防撞不防甩）；[shared/SAFETY.md](../shared/SAFETY.md)（使能前置校验条款）
-- **状态：** `implemented`（2026-09-14 仿真回归验收通过：`incident_regression_test.py` T0–T4 与 `incident_monitor_regression_test.py` M1–M4 全绿，且两脚本对 HEAD 旧版均失败——修复前执行层 stop 后仍续发 `(p=1.98, kp=80)`、使能后命令位置偏离反馈位 1.950 rad、mock 关节被拖到 1.98；修复前看门狗示教退出 1.4 s 触发 FOLLOW_STUCK→stop→3 s→reset、带外失能无人报。**真机验收（第 3/4 条）未做**——L6 打印关节与腕部 CAN 线在事故中损坏，臂待修，按约束不得使能）
+- **真机验收（2026-09-14 夜，事故后 5J 档整栈重启，`scripts/a3_test/f51_real_arm_acceptance.py` P0–P8 全绿）：** 判据 3——`/a3/motor/enable` 响应 `F51 重锚 5 电机到反馈位, 最大丢弃目标距离 0.000000 rad`、使能帧只覆盖档位内 1..5、5 电机 mode=2；**使能后命令位 vs 反馈位最大偏差 0.0004 rad、实际沉降 0.0004 rad（等价于使能瞬间臂没动）**；kp 逐电机 0.35→80.0、0.73–0.74 s 达 90%（软起步生效）；`/a3/motor/stop` 后 1.2 s 内 570 帧（5 电机合计）**全为零增益保活**、无 kp>0。判据 4——带外 `/a3/motor/reset` → 看门狗 `TRIGGERED/UNEXPECTED_DISABLE`（0.61 s，action=report）+ 编排层 `DISABLED`（0.71 s）双通道。另：P7 保持期 3 s 无 HOLD_DRIFT 误报（LL-039 假阳性回归）。**真机验收前排查出并修掉一处同类漏洞**（使能不清 Named 轨迹回退表 `latest_input_champ_rad_`）→ [LL-040](../../lessons_learned/LL-040-enable-resurrects-unnamed-joint-input.md)
+- **关联：** [LL-039](../../lessons_learned/LL-039-teach-exit-reanchor-false-trip-enable-snap.md)（事故复盘与判据教训）；[LL-040](../../lessons_learned/LL-040-enable-resurrects-unnamed-joint-input.md)（使能重锚漏回退表）；[LL-041](../../lessons_learned/LL-041-rest-pose-outside-urdf-limit-f48-refuses-enable.md)（姿态越 URDF 限位时编排层 F48 拒使能）；F38（示教退出重锚——本需求第 5 条与之配套）；F50（看门狗）；F42（力矩钳位是防撞不防甩）；[shared/SAFETY.md](../shared/SAFETY.md)（使能前置校验条款）
+- **状态：** `implemented`（2026-09-14 仿真回归验收通过：`incident_regression_test.py` T0–T4 与 `incident_monitor_regression_test.py` M1–M4 全绿，且两脚本对 HEAD 旧版均失败——修复前执行层 stop 后仍续发 `(p=1.98, kp=80)`、使能后命令位置偏离反馈位 1.950 rad、mock 关节被拖到 1.98；修复前看门狗示教退出 1.4 s 触发 FOLLOW_STUCK→stop→3 s→reset、带外失能无人报。**真机验收（第 3/4 条）已完成**——2026-09-14 夜事故后按 F52 5J 档（L1–L5）整栈重启，`f51_real_arm_acceptance.py` P0–P8 全绿：见上方「真机验收」段；L6/L7 缺失下不触碰档位外电机）
+
+## F52 缺电机降级档（N 关节运行：只对在线电机做校验/比对/遥测）
+
+- **说明：** 2026-09-14 事故后 can1 上物理只剩 L1–L5（L6/L7 腕部无新鲜反馈），而整栈到处按 7 关节写死（`control_gains.yaml` 的关节/量程/钳位数组、`/joint_states` 名字表、F48 限位校验范围、看门狗逐关节比对、遥测点位）——**后果不是「少两个关节」，而是整臂不可用**：F51 的使能门禁逐电机校验反馈新鲜度，L6/L7 永远陈旧 → **整体拒绝使能**，连存活的 5 个电机都没法调试；同时 L6/L7 的**陈旧缓存值**（`fresh=false`，位置/模式仍是拽脱前最后一帧）会像 LL-020 那样作为「看起来正常的假值」参与限位校验与看门狗比对。本需求把「哪些电机关节参与」收敛成一个**档位清单**（joint profile），各节点按清单长度自适应：清单外电机不参与使能新鲜度校验、限位校验、看门狗比对、F42 钳位与遥测点位，也不再发布其缓存值（避免假值污染）。**7J 档为默认，行为不得改变。**
+- **验收标准：**
+  1. 5J 档（L1–L5）起栈：`/joint_states`/`MotorStates` 只含清单内关节（不出现 L6/L7 的陈旧缓存值、无 NaN）；F48 硬/软校验只查清单内关节；看门狗不因缺电机报任何故障
+  2. 5J 档 `/a3/motor/enable` 与 `/a3/arm/enable` 只看清单内电机的反馈新鲜度 → L1–L5 正常使能到 READY；任一**清单内**电机反馈陈旧仍整体拒绝使能（F51 语义不放松）
+  3. 7J 档回归不受影响：`./scripts/a3_test/a3_test.sh incident` 三段全绿，既有仿真/真机路径行为不变
+  4. 真机：5J 档 enable → READY，`/a3/arm/move_to` 小幅运动闭环正常、结束后可正常 disable
+- **关联：** F51（使能新鲜度校验是本需求的直接动因）、F48（限位校验范围）、F50（看门狗逐关节比对）、F42（钳位数组）、[LL-020](../../lessons_learned/LL-020-bridge-no-seed-stale-js.md)（陈旧值当新鲜用）、[LL-039](../../lessons_learned/LL-039-teach-exit-reanchor-false-trip-enable-snap.md)（事故硬件后果）
+- **实现：** 档位清单 = `motor_map*.yaml` 的 `joint_names` + `motor_ids_by_index`（等长，下标即轨迹关节位），`motor_protocol_node`/`power_sequence_node` 启动时读入 `ArmMapper::Configure()`；默认（不配或配错）退回**编译期 7J 档** `kChampJointNames`/`kTemporaryIndexMap`，配错时 ERROR 明示「F52 档位配置非法」而非静默降级。全栈按 `NumArmJoints()` 自适应：`/joint_states` 名字表、`MotorStates`/`tx_stats` 条数、广播 id 展开、F51 使能新鲜度门禁范围、逐关节参数长度校验。配套档位文件：`motor_map_5j.yaml`、`control_gains_5j.yaml`（逐关节数组取 7J 前 5 项）、`arm_controller_5j.yaml`。
+- **状态：** `completed`（2026-09-14 夜）
+  - **仿真：** `incident` 阶段八c 三用例全绿——5J 档使能+命名轨迹逐关节到位、7J 档遇缺电机整体拒绝使能且零帧、非法档位退回 7J 默认档
+  - **真机（5J 档整套起栈，`--bridge-log` 核对执行层日志）：** 判据 1——执行层启动日志 `F52 档位：5 关节 [L1_joint→motor1 … L5_joint→motor5]`，`/joint_states` 恰好 5 个名字（无 L6/L7 陈旧值）、`MotorStates` 5 条全 `fresh`；判据 2——`/a3/motor/enable` 响应 `F51 重锚 5 电机到反馈位`、使能帧**只覆盖电机 1..5**、5 电机 mode=2，`/a3/arm/enable` 到 `READY`；判据 4——`/a3/arm/move_to`（L1 +0.10 rad / 3.0 s，增量经 `safety_limits.clamp_delta`）到位误差 0.0029 rad、原路返回误差 0.0004 rad，随后带外 `/a3/motor/reset` 双通道失能（看门狗 `TRIGGERED/UNEXPECTED_DISABLE` 0.61 s + 编排层 `DISABLED` 0.71 s），收尾 5 电机全部 mode=0、温度 31–34 °C
+  - 真机验收脚本：`scripts/a3_test/f51_real_arm_acceptance.py`（`A3_REAL_ARM_ACCEPT=1 … --move`；姿态越 URDF 限位时加 `--nudge-delta`，见 [LL-041](../../lessons_learned/LL-041-rest-pose-outside-urdf-limit-f48-refuses-enable.md)）
+  - **未覆盖项（有意）**：判据 4 的 disable 走的是带外 `/a3/motor/reset`（紧急失能，也是 P8 双通道判据本身），**没有**走 `/a3/arm/disable` 的 F40 park——该臂当时 L4≈-1.0 rad、home_L4≈+0.334，park 是约 1.4 rad 的单次无人监护运动，超出当晚授权范围，留待有人在场或新结构到位后单独验证
 
 ### F40 — 失能保护（disable → 自动回 home → 失能）
 

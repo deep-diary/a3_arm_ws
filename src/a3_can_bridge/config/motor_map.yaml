@@ -2,5 +2,10 @@
   ros__parameters:
     # 控臂总线：can0 或 can1。切换总线只需改这里并重启栈，无需重编译。
     arm_bus: can1
-    # 电机 ID 与关节索引映射（index 0..6 -> L1..L7）
+    # ---- F52 运行期档位（7J 默认档）----
+    # joint_names[i] ↔ motor_ids_by_index[i]，下标即轨迹关节位；两项必须等长。
+    # 全栈的 /joint_states 名字表、MotorStates 条数、广播 id 展开、F51 使能新鲜度
+    # 门禁范围、逐关节参数长度校验都以本表为准。缺电机时（如事故后只剩 L1–L5）
+    # 用 motor_map_5j.yaml + control_gains_5j.yaml 这套降级档，不要删这里的条目。
     motor_ids_by_index: [1, 2, 3, 4, 5, 6, 7]
+    joint_names: [L1_joint, L2_joint, L3_joint, L4_joint, L5_joint, L6_joint, L7_joint]

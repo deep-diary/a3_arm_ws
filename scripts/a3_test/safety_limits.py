@@ -71,3 +71,56 @@ def build_safe_trajectory(targets, segment_s=MIN_SEG_DURATION_S):
 
 def total_duration(targets, segment_s=MIN_SEG_DURATION_S) -> float:
     return max(segment_s, MIN_SEG_DURATION_S) * len(list(targets)) + SETTLE_S
+
+
+# ---------------------------------------------------------------------------
+# F52 缺电机降级档（L1–L5）：多关节小幅安全轨迹
+# ---------------------------------------------------------------------------
+# 上面那套 API 是「单电机 L7」时代的（目标固定 L7、绝对值 ±0.30 rad、从 0 位出发）。
+# 缺电机降级档下要在 L1–L5 上做小幅运动验证，限幅口径完全一致，只是把
+# 「哪个关节 / 从哪个位姿出发」参数化：
+#   · 目标一律是**相对当前位姿**的增量，逐关节 |Δ| ≤ MAX_TARGET_RAD；
+#   · 每段时长 ≥ MIN_SEG_DURATION_S（→ ≤ ~0.12 rad/s）；
+#   · 轨迹 joint_names 只含档位内核定的关节（执行层按名匹配，档位外关节不受影响）。
+
+def clamp_delta(rad: float, limit: float = MAX_TARGET_RAD) -> float:
+    """把相对当前位姿的增量限制在 ±limit 内。"""
+    return max(-limit, min(limit, float(rad)))
+
+
+def build_safe_delta_trajectory(joint_names, start_rad, deltas, segment_s=MIN_SEG_DURATION_S):
+    """从 start_rad 出发、按 deltas 逐段前进的小幅多关节轨迹（F52 缺电机档用）。
+
+    joint_names: 档位内的关节名（顺序即 positions 顺序，须与 /joint_states 一致）
+    start_rad:   当前位姿（与 joint_names 等长）—— 起点显式写在轨迹里，避免执行层
+                 用陈旧目标/启动平滑猜测起点
+    deltas:      每段的增量向量（与 joint_names 等长），逐项 clamp 到 ±MAX_TARGET_RAD
+    返回 trajectory_msgs/JointTrajectory；调用方负责确认终点在软限位内。
+    """
+    from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+    segment_s = max(segment_s, MIN_SEG_DURATION_S)
+    traj = JointTrajectory()
+    traj.joint_names = list(joint_names)
+
+    p0 = JointTrajectoryPoint()
+    p0.positions = [float(v) for v in start_rad]
+    p0.time_from_start.sec = 0
+    traj.points.append(p0)
+
+    cur = [float(v) for v in start_rad]
+    t = 0.0
+    for delta in deltas:
+        d = [clamp_delta(x) for x in delta]
+        cur = [c + x for c, x in zip(cur, d)]
+        t += segment_s
+        p = JointTrajectoryPoint()
+        p.positions = list(cur)
+        p.time_from_start.sec = int(t)
+        p.time_from_start.nanosec = int((t - int(t)) * 1e9)
+        traj.points.append(p)
+    return traj
+
+
+def delta_total_duration(deltas, segment_s=MIN_SEG_DURATION_S) -> float:
+    return max(segment_s, MIN_SEG_DURATION_S) * len(list(deltas)) + SETTLE_S
