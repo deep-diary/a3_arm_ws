@@ -292,6 +292,43 @@ cat ~/.a3/stats/torque_stats.yaml
 - **F46 帧率**：轨迹期 195 Hz/关节（4098 帧/3 s ≈99% 交付、限速丢弃 0.7%）、静止对照 47.2 Hz/关节、`tx_rate_ok=true`；**tx_stats 5 s 窗口旋转会切分轨迹尾巴，读帧率须对照同时段桥日志**（LL-026）。
 - **F50 故障监视看门狗**（`a3_arm_monitor`，随 arm_controller.launch.py 默认启动，`enable_monitor:=false` 可关）：跨源比对 js/轨迹/电机状态/编排状态，故障走 stop → 升级 reset 阶梯（阈值与抑制规则见 [TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)「故障监视看门狗」）。2026-09-13 仿真验收（ROS_DOMAIN_ID=55 sim 闭环 + 故障注入）：健康 move_to 零触发（max err 0.0004 rad）；斜坡轨迹注入 → FOLLOW_STUCK → stop → +3 s 升级 reset；SIGSTOP sim_motor → STALE_JS → reset；ZERO_TORQUE 模式注入跳变零触发（抑制生效）。**5 次触发全为注入诱导，零误报**；真机观察随 F49 重力采集同场进行（`ros2 topic echo /a3/monitor/status`）。
 
+### 重力标定（F49，真机 7 关节臂）
+
+替换 `a3_description/config/inertia_params.yaml`（Pinocchio 重力前馈的参数源）。2026-09-14 真机 full 模式 68 点完成，RMSE 0.1592 / R² 0.9835（旧的官方 6J 参数在同批数据上 0.2036，URDF 默认 0.705）。**误差地板与验收偏差见 [LL-038](../lessons_learned/LL-038-static-gravity-calibration-hardware-floor.md)**。
+
+```bash
+# 0) 前置：硬件栈在跑、臂 enable 到 READY、周围清空、手边可断电；量夹爪全开
+ros2 launch a3_bringup a3_bringup.launch.py use_power_sequence:=false use_teleop:=false
+ros2 launch a3_arm_controller arm_controller.launch.py      # 另开终端：READY 门禁 + 温度守护数据源
+
+# 1) 先看要动的点位与时长（不动臂）
+python3 scripts/gravity_calibration.py --dry-run --no-rest-anchor \
+  --anchors 0.07,1.0839,-0.5649,-0.4617,0.0831,-0.0497,-0.0002
+
+# 2) 采集 + 拟合（断点续采：重跑同命令；清数据：--restart；只拟合：--optimize-only）
+python3 scripts/gravity_calibration.py --no-rest-anchor \
+  --anchors 0.07,1.0839,-0.5649,-0.4617,0.0831,-0.0497,-0.0002
+
+# 3) 生效：重启重力节点（install 下 yaml 是 symlink，不必重编）
+ros2 run a3_bringup gravity_torque_node --ros-args -r __node:=a3_gravity_torque -p enabled:=True
+#   日志出现 "Applied calibrated inertia to 5 links" 即为加载成功
+```
+
+关键参数与坑：
+
+- **`--effort-domain`**：真机 `/joint_states.effort` 是**电机域**（LL-037），默认 `motor`（拟合前 ×`joint_signs`）；仿真数据文件用 `urdf`。域随数据文件 meta 留档，混用会直接报错退出。
+- **`--temp-pause/--temp-resume`**（默认 85/75 °C）：超限回折叠位降温再续采（3D 打印外壳散热差，85 留 5 °C 余量给 F44 warn 90；实测被动降温 ~2 °C/min，单次约 5 min）。
+- **`--no-rest-anchor` + `--anchors`**：折叠 home 位搭在支撑上 τ 恒≈0，不是重力样本（LL-035）——用 ready 等自由位姿做外推锚定。
+- **安全**：所有移动 ≤0.25 rad/步链式分段（3 s/段），每点前用当前模型预测 τ（>3.5 Nm 跳过），F42/F44 仍是最后防线；异常时 Ctrl+C，数据逐点留盘。
+- **yaml 旧版留档**：`inertia_params.official-6J-20260318.bak.yaml`（官方 6J 标定值，回退用）。
+- **验收位姿用 ready**（自由悬空位）：home 是折叠支撑位，实测 τ≈0 判不了模型（LL-035）。
+
+```bash
+# 4) ready 位复核模型 vs 实测（臂会移动到 ready；实测 τ 需 ×joint_signs）
+ros2 service call /a3/arm/goto_named_pose a3_msgs/srv/GotoNamedPose "{pose_name: ready}"
+#   2026-09-14 结果：max|Δτ| 0.302 Nm（L3）、RMSE 0.145；旧 6J 参数 0.403 / 0.212
+```
+
 ### URDF 方向校验（RViz 双模型，臂不失能）
 
 用两个模型对照 URDF 关节方向与真机反馈：**目标模型**（半透明青蓝色 ghost，默认静止在 home）与**实际反馈模型**（原色实体，由电机反馈 /joint_states 驱动）。全程臂失能（电机 mode=0，轨迹帧只收不执行，LL-018）；手转各关节，对比实际模型运动方向与真机是否一致。

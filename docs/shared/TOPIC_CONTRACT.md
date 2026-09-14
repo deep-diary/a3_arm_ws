@@ -10,7 +10,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 |------|------|------|
 | 轨迹命令 | `trajectory_msgs/JointTrajectory` | `joint_names`、`points[]`：`positions` 必填；`velocities` 由规划时间参数化填入（MoveIt TOTG）；`accelerations` 可选（执行层五次插值）；`effort` 为开环重力补偿（Nm），与 `positions` 同一 URDF 关节系，**不**乘 `joint_signs`；另有 `time_from_start` |
 | 轨迹执行 Action | `control_msgs/action/FollowJointTrajectory` | MoveIt Execute / 标准控制器入口 |
-| 关节反馈 | `sensor_msgs/JointState` | position、velocity、effort（部分字段可为 NaN） |
+| 关节反馈 | `sensor_msgs/JointState` | position、velocity、effort（部分字段可为 NaN）。**域不同（LL-037）**：position/velocity 已换算到 URDF 关节系（`champ_feedback`、`current_speed/sign`），`effort` 是**电机域原值**（`motor_protocol_node.cpp` 直取 `current_torque`，未乘 `joint_signs`）。消费 `effort` 做力矩对比/标定时必须 `τ_urdf = joint_signs × τ_motor`（`joint_signs` = `a3_can_bridge/config/control_gains.yaml`，L1/L3/L5 为 −1） |
 | 电源门控 | `std_msgs/Bool` | `true` 时允许轨迹执行 |
 | 电源命令 | `std_msgs/String` | `start` / `shutdown` / `set_zero` |
 | 电源状态 | `std_msgs/String` | 电源序列当前状态（可选订阅） |

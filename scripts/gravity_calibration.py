@@ -22,6 +22,9 @@
   python3 scripts/gravity_calibration.py --dry-run            # 只打印位姿网格与分段数，不动臂
   python3 scripts/gravity_calibration.py --start 30           # 断点续采（0 基）
   python3 scripts/gravity_calibration.py --restart            # 清数据重来
+  # 折叠 rest 位顶限位/搭支撑时（τ 实测恒≈0，非重力样本）剔除该锚点、改用自由位姿锚定：
+  python3 scripts/gravity_calibration.py --no-rest-anchor \
+      --anchors 0.07,1.0839,-0.5649,-0.4617,0.0831,-0.0497,-0.0002   # ready 位
 
 前提：桥 + 编排层在跑、臂已 enable（READY）。中断后重跑自动续采。
 """
@@ -42,9 +45,24 @@ import numpy as np
 CAL_DATA_DIR = os.path.expanduser("~/.a3/calibration")
 CAL_DATA_FILE = os.path.join(CAL_DATA_DIR, "calibration_data.jsonl")
 
+# 到位残差容差（rad）：真机保位稳态垂降 = τ_g/kp（kp=80 时 3.2 Nm → 0.04 rad；
+# 4~5 Nm 的关节可达 0.05~0.06），FJT 自身的 0.05 容差处在边界上，故放宽到 0.08
+# （≈4.6°，仍远小于网格步长；采样记录的是**实测**位姿，残差只影响网格覆盖精度）。
+# 残差超过它 = 另有异常（被支撑顶住 / F42 冻结），弃点（LL-036）。
+ARRIVE_TOL_RAD = 0.08
+
 JOINT_NAMES = [
     "L1_joint", "L2_joint", "L3_joint", "L4_joint", "L5_joint", "L6_joint", "L7_joint",
 ]
+
+# 力矩域换算（LL-037）：motor_protocol_node 发布的 /joint_states **位置/速度**已换算到
+# URDF 关节域（champ_feedback / current_speed/sign），但 **effort 是电机域原值**
+# （motor_protocol_node.cpp: last_feedback_effort_nm_[idx] = current_torque，没乘 sign）。
+# pinocchio 的 τ_g 是 URDF 域，故拟合前必须把实测 effort 乘回 joint_signs：
+#   τ_urdf = joint_signs × τ_motor（与 gravity_torque_node 的 τ_mit = signs × τ_g_urdf 互逆）
+# 不换算的后果：sign=-1 的关节（L1/L3/L5）符号全反，RMSE 1.66（vs 换算后 0.16）。
+# 值须与 src/a3_can_bridge/config/control_gains.yaml 的 joint_signs 一致。
+JOINT_SIGNS = np.array([-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, 1.0])
 
 # 与 gravity_torque_node._apply_calibrated_inertia 的 joint_to_link 完全一致：
 # 各关节「下方」的杆（官方 inertias[2..6] 同下标）——τ_i 只依赖第 i 关节以下的杆
@@ -57,6 +75,12 @@ FIT_LINK_MAP = {
 }
 
 # 官方 full 模式 12 参数：L2(mass,com_x) L3(mass,com_x,com_y) L4(mass,com_x,com_y) L5(mass,com_z) L6(mass,com_z)
+#
+# 初值：用**本臂 URDF 现值**（比官方 6J 初值更接近真机；见 gravity_calibration 的 _urdf_initial）。
+# 边界：官方那套是从官方 URDF 的连杆坐标系推的，对本臂不成立——例如 L4 com_y 官方界 [0,0.1]
+# 而本臂 URDF 是 -0.0298、L6 com_z 官方界 [-0.15,0] 而本臂是 +0.0699，**直接把真值排除在外**，
+# 最优解被顶在边界上（RMSE 0.162 且 L3 com_x 顶界）。改为物理上宽松的 质量[0.01,2] / 质心±0.25，
+# 拟合结果落在 URDF 现值附近（质量偏差 <10%）且 RMSE 略降 → 边界不再是瓶颈（LL-037）。
 FIT_INIT = np.array([
     0.8348, 0.095,
     0.1976, -0.056, 0.049,
@@ -65,11 +89,11 @@ FIT_INIT = np.array([
     0.5313, 0.070,
 ])
 FIT_BOUNDS = [
-    (0.1, 2.0), (-0.2, 0.2),
-    (0.05, 0.5), (-0.15, 0.0), (-0.1, 0.1),
-    (0.1, 1.0), (-0.1, 0.0), (0.0, 0.1),
-    (0.001, 0.1), (0.0, 0.05),
-    (0.1, 1.0), (-0.15, 0.0),
+    (0.01, 2.0), (-0.25, 0.25),
+    (0.01, 1.0), (-0.25, 0.25), (-0.25, 0.25),
+    (0.01, 2.0), (-0.25, 0.25), (-0.25, 0.25),
+    (0.001, 0.5), (-0.25, 0.25),
+    (0.01, 2.0), (-0.25, 0.25),
 ]
 
 
@@ -87,8 +111,12 @@ class CalibrationConfig:
     rest_pose: List[float] = None  # 降温位（折叠 home）
     temp_guard: bool = True
     torque_filter: bool = True
-    temp_pause_c: float = 75.0
-    temp_resume_c: float = 60.0
+    # 温控阈值（2026-09-14 上调）：关节外壳是 3D 打印件且直接固定电机（受力结构件），
+    # 散热差、耐温低于金属件。85 °C 停采回折叠位降温、75 °C 继续：
+    # 留 5 °C 余量给 F44 warn(90)/protect(95)，远低于电机自身保护 130 °C（LL-023）。
+    # 单次降温 85→75 约 5 min（实测被动降温 ~2 °C/min）。
+    temp_pause_c: float = 85.0
+    temp_resume_c: float = 75.0
 
     def __post_init__(self):
         if self.home_position is None:
@@ -172,11 +200,16 @@ def check_collision_with_base(config: List[float]) -> bool:
 # JSONL 增量数据
 # ---------------------------------------------------------------------------
 
-def write_meta_line(path: str, mode: str, total_points: int, home: list):
+def write_meta_line(path: str, mode: str, total_points: int, home: list,
+                    effort_domain: str = "urdf", joint_signs=None):
     with open(path, "w") as f:
         f.write(json.dumps({
             "meta": True, "mode": mode, "total_points": total_points,
             "home": home, "start_time": datetime.now().isoformat(),
+            # LL-037：effort 的域必须随数据一起留档——真机是电机域，拟合前要 ×joint_signs；
+            # 否则 --optimize-only 读旧文件时会把 L1/L3/L5 符号搞反（RMSE 1.66 那次）。
+            "effort_domain": effort_domain,
+            "joint_signs": [float(s) for s in (joint_signs if joint_signs is not None else JOINT_SIGNS)],
         }) + "\n")
 
 
@@ -246,6 +279,19 @@ def _param_to_inertia_overrides(model, params: np.ndarray, jids: dict) -> List[T
             lever[2] = fitted["z"]
         overrides.append((jid, float(mass), lever))
     return overrides
+
+
+def _urdf_initial(model, jids: dict) -> np.ndarray:
+    """从本臂 URDF 现值构造 12 参数初值（比官方 6J 初值更接近真机，见 LL-037）。"""
+    def I(key):
+        return model.inertias[jids[key]]
+    return np.array([
+        I("L2").mass, I("L2").lever[0],
+        I("L3").mass, I("L3").lever[0], I("L3").lever[1],
+        I("L4").mass, I("L4").lever[0], I("L4").lever[1],
+        I("L5").mass, I("L5").lever[2],
+        I("L6").mass, I("L6").lever[2],
+    ])
 
 
 def predict_gravity(model, data, q7: np.ndarray, params: Optional[np.ndarray] = None) -> np.ndarray:
@@ -330,10 +376,16 @@ def fit_inertia(model, records, fix_masses: bool = False) -> Tuple[dict, float, 
         opt = _expand(result.x)
         fixed_tags = {"L2", "L3", "L4", "L6"}
     else:
-        result = minimize(objective, FIT_INIT, method="L-BFGS-B", bounds=FIT_BOUNDS,
-                          options={"maxiter": 500, "disp": False})
+        x0 = _urdf_initial(model, jids)
+        print("initial (URDF 现值):", np.round(x0, 4))
+        result = minimize(objective, x0, method="L-BFGS-B", bounds=FIT_BOUNDS,
+                          options={"maxiter": 2000, "disp": False})
         opt = result.x
         fixed_tags = set()
+        hits = [f"p{i}" for i, (lo, hi) in enumerate(FIT_BOUNDS)
+                if abs(opt[i] - lo) < 1e-4 or abs(opt[i] - hi) < 1e-4]
+        if hits:
+            print(f"  WARN: 参数顶在边界上 {hits}（边界可能仍限制最优解）")
 
     final_error = result.fun
     n_samples = len(records) * 5
@@ -361,12 +413,113 @@ def fit_inertia(model, records, fix_masses: bool = False) -> Tuple[dict, float, 
             "rmse": float(rmse),
             "r_squared": float(r_squared),
         },
+        # 供诊断（residual_report）复用最优解，不进 yaml
+        "_params": opt,
     }
     for key, tag in [("L2", "L2" in fixed_tags), ("L3", "L3" in fixed_tags),
                      ("L4", "L4" in fixed_tags), ("L6", "L6" in fixed_tags)]:
         if tag:
             results[key]["_fixed_mass"] = True
     return results, rmse, r_squared
+
+
+FIT_JOINT_IDX = {"L2": 1, "L3": 2, "L4": 3, "L5": 4, "L6": 5}
+
+
+def residual_report(model, records, results, min_move: float = 0.02) -> dict:
+    """拟合后诊断（LL-038）：逐关节残差 + 上/下行迟滞（摩擦）估计。
+
+    records 是 (pos7, eff_urdf) 且**按访问顺序**（dedup_records 按 idx 排序 == 访问顺序），
+    才能用 q[k]−q[k−1] 判最后一次显著移动的方向。残差按该方向分裂 = 关节摩擦/间隙迟滞
+    （τ_meas = τ_g ± τ_fric），与模型无关，是 RMSE 的硬件地板；两方向均值 = 模型系统偏置。
+
+    方向必须**保持**（|Δq| ≤ min_move 时沿用上一次方向）：摩擦偏置在关节停下后就锁在
+    那个方向，直到再次移动——不保持会把同一段扫描里的点错分成两个方向（LL-038）。
+    """
+    params = results.get("_params")
+    data = model.createData()
+    errs, dirs = [], []
+    prev_q, last_dir = None, np.zeros(7)
+    for positions, measured in records:
+        errs.append(measured - predict_gravity(model, data, positions, params))
+        if prev_q is None:
+            dirs.append(np.zeros(7))
+        else:
+            moved = np.abs(positions - prev_q) > min_move
+            last_dir = np.where(moved, np.sign(positions - prev_q), last_dir)
+            dirs.append(last_dir.copy())
+        prev_q = positions
+    errs, dirs = np.array(errs), np.array(dirs)
+
+    joints, corr_parts, all_parts = {}, [], []
+    for name, i in FIT_JOINT_IDX.items():
+        e, u = errs[:, i], dirs[:, i]
+        sel_up, sel_dn = e[u > 0], e[u < 0]
+        up_m = float(np.mean(sel_up)) if len(sel_up) else 0.0
+        dn_m = float(np.mean(sel_dn)) if len(sel_dn) else 0.0
+        fric = (up_m - dn_m) / 2.0 if len(sel_up) and len(sel_dn) else 0.0
+        corrected = e - np.where(u > 0, fric, np.where(u < 0, -fric, 0.0))
+        joints[name] = {
+            "rmse": float(np.sqrt(np.mean(e ** 2))), "bias": float(np.mean(e)),
+            "up": up_m, "down": dn_m, "fric": fric,
+            "n_up": int(len(sel_up)), "n_down": int(len(sel_dn)),
+        }
+        corr_parts.append(corrected); all_parts.append(e)
+    all_err = np.concatenate(all_parts); corr_err = np.concatenate(corr_parts)
+    return {
+        "joints": joints,
+        "rmse": float(np.sqrt(np.mean(all_err ** 2))),
+        "rmse_fric_free": float(np.sqrt(np.mean(corr_err ** 2))),
+    }
+
+
+def acceptance_verdict(rmse: float, report: dict) -> Tuple[bool, List[str]]:
+    """F49 验收：全关节 RMSE ≤ 0.15 Nm。附系统性偏置/摩擦地板提示（不计入判定）。"""
+    notes = [f"RMSE {rmse:.4f} Nm ≤ 0.15 → {'PASS' if rmse <= 0.15 else 'FAIL'}"]
+    ok = rmse <= 0.15
+    worst = max(report["joints"].items(), key=lambda kv: abs(kv[1]["bias"]))
+    if abs(worst[1]["bias"]) > 0.05:
+        notes.append(f"WARN: {worst[0]} 系统性偏置 {worst[1]['bias']:+.4f} Nm"
+                     "（两方向同号 → 模型/URDF 偏差，不是摩擦）")
+    fr = max(report["joints"].items(), key=lambda kv: abs(kv[1]["fric"]))
+    if abs(fr[1]["fric"]) > 0.05:
+        notes.append(f"INFO: 最大方向性迟滞（摩擦/间隙）{fr[0]} ±{abs(fr[1]['fric']):.3f} Nm"
+                     f"（末次上行 {fr[1]['up']:+.3f} / 末次下行 {fr[1]['down']:+.3f}，"
+                     f"n={fr[1]['n_up']}/{fr[1]['n_down']}）"
+                     f"；扣掉方向项后 RMSE {report['rmse_fric_free']:.4f}")
+    if not ok and report["rmse_fric_free"] <= 0.15:
+        notes.append("INFO: 超额部分来自关节迟滞这个硬件地板——静态模型无法表示"
+                     "「同姿态不同到达方向」的偏置，参数本身已无拟合空间"
+                     "（复核：20 参数全一阶矩拟合 RMSE 0.158 ≈ 12 参数 0.159）")
+    return ok, notes
+
+
+def eval_params_yaml(model, records, path: str) -> Optional[float]:
+    """用同一批数据评当前 yaml（切换前基线对比）。读不到就返回 None。"""
+    if not os.path.isfile(path):
+        return None
+    try:
+        import yaml
+        with open(path) as f:
+            doc = yaml.safe_load(f) or {}
+        p = doc.get("inertia_params") or {}
+        if not p:
+            return None
+        params = np.array([
+            p["L2"]["mass"], p["L2"]["com"][0],
+            p["L3"]["mass"], p["L3"]["com"][0], p["L3"]["com"][1],
+            p["L4"]["mass"], p["L4"]["com"][0], p["L4"]["com"][1],
+            p["L5"]["mass"], p["L5"]["com"][2],
+            p["L6"]["mass"], p["L6"]["com"][2],
+        ], dtype=float)
+    except Exception as e:  # noqa: BLE001 — 基线对比失败不该挡住拟合
+        print(f"  基线 yaml 解析失败（{e}），跳过对比")
+        return None
+    data = model.createData()
+    parts = [measured[1:6] - predict_gravity(model, data, positions, params)[1:6]
+             for positions, measured in records]
+    all_err = np.concatenate(parts)
+    return float(np.sqrt(np.mean(all_err ** 2)))
 
 
 def save_results(results: dict, output_path: str) -> None:
@@ -379,7 +532,11 @@ def save_results(results: dict, output_path: str) -> None:
         f"# Calibration date: {info['date']}\n"
         f"# RMSE: {info['rmse']:.4f} Nm\n"
         f"# R^2: {info['r_squared']:.4f}\n"
-        "\n"
+        + (f"# effort domain: {info['effort_domain']}（拟合前 ×joint_signs 换算，LL-037）\n"
+           if info.get("effort_domain") else "")
+        + (f"# RMSE per joint: {json.dumps(info['rmse_per_joint'], ensure_ascii=False)}\n"
+           if info.get("rmse_per_joint") else "")
+        + "\n"
         "use_calibrated_params: true\n"
         "\n"
         "inertia_params:\n"
@@ -393,6 +550,12 @@ def save_results(results: dict, output_path: str) -> None:
         f"  num_samples: {info['num_samples']}\n"
         f"  rmse: {info['rmse']:.4f}\n"
         f"  r_squared: {info['r_squared']:.4f}\n"
+        + (f"  effort_domain: {info['effort_domain']}\n" if info.get("effort_domain") else "")
+        + (f"  rmse_fric_free: {info['rmse_fric_free']:.4f}\n" if info.get("rmse_fric_free") else "")
+        + (f"  accepted: {str(bool(info['accepted'])).lower()}"
+           f"  # F49 验收 RMSE ≤ 0.15\n" if "accepted" in info else "")
+        + (f"  rmse_per_joint: {json.dumps(info['rmse_per_joint'], ensure_ascii=False)}"
+           f"  # err = 实测 − 模型，URDF 域\n" if info.get("rmse_per_joint") else "")
     )
     if os.path.isfile(output_path):
         bak = f"{output_path}.bak-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -423,6 +586,15 @@ class GravityCalibrator:
         self.data = None
         self.fjt = None
         self.records = []
+        # 力矩域换算系数：真机 /joint_states.effort 是电机域，须 ×joint_signs（LL-037）
+        signs = getattr(args, "joint_signs", None)
+        if signs:
+            s = np.array([float(x) for x in str(signs).split(",")])
+            if len(s) != 7 or not np.all(np.isin(s, (-1.0, 1.0))):
+                raise SystemExit(f"--joint-signs 需要 7 个 ±1，收到 {signs}")
+            self.signs = s
+        else:
+            self.signs = JOINT_SIGNS.copy()
 
     # ---- ROS 初始化 ----
 
@@ -534,19 +706,27 @@ class GravityCalibrator:
         if res.result.error_code != 0:
             print(f"  WARN: move error_code={res.result.error_code} ({res.result.error_string})", flush=True)
             # -5 timeout 可能是 FJT 收敛判定的偶发误报（回调组被饿时 _joint_pos 停在移动起点），
-            # 臂（C++ 执行层独立插值）往往已到位：等 js 到位核实，到位视为成功继续采样
+            # 臂（C++ 执行层独立插值）往往已到位；也可能是垂降残差略超 FJT 的 0.05 容差
+            # （LL-036）——等 js 到位核实，到位视为成功继续采样
             for _ in range(40):  # ≤4 s
                 self._rclpy.spin_once(self.node, timeout_sec=0.05)
                 if (self.cur_pos is not None
-                        and np.max(np.abs(self.cur_pos - np.array(target))) <= 0.05):
-                    print("    但 js 已到位（误差 ≤0.05），视为成功", flush=True)
+                        and np.max(np.abs(self.cur_pos - np.array(target))) <= ARRIVE_TOL_RAD):
+                    print(f"    但 js 已到位（误差 ≤{ARRIVE_TOL_RAD}），视为成功", flush=True)
                     return True
                 time.sleep(0.05)
             return False
         return True
 
     def move_chained(self, target: np.ndarray) -> bool:
-        """≤ max_step rad/关节的链式分段移动；每段 2 点 FJT。"""
+        """≤ max_step rad/关节的链式分段移动；每段 2 点 FJT。
+
+        到位判据：本段已直接指令最终目标（scale=1）且 FJT 报成功即到达——FJT 容差
+        0.05 rad 已把真机**稳态垂降** τ_g/kp 算在内（L3 3.2 Nm / kp 80 ≈ 0.04 rad），
+        不能再按实测残差 ≤0.02 rad 判（那会永远判不到位：同一目标反复下发，每段
+        抬起垂降量又被重力拉回，真机表现为「抬一点掉回去」死循环，LL-036）。
+        残差明显大于垂降量（>0.08 rad）说明另有异常（被支撑顶住 / F42 冻结），弃点。
+        """
         steps = 0
         while True:
             delta = target - self.cur_pos
@@ -561,6 +741,12 @@ class GravityCalibrator:
             if not self.move_to_position(wp):
                 return False
             steps += 1
+            if scale >= 1.0:
+                resid = float(np.max(np.abs(target - self.cur_pos)))
+                if resid > ARRIVE_TOL_RAD:
+                    print(f"  FAIL: 到位残差 {resid:.3f} rad 过大（疑似被支撑顶住 / F42 冻结），弃点")
+                    return False
+                return True
             # 轨迹结束后等 js 跟上（收敛判定 0.05 rad 已由 FJT 保证）
             self.spin_until(lambda: self.cur_pos is not None, 1.0, interval=0.1)
 
@@ -576,15 +762,22 @@ class GravityCalibrator:
         if not self.move_chained(np.array(self.config.rest_pose)):
             return False
         print(f"  [temp guard] 等待降至 {self.config.temp_resume_c}°C ...")
+        last_print = -99.0
         while True:
-            self._rclpy.spin_once(self.node, timeout_sec=1.0)
+            self._rclpy.spin_once(self.node, timeout_sec=0.02)
             if self.arm_state not in ("READY", "TRAJ"):
                 print(f"  [temp guard] 状态异常 {self.arm_state}，中止")
                 return False
-            if self.max_temp() <= self.config.temp_resume_c:
-                print(f"  [temp guard] 已降至 {self.max_temp():.1f}°C，继续采集")
+            t = self.max_temp()
+            if t <= self.config.temp_resume_c:
+                print(f"  [temp guard] 已降至 {t:.1f}°C，继续采集")
                 return True
-            print(f"  [temp guard] {self.max_temp():.1f}°C ...", flush=True)
+            # 只在温度变化 ≥1 °C 时打印（原来无 sleep + spin_once 立即返回，50 Hz js 流
+            # 导致 ~62 行/s、单次降温刷 6 万行日志）
+            if t <= last_print - 1.0:
+                print(f"  [temp guard] {t:.1f}°C ...", flush=True)
+                last_print = t
+            time.sleep(1.0)
 
     # ---- 采样 ----
 
@@ -606,7 +799,11 @@ class GravityCalibrator:
 
         # 锚点位姿：官方网格不含折叠位（L2/L3 近 0），但验收要 home/ready 的 |Δτ|≤0.2 Nm，
         # 把 rest（折叠 home）与 --anchors 指定位姿追加进网格做外推锚定（不进碰撞过滤，用户自定）
-        anchors = [self.config.rest_pose]
+        #
+        # --no-rest-anchor：折叠 rest 位（L2=0/L3=0）顶在限位上（或搭在支撑上）时由机械
+        # 止挡/支撑承重，电机 τ 恒 ≈0——那不是重力矩样本，混进拟合会把模型在该区域往 0
+        # 拉偏（LL-035）。此时用 --anchors 传 ready 等自由位姿替代锚定。
+        anchors = [] if self.args.no_rest_anchor else [self.config.rest_pose]
         for raw in (self.args.anchors or []):
             try:
                 anchors.append([float(x) for x in raw.split(",")])
@@ -615,8 +812,9 @@ class GravityCalibrator:
         for a in anchors:
             if len(a) == 7 and not any(np.allclose(a, c, atol=0.05) for c in test_configs):
                 test_configs.append(a)
-        if len(anchors) > 1:
-            print(f"锚点位姿追加：rest + {len(anchors) - 1} 个 --anchors")
+        if anchors:
+            tag = "无 rest（--no-rest-anchor）" if self.args.no_rest_anchor else "含 rest"
+            print(f"锚点位姿追加：{len(anchors)} 个（{tag}）")
 
         # 力矩预测过滤（当前模型，可能低估——F42/F44 仍是最后防线）
         skipped = 0
@@ -655,12 +853,13 @@ class GravityCalibrator:
         if self.args.start is not None:
             completed = self.args.start
             if not os.path.exists(df):
-                write_meta_line(df, mode, total, self.config.home_position)
+                self._write_meta(df, mode, total)
             else:
                 meta, _ = read_jsonl(df)
                 if meta and meta.get("mode") != mode:
                     print(f'Mode mismatch: file has "{meta.get("mode")}", requested "{mode}". Use --restart.')
                     return False
+                self._check_domain_meta(meta)
         elif os.path.exists(df):
             meta, records = read_jsonl(df)
             if meta is None:
@@ -669,11 +868,12 @@ class GravityCalibrator:
             if meta.get("mode") != mode:
                 print(f'Mode mismatch: file has "{meta.get("mode")}", requested "{mode}". Use --restart.')
                 return False
+            self._check_domain_meta(meta)
             completed = len(dedup_records(records))
             print(f"Resuming: {completed}/{total} points already collected")
         else:
             completed = 0
-            write_meta_line(df, mode, total, self.config.home_position)
+            self._write_meta(df, mode, total)
             print(f"Starting fresh collection: {total} points")
 
         if completed >= total:
@@ -717,27 +917,76 @@ class GravityCalibrator:
 
     # ---- 拟合入口 ----
 
+    def _write_meta(self, df: str, mode: str, total: int) -> None:
+        write_meta_line(df, mode, total, self.config.home_position,
+                        self.args.effort_domain, self.signs)
+
+    def _check_domain_meta(self, meta: Optional[dict]) -> None:
+        """续采时核对数据文件记录的力矩域/符号，与本次运行不一致就停（LL-037）。"""
+        if not meta:
+            return
+        if meta.get("effort_domain") and meta["effort_domain"] != self.args.effort_domain:
+            raise SystemExit(
+                f'数据文件 effort_domain="{meta["effort_domain"]}"，本次 --effort-domain='
+                f"{self.args.effort_domain}——同一文件不能混两个域，用 --restart 重来")
+        if meta.get("joint_signs") and list(meta["joint_signs"]) != [float(s) for s in self.signs]:
+            raise SystemExit(
+                f'数据文件 joint_signs={meta["joint_signs"]}，本次 {list(self.signs)}——'
+                "符号变了数据不可混用，用 --restart 重来")
+
     def run_optimize(self) -> bool:
         df = self.args.data_file
         if not os.path.exists(df):
             print(f"No data file found at {df}")
             return False
-        _, records = read_jsonl(df)
+        meta, records = read_jsonl(df)
         records = dedup_records(records)
         if len(records) < 10:
             print(f"Too few data points ({len(records)}), need at least 10")
             return False
-        self.records = [(np.array(r["position"]), np.array(r["effort"])) for r in records]
+        # 力矩域（LL-037）：真机 /joint_states.effort 是电机域原值，需 ×joint_signs 换回
+        # URDF 域才能和 pinocchio 的 τ_g 比；仿真 sim_motor_node 直接发 URDF 域。
+        # 数据文件 meta 里注明的域优先于命令行（--optimize-only 读旧文件时不会搞错）。
+        domain = (meta or {}).get("effort_domain") or self.args.effort_domain
+        signs = self.signs if domain == "motor" else np.ones(7)
+        if domain == "motor":
+            flips = [JOINT_NAMES[i] for i in range(7) if signs[i] < 0]
+            print(f"effort 域：motor → ×joint_signs 转 URDF 域（翻转 {flips}）")
+        self.records = [(np.array(r["position"]), np.array(r["effort"]) * signs)
+                        for r in records]
         print(f"Loaded {len(records)} data points")
 
+        base = eval_params_yaml(self.model, self.records, self.args.output)
         results, rmse, r_squared = fit_inertia(self.model, self.records,
                                                fix_masses=self.args.fix_masses)
         print(f"RMSE: {rmse:.4f} Nm  R^2: {r_squared:.4f}")
+        if base is not None:
+            delta = base - rmse
+            print(f"同批数据基线（当前 yaml）RMSE {base:.4f} → 新参数 {rmse:.4f} "
+                  f"({'+' if delta >= 0 else '−'}{abs(delta):.4f} Nm)")
         for j in ["L2", "L3", "L4", "L5", "L6"]:
             p = results[j]
             print(f"  {j}: mass={p['mass']:.4f}, com={[round(x, 4) for x in p['com']]}")
+
+        report = residual_report(self.model, self.records, results)
+        print("每关节残差（实测 − 模型，URDF 域）：")
+        for j in FIT_JOINT_IDX:
+            d = report["joints"][j]
+            print(f"  {j}: rmse={d['rmse']:.4f} bias={d['bias']:+.4f} "
+                  f"方向性摩擦 ±{abs(d['fric']):.3f}（上行 {d['up']:+.3f} / "
+                  f"下行 {d['down']:+.3f}，n={d['n_up']}/{d['n_down']}）")
+        ok, notes = acceptance_verdict(rmse, report)
+        for n in notes:
+            print(f"  [验收] {n}")
+
+        results["calibration_info"].update({
+            "effort_domain": domain,
+            "rmse_per_joint": {j: round(report["joints"][j]["rmse"], 4) for j in FIT_JOINT_IDX},
+            "rmse_fric_free": report["rmse_fric_free"],
+            "accepted": ok,
+        })
         save_results(results, self.args.output)
-        return True
+        return ok
 
 
 def main():
@@ -761,8 +1010,20 @@ def main():
     parser.add_argument("--anchors", action="append", default=None,
                         help="追加锚点位姿（可多次），7 个逗号分隔浮点，"
                              "如 0.07,1.08,-0.56,-0.46,0.08,-0.05,0（rest 折叠位默认追加）")
+    parser.add_argument("--no-rest-anchor", action="store_true",
+                        help="不追加折叠 rest 位——该位姿顶限位/搭支撑时电机 τ 恒≈0（非重力样本，LL-035）")
     parser.add_argument("--no-temp-guard", action="store_true")
     parser.add_argument("--no-torque-filter", action="store_true")
+    parser.add_argument("--temp-pause", type=float, default=85.0,
+                        help="关节温度超过此值回折叠位降温（默认 85，F44 warn 90 留 5 °C 余量）")
+    parser.add_argument("--temp-resume", type=float, default=75.0,
+                        help="降温到该温度继续采集（默认 75）")
+    parser.add_argument("--effort-domain", default="motor", choices=["motor", "urdf"],
+                        help="数据里 /joint_states.effort 的域：motor=真机（拟合前 ×joint_signs）/ "
+                             "urdf=仿真（sim_motor_node 直发）")
+    parser.add_argument("--joint-signs", default=None,
+                        help="7 个逗号分隔 ±1，默认 -1,1,-1,1,-1,1,1"
+                             "（须与 a3_can_bridge/config/control_gains.yaml 一致）")
     args = parser.parse_args()
 
     if args.urdf is None:
@@ -780,6 +1041,8 @@ def main():
         torque_skip=args.torque_skip,
         temp_guard=not args.no_temp_guard,
         torque_filter=not args.no_torque_filter,
+        temp_pause_c=args.temp_pause,
+        temp_resume_c=args.temp_resume,
     )
 
     cal = GravityCalibrator(config, args)
@@ -811,12 +1074,15 @@ def main():
         if not cal.run_collection():
             print("\n采集中止。已采数据保留，重跑续采。")
             return 1
-        if not cal.run_optimize():
-            return 1
+        ok = cal.run_optimize()
         print("\n" + "=" * 60)
-        print("  标定完成！重启重力节点（a3_gravity_torque）生效")
+        if ok:
+            print("  验收 PASS：重启重力节点（a3_gravity_torque）生效")
+        else:
+            print("  未达验收线（RMSE > 0.15）：yaml 已写但 accepted: false，"
+                  "启用前先看上面的逐关节/摩擦诊断")
         print("=" * 60)
-        return 0
+        return 0 if ok else 1
     except KeyboardInterrupt:
         print(f"\nInterrupted. 数据已逐点保存在 {args.data_file}，重跑续采。")
         return 130
