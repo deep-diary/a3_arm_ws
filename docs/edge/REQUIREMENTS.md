@@ -513,7 +513,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   5. 仿真：sim 电机 reset 而 state 仍 READY → UNEXPECTED_DISABLE 事件上报
   6. 真机：挂载观察（与 F49 真机采集同场），零误报；阈值按真机跟踪误差微调
 - **关联：** F42/F44/F40（保留原位的分层保护）；LL-030（js QoS）；LL-020（js 冻结判据）；LL-009（control_mode 语义）；F49（重力标定采集期间依赖本看门狗）
-- **状态：** `implemented`（2026-09-13 仿真验收通过：健康 move_to 零触发 max err 0.0004 rad；斜坡注入 → FOLLOW_STUCK → stop → +3 s 升级 reset；SIGSTOP 冻结 → STALE_JS → reset；sim reset 而 READY → UNEXPECTED_DISABLE 报告；ZERO_TORQUE 抑制生效。5 次触发全为注入诱导、零误报，验收标准 1–5 全过。实现踩坑 LL-034：回调内 sync 服务死锁 + 时间纪元混用。真机观察（验收 6）随 F49 真机采集同场进行）
+- **状态：** `implemented`（2026-09-13 仿真验收通过：健康 move_to 零触发 max err 0.0004 rad；斜坡注入 → FOLLOW_STUCK → stop → +3 s 升级 reset；SIGSTOP 冻结 → STALE_JS → reset；sim reset 而 READY → UNEXPECTED_DISABLE 报告；ZERO_TORQUE 抑制生效。5 次触发全为注入诱导、零误报，验收标准 1–5 全过。实现踩坑 LL-034：回调内 sync 服务死锁 + 时间纪元混用。**真机观察（验收 6）进行中**：2026-09-14 F49 采集全程（约 1 h，68 点链式轨迹 + 2 次降温）fault **动作**零次（日志无任何 `[monitor] <fault>: success=...` 行 ⇒ 无 stop/reset），仅 19:32:02 出现一次 `FOLLOW_STUCK recovered -> OK` 的**状态抖动**。**已知语义**：MonitorStatus 的 status/fault 反映**瞬时**条件（`active` 非空即置 `_fault`），动作才要求持续过 sustain（0.25 rad/0.5 s）；故该抖动未触发任何动作，但 status 通道会短暂显示 FOLLOW_STUCK——对消费 status 的上层（web/MQTT）是噪声，是否把 status 也改为「确认后置位」（瞬时量仍见 tracking_errors）待用户裁定；真机长跑（≥30 min 含 move_to/goto/零力矩）与阈值微调仍未做）
 
 ### F40 — 失能保护（disable → 自动回 home → 失能）
 
