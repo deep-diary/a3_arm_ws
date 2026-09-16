@@ -20,7 +20,13 @@
     goto_duration_s: 3.0
     goto_waypoints: 21
     # 回放前从当前位姿插值到首记录点的时长（s）；≤0.05 关闭插值（F38）
-    playback_ramp_duration_s: 2.5
+    # LL-046: 2.5s→5s——ramp 把末位→首位差（如 L4 深垂 1.18 rad 段）压缩进 2.5s 会
+    # 形成 ~0.47 rad/s 的突兀下砸，肉眼即"回放开局快/不平滑"；5s 拉平该过渡。
+    playback_ramp_duration_s: 5.0
+    # LL-047: 回放低通平滑窗口（中心滑动平均，@50Hz 采样数）。手拖录制 50Hz 数据天然带
+    # 加速度尖峰，伺服忠实复现即"抖动"；7 点平滑把尖峰砍 ~93%，路径几何扰动 ≤20 mrad。
+    # 0/1 关闭，热设置生效。
+    playback_smooth_samples: 7
     # F41: move_to/goto/ramp 兜底——最短时长 + ≥50Hz 插值点
     move_to_min_duration_s: 3.0
     move_to_points_hz: 50.0
@@ -44,8 +50,10 @@
     fault_mask_reset_on_fault: true
     # F48: 使能前读数限位门禁（环绕读数超限时拒绝使能，见 LL-019）
     enable_position_check: true
-    # 限位比较裕量：编码器量化噪声 ±0.0002（L2/L3/L7 下界为 0），0.001 rad 足够
-    position_check_margin_rad: 0.001
+    # 限位比较裕量（F48 enable 门控）：理论 URDF 边界外 2°(=0.035 rad) 内视为正常。
+    # 放行的是静差下垂/公差 1° 级；多圈环绕(LL-019)是 6.28 rad 级，不受影响。
+    # 命令侧 set_joint_positions 仍按 URDF 死 clamp，此处仅放宽实测读数门禁。
+    position_check_margin_rad: 0.035
     # /joint_states 最大陈旧时长：桥异常时 js 冻结旧值（LL-020），超过拒绝使能
     js_max_stale_s: 1.0
 

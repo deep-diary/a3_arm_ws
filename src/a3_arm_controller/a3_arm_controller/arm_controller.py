@@ -75,6 +75,42 @@ def _duration(sec: float) -> Duration:
     return d
 
 
+def _smooth_points(
+    points: List[JointTrajectoryPoint], window: int
+) -> List[JointTrajectoryPoint]:
+    """LL-047: 中心滑动平均低通（仅动 positions，保留 time_from_start）。
+
+    手拖录制的 50Hz 轨迹天然带加速度尖峰（实测 L2 113→7 rad/s² @w=9），伺服忠实复现
+    即"抖动"。对整条轨迹（ramp+录制）做中心滑动平均：凸组合不越出原始 min/max，
+    不会把关节推出录制轨迹本身的包络；仅圆顺快速段尖角，停顿点几乎不动。
+    """
+    w = int(window)
+    if w < 3:
+        return points
+    if w % 2 == 0:
+        w += 1  # 取奇数保证窗口对称
+    h = w // 2
+    n = len(points)
+    m = len(points[0].positions)
+    # 逐关节独立平滑
+    smoothed = []
+    for k in range(m):
+        seq = [p.positions[k] for p in points]
+        out = [0.0] * n
+        for i in range(n):
+            lo = max(0, i - h)
+            hi = min(n, i + h + 1)
+            out[i] = sum(seq[lo:hi]) / (hi - lo)  # 边界自动缩窗，不拉飞端点
+        smoothed.append(out)
+    result: List[JointTrajectoryPoint] = []
+    for i, pt in enumerate(points):
+        q = JointTrajectoryPoint()
+        q.positions = [smoothed[k][i] for k in range(m)]
+        q.time_from_start = pt.time_from_start
+        result.append(q)
+    return result
+
+
 def _sanitize_name(name: str) -> str:
     s = re.sub(r"[^A-Za-z0-9_-]", "_", (name or "").strip())
     return s or "trajectory"
@@ -107,6 +143,10 @@ class ArmController(Node):
         self.declare_parameter("goto_duration_s", 3.0)
         self.declare_parameter("goto_waypoints", 21)
         self.declare_parameter("playback_ramp_duration_s", 2.5)
+        # LL-047: 回放低通平滑窗口（中心滑动平均，@50Hz 采样数）。7 点把录制 L2/L3 最大
+        # 加速度 119/86 → ~8 rad/s²（-93%），几何扰动 ≤20 mrad；0/1 关闭。手拖录制天然带
+        # 加速度尖峰，伺服忠实复现即"抖"——平滑压尖峰而非改路径。热设置回放前读取。
+        self.declare_parameter("playback_smooth_samples", 7)
         self.declare_parameter("trajectories_dir", "~/.a3/trajectories")
         self.declare_parameter("named_poses_pkg", "a3_description")
         # F41: move_to/goto/ramp 兜底——最短时长 + ≥50Hz 插值点
@@ -1394,6 +1434,14 @@ class ArmController(Node):
             self.get_logger().info(
                 f"playback ramp: {ramp_s:.2f}s from current pose to first recorded "
                 f"point ({n} pts)"
+            )
+
+        smooth_s = int(self.get_parameter("playback_smooth_samples").value)
+        if smooth_s >= 3 and len(traj.points) >= 4:
+            traj.points = _smooth_points(traj.points, smooth_s)
+            self.get_logger().info(
+                f"playback smooth: {smooth_s}-pt moving avg applied "
+                f"({len(traj.points)} pts)"
             )
 
         duration = (
