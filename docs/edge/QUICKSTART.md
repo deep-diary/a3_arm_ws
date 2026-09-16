@@ -79,10 +79,15 @@
     ros2 service call /a3/arm/goto_named_pose a3_msgs/srv/GotoNamedPose "{pose_name: ready}"
     # 状态聚合（唯一状态入口）：
     ros2 topic echo /a3/arm_status
-    # 示教（拖动）→ 保存 → 回放：
+    # 示教（拖动）→ 回放（F54：stop_teach 自动保存；空名 ↑ 空名 = latest）：
     ros2 service call /a3/arm/start_teach std_srvs/srv/Trigger
     # ...手动拖动机械臂...
     ros2 service call /a3/arm/stop_teach std_srvs/srv/Trigger
+    #   stop_teach 已自动保存 latest.yaml + teach_TIMESTAMP.yaml 备份
+    #   （误触发：样本 < teach_auto_save_min_samples 默认 10 时自动跳过、不覆盖）
+    ros2 service call /a3/arm/playback a3_msgs/srv/PlaybackTrajectory "{name: ''}"
+    #   save_trajectory 留空名 ≡ 另存/刷新 latest；playback 空名 ≡ 回放 latest，
+    #   命名 {name} 仍按名保存/回放；无 latest 时 playback 给出 start_teach 引导消息
     ros2 service call /a3/arm/save_trajectory a3_msgs/srv/SaveTrajectory "{name: demo}"
     ros2 service call /a3/arm/playback a3_msgs/srv/PlaybackTrajectory "{name: demo}"
     # AI 模式（LeRobot 采集/回放）：
@@ -205,9 +210,12 @@
     ros2 service call /a3/zero_torque/start std_srvs/srv/Trigger "{}"
     ros2 service call /a3/zero_torque/stop std_srvs/srv/Trigger "{}"
 
-    # (f) 示教 5s → 保存 → 回放（F38b：回放先按 playback_ramp_duration_s 插值到首记录点，无跳变）
+    # (f) 示教 5s → 回放（F54 自动保存 latest.yaml；F38b：回放先按 playback_ramp_duration_s 插值到首记录点，无跳变）
     ros2 service call /a3/arm/start_teach std_srvs/srv/Trigger "{}"
     ros2 service call /a3/arm/stop_teach std_srvs/srv/Trigger "{}"
+    #   stop_teach 即自动保存：latest.yaml + teach_TIMESTAMP.yaml（样本<阈值自动跳过）
+    ros2 service call /a3/arm/playback a3_msgs/srv/PlaybackTrajectory "{name: ''}"
+    #   命名保存/回放仍可用（空名 ≡ latest 槽位）：
     ros2 service call /a3/arm/save_trajectory a3_msgs/srv/SaveTrajectory "{name: teach6}"
     ros2 service call /a3/arm/playback a3_msgs/srv/PlaybackTrajectory "{name: teach6}"
     ```

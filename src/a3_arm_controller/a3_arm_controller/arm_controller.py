@@ -116,6 +116,13 @@ def _sanitize_name(name: str) -> str:
     return s or "trajectory"
 
 
+def _traj_path_for(traj_dir: str, name: str) -> str:
+    """F54: 空名 ≡ latest 槽位（save/playback 都读写 latest.yaml）；非空名 → {name}.yaml。"""
+    if not (name or "").strip():
+        return os.path.join(traj_dir, "latest.yaml")
+    return os.path.join(traj_dir, f"{_sanitize_name(name)}.yaml")
+
+
 class ArmController(Node):
     def __init__(self) -> None:
         super().__init__("a3_arm_controller")
@@ -147,6 +154,9 @@ class ArmController(Node):
         # 加速度 119/86 → ~8 rad/s²（-93%），几何扰动 ≤20 mrad；0/1 关闭。手拖录制天然带
         # 加速度尖峰，伺服忠实复现即"抖"——平滑压尖峰而非改路径。热设置回放前读取。
         self.declare_parameter("playback_smooth_samples", 7)
+        # F54: 示教停止自动保存的最小样本数——start 后立刻 stop 的误触发（1~2 个样本）不许
+        # 用退化单点文件覆盖上一条好的 latest。~0.2s 拖动即可超过（@50Hz 10 样本）。
+        self.declare_parameter("teach_auto_save_min_samples", 10)
         self.declare_parameter("trajectories_dir", "~/.a3/trajectories")
         self.declare_parameter("named_poses_pkg", "a3_description")
         # F41: move_to/goto/ramp 兜底——最短时长 + ≥50Hz 插值点
@@ -1319,63 +1329,92 @@ class ArmController(Node):
             return resp
         self._recording = False
         ok, msg = self._call_trigger(self._zt_stop_cli, "zero_torque/stop")
-        self._set_state(STATE_READY, f"teach stopped ({len(self._record)} samples)")
+        n = len(self._record)
+        # F54: 停止即自动保存 —— latest.yaml（滚动最新槽）+ 时间戳备份（防覆盖丢失）。
+        # 样本 < teach_auto_save_min_samples 时认为是误触发（start 后立刻 stop），
+        # 不写 latest、不覆盖上一条好的录制。
+        min_samples = int(self.get_parameter("teach_auto_save_min_samples").value)
+        auto_msgs: List[str] = []
+        if n >= min_samples:
+            latest = _traj_path_for(self._traj_dir, "")
+            if self._save_recording_to(latest):
+                auto_msgs.append("auto-saved latest.yaml")
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                hist = os.path.join(self._traj_dir, f"teach_{ts}.yaml")
+                if self._save_recording_to(hist):
+                    auto_msgs.append(f"backup teach_{ts}.yaml")
+            else:
+                auto_msgs.append("auto-save FAILED (see log)")
+        else:
+            auto_msgs.append(
+                f"auto-save skipped ({n} samples < {min_samples}, keep previous latest)"
+            )
+        self._set_state(STATE_READY, f"teach stopped ({n} samples)")
         resp.success = True
-        resp.message = f"recorded {len(self._record)} samples" + (
+        resp.message = f"recorded {n} samples; " + ", ".join(auto_msgs) + (
             f" (zero_torque/stop: {msg})" if not ok else ""
         )
         return resp
 
+    def _dump_recording(self) -> dict:
+        """F54: 把当前内存录制(self._record: (t, pos) 列表)序列化为磁盘 YAML 数据。"""
+        data = {
+            "joint_names": list(self._joint_names),
+            "points": [
+                {
+                    "positions": [float(p) for p in pos],
+                    "time_from_start_sec": float(t),
+                }
+                for t, pos in self._record
+            ],
+        }
+        return data
+
+    def _save_recording_to(self, path: str) -> bool:
+        """把当前录制写到 path，返回是否成功（异常已记录日志，不抛）。"""
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(self._dump_recording(), f)
+            self.get_logger().info(f"trajectory saved to {path}")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f"trajectory save failed to {path}: {exc}")
+            return False
+
     def _save_cb(
         self, req: SaveTrajectory.Request, resp: SaveTrajectory.Response
     ) -> SaveTrajectory.Response:
-        name = _sanitize_name(req.name)
+        path = _traj_path_for(self._traj_dir, req.name)
         if not self._record:
             resp.success = False
             resp.message = "no recording to save"
             return resp
-
-        traj = JointTrajectory()
-        traj.joint_names = list(self._joint_names)
-        for t, pos in self._record:
-            pt = JointTrajectoryPoint()
-            pt.positions = [float(p) for p in pos]
-            pt.time_from_start = _duration(t)
-            traj.points.append(pt)
-
-        path = os.path.join(self._traj_dir, f"{name}.yaml")
-        data = {
-            "joint_names": list(traj.joint_names),
-            "points": [
-                {
-                    "positions": list(p.positions),
-                    "time_from_start_sec": p.time_from_start.sec + p.time_from_start.nanosec * 1e-9,
-                }
-                for p in traj.points
-            ],
-        }
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                yaml.safe_dump(data, f)
-        except Exception as exc:  # noqa: BLE001
+        if not self._save_recording_to(path):
             resp.success = False
-            resp.message = f"save failed: {exc}"
+            resp.message = f"save failed: {path}"
             return resp
-
         resp.success = True
-        resp.message = f"saved {len(traj.points)} pts"
+        resp.message = f"saved {len(self._record)} pts"
         resp.path = path
-        self.get_logger().info(f"trajectory saved to {path}")
         return resp
 
     def _playback_cb(
         self, req: PlaybackTrajectory.Request, resp: PlaybackTrajectory.Response
     ) -> PlaybackTrajectory.Response:
-        name = _sanitize_name(req.name)
-        path = os.path.join(self._traj_dir, f"{name}.yaml")
+        # F54: 空名 = 回放 latest 槽（分支在 sanitize 之前，_sanitize_name("")→"trajectory" 会撞纸面名）
+        is_latest = not (req.name or "").strip()
+        label = "latest" if is_latest else _sanitize_name(req.name)
+        path = _traj_path_for(self._traj_dir, req.name)
         if not os.path.exists(path):
-            resp.success = False
-            resp.message = f"trajectory not found: {path}"
+            if is_latest:
+                resp.success = False
+                resp.message = (
+                    "no latest trajectory yet —— 先 start_teach → 拖动 → stop_teach 录制,"
+                    "或显式指定 name (如 teach_jog2)"
+                )
+            else:
+                resp.success = False
+                resp.message = f"trajectory not found: {path}"
             return resp
         can, why = self._can_move()
         if not can:
@@ -1449,11 +1488,11 @@ class ArmController(Node):
         )
         self._publish_mode("TRAJ_RUNNING")
         self._traj_pub.publish(traj)
-        self._set_state(STATE_TRAJ, f"playback {name}")
+        self._set_state(STATE_TRAJ, f"playback {label}")
         self._schedule_back_to_ready(duration + 0.3)
 
         resp.success = True
-        resp.message = f"playback {name} ({len(traj.points)} pts, {duration:.1f}s)"
+        resp.message = f"playback {label} ({len(traj.points)} pts, {duration:.1f}s)"
         return resp
 
     def _enter_ai_cb(self, req: Trigger.Request, resp: Trigger.Response) -> Trigger.Response:

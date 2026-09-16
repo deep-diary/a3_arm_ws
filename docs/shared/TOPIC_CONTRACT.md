@@ -101,9 +101,9 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/arm/goto_named_pose` | `a3_msgs/srv/GotoNamedPose` | `pose_name` 按 `named_poses.yaml` 插值下发 |
 | `/a3/arm/set_joint_positions` | `a3_msgs/srv/SetJointPositions` | 设 7 关节目标位置（`positions[7]` + `duration`），限位 clamp 后短插值下发；节流连续下发以覆盖语义衔接 |
 | `/a3/arm/start_teach` | `std_srvs/Trigger` | 切零力矩拖动 + 开始记录 |
-| `/a3/arm/stop_teach` | `std_srvs/Trigger` | 停止记录 + 退出拖动 |
-| `/a3/arm/save_trajectory` | `a3_msgs/srv/SaveTrajectory` | `name` → 保存为本地轨迹文件 |
-| `/a3/arm/playback` | `a3_msgs/srv/PlaybackTrajectory` | `name` → 读取并回放 |
+| `/a3/arm/stop_teach` | `std_srvs/Trigger` | 停止记录 + 退出拖动；F54：样本 ≥ `teach_auto_save_min_samples`(默认 10) 时自动保存 `latest.yaml` + `teach_TIMESTAMP.yaml` 备份，误触发(样本不足)自动跳过不覆盖 |
+| `/a3/arm/save_trajectory` | `a3_msgs/srv/SaveTrajectory` | `name` → 保存为本地轨迹文件；`name` 为空 ≡ latest 槽位(`latest.yaml`) |
+| `/a3/arm/playback` | `a3_msgs/srv/PlaybackTrajectory` | `name` → 读取并回放；`name` 为空 ≡ 回放 latest，无 latest 时返回 start_teach 引导消息 |
 | `/a3/arm/enter_ai` | `std_srvs/Trigger` | 状态 → `AI`（LeRobot 采集/回放） |
 | `/a3/arm/exit_ai` | `std_srvs/Trigger` | 状态 → `READY` |
 
