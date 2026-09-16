@@ -30,7 +30,10 @@
     # F40: 失能保护（不在 home 容差内先平滑回 home 再失能，防掉臂）
     disable_home_pose_name: home
     disable_home_tol_rad: 0.15
-    disable_home_duration_s: 3.0
+    # LL-044: park 3s→5s——用户手持/远离 home 时 3s 强制回位过急，
+    # 会触发 monitor FOLLOW_STUCK→stop→reset 阶梯把臂中途切断（震动 + 误报带外失能）。
+    # 5s 更柔和，回 home 慢一点没问题。
+    disable_home_duration_s: 5.0
     disable_home_confirm_s: 0.5
     disable_park_timeout_s: 8.0
     # F43: 最大力矩持久化

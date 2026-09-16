@@ -519,10 +519,11 @@ class ArmController(Node):
             return False, "gate closed"
         if self._mode in BLOCKED_MODES:
             return False, f"mode={self._mode}"
-        # F45: DISABLED/COOLING 下运动命令被拒（原 IDLE 允许 move_to 语义混乱）
+        # F45/F53: DISABLED/COOLING/FAULT 下运动命令被拒（原 IDLE 允许 move_to 语义混乱；
+        # FAULT 电机已复位关断，发轨迹只被静默接受、臂不动）
         if self._state in (
             STATE_INIT, STATE_TEACH, STATE_AI, STATE_TRAJ, STATE_SERVO,
-            STATE_SAFE_PARK, STATE_DISABLED, STATE_COOLING,
+            STATE_SAFE_PARK, STATE_DISABLED, STATE_COOLING, STATE_FAULT,
         ):
             return False, f"state={self._state}"
         return True, ""
@@ -842,9 +843,17 @@ class ArmController(Node):
     # ------------------------------------------------------------------ services
 
     def _init_cb(self, req: Trigger.Request, resp: Trigger.Response) -> Trigger.Response:
-        if self._state in (STATE_TRAJ, STATE_SERVO, STATE_TEACH, STATE_AI):
+        if self._state in (STATE_TRAJ, STATE_SERVO, STATE_TEACH, STATE_AI, STATE_SAFE_PARK):
             resp.success = False
             resp.message = f"busy in state={self._state}"
+            return resp
+        # F53/LL-045: 零力矩/重力补偿模式下 set_zero 会打碎零位帧，且执行层 enable 不
+        # 退出 zero_torque（kp 仍 0）——init 变“伪成功”。拒绝并给还原路径。
+        if self._mode in BLOCKED_MODES:
+            resp.success = False
+            resp.message = (
+                f"mode={self._mode}: 先 /a3/zero_torque/stop 恢复闭环再 init"
+            )
             return resp
         # F44: COOLING 下重新使能门禁（init 含 enable）
         if self._state == STATE_COOLING:
@@ -908,6 +917,14 @@ class ArmController(Node):
             resp.success = False
             resp.message = f"busy in state={self._state}"
             return resp
+        # F53/LL-045: 零力矩/重力补偿下使能=执行层重锚当前位，但 zero_torque 仍生效
+        # （kp 0, enable 不退出该模式）——臂继续保持悬浮，enable 成“伪成功”。拒绝。
+        if self._mode in BLOCKED_MODES:
+            resp.success = False
+            resp.message = (
+                f"mode={self._mode}: 先 /a3/zero_torque/stop 恢复闭环再 enable"
+            )
+            return resp
         # F44: COOLING 下重新使能门禁（降温到 protect−hysteresis 才放行）
         if self._state == STATE_COOLING:
             can_cool, why = self._check_cooling()
@@ -941,9 +958,10 @@ class ArmController(Node):
     def _disable_cb(self, req: Trigger.Request, resp: Trigger.Response) -> Trigger.Response:
         """F40: 失能保护——不在 home 容差内先平滑回 home 再失能，避免掉臂。
 
-        服务语义：success=true ⟺ 已失能（或本就已失能）。INIT/TEACH/SERVO/AI 期间
-        zero_torque/SERVO 下执行层会丢弃轨迹，无法安全回 home，拒绝并提示用底层
-        /a3/motor/reset 作紧急失能。
+        服务语义：success=true ⟺ 已失能（或本就已失能）。拒绝时消息必含可执行下一步：
+        · INIT/TEACH/SERVO/AI 状态 busy → 提示 /a3/motor/reset 紧急失能；
+        · F53: mode∈BLOCKED_MODES（zero_torque/重力补偿）下执行层丢弃轨迹，safe park
+        无法回家；且直接 reset 会撤重力补偿让臂垂落——提示先 /a3/zero_torque/stop。
         """
         if self._state in (STATE_INIT, STATE_TEACH, STATE_SERVO, STATE_AI):
             resp.success = False
@@ -956,6 +974,20 @@ class ArmController(Node):
         if self._state in (STATE_DISABLED, STATE_COOLING):
             resp.success = True
             resp.message = "already disabled"
+            return resp
+
+        # F53/LL-045（主缺口）: 零力矩/重力补偿模式下安全区——执行层会丢弃轨迹，
+        # safe park 的回家轨迹被静默丢弃，臂在悬浮中干等 ~4-5s 后看门狗 FOLLOW_STUCK
+        # →stop→3s→reset 阶梯把臂中途切断（误报「电机带外失能」→DISABLED）。
+        # 且此时 reset 会撤掉重力补偿让臂在重力下垂落。正确退出：zero_torque/stop
+        # （先恢复 kp 锚定当前位）→ 再 disable；紧急失能才直接 /a3/motor/reset
+        # （之后仍需 zero_torque/stop 清零标志，否则重使能后臂保持悬浮）。
+        if self._mode in BLOCKED_MODES:
+            resp.success = False
+            resp.message = (
+                f"mode={self._mode}: 先 /a3/zero_torque/stop 恢复闭环再 disable；"
+                f"紧急失能 /a3/motor/reset（此后需 zero_torque/stop 才能正常重使能）"
+            )
             return resp
 
         if not self._have_js:
@@ -1380,6 +1412,14 @@ class ArmController(Node):
         if self._state in (STATE_TRAJ, STATE_SERVO, STATE_TEACH, STATE_AI):
             resp.success = False
             resp.message = f"busy in state={self._state}"
+            return resp
+        # F53/LL-045: 零力矩/重力补偿下 AI 发的轨迹会被执行层丢弃（静默无动作）
+        # ——进入 AI 只会让命令石沉大海。先退出模式再进。
+        if self._mode in BLOCKED_MODES:
+            resp.success = False
+            resp.message = (
+                f"mode={self._mode}: 先 /a3/zero_torque/stop 恢复闭环再 enter_ai"
+            )
             return resp
         self._set_state(STATE_AI, "AI control")
         resp.success = True

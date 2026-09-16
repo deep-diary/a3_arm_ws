@@ -44,6 +44,7 @@ docs/
 ├── edge/                     A3 Edge 主线
 │   ├── REQUIREMENTS.md
 │   ├── ARCHITECTURE.md
+│   ├── STATE_MACHINE.md       编排层状态机（指令×状态矩阵）
 │   ├── QUICKSTART.md
 │   └── PLATFORM_CAN.md
 ├── cloud_edge/               A3 CloudEdge 支线
@@ -74,6 +75,7 @@ docs/
 |------|------|
 | [edge/REQUIREMENTS.md](edge/REQUIREMENTS.md) | 边缘全栈需求 |
 | [edge/ARCHITECTURE.md](edge/ARCHITECTURE.md) | 运行时分层与数据流 |
+| [edge/STATE_MACHINE.md](edge/STATE_MACHINE.md) | 编排层状态机（11 态 + 指令×状态×模式矩阵，F53） |
 | [edge/QUICKSTART.md](edge/QUICKSTART.md) | 真机快速上手清单 |
 | [edge/PLATFORM_CAN.md](edge/PLATFORM_CAN.md) | RK3588 SocketCAN 上板配置 |
 

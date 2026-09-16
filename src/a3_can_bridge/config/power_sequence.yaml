@@ -45,7 +45,9 @@
 
     send_set_zero_in_startup: false
     send_enable_in_startup: true
-    send_mit_zero_in_startup: true
+    # LL-043: 机械臂上关掉机器狗残留的 MIT 掰零帧（pos=0,kp=80 -> L4@+1.17rad≈94Nm 甩臂）。
+    # 改 false 后 start=使能+开 gate，由 motor_protocol F51 锚定当前位姿接管保持。
+    send_mit_zero_in_startup: false
 
     enable_active_report_in_startup: true
     enable_active_report_at_launch: true
