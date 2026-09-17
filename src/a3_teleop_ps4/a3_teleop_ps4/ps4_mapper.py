@@ -157,16 +157,20 @@ class Ps4Mapper(Node):
                         v = -v
                     self._exec.apply_analog(fn, v)
 
-        for btn, spec in iter_button_bindings(self._mapping):
+        for bind_key, btn, spec in iter_button_bindings(self._mapping):
             held = self._layout.button(joy, btn)
             edge = str(spec.get("edge", "rising"))
             fire = False
             if edge == "longpress":
                 fire = self._edges.longpress(
-                    btn, held, now, float(spec.get("hold_s", 1.0))
+                    bind_key, held, now, float(spec.get("hold_s", 1.0))
+                )
+            elif edge == "shortpress":
+                fire = self._edges.shortpress(
+                    bind_key, held, now, float(spec.get("hold_s", 3.0))
                 )
             else:
-                fire = self._edges.rising(btn, held)
+                fire = self._edges.rising(bind_key, held)
             if fire:
                 kwargs = dict(spec.get("kwargs") or {})
                 self._exec.apply_discrete(str(spec.get("fn")), kwargs)

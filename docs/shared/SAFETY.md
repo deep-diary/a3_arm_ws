@@ -31,6 +31,7 @@ A3 Edge 与 A3 CloudEdge 共同遵守的安全设计原则。具体参数以配�
 - Servo：`incoming_command_timeout` 超时后应回 `IDLE` 并停止下发
 - 零力矩 ≠ 纯 `tau=0`：默认同重力前馈叠加，退出时恢复原 `kp`/`kd`
 - **手柄死人开关：** 生产映射 `mapping:=default` 时，PS4 **L1 按住** 才允许非零 Servo Twist 与 R2 夹爪力控（F36）；松开立即发零速度。仿真默认 `mapping:=simple` **关闭** L1 死人开关（见 `config/mappings/simple.yaml`）。D-pad 命名姿态与电源长按不要求 L1。Cross → `stop_motion`。
+- **示教三键（F55）：** Share 短按=开始示教、Options 短按=结束示教（自动保存）、Circle 短按=执行回放。Options 长按 3 s = 调零。Touchpad=init、L3=使能、R3=失能。完整映射表见 `src/a3_teleop_ps4/README.md`。
 - **R2 力控扳机（F36）：** 松开 → 夹爪全开（`release`）；按过 0.22 → 目标力矩 0.1..1.0 Nm（上限 = 硬限 1.0 Nm）；迟滞 0.15 防抖动。default 映射下「L1 松开而 R2 还按着」→ mapper 停发指令 → 夹持保持现状（不是松开），重新按住 L1 才恢复跟随；松 R2（L1 按住）→ 全开。臂运动中力控被互锁拒绝 → 每 0.5 s 重试、松手即停。力控本身仍受抓取超时/看门狗/超硬限三重保护（见下节）。
 
 ## 轨迹门控（gate）
@@ -62,8 +63,8 @@ A3 Edge 与 A3 CloudEdge 共同遵守的安全设计原则。具体参数以配�
 | 操作 | Edge 触发方式 | 命令 |
 |------|---------------|------|
 | 启动 | PS4 Square 长按 / `start` | `/power_sequence/command` |
-| 关机 | PS4 Triangle / L1+R1+Share | `shutdown` |
-| 调零 | PS4 Options 长按 | `set_zero` |
+| 关机 | PS4 **Triangle 长按 1 s**（手柄唯一急停；原 L1+R1+Share 三键组合已废弃，F55） | `shutdown` |
+| 调零 | PS4 **Options 长按 3 s**（短按是结束示教） | `set_zero` |
 | Servo / 夹爪力控 | PS4 **L1 按住** + 摇杆 / R2（F36） | Twist / 夹爪 force-release |
 | 立即停 | PS4 Cross | 零 Twist，中止命名姿态 |
 

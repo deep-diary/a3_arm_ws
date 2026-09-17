@@ -575,6 +575,33 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F38（示教/回放）、F41（ramp 插值口径）、[LL-047](../../lessons_learned/LL-047-playback-smoothing-accel-spike.md)（回放平滑）、[LL-030](../../lessons_learned/LL-030-return-args-free-instruction.md)（安全取参/默认值语义）
 - **状态：** `implemented`（2026-09-16，代码 + 文档；仿真验收通过；真机需在场拖臂）
 
+## F55 PS4 全功能映射：示教/执行/使能/初始化一键化（短按+长按双义）
+
+- **说明：** 手柄遥控是示教/回放的主交互入口，但编排层服务（init/enable/disable/start_teach/stop_teach/playback）此前一个键都没接。本需求把 arm_controller 服务全部映射到 PS4 空闲键，并为映射引入短按边沿——一个键「短按=功能 A、长按=功能 B」的双义（Options：短按停示教 / 长按 3s 调零）。示教主流程定键：**Share=开始、Options=结束、Circle=执行**。
+- **映射（`src/a3_teleop_ps4/config/mappings/default.yaml`，完整表见该包 `README.md`）：**
+
+  | 键 | 边沿 | 动作 |
+  |----|------|------|
+  | Share | 短按 | `start_teach`（进示教，0/mode 拖动 + 记录） |
+  | Options | 短按 | `stop_teach`（停记录 + F54 自动保存） |
+  | Options | 长按 3 s | `power_set_zero`（调零；原 2 s 上调，降误触） |
+  | Circle | 短按 | `playback` 空名（回放定义最新） |
+  | Touchpad | 短按 | `arm_init`（0/mode，F51 越限只 WARN） |
+  | L3 | 短按 | `arm_enable`（使能安全门禁：重锚 + 软起步） |
+  | R3 | 短按 | `arm_disable`（F40：离 home 先 safe park） |
+  | Triangle | 长按 1 s | `power_shutdown`（**唯一**手柄急停） |
+  | Square / Cross / D-pad / L1 / R1 / R2 | 不变 | 上电 / 立即停 / 命名位姿 / deadman / boost / 力控夹爪 |
+
+- **「三键组合急停」废弃：** 原 SAFETY 契约的「L1+R1+Share = 关机」需要三键同时操作，误用风险高且真按三键反而不如单键可靠。急停收敛为 **Triangle 长按 1 s**（单键、防误触、无组合需求）；`L1+R1+Share` 从 SAFETY.md 移除。
+- **验收标准：**
+  1. 映射含上述 7 个新绑定；`buttons.options` 为**两条绑定的列表**（短按/长按各自独立边沿跟踪）；mapper 启动时 `validate_mapping` 对列表逐条校验、零报错
+  2. 短按语义：按下起计时、**释放时**持续时长 `< hold_s`（3 s）才触发一次；按住超 `hold_s` 再释放该次不触发、也不能连带触发同一键的另一条绑定
+  3. sim（domain-55 隔离栈 + fake `/joy`）：Share → `arm_status.state=TEACH`；Options 短按 → `stop_teach success + auto-saved latest.yaml`；Circle → 日志 `playback latest`；Options 按住 ≥3 s 再放 → `/power_sequence/command` 收到 `set_zero`（且**不**触发 teach_stop）；L3/R3 → enable/disable 成功
+  4. 既有按键零回归：D-pad 4 位姿、Cross 立即停、Square/Triangle 电源、L1 deadman、R1 boost、R2 力控保持原绑定
+  5. 文档三处可见：包 `README.md` 完整表 + `default.yaml` 文件名即可改（约零代码） + `QUICKSTART.md` 指向
+- **关联：** F54（自动保存/空名=latest）、F38（示教回放）、F51（使能安全）、F40（失能保护）、F36（力控扳机）；[shared/SAFETY.md](../shared/SAFETY.md)、`src/a3_teleop_ps4/README.md`
+- **状态：** `implemented`（2026-09-17，代码 + 文档；仿真验收通过；真机需用户在场按手柄）
+
 ### F40 — 失能保护（disable → 自动回 home → 失能）
 
 - **说明：** `/a3/arm/disable` 不再是「无条件直接失能」——不在 home 容差内时先平滑回 home 再失能，防止 ready 位直接掉臂。新增参数：`disable_home_pose_name: "home"`、`disable_home_tol_rad: 0.15`、`disable_home_duration_s: 3.0`、`disable_home_confirm_s: 0.5`、`disable_park_timeout_s: 8.0`。新辅助 `_at_home()`（全关节 |q−home| ≤ tol）与 `_safe_park_then_disable()`（同步阻塞：发布 home 轨迹抢占活跃轨迹——执行层 OnTrajectory 天然支持替换，无需排队 → `SAFE_PARK`（期间拒绝新运动指令）→ 轮询连续 `confirm_s` 收敛 → reset → `DISABLED`）。服务语义（同步阻塞返回，`success=true ⟺ 已失能`）：READY/TRAJ 容差内 → 直达 reset → DISABLED；容差外 → safe park → reset → DISABLED（message 含耗时）；IDLE → 直达 reset；DISABLED/COOLING → 幂等不动电机；FAULT → 紧急直达 reset；INIT/TEACH/SERVO/AI → 拒绝 busy；SAFE_PARK → 拒绝「already safe parking」。park 超时 → **FAULT 不 reset**（保持使能、停在半途，人工介入）；reset 被 gate 拒 → park 前 `success=false` + 原文 + "(stop power sequence first)"，park 完成后被拒 → 回 READY（已在 home 位，安全）；`_have_js==False` → 直达 reset + WARN（保持旧行为）。`/a3/motor/reset` 直达保留作紧急失能。

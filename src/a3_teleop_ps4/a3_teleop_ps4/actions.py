@@ -16,7 +16,7 @@ from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-from a3_msgs.srv import GripperCommand
+from a3_msgs.srv import GripperCommand, PlaybackTrajectory
 
 
 JOINTS = [
@@ -105,6 +105,13 @@ class ActionExecutor:
         self._zt_start = node.create_client(Trigger, self.zt_start_srv)
         self._zt_stop = node.create_client(Trigger, self.zt_stop_srv)
         self._grip_cli = node.create_client(GripperCommand, "/a3/gripper/command")
+        # F55：编排层服务（arm_controller）全量接入手柄
+        self._arm_init = node.create_client(Trigger, "/a3/arm/init")
+        self._arm_enable = node.create_client(Trigger, "/a3/arm/enable")
+        self._arm_disable = node.create_client(Trigger, "/a3/arm/disable")
+        self._teach_start = node.create_client(Trigger, "/a3/arm/start_teach")
+        self._teach_stop = node.create_client(Trigger, "/a3/arm/stop_teach")
+        self._playback = node.create_client(PlaybackTrajectory, "/a3/arm/playback")
 
         self.speed_scale = 0.35
         self._servo_paused = False
@@ -312,6 +319,32 @@ class ActionExecutor:
 
     def power_set_zero(self) -> None:
         self._power("set_zero")
+
+    # --- F55: 编排层服务（/a3/arm/*，arm_controller） ---
+
+    def arm_init(self) -> None:
+        self._call_trigger(self._arm_init, "arm/init")
+
+    def arm_enable(self) -> None:
+        self._call_trigger(self._arm_enable, "arm/enable")
+
+    def arm_disable(self) -> None:
+        self._call_trigger(self._arm_disable, "arm/disable")
+
+    def teach_start(self) -> None:
+        self._call_trigger(self._teach_start, "arm/start_teach")
+
+    def teach_stop(self) -> None:
+        self._call_trigger(self._teach_stop, "arm/stop_teach")
+
+    def playback_latest(self) -> None:
+        if not self._playback.service_is_ready():
+            self._n.get_logger().warn("arm/playback not available")
+            return
+        req = PlaybackTrajectory.Request()
+        req.name = ""  # F54：空名 ≡ latest 槽位
+        self._playback.call_async(req)
+        self._n.get_logger().info("playback_latest -> /a3/arm/playback {name:''}")
 
     def stop_motion(self) -> None:
         self._stopped = True

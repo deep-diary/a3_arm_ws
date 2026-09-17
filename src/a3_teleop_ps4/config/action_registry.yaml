@@ -57,6 +57,30 @@ functions:
     kind: discrete
     description: Call /a3/zero_torque/stop
 
+  arm_init:
+    kind: discrete
+    description: Call /a3/arm/init (依编排层状态机初始化; 越限只 WARN)
+
+  arm_enable:
+    kind: discrete
+    description: "Call /a3/arm/enable (使能安全门禁: 目标重锚到反馈位 + 软起步)"
+
+  arm_disable:
+    kind: discrete
+    description: "Call /a3/arm/disable (F40: 离 home 先 safe park 再失能)"
+
+  teach_start:
+    kind: discrete
+    description: Call /a3/arm/start_teach (切零力矩拖动 + 开始记录)
+
+  teach_stop:
+    kind: discrete
+    description: Call /a3/arm/stop_teach (停止记录 + F54 自动保存)
+
+  playback_latest:
+    kind: discrete
+    description: 'Call /a3/arm/playback {name:""} (空名 ≡ 回放 latest)'
+
   set_gripper:
     kind: analog_01
     description: q_L7 = v * 1.79 rad (legacy alias, 0 closed .. 1 open)

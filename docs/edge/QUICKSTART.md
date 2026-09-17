@@ -57,11 +57,12 @@
     export DISPLAY=:0
     # 重复 launch 前先清僵尸进程：pkill -f 'edge_teleop|a3_sim_executor|ps4_mapper|servo_node'
     ros2 launch a3_bringup edge_teleop_sim.launch.py use_rviz:=true
-    # 默认 mapping:=simple（无 L1 组合键）；恢复 L1 死人开关：mapping:=default
+    # 默认 mapping:=simple（无 L1 组合键）；恢复 L1 死人开关 + 全功能：mapping:=default
     ```
     - **simple（默认）**：右摇杆基座系左右/上下；左摇杆 Y 前后；L2→L6、R2→夹爪力控（F36：松开全开，按过 0.2 后 0.2..1 → 0.1..1.0 Nm）；Square/Circle 夹爪开/合
+    - **default（真机生产映射，F55）**：示教三步 **Share=开始 / Options=结束(自动保存) / Circle=执行回放(latest)**；Touchpad=init、L3=使能、R3=失能；Options 长按 3s=调零；Triangle 长按=关机（唯一手柄急停）；L1=死人开关、R1=加速。**完整映射表见 `src/a3_teleop_ps4/README.md`**
     - D-pad 上/下/左/右：`ready` / `zero` / `home` / `ready`（上键暂与右键同，work 已并入 ready）；Cross 急停
-    - 改映射只编 `config/mappings/*.yaml`；轴序校准见 `ds4_linux.yaml`
+    - 改映射只编 `config/mappings/*.yaml`（本包 README 有速查表）；轴序校准见 `ds4_linux.yaml`
     - 真机：`a3_bringup.launch.py use_teleop:=true mapping:=default` 起 mapper；笛卡尔还需另开 `servo.launch.py`（板测待办）
 
 11. **机械臂编排节点（F21，a3_arm_controller）：**

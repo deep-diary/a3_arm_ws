@@ -1,5 +1,11 @@
 # Default PS4 → A3 mapping. Change this file to rebind; no code change needed.
 # Source names: buttons/axes keys from ds4_linux.yaml, plus virtual_buttons.
+#
+# == 全功能速查（F55；完整操作手册见本包 README.md）==
+#   示教三键:  Share 短按=开始示教 / Options 短按=结束示教(自动保存) / Circle 短按=执行回放(latest)
+#   功能键:    Touchpad=init / L3=使能 / R3=失能
+#   双义键:    Options 短按=teach_stop, 长按 3s=调零 (buttons 用 list 绑两条, 各自独立边沿)
+#   安全键:    Triangle 长按=关机(唯一手柄急停) / Square 长按=上电 / Cross=立即停 / L1=死人开关
 
 deadman:
   enabled: true
@@ -63,10 +69,35 @@ buttons:
     fn: power_shutdown
     edge: longpress
     hold_s: 1.0
+  # F55：示教三键 + 功能键 + 双义键
+  share:
+    fn: teach_start
+    edge: shortpress
+    hold_s: 3.0
   options:
-    fn: power_set_zero
-    edge: longpress
-    hold_s: 2.0
+    # 双义：短按(释放时 <3s)=结束示教；长按 3s=调零（互斥，长按不会连带触发短按）
+    - fn: teach_stop
+      edge: shortpress
+      hold_s: 3.0
+    - fn: power_set_zero
+      edge: longpress
+      hold_s: 3.0
+  circle:
+    fn: playback_latest
+    edge: shortpress
+    hold_s: 3.0
+  touchpad:
+    fn: arm_init
+    edge: shortpress
+    hold_s: 3.0
+  l3:
+    fn: arm_enable
+    edge: shortpress
+    hold_s: 3.0
+  r3:
+    fn: arm_disable
+    edge: shortpress
+    hold_s: 3.0
 
 held:
   r1:

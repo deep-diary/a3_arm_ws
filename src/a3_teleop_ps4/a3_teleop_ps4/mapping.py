@@ -114,17 +114,23 @@ def analog_01_from_axis(
 
 
 class ButtonEdgeTracker:
-    """Rising-edge and long-press detectors keyed by binding name."""
+    """Rising-edge, short-press and long-press detectors keyed by binding name.
+
+    同一物理按键的多条绑定用不同 key（iter_button_bindings 生成 `btn#i` 后缀），
+    各自独立跟踪——这是「短按=功能 A / 长按=功能 B」双义的基础（F55）。
+    """
 
     def __init__(self) -> None:
         self._prev: Dict[str, bool] = {}
         self._press_t: Dict[str, Optional[float]] = {}
         self._fired: Dict[str, bool] = {}
+        self._overshoot: Dict[str, bool] = {}
 
     def reset(self) -> None:
         self._prev.clear()
         self._press_t.clear()
         self._fired.clear()
+        self._overshoot.clear()
 
     def rising(self, key: str, held: bool) -> bool:
         prev = self._prev.get(key, False)
@@ -146,6 +152,28 @@ class ButtonEdgeTracker:
         self._fired[key] = False
         return False
 
+    def shortpress(self, key: str, held: bool, now: float, hold_s: float) -> bool:
+        """释放时判定：按住持续时长 < hold_s → 触发一次；按住超时则本次作废。
+
+        长按作废用 overshoot 标记（而不是直接不放行），保证释放帧既不误触发、
+        也不影响其他同键绑定（key 唯一）。
+        """
+        if held:
+            t0 = self._press_t.get(key)
+            if t0 is None:
+                self._press_t[key] = now
+                self._overshoot[key] = False
+            elif now - t0 >= hold_s:
+                self._overshoot[key] = True
+            return False
+        t0 = self._press_t.pop(key, None)
+        if t0 is None:
+            return False
+        overshot = self._overshoot.pop(key, False)
+        if overshot or now - t0 >= hold_s:
+            return False
+        return True
+
 
 def validate_mapping(
     mapping: Dict[str, Any], registry: Dict[str, Any]
@@ -165,7 +193,9 @@ def validate_mapping(
     for axis, spec in (mapping.get("axes") or {}).items():
         check(str(spec.get("fn")), str(spec.get("kind", "")), f"axes.{axis}")
     for btn, spec in (mapping.get("buttons") or {}).items():
-        check(str(spec.get("fn")), "discrete", f"buttons.{btn}")
+        specs = spec if isinstance(spec, list) else [spec]
+        for i, s in enumerate(specs):
+            check(str(s.get("fn")), "discrete", f"buttons.{btn}[{i}]")
     for btn, spec in (mapping.get("held") or {}).items():
         check(str(spec.get("fn")), str(spec.get("kind", "analog_01")), f"held.{btn}")
     return errors
@@ -175,8 +205,24 @@ def iter_axis_bindings(mapping: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any
     return list((mapping.get("axes") or {}).items())
 
 
-def iter_button_bindings(mapping: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
-    return list((mapping.get("buttons") or {}).items())
+def iter_button_bindings(
+    mapping: Dict[str, Any],
+) -> List[Tuple[str, str, Dict[str, Any]]]:
+    """展开按钮绑定为 (bind_key, button_name, spec) 三元组。
+
+    - 普通 dict 条目：bind_key = button 名（single binding）；
+    - list 条目（F55 双义，如 options 短按+长按）：逐条展开，
+      bind_key = `{btn}#{i}` 保证同键多条绑定各自独立边沿跟踪。
+    button_name 始终是原始 `btn`（用来从 /joy 取样）。
+    """
+    out: List[Tuple[str, str, Dict[str, Any]]] = []
+    for btn, spec in (mapping.get("buttons") or {}).items():
+        if isinstance(spec, list):
+            for i, s in enumerate(spec):
+                out.append((f"{btn}#{i}", str(btn), s))
+        else:
+            out.append((str(btn), str(btn), spec))
+    return out
 
 
 def iter_held_bindings(mapping: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
