@@ -3,7 +3,7 @@
 #
 # == 全功能速查（F55；完整操作手册见本包 README.md）==
 #   示教三键:  Share 短按=开始示教 / Options 短按=结束示教(自动保存) / Circle 短按=执行回放(latest)
-#   功能键:    Touchpad=init / L3=使能 / R3=失能
+#   功能键:    PS=init(蓝牙下触摸板按键不进 js0, 唤醒改用 PS) / L3=使能 / R3=失能
 #   双义键:    Options 短按=teach_stop, 长按 3s=调零 (buttons 用 list 绑两条, 各自独立边沿)
 #   安全键:    Triangle 长按=关机(唯一手柄急停) / Square 长按=上电 / Cross=立即停 / L1=死人开关
 
@@ -86,10 +86,16 @@ buttons:
     fn: playback_latest
     edge: shortpress
     hold_s: 3.0
-  touchpad:
+  ps:
     fn: arm_init
     edge: shortpress
     hold_s: 3.0
+  # 蓝牙下触摸板按键在独立 input 设备("Wireless Controller Touchpad")，js0 收不到 → 不绑定；
+  # 有线(insmod ds4_generic.ko)时触摸板键可能回到 js0，届时若需再启用。
+  # touchpad:
+  #   fn: arm_init
+  #   edge: shortpress
+  #   hold_s: 3.0
   l3:
     fn: arm_enable
     edge: shortpress
