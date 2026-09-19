@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>组件关系 — A3 Arm Platform</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="mermaid-init.js"></script>
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="home" href="index.html">🏠 主页</a><span class="sep">|</span>
+  <a href="overview.html">宏观架构</a>
+  <a href="detail.html">微观架构</a>
+  <a href="components.html">组件关系</a>
+  <a href="control_flow.html">控制流</a>
+  <a href="signal_flow.html">信号流</a>
+  <a href="data.html">数据架构</a>
+  <a href="mechanisms.html">工作机制</a>
+</div></nav>
+
+<header class="main">
+  <h1>LEVEL 3 · 组件与关系</h1>
+  <p>包依赖方向 · 话题中枢 Hub-Spoke · 设计模式 · 决策流 · 组件档案 —— Mermaid 关系图为主</p>
+</header>
+
+<div class="wrap">
+
+<section>
+  <h2>包依赖总图</h2>
+  <div class="sub">实线 = 依赖/持有；虚线 = 运行时协作 / 跨仓</div>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart TB
+  MSG["a3_msgs<br/>msg/srv/action 契约"] --> ARMC["a3_arm_controller"]
+  MSG --> GRIP["a3_gripper_controller"]
+  MSG --> BRIDGE["a3_mqtt_bridge"]
+  MSG --> CANB["a3_can_bridge"]
+  MSG --> TELE["a3_teleop_ps4"]
+  MSG --> BRING["a3_bringup"]
+  CANB -->|"MIT 编解码/服务"| BRING
+  CANB -->|"motor 服务客户端"| ARMC
+  CANB -->|"set_param 客户端"| GRIP
+  BRING -->|"launch + 工具节点"| CANB
+  DESC["a3_description<br/>URDF · named_poses · 控制器"] --> CANB
+  DESC --> MOVIT["a3_moveit_config"]
+  MOVIT --> BRING
+  ARMC -->|"/a3/arm_status 等订阅源"| BRING
+  BRIDGE -->|"订阅各状态话题"| BRING
+  LERO["a3_lerobot_config<br/>LeRobot stub"] -.-> ARMC
+  CE["a3_cloud_edge"] -.-> DESC
+  BRIDGE -.->|"MQTT 契约耦合"| DT["deep-trace（外部仓）<br/>HOME-DEMO.RK3588.yaml"]
+
+  classDef ui fill:#2e74b5,stroke:#1a4a7a,color:#fff
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef data fill:#538f53,stroke:#2e5a2e,color:#fff
+  classDef cfg fill:#4fb6c7,stroke:#2a7a8a,color:#fff
+  classDef stat fill:#b06a8f,stroke:#7a3a5a,color:#fff
+  class MSG,BRING cfg
+  class ARMC,GRIP,CE,BRIDGE eng
+  class CANB io
+  class DESC,MOVIT,LERO data
+  class TELE ui
+  class DT stat
+</pre>
+  </div>
+</section>
+
+<section>
+  <h2>话题中枢 Hub-Spoke（四总线）</h2>
+  <div class="sub">跨节点协作尽量收敛到少数中枢话题，避免点对点乱连。</div>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart TB
+  subgraph hub1 ["轨迹总线（执行入口）"]
+    direction LR
+    A1["arm_controller"] --> TB["/joint_group_effort_controller/joint_trajectory"]
+    G1["gripper_controller"] --> TB
+    F1["FJT action"] --> TB
+    S1["servo / trajectory_bridge"] --> TB
+    TB --> M1["motor_protocol（200Hz）"]
+  end
+  subgraph hub2 ["状态总线（反馈中枢）"]
+    direction LR
+    M2["motor_protocol / sim"] --> JS2["/joint_states<br/>BEST_EFFORT 50Hz"]
+    JS2 --> C2["arm_controller"]
+    JS2 --> G2["gripper_controller"]
+    JS2 --> W2["arm_monitor"]
+    JS2 --> B2["mqtt_bridge"]
+  end
+  subgraph hub3 ["模式仲裁 / 门控"]
+    direction LR
+    M3["motor_protocol"] --> CM["/a3/control_mode"]
+    G3["gravity_torque"] --> CM
+    V3["servo_mode_bridge"] --> CM
+    F3["FJT"] --> CM
+    A3["arm_controller"] --> CM
+    P3["power_sequence"] --> GATE["/power_sequence/gate_open"]
+    GATE --> M4["motor_protocol（拦截）"]
+  end
+
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  classDef stat fill:#b06a8f,stroke:#7a3a5a,color:#fff
+  class A1,G1,F1,S1,M1,M2,JS2,G2,C2,W2,B2,M3,G3,V3,F3,A3,P3,GATE,M4 io
+  class CM stat
+</pre>
+  </div>
+  <div class="note">模式总线为「多写者」设计（5 个节点共写 <code>/a3/control_mode</code>）——历史上因无 owner 导致锁存（F29），属待改进项（见 <a href="index.html#assessment">index 评估</a>）。</div>
+</section>
+
+<section>
+  <h2>设计模式落点</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart TB
+  F["外观 Facade"] --> F1["a3_arm_controller 统一对外 /a3/arm/* · ArmStatus 唯一状态入口"]
+  S["状态机 State"] --> S1["arm_controller 11 态 · power_sequence 序列 · gripper 力控状态机"]
+  B["桥接 Bridge"] --> B1["a3_bringup/trajectory_bridge<br/>reBot 话题 ↔ 轨迹总线 · joint1..7 ↔ L1..L7"]
+  B --> B2["a3_mqtt_bridge<br/>ROS 话题 ↔ MQTT points"]
+  O["观察者 / 发布订阅"] --> O1["ROS 2 topic QoS（双 QoS 订阅 /joint_states）"]
+  P["策略 Strategy"] --> P1["PS4 YAML 映射（simple/default）· F52 档位（7J/6J/5J）"]
+  W["独立看门狗 Watchdog"] --> W1["arm_monitor 跨源比对 · 分级处置（stop→reset）"]
+
+  classDef m fill:#1f3b63,stroke:#0d1f3c,color:#fff
+  classDef d fill:#e8f0fa,stroke:#2e74b5,color:#1f3b63
+  class F,S,B,O,P,W m
+  class F1,S1,B1,B2,O1,P1,W1 d
+</pre>
+  </div>
+</section>
+
+<section>
+  <h2>「我想改什么」决策流</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart TD
+  Q["想改什么?"] --> Q1["轨迹插值/执行语义"]
+  Q --> Q2["安全机制（钳位/门禁/温度/看门狗）"]
+  Q --> Q3["对外交互接口（web/PS4/话题）"]
+  Q --> Q4["遥测上报 / MQTT 契约"]
+  Q --> Q5["夹爪力控行为"]
+  Q --> Q6["启动组合 / launch"]
+  Q --> Q7["URDF / 关节 / 命名位姿"]
+  Q --> Q8["电机映射 / 档位"]
+  Q --> Q9["示教 / 回放 / 点位"]
+  Q1 --> F1["a3_can_bridge src/motor_protocol_node.cpp<br/>+ trajectory_interpolator.hpp"]
+  Q2 --> F2["a3_can_bridge config/control_gains.yaml（F42/F51）<br/>a3_arm_controller config/arm_controller.yaml（F40/F44/F45）<br/>a3_arm_controller/arm_monitor_node.py（F50）"]
+  Q3 --> F3["a3_arm_controller/arm_controller.py<br/>+ a3_msgs（新接口）"]
+  Q4 --> F4["a3_mqtt_bridge config/bridge.yaml<br/>+ deep-trace HOME-DEMO.RK3588.yaml（两端同改）"]
+  Q5 --> F5["a3_gripper_controller/gripper_controller_node.py<br/>+ config/gripper_config.yaml"]
+  Q6 --> F6["a3_bringup launch/*.launch.py"]
+  Q7 --> F7["a3_description urdf/el_a3.urdf.xacro · config/named_poses.yaml"]
+  Q8 --> F8["a3_can_bridge config/motor_map*.yaml（F52 配对档）"]
+  Q9 --> F9["a3_arm_controller/arm_controller.py（F38/F39）"]
+
+  classDef q fill:#2e74b5,stroke:#1a4a7a,color:#fff
+  classDef f fill:#538f53,stroke:#2e5a2e,color:#fff
+  class Q,Q1,Q2,Q3,Q4,Q5,Q6,Q7,Q8,Q9 q
+  class F1,F2,F3,F4,F5,F6,F7,F8,F9 f
+</pre>
+  </div>
+</section>
+
+<section>
+  <h2>核心组件档案（速查表）</h2>
+  <div class="sub">表格便于检索；关系以上方流程图为准</div>
+  <table>
+    <tr><th>组件</th><th>层</th><th>职责</th><th>源文件</th></tr>
+    <tr><td>motor_protocol_node</td><td>IO</td><td>轨迹插值→MIT 帧；反馈解码；F42/F46/F51；motor 服务</td><td>src/a3_can_bridge/src/motor_protocol_node.cpp</td></tr>
+    <tr><td>power_sequence_node</td><td>IO</td><td>电源序列状态机 + gate 门禁</td><td>src/a3_can_bridge/src/power_sequence_node.cpp</td></tr>
+    <tr><td>can_transport_node</td><td>IO</td><td>SocketCAN 双总线收发 + 统计</td><td>src/a3_can_bridge/src/can_transport_node.cpp</td></tr>
+    <tr><td>arm_controller</td><td>ENG</td><td>11 态状态机、统一服务门面、ArmStatus 聚合、示教/AI</td><td>src/a3_arm_controller/a3_arm_controller/arm_controller.py</td></tr>
+    <tr><td>arm_monitor_node</td><td>ENG</td><td>F50 看门狗：跨源比对 → stop/reset，MonitorStatus 20Hz</td><td>src/a3_arm_controller/a3_arm_controller/arm_monitor_node.py</td></tr>
+    <tr><td>gripper_controller_node</td><td>ENG</td><td>L7 自适应力控（PI 力外环 + 位置内环）</td><td>src/a3_gripper_controller/a3_gripper_controller/gripper_controller_node.py</td></tr>
+    <tr><td>ros2mqtt_bridge</td><td>STAT</td><td>话题白名单展平上云 + cmd 下行回执（5Hz 节流）</td><td>src/a3_mqtt_bridge/a3_mqtt_bridge/ros2mqtt_bridge.py</td></tr>
+    <tr><td>ps4_mapper / actions</td><td>UI</td><td>PS4 YAML 映射 → Servo/电源/夹爪动作</td><td>src/a3_teleop_ps4/a3_teleop_ps4/ps4_mapper.py · actions.py</td></tr>
+    <tr><td>trajectory_bridge</td><td>CFG</td><td>reBot 话题 ↔ 轨迹总线；关节名映射</td><td>src/a3_bringup/a3_bringup/trajectory_bridge.py</td></tr>
+    <tr><td>sim_motor_node / sim_power_sequence / sim_executor</td><td>CFG</td><td>无 CAN 仿真等价节点</td><td>src/a3_bringup/a3_bringup/</td></tr>
+    <tr><td>gravity_torque_node</td><td>ENG</td><td>Pinocchio 重力矩 + 启停服务（F49 标定产物）</td><td>src/a3_bringup/a3_bringup/gravity_torque_node.py</td></tr>
+    <tr><td>move_to_pose_ik_node</td><td>ENG</td><td>Pinocchio IK 服务 + MoveToPose Action</td><td>src/a3_bringup/a3_bringup/move_to_pose_ik_node.py</td></tr>
+    <tr><td>follow_joint_trajectory_action</td><td>ENG</td><td>FJT Action Server → 轨迹话题</td><td>src/a3_bringup/a3_bringup/follow_joint_trajectory_action.py</td></tr>
+    <tr><td>a3_cloud_edge 栈</td><td>GOAL</td><td>micro-ROS Agent / mock client / gravity_compensation</td><td>src/a3_cloud_edge/</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>目录边界</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart LR
+  DESC["a3_description<br/>URDF/关节/控制器"] --> CANB["a3_can_bridge<br/>执行层"]
+  BRING["a3_bringup<br/>launch + 工具"] --> CANB
+  CANB --> ARMC["a3_arm_controller<br/>编排"]
+  CANB --> GRIP["a3_gripper_controller"]
+  ARMC --> BRIDGE["a3_mqtt_bridge<br/>遥测/指令"]
+  MSGS["a3_msgs<br/>接口契约"] --> CANB & ARMC & GRIP & BRIDGE & TELE & BRING
+  TELE["a3_teleop_ps4"] --> BRING
+  LERO["a3_lerobot_config"] -.-> ARMC
+  CE["a3_cloud_edge"] -.-> DESC
+
+  classDef a fill:#2e74b5,stroke:#1a4a7a,color:#fff
+  classDef b fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  classDef c fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef d fill:#538f53,stroke:#2e5a2e,color:#fff
+  classDef e fill:#4fb6c7,stroke:#2a7a8a,color:#fff
+  classDef f fill:#b06a8f,stroke:#7a3a5a,color:#fff
+  classDef g fill:#8c8c8c,stroke:#555,color:#fff
+  class TELE a
+  class ARMC,GRIP,CE b
+  class CANB c
+  class DESC,LERO d
+  class MSGS,BRING e
+  class BRIDGE f
+</pre>
+  </div>
+</section>
+
+</div>
+<footer>LEVEL 3 · 组件关系 · 继续：<a href="control_flow.html">控制流 →</a></footer>
+</body>
+</html>

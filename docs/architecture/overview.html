@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>宏观架构 — A3 Arm Platform</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="mermaid-init.js"></script>
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="home" href="index.html">🏠 主页</a><span class="sep">|</span>
+  <a href="overview.html">宏观架构</a>
+  <a href="detail.html">微观架构</a>
+  <a href="components.html">组件关系</a>
+  <a href="control_flow.html">控制流</a>
+  <a href="signal_flow.html">信号流</a>
+  <a href="data.html">数据架构</a>
+  <a href="mechanisms.html">工作机制</a>
+</div></nav>
+
+<header class="main">
+  <h1>LEVEL 1 · 宏观架构</h1>
+  <p>分层总览 · 数据/控制流向 · 架构原则 · 技术栈 · 启动组合 —— 以 Mermaid 流程图为主<br>
+  主线 = A3 Edge（RK3588 板载全栈）；支线 = A3 CloudEdge（服务器 + ESP32-S3）</p>
+</header>
+
+<div class="wrap">
+
+<section>
+  <h2>系统分层总览（含数据流）</h2>
+  <div class="sub">自上而下依赖；实线 = 数据/调用，虚线 = 订阅/遥测。轨迹总线为执行入口中枢，状态总线为反馈中枢。</div>
+  <div class="legend-inline">
+    <span class="lg-eng"><i></i>编排/规划</span>
+    <span class="lg-io"><i></i>CAN 执行层</span>
+    <span class="lg-cfg"><i></i>配置/Launch</span>
+    <span class="lg-stat"><i></i>遥测/监视</span>
+    <span class="lg-ui"><i></i>HMI/工具</span>
+    <span class="lg-data"><i></i>硬件/数据</span>
+    <span><i style="background:#2e74b5"></i>下行 D1-D6（控制/命令/配置）</span>
+    <span><i style="background:#1e8e4e"></i>上行 U1-U7（反馈/状态/遥测）</span>
+  </div>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart TB
+  subgraph HMI["HMI / 规划 / 工具"]
+    direction LR
+    PS4["a3_teleop_ps4<br/>ps4_mapper · YAML 映射"]
+    MV["MoveIt / reBot 工具链<br/>move_group · servo_node"]
+    TB["a3_bringup 工具节点<br/>trajectory_bridge · sim_executor<br/>gravity_torque · FJT · IK · demo"]
+    WEB0["Web 浏览器（外部 deep-trace）<br/>3D · 曲线 · 控制面板"]
+    WEB0 -.->|"D5 cmd（op 白名单）"| MQ
+  end
+
+  subgraph ORCH["编排层 Orchestration"]
+    direction LR
+    AC["a3_arm_controller<br/>11态状态机 · /a3/arm/* 门面<br/>arm_status 10Hz · 示教/AI"]
+    MON["a3_arm_monitor<br/>F50 看门狗 20Hz<br/>跨源比对 → stop/reset"]
+    GR["a3_gripper_controller<br/>L7 力外环 50Hz<br/>POSITION/FORCE/RELEASE/STOP"]
+    AC --- MON
+  end
+
+  subgraph EXEC["执行层 Execution（a3_can_bridge）"]
+    direction LR
+    MP["motor_protocol_node<br/>200Hz 插值→MIT 帧<br/>F42钳位 · F46帧率 · F51门禁"]
+    PS["power_sequence_node<br/>电源序列 + gate"]
+    CT["can_transport_node<br/>SocketCAN 双总线"]
+    MP --> CT
+    PS --> CT
+  end
+
+  subgraph PLAT["平台 / 硬件"]
+    direction LR
+    CAN["SocketCAN can1（默认）<br/>can-up.service · 1 Mbps"]
+    MOT["7× MIT 电机 ID1..7<br/>L1..L7（L7 夹爪）"]
+    CAN --> MOT
+  end
+
+  subgraph MQTT["MQTT 北向/南向（跨仓 deep-trace）"]
+    direction LR
+    MQ["a3_mqtt_bridge<br/>bridge.yaml 白名单展平<br/>telemetry 5Hz · op 下行"]
+    EMQX["EMQX Broker"]
+    MQ --> EMQX
+    EMQX -->|"U6 telemetry/info/status"| WEB0
+  end
+
+  subgraph CE["A3 CloudEdge 支线（服务器 + ESP32）"]
+    direction LR
+    CEMV["服务器 MoveIt / 规划"]
+    CEG["gravity_compensation_node<br/>effort 前馈填充"]
+    AGT["micro-ROS Agent"]
+    ESP["ESP32-S3<br/>200Hz 插值 + CAN MIT"]
+    CEMV --> CEG --> AGT <-->|"WiFi DDS"| ESP
+  end
+
+  %% 下行 D1-D6（蓝）
+  PS4 -->|"D2｜电源命令 start/shutdown/set_zero"| PS
+  PS4 -->|"D1｜Servo Twist / 命名位姿 / L7 夹爪"| TB
+  MV -->|"D1｜FJT / 轨迹"| TB
+  TB -->|"D1｜轨迹总线"| MP
+  AC -->|"D1｜/a3/arm/* 服务 + 轨迹"| TB
+  GR -->|"D1｜L7 单关节轨迹"| TB
+  WEB0 -.->|"D5｜MQTT cmd"| MQ
+  MQ -->|"D5｜调 /a3/arm/*、/a3/gripper/*、/a3/motor/*"| AC
+  MQ -->|"D5｜gripper op"| GR
+  MQ -->|"D5｜motor op（C++ 权威拦截）"| MP
+  CEMV -->|"D1｜planned_joint_trajectory"| CEG
+  CEG -->|"D1｜轨迹总线（服务器侧）"| AGT
+  AGT -->|"D1｜XRCE 轨迹下发"| ESP
+  MP -->|"D3｜/can_tx_frames"| CT
+  PS -->|"D3｜gate 控制帧"| CT
+  CT -->|"D4｜MIT 帧"| CAN
+
+  %% 上行 U1-U7（绿）
+  MOT -.->|"U1｜回帧"| CAN
+  CAN -.->|"U1｜回帧"| CT
+  CT -.->|"U2｜/can_rx_frames"| MP
+  MP -.->|"U3｜/joint_states 50Hz + /a3/motor/states + tx_stats"| JS
+  JS["状态总线"] --> AC & GR & MON
+  AC -.->|"U4｜/a3/arm_status 10Hz"| MQ
+  GR -.->|"U4｜/a3/gripper_status"| MQ
+  MP -.->|"U3｜motor 遥测源"| MQ
+  MON -.->|"U5｜/a3/monitor/status 20Hz"| MQ
+  ESP -.->|"U1｜joint_states（XRCE）"| AGT
+
+  classDef ui fill:#2e74b5,stroke:#1a4a7a,color:#fff
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef data fill:#538f53,stroke:#2e5a2e,color:#fff
+  classDef cfg fill:#4fb6c7,stroke:#2a7a8a,color:#fff
+  classDef stat fill:#b06a8f,stroke:#7a3a5a,color:#fff
+  classDef goal fill:#8c8c8c,stroke:#555,color:#fff
+  class PS4,MV,WEB0 ui
+  class TB cfg
+  class AC,MON,GR eng
+  class MP,PS,CT,JS io
+  class CAN,MOT data
+  class MQ,EMQX stat
+  class CEMV,CEG,AGT,ESP goal
+</pre>
+  </div>
+  <div class="hub-bar"><b>原则：</b>上层可调用下层；执行入口唯一（轨迹总线）；编排层对外门面、执行层权威拦截；分层保护（F42 执行层 200 Hz / F44·F40 编排层状态机 / F50 独立看门狗）；遥测统一经 MQTT 桥白名单展平上云。<b>主路径 = A3 Edge</b>：PS4/Web/MoveIt 的指令 → 轨迹总线 → motor_protocol 200 Hz 插值 → SocketCAN MIT 帧 → 7 电机；反馈 50 Hz 回 /joint_states → 编排聚合 + 遥测上云。<b>CloudEdge 支线</b>：服务器集中规划 → gravity_compensation_node 填 effort 前馈 → micro-ROS Agent → ESP32 本地 200 Hz 插值 + CAN（本仓仅 Linux 端验证栈）。</div>
+</section>
+
+<section id="data">
+  <h2>数据流编号速查（D/U · From → To）</h2>
+  <div class="sub"><span style="color:#2e74b5">■</span> 蓝=下行（控制/命令/配置），<span style="color:#1e8e4e">■</span> 绿=上行（反馈/状态/遥测）。逐跳细化见《<a href="signal_flow.html">信号流</a>》页。</div>
+  <table>
+    <tr><th>编号</th><th>From（发出方）</th><th>To（接收方）</th><th>说明</th></tr>
+    <tr><td><span style="color:#2e74b5">■</span>下行1</td><td>arm_controller / gripper / FJT / trajectory_bridge / servo / gravity（CloudEdge）</td><td>轨迹总线 → motor_protocol</td><td>所有执行层指令统一收敛到 <code>/joint_group_effort_controller/joint_trajectory</code>（JointTrajectory，effort 为开环重力前馈）</td></tr>
+    <tr><td><span style="color:#2e74b5">■</span>下行2</td><td>PS4（F3） / topic</td><td>power_sequence_node</td><td>电源命令 <code>start / shutdown / set_zero</code></td></tr>
+    <tr><td><span style="color:#2e74b5">■</span>下行3</td><td>motor_protocol / power_sequence</td><td>can_transport_node</td><td>MIT 控制帧与电源控制帧 → <code>/can_tx_frames</code></td></tr>
+    <tr><td><span style="color:#2e74b5">■</span>下行4</td><td>can_transport_node</td><td>SocketCAN → 电机</td><td>物理 CAN 帧（1 Mbps，≤200 Hz/电机）</td></tr>
+    <tr><td><span style="color:#2e74b5">■</span>下行5</td><td>Web 浏览器（MQTT cmd）</td><td>a3_mqtt_bridge → arm/gripper/motor 服务</td><td>op 白名单：init/enable/disable/goto/set_joints/teach/save/playback/enter_ai/exit_ai/gripper_*/motor_*</td></tr>
+    <tr><td><span style="color:#2e74b5">■</span>下行6</td><td>config YAML（控制增益/限位/档位）</td><td>各节点参数</td><td>control_gains / motor_map / power_sequence / bridge / F52 档位（7J/6J/5J 配对）</td></tr>
+    <tr><td><span style="color:#1e8e4e">■</span>上行1</td><td>电机 → SocketCAN</td><td>can_transport_node</td><td>反馈帧回传</td></tr>
+    <tr><td><span style="color:#1e8e4e">■</span>上行2</td><td>can_transport_node</td><td>motor_protocol_node</td><td><code>/can_rx_frames</code> → MIT 编解码</td></tr>
+    <tr><td><span style="color:#1e8e4e">■</span>上行3</td><td>motor_protocol_node</td><td>状态总线 / 遥测源</td><td><code>/joint_states</code>（50Hz，BEST_EFFORT，注意域差异 LL-037）+ <code>/a3/motor/states</code> + <code>/a3/motor/tx_stats</code></td></tr>
+    <tr><td><span style="color:#1e8e4e">■</span>上行4</td><td>arm_controller / gripper_controller</td><td>MQTT 桥</td><td><code>/a3/arm_status</code>（10Hz，arm_state/mode/message/temp_warn + mtqmax_*）与 <code>/a3/gripper_status</code>（grip_* 8 信号）</td></tr>
+    <tr><td><span style="color:#1e8e4e">■</span>上行5</td><td>arm_monitor_node</td><td>MQTT 桥</td><td><code>/a3/monitor/status</code>（20Hz：OK/PENDING/TRIGGERED + 处置动作）</td></tr>
+    <tr><td><span style="color:#1e8e4e">■</span>上行6</td><td>a3_mqtt_bridge</td><td>EMQX → Web</td><td>telemetry（5Hz 最新值胜出）/ device.info / device.status / cmd_result（永不丢、不受节流）</td></tr>
+    <tr><td><span style="color:#1e8e4e">■</span>上行7</td><td>ESP32（CloudEdge）</td><td>服务器</td><td>joint_states XRCE 回传（支线）</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>端到端价值流</h2>
+  <div class="sub">从开机到 Web 控制的宏观流水线（Edge 主线）</div>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart LR
+  A["can-up.service<br/>SocketCAN can1 UP 1Mbps"] --> B["a3_bringup.launch<br/>rsp + can_bridge + 可选 teleop/gravity/rviz"]
+  B --> C["power_sequence start<br/>gate_open=true"]
+  C --> D["a3_arm_controller init → enable<br/>READY"]
+  D --> E["指令源<br/>PS4 / Web MQTT cmd / MoveIt / 话题"]
+  E --> F["轨迹总线<br/>/joint_group_effort_controller/joint_trajectory"]
+  F --> G["motor_protocol 200Hz 插值<br/>→ MIT 帧 → SocketCAN"]
+  G --> H["7 电机执行 + 反馈 50Hz"]
+  H --> I["/joint_states → arm_status/gripper_status/monitor_status"]
+  I --> J["a3_mqtt_bridge 白名单展平<br/>telemetry 5Hz"]
+  J --> K["EMQX → Web 3D/曲线/面板"]
+  K -->|"cmd 下行"| E
+
+  classDef ui fill:#2e74b5,stroke:#1a4a7a,color:#fff
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef data fill:#538f53,stroke:#2e5a2e,color:#fff
+  classDef cfg fill:#4fb6c7,stroke:#2a7a8a,color:#fff
+  classDef stat fill:#b06a8f,stroke:#7a3a5a,color:#fff
+  class A,B,F cfg
+  class C,D eng
+  class E,K ui
+  class G,H,I io
+  class J stat
+</pre>
+  </div>
+</section>
+
+<section>
+  <h2>四条硬原则</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart TB
+  P1["① 执行入口唯一<br/>轨迹总线 /joint_group_effort_controller/joint_trajectory<br/>多源收敛 · 禁止绕过"]
+  P2["② 编排门面 + 执行权威<br/>arm_controller 统一对外 /a3/arm/*<br/>C++ 执行层权威拦截（gate/互锁/钳位）"]
+  P3["③ 状态总线 + 双 QoS<br/>/joint_states BEST_EFFORT<br/>消费方必须双 QoS 订阅（LL-030）"]
+  P4["④ 分层保护不越权<br/>F42 执行层 200Hz 钳位 · F44/F40 编排层状态机 · F50 独立看门狗跨源比对"]
+  P1 --- P2 --- P3 --- P4
+
+  classDef p fill:#1f3b63,stroke:#0d1f3c,color:#fff
+  class P1,P2,P3,P4 p
+</pre>
+  </div>
+</section>
+
+<section>
+  <h2>技术栈关系</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart TB
+  LINUX["Ubuntu 22.04 · RK3588"] --> HUM["ROS 2 Humble"]
+  HUM --> RCPP["rclcpp（a3_can_bridge C++ 实时路径）"]
+  HUM --> RPY["rclpy（编排/力控/桥/遥操作 Python 路径）"]
+  HUM --> MK["MoveIt2（move_group · pick_ik · servo）"]
+  HUM --> R2C["ros2_control（mock/demo）"]
+  HUM --> PIN["Pinocchio（重力矩 / IK）"]
+  RCPP --> SOCK["SocketCAN（can-up.service · 1 Mbps）"]
+  SOCK --> MIT["MIT 阻抗/力控协议帧"]
+  RPY --> PAHO["paho-mqtt → EMQX（跨仓 deep-trace）"]
+  LINUX --> SYSTEMD["systemd（can-up / a3-bringup example）"]
+
+  classDef r fill:#2e74b5,stroke:#1a4a7a,color:#fff
+  classDef d fill:#538f53,stroke:#2e5a2e,color:#fff
+  classDef a fill:#b06a8f,stroke:#7a3a5a,color:#fff
+  class LINUX,HUM,RCPP,RPY,SYSTEMD r
+  class MK,R2C,PIN,SOCK,MIT d
+  class PAHO a
+</pre>
+  </div>
+  <div class="note info">本进程内刻意不引入中间件：ROS 2 话题/服务承载全部节点间通信；遥测北向仅 <code>paho-mqtt</code> 出站客户端；持久化落用户层文件（<code>~/.a3/</code>）与本地 YAML，无数据库。</div>
+</section>
+
+<section>
+  <h2>双产品线对照</h2>
+  <div class="sub">完整背景见 <a href="../README.md">docs/README.md</a> 与 <a href="../cloud_edge/ARCHITECTURE.md">cloud_edge/ARCHITECTURE.md</a></div>
+  <table>
+    <tr><th>维度</th><th>A3 Edge（主线，active）</th><th>A3 CloudEdge（支线，draft）</th></tr>
+    <tr><td>单臂主控</td><td>RK3588（Linux + ROS 2 全栈）</td><td>ESP32-S3（固件）+ 内网服务器</td></tr>
+    <tr><td>轨迹规划</td><td>板载 MoveIt / reBot 工具链</td><td>服务器集中规划（多臂共用一套）</td></tr>
+    <tr><td>CAN 执行</td><td>SocketCAN → <code>a3_can_bridge</code></td><td>ESP32 TWAI/CAN，本地 200 Hz 插值</td></tr>
+    <tr><td>控制延迟</td><td>板内 &lt; 10 ms</td><td>WiFi 轨迹块下发 + 边缘插值</td></tr>
+    <tr><td>网络依赖</td><td>无（本地闭环）</td><td>WiFi 必须</td></tr>
+    <tr><td>单臂 BOM</td><td>较高</td><td>较低</td></tr>
+    <tr><td>适用场景</td><td>单机低延迟力控、现网部署</td><td>多臂实验室、降本量产、MCP 编排</td></tr>
+    <tr><td>本仓承载</td><td>全栈 11 包</td><td>仅 <code>a3_cloud_edge</code>（Agent/mock 验证栈）</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>启动组合图（a3_bringup.launch.py 主干）</h2>
+  <div class="sub">主入口 <code>ros2 launch a3_bringup a3_bringup.launch.py can0_name:=can0 use_teleop:=true use_rviz:=true</code></div>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart TB
+  MAIN["a3_bringup.launch.py"]
+  MAIN --> RSP["robot_state_publisher<br/>xacro use_mock_hardware:=true"]
+  MAIN --> CB["can_bridge.launch.py"]
+  CB --> CT["can_transport_node<br/>can0/can1 · rx_poll 2ms"]
+  CB --> MP["motor_protocol_node<br/>gains_file · motor_map_file"]
+  CB --> PS["power_sequence_node（可选 use_power_sequence:=true）"]
+  MAIN --> TB0["trajectory_bridge<br/>reBot 话题 ↔ 轨迹总线"]
+  MAIN --> GRAV["gravity_torque_node（可选 use_gravity_compensation）"]
+  MAIN --> TEL["ps4_teleop.launch.py（可选 use_teleop:=true）"]
+  MAIN --> RVIZ["rviz（可选 use_rviz:=false）"]
+
+  classDef ui fill:#2e74b5,stroke:#1a4a7a,color:#fff
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef cfg fill:#4fb6c7,stroke:#2a7a8a,color:#fff
+  class MAIN,TEL,RVIZ ui
+  class GRAV,TB0 eng
+  class CB,CT,MP,PS io
+  class RSP cfg
+</pre>
+  </div>
+  <div class="note">其它 launch：<code>a3_hardware.launch.py</code>（无头板级）、<code>edge_web_sim.launch.py</code>（仿真闭环：sim_motor + sim_power_sequence + arm_controller + mqtt_bridge + gripper）、<code>edge_moveit_execute.launch.py</code>（FJT + IK + 可选画矩形）、<code>servo.launch.py</code>（MoveIt Servo）、<code>edge_teleop_sim.launch.py</code>（PS4 仿真）。编排层另起 <code>arm_controller.launch.py</code>（含可选 monitor）。</div>
+</section>
+
+</div>
+<footer>LEVEL 1 · 宏观架构 · 继续深入：<a href="detail.html">微观架构 →</a></footer>
+</body>
+</html>

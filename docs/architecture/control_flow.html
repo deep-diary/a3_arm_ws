@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>控制流 — A3 Arm Platform</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="mermaid-init.js"></script>
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="home" href="index.html">🏠 主页</a><span class="sep">|</span>
+  <a href="overview.html">宏观架构</a>
+  <a href="detail.html">微观架构</a>
+  <a href="components.html">组件关系</a>
+  <a href="control_flow.html">控制流</a>
+  <a href="signal_flow.html">信号流</a>
+  <a href="data.html">数据架构</a>
+  <a href="mechanisms.html">工作机制</a>
+</div></nav>
+
+<header class="main">
+  <h1>LEVEL 4 · 控制流</h1>
+  <p>启动 / 初始化 / 命令下发 / 电源序列 / 失能保护 / 状态转移 —— flowchart + 时序图</p>
+</header>
+
+<div class="wrap">
+
+<section>
+  <h2>启动流</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart TB
+  BOOT["上电"] --> CANUP["can-up.service<br/>SocketCAN can0/can1 UP · 1 Mbps"]
+  CANUP --> BRING["ros2 launch a3_bringup a3_bringup.launch.py"]
+  BRING --> NODES["rsp + can_bridge（3 节点）<br/>+ trajectory_bridge + 可选 gravity/teleop/rviz"]
+  NODES --> ARMCTRL["（可选叠加）arm_controller.launch.py<br/>arm_controller + arm_monitor"]
+  ARMCTRL --> PS4["ps4_teleop.launch.py<br/>（可选）"]
+  BRING --> READY0["gate_open=false · IDLE 等待命令"]
+  PS4 -->|"Square 长按 / power_sequence/command"| SEQ
+
+  classDef ui fill:#2e74b5,stroke:#1a4a7a,color:#fff
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef cfg fill:#4fb6c7,stroke:#2a7a8a,color:#fff
+  class BOOT ui
+  class CANUP,BRING,NODES cfg
+  class ARMCTRL,PS4 eng
+  class READY0 io
+</pre>
+  </div>
+</section>
+
+<section>
+  <h2>初始化闭环 init → enable → READY</h2>
+  <div class="sub"><code>/a3/arm/init</code>（设零→异步确认→使能）与 <code>/a3/arm/enable</code>（F48 读数门禁 + F51 重锚/软起步）</div>
+  <div class="mmd">
+<pre class="mermaid">
+sequenceDiagram
+    participant Web as Web / 调用方
+    participant AC as arm_controller
+    participant MP as motor_protocol_node
+    participant JS as /joint_states
+
+    Web->>AC: /a3/arm/init (Trigger)
+    AC->>MP: /a3/motor/set_zero（广播）
+    MP->>JS: 设零后反馈
+    loop 轮询确认
+        AC->>JS: 读 7 关节位置
+    end
+    AC-->>Web: success n/7（如 7/7）
+    Web->>AC: /a3/arm/enable
+    AC->>AC: F48 门禁：读数在 URDF 限位内 && js 新鲜
+    alt 越限 / 陈旧
+        AC-->>Web: 拒绝，点名关节与限位
+    else 通过
+        AC->>MP: /a3/motor/enable（F51：重锚反馈位 + kp 软起步 0.8s）
+        MP-->>AC: 响应（重锚 N 电机…）
+        AC->>AC: 状态 READY
+        AC-->>Web: success
+    end
+  </pre>
+  </div>
+</section>
+
+<section>
+  <h2>命令流（Web MQTT cmd 下行）</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart LR
+  WEB["浏览器面板<br/>二次确认后 publish"] -->|"cmd {op, args}"| EMQX["EMQX"]
+  EMQX --> BR["a3_mqtt_bridge<br/>op 白名单校验（24 个）"]
+  BR -->|"参数非法"| R1["cmd_result ok=false<br/>不调服务"]
+  BR -->|"init/enable/disable/goto/set_joints/teach/..."| AC["/a3/arm/* 服务"]
+  BR -->|"gripper_grasp/release/stop/..."| GR["/a3/gripper/*"]
+  BR -->|"motor_scan/mit/hold/stop/set_param/..."| MP["/a3/motor/* 服务<br/>（C++ 权威 gate 拦截）"]
+  AC -->|"轨迹"| TB["轨迹总线 → 执行层"]
+  AC & GR & MP -->|"success/message"| BR
+  BR -->|"cmd_result {op, ok, message, ts}"| EMQX --> WEB
+
+  classDef ui fill:#2e74b5,stroke:#1a4a7a,color:#fff
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef stat fill:#b06a8f,stroke:#7a3a5a,color:#fff
+  class WEB,EMQX ui
+  class BR,AC,GR,MP eng
+  class TB io
+  class R1 stat
+</pre>
+  </div>
+  <div class="note">桥不预检 gate——C++ 是权威拦截点，拒绝文案经 <code>cmd_result</code> 回传（预检会破坏 sim 闭环）。</div>
+</section>
+
+<section>
+  <h2>电源序列</h2>
+  <div class="mmd">
+<pre class="mermaid">
+sequenceDiagram
+    participant PS4 as PS4 / command topic
+    participant PS as power_sequence_node
+    participant MP as motor_protocol_node
+    participant CAN as SocketCAN
+
+    PS4->>PS: start
+    PS->>PS: Precheck → EnableInit → SoftStand
+    PS->>CAN: 使能/标定帧
+    PS->>PS: Running
+    PS-->>MP: gate_open=true（transient_local）
+    PS4->>PS: shutdown（Triangle / L1+R1+Share）
+    PS->>PS: SoftProne → ProneHold
+    PS-->>MP: gate_open=false
+    PS4->>PS: set_zero（Options 长按）
+    PS->>CAN: 调零帧
+  </pre>
+  </div>
+</section>
+
+<section>
+  <h2>失能保护 disable（F40 safe park）</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart TD
+  D["/a3/arm/disable"] --> CHK{"是否在 home 容差内<br/>|q−home| ≤ 0.15 rad"}
+  CHK -->|"是"| R1["直接 /a3/motor/reset → DISABLED"]
+  CHK -->|"否"| PARK["SAFE_PARK<br/>发布 home 轨迹（3.0s, 150pts）抢占活跃轨迹"]
+  PARK --> CONF["轮询连续 0.5s 收敛"]
+  CONF -->|"收敛"| R1
+  CONF -->|"park 超时（8s）"| FAULT["FAULT（保持使能 · 人工介入）"]
+  R1 --> FIN["message: safe park -> disabled (0.9s)"]
+
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  classDef ctrl fill:#c0392b,stroke:#8a1a1a,color:#fff
+  classDef sig fill:#1a7a6d,stroke:#0a4a40,color:#fff
+  class D,CHK,R1,PARK,CONF,FIN eng
+  class FAULT ctrl
+</pre>
+  </div>
+</section>
+
+<section>
+  <h2>状态机转移（11 态速览）</h2>
+  <div class="sub">完整转移与拒绝表见 <a href="detail.html#arm-st">detail 微观架构</a> 与 <a href="../shared/SAFETY.md">shared/SAFETY.md</a></div>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart LR
+  IDLE["IDLE"] --> INIT["INIT"] --> READY["READY"]
+  READY --> TRAJ["TRAJ"]
+  READY --> SERVO["SERVO"]
+  READY --> TEACH["TEACH"]
+  READY --> AI["AI"]
+  READY -->|"F40/F44"| SAFE["SAFE_PARK"] --> DIS["DISABLED"]
+  SAFE --> COOL["COOLING"] --> READY
+  SAFE -->|"超时/reset拒"| FLT["FAULT"]
+  DIS --> READY
+  FLT --> DIS
+
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  classDef ctrl fill:#c0392b,stroke:#8a1a1a,color:#fff
+  class IDLE,INIT,READY,TRAJ,SERVO,TEACH,AI,SAFE,DIS,COOL eng
+  class FLT ctrl
+</pre>
+  </div>
+</section>
+
+</div>
+<footer>LEVEL 4 · 控制流 · 继续：<a href="signal_flow.html">信号流 →</a></footer>
+</body>
+</html>

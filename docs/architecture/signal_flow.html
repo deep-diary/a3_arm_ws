@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>信号流 — A3 Arm Platform</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="mermaid-init.js"></script>
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="home" href="index.html">🏠 主页</a><span class="sep">|</span>
+  <a href="overview.html">宏观架构</a>
+  <a href="detail.html">微观架构</a>
+  <a href="components.html">组件关系</a>
+  <a href="control_flow.html">控制流</a>
+  <a href="signal_flow.html">信号流</a>
+  <a href="data.html">数据架构</a>
+  <a href="mechanisms.html">工作机制</a>
+</div></nav>
+
+<header class="main">
+  <h1>LEVEL 4 · 信号流</h1>
+  <p>轨迹/状态/模式/门控四总线拓扑 · QoS 矩阵 · MQTT 上下行 · 跨节点分层保护信号 —— 以信号与时序图为主</p>
+</header>
+
+<div class="wrap">
+
+<section>
+  <h2>轨迹总线拓扑（执行入口唯一）</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart LR
+  subgraph srcs ["多源（下行指令）"]
+    direction LR
+    AC["arm_controller"]
+    GR["gripper_controller"]
+    FJT["FJT action server"]
+    BRIDGE["trajectory_bridge<br/>(reBot/a3/rebotarm)"]
+    SV["servo_node（moveit_servo）"]
+    GT["gravity_compensation（CloudEdge）"]
+  end
+  srcs --> BUS["/joint_group_effort_controller/joint_trajectory<br/>trajectory_msgs/JointTrajectory"]
+  BUS --> MP["motor_protocol_node<br/>200Hz 插值（auto 线性/三次/五次）"]
+  MP --> CAN["SocketCAN → 7 电机"]
+
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  class AC,GR,FJT,GT eng
+  class BRIDGE,SV cfg
+  class BUS,MP,CAN io
+</pre>
+  </div>
+  <div class="note">多源经桥接/服务统一转成该话题；禁止绕过。CloudEdge 服务器侧同一话题名经 micro-ROS Agent 下发。</div>
+</section>
+
+<section>
+  <h2>状态总线拓扑 + QoS 矩阵</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart TB
+  MP["motor_protocol_node（真机）<br/>sim_motor_node（仿真）"] --> JS["/joint_states 50Hz<br/>BEST_EFFORT（SensorData）"]
+  JS --> AC["arm_controller<br/>（双 QoS 订阅，LL-030）"]
+  JS --> GR["gripper_controller"]
+  JS --> MON["arm_monitor"]
+  JS --> BR["mqtt_bridge"]
+  AC --> ARMST["/a3/arm_status 10Hz"]
+  MP --> MST["/a3/motor/states 50Hz"]
+  MP --> TX["/a3/motor/tx_stats 5s 窗口"]
+  GR --> GRS["/a3/gripper_status 10/50Hz"]
+  MON --> MS["/a3/monitor/status 20Hz"]
+  ARMST & MST & GRS & MS --> BR
+
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  classDef stat fill:#b06a8f,stroke:#7a3a5a,color:#fff
+  class MP,JS io
+  class AC,GR,MON eng
+  class ARMST,MST,TX,GRS,MS,BR stat
+</pre>
+  </div>
+  <table>
+    <tr><th>话题</th><th>发布者</th><th>类型</th><th>QoS / 频率</th><th>消费方</th></tr>
+    <tr><td>/joint_states</td><td>motor_protocol / sim</td><td>sensor_msgs/JointState</td><td>BEST_EFFORT / 50Hz</td><td>arm_controller、gripper、monitor、bridge（均双 QoS）</td></tr>
+    <tr><td>/a3/arm_status</td><td>arm_controller</td><td>a3_msgs/ArmStatus</td><td>RELIABLE / 10Hz</td><td>bridge → Web 唯一状态入口</td></tr>
+    <tr><td>/a3/motor/states</td><td>motor_protocol</td><td>a3_can_bridge/MotorStates</td><td>BEST_EFFORT / 50Hz</td><td>bridge（42 点展平）、monitor、arm_controller（F43）</td></tr>
+    <tr><td>/a3/motor/tx_stats</td><td>motor_protocol</td><td>a3_can_bridge/TxStats</td><td>BEST_EFFORT / 5s 窗口</td><td>bridge（txhz_*）</td></tr>
+    <tr><td>/a3/gripper_status</td><td>gripper_controller</td><td>a3_msgs/GripperStatus</td><td>RELIABLE / 10Hz（力控 50Hz）</td><td>bridge（grip_*）</td></tr>
+    <tr><td>/a3/monitor/status</td><td>arm_monitor</td><td>a3_msgs/MonitorStatus</td><td>RELIABLE / 20Hz</td><td>bridge；arm_controller（只认 TRIGGERED）</td></tr>
+    <tr><td>/a3/control_mode</td><td>多写者（见下）</td><td>std_msgs/String</td><td>VOLATILE / 事件</td><td>gripper、monitor、arm_controller 互锁</td></tr>
+    <tr><td>/power_sequence/gate_open</td><td>power_sequence</td><td>std_msgs/Bool</td><td>transient_local</td><td>motor_protocol（权威拦截）、gripper、arm_controller</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>模式仲裁流（/a3/control_mode）</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart LR
+  MP["motor_protocol<br/>TRAJ_RUNNING/ZERO_TORQUE/IDLE"]
+  GT["gravity_torque<br/>GRAVITY_COMP"]
+  SV["servo_mode_bridge<br/>SERVO（Twist 新鲜度 0.25s）"]
+  FJT["FJT action<br/>TRAJ_RUNNING"]
+  AC["arm_controller<br/>READY/IDLE 兜底 + TRAJ_RUNNING"]
+  MP & GT & SV & FJT & AC --> BUS["/a3/control_mode"]
+  BUS --> GR["gripper（BLOCKED_MODES 拒 FORCE）"]
+  BUS --> MON["monitor（抑制）"]
+  BUS --> AC["arm_controller（_can_move 拒绝表）"]
+
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  classDef stat fill:#b06a8f,stroke:#7a3a5a,color:#fff
+  class MP,GT,SV,FJT,AC io
+  class BUS stat
+  class GR,MON eng
+</pre>
+  </div>
+  <div class="note"><b>BLOCKED_MODES 集合</b>（一致维护于 arm_controller/gripper/monitor）：<code>{ZERO_TORQUE, SERVO, GRAVITY_COMP}</code>——处于其中时拒轨迹/FORCE 类命令。⚠️ 多写者无 owner，曾发生 TRAJ_RUNNING 锁存（F29/LL-009），见 <a href="index.html#assessment">评估 #3</a>。</div>
+</section>
+
+<section>
+  <h2>MQTT 上/下行时序</h2>
+  <div class="mmd">
+<pre class="mermaid">
+sequenceDiagram
+    participant NODES as ROS 节点（arm/gripper/motor/monitor）
+    participant BR as a3_mqtt_bridge
+    participant EMQX as EMQX
+    participant WEB as Web 浏览器（mqtt.js WS）
+
+    loop 各话题回调
+        NODES->>BR: 状态/遥测消息
+        BR->>BR: 展平 points + NaN 清洗 → 缓存置脏
+    end
+    loop flusher 0.05s（5Hz 上限）
+        BR->>EMQX: telemetry（全量 points，最新值胜出，可丢）
+    end
+    BR-->>EMQX: device/info · device/status（retained，永不丢）
+    WEB->>EMQX: cmd {op, args}（QoS1）
+    EMQX->>BR: cmd
+    BR->>BR: op 白名单校验
+    alt 参数非法
+        BR->>EMQX: cmd_result ok=false
+    else 合法
+        BR->>NODES: 调 /a3/arm|gripper|motor 服务
+        NODES-->>BR: success/message
+        BR->>EMQX: cmd_result {op, ok, message, ts}（永不丢）
+    end
+    EMQX-->>WEB: cmd_result / telemetry
+  </pre>
+  </div>
+  <div class="note">遥测队列满只丢遥测；发布在独立线程，broker 慢不阻塞 cmd 处理与回执。</div>
+</section>
+
+<section>
+  <h2>分层保护信号（跨节点）</h2>
+  <div class="sub">同一故障的不同观察视角 → 各自职责内的处置，不越权（F50 原则）。</div>
+  <div class="mmd">
+<pre class="mermaid">
+sequenceDiagram
+    participant EXEC as motor_protocol（执行层）
+    participant MON as arm_monitor（看门狗）
+    participant AC as arm_controller（编排层）
+
+    Note over EXEC: F42 力矩方向钳位（200Hz latch）——撞堵立即冻结目标
+    EXEC->>EXEC: trip + latch 符号，目标钉在反馈位
+    Note over AC: F44 温度保护——warn 90 / protect 95
+    AC->>AC: READY→SAFE_PARK→COOLING（回 home 后失能）
+    Note over MON: F50 跨源比对（期望 vs 实际）
+    MON->>MON: 20Hz 检查 tracking_errors / js 新鲜度
+    alt FOLLOW_STUCK 持续 0.5s
+        MON->>EXEC: /a3/motor/stop
+        Note right of MON: 3s 未消 → /a3/motor/reset
+    else STALE_JS
+        MON->>EXEC: /a3/motor/reset
+    end
+    Note over AC: 消费 MonitorStatus（只认 TRIGGERED）→ DISABLED
+    AC->>AC: 本地兜底 unexpected_disable_sustain_s 1.0s
+  </pre>
+  </div>
+</section>
+
+</div>
+<footer>LEVEL 4 · 信号流 · 继续：<a href="data.html">数据架构 →</a></footer>
+</body>
+</html>

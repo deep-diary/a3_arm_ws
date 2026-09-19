@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>数据架构 — A3 Arm Platform</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="mermaid-init.js"></script>
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="home" href="index.html">🏠 主页</a><span class="sep">|</span>
+  <a href="overview.html">宏观架构</a>
+  <a href="detail.html">微观架构</a>
+  <a href="components.html">组件关系</a>
+  <a href="control_flow.html">控制流</a>
+  <a href="signal_flow.html">信号流</a>
+  <a href="data.html">数据架构</a>
+  <a href="mechanisms.html">工作机制</a>
+</div></nav>
+
+<header class="main">
+  <h1>LEVEL 3 · 数据架构</h1>
+  <p>配置层级链 · 用户层持久化 · MQTT telemetry points 目录 —— 无数据库，数据以 YAML/文件 + 遥测流为主</p>
+</header>
+
+<div class="wrap">
+
+<section>
+  <h2>配置层级链（包内 YAML → 用户层覆盖）</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart TB
+  subgraph pkg ["包内 YAML（真源 · 随代码发布）"]
+    direction LR
+    CG["a3_can_bridge/config/control_gains.yaml<br/>+ motor_map.yaml + power_sequence.yaml + bridge.yaml"]
+    ACG["a3_arm_controller/config/arm_controller.yaml<br/>+ arm_monitor.yaml"]
+    GG["a3_gripper_controller/config/gripper_config.yaml"]
+    PPG["a3_teleop_ps4/config/mappings/*.yaml<br/>+ ds4_*.yaml"]
+    DG["a3_description/config/named_poses.yaml<br/>+ inertia_params.yaml"]
+  end
+  subgraph user ["用户层 ~/.a3/（运行时覆盖 · 即时生效）"]
+    direction LR
+    POS["poses.yaml（save_named_pose · F39 同名覆盖）"]
+    GOV["gripper_overrides.yaml（F24 握力上限落盘）"]
+    TRAJ["trajectories/（示教回放）"]
+    STAT["stats/torque_stats.yaml（F43 最大力矩）"]
+    CAL["calibration/calibration_data.jsonl（F49 断点续采）"]
+  end
+  pkg -->|"默认值 / 白名单"| user
+  user -->|"运行时读"| NODES["各节点"]
+
+  classDef cfg fill:#4fb6c7,stroke:#2a7a8a,color:#fff
+  classDef data fill:#538f53,stroke:#2e5a2e,color:#fff
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  class CG,ACG,GG,PPG,DG cfg
+  class POS,GOV,TRAJ,STAT,CAL data
+  class NODES io
+</pre>
+  </div>
+  <div class="note info">示例：<code>save_named_pose</code> 写 <code>~/.a3/poses.yaml</code> 并<b>运行时即时生效</b>（包内 named_poses.yaml 同名覆盖，重启保留）；<code>gripper set_config</code> 合法值落盘 <code>~/.a3/gripper_overrides.yaml</code> 重启自动加载。F52 档位三件套（control_gains_*j + motor_map_*j + arm_controller_*j）必须配对，配错回退 7J 档并 ERROR。</div>
+</section>
+
+<section>
+  <h2>持久化数据与写入流</h2>
+  <table>
+    <tr><th>数据</th><th>位置</th><th>写入者</th><th>说明</th></tr>
+    <tr><td>命名点位</td><td>~/.a3/poses.yaml</td><td>arm_controller（F39）</td><td>包内 named_poses.yaml 为默认，用户层同名覆盖</td></tr>
+    <tr><td>示教轨迹</td><td>~/.a3/trajectories/</td><td>arm_controller（F38）</td><td>save_trajectory / playback</td></tr>
+    <tr><td>最大力矩统计</td><td>~/.a3/stats/torque_stats.yaml</td><td>arm_controller（F43）</td><td>max_abs/max_pos/max_neg + 时间戳，10 s 节流落盘、启动恢复</td></tr>
+    <tr><td>夹爪握力覆盖</td><td>~/.a3/gripper_overrides.yaml</td><td>gripper_controller（F24）</td><td>max_torque_nm 运行时下发后落盘</td></tr>
+    <tr><td>重力标定数据</td><td>~/.a3/calibration/calibration_data.jsonl</td><td>scripts/gravity_calibration.py（F49）</td><td>每点 fsync、断点续采；拟合输出 inertia_params.yaml 回写 a3_description</td></tr>
+    <tr><td>日志</td><td>~/.ros/log/ · 终端</td><td>各节点</td><td>关键事件（F42 trip / 状态转移 / monitor fault）以日志 + telemetry 双通道</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>MQTT telemetry points 目录（上行）</h2>
+  <div class="sub">a3_mqtt_bridge 经 bridge.yaml 白名单展平；code 须与 deep-trace 设备 YAML 完全对齐（跨仓耦合）。</div>
+  <table>
+    <tr><th>来源话题</th><th>展平规则</th><th>points key 示例</th></tr>
+    <tr><td>/joint_states</td><td>joint_state</td><td>pos_L1..L7、vel_*、eff_*（BEST_EFFORT；eff 为电机域原值 LL-037）</td></tr>
+    <tr><td>/a3/gravity_torque</td><td>joint_state</td><td>tau_g_L1..L7</td></tr>
+    <tr><td>/a3/control_mode · /power_sequence/gate_open · state</td><td>scalar</td><td>control_mode、gate_open、power_state</td></tr>
+    <tr><td>/a3/arm_status</td><td>scalar（2 条 rule）</td><td>arm_state / arm_mode / arm_message / arm_temp_warn；mtqmax_L1..L7（F43）</td></tr>
+    <tr><td>/a3/gripper_status</td><td>scalar</td><td>grip_state / grip_mode / grip_target_torque / grip_actual_torque / grip_position / grip_target_position / grip_contact / grip_error</td></tr>
+    <tr><td>/a3/motor/states</td><td>motor_state</td><td>temp/err/mode/online/mtq/mp_L1..L7（6×7=42 点，F32）</td></tr>
+    <tr><td>/a3/motor/tx_stats</td><td>joint_state + scalar</td><td>txhz_L1..L7、tx_window_s、tx_traj_total、tx_refresh_total、tx_rate_ok（F46）</td></tr>
+    <tr><td>/a3/monitor/status</td><td>scalar</td><td>monitor_status / monitor_fault / monitor_action（F50，二期规划）</td></tr>
+  </table>
+  <div class="note">速率契约：telemetry 全量聚合 ≤5 Hz（最新值胜出，可丢）；device/info、device/status、cmd_result 永不丢、不受节流；NaN/±Inf 递归清洗（F31/LL-011）。</div>
+</section>
+
+<section>
+  <h2>下行指令数据（cmd / cmd_result）</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart LR
+  CMD["cmd<br/>{ op, args }"] --> OPS["op 白名单（24 个）"]
+  OPS --> ARM["arm: init/enable/disable/goto/set_joints/teach/save/playback/ai"]
+  OPS --> GRI["gripper: grasp/release/stop/set_position/set_max_torque"]
+  OPS --> MOT["motor: scan/enable/reset/set_zero/mit/hold/stop/set_mode/set_param..."]
+  ARM & GRI & MOT --> RES["cmd_result<br/>{ op, ok, message, ts }"]
+  RES -->|"QoS1 · 永不丢"| WEB["Web"]
+
+  classDef stat fill:#b06a8f,stroke:#7a3a5a,color:#fff
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  classDef ui fill:#2e74b5,stroke:#1a4a7a,color:#fff
+  class CMD,OPS,RES stat
+  class ARM,GRI,MOT eng
+  class WEB ui
+</pre>
+  </div>
+</section>
+
+<section>
+  <h2>数据流编号（data 视角速览）</h2>
+  <div class="sub">完整 From/To 见 <a href="overview.html#data">宏观架构·数据流编号速查</a></div>
+  <table>
+    <tr><th>编号</th><th>方向</th><th>内容</th></tr>
+    <tr><td>下行6</td><td><span style="color:#2e74b5">■</span> 配置</td><td>包内 YAML / F52 档位 / 用户层覆盖 → 各节点参数</td></tr>
+    <tr><td>下行5</td><td><span style="color:#2e74b5">■</span> 命令</td><td>Web cmd（op 白名单）→ arm/gripper/motor 服务</td></tr>
+    <tr><td>上行3</td><td><span style="color:#1e8e4e">■</span> 反馈</td><td>joint_states / motor/states / tx_stats</td></tr>
+    <tr><td>上行4·5</td><td><span style="color:#1e8e4e">■</span> 状态</td><td>arm_status / gripper_status / monitor/status</td></tr>
+    <tr><td>上行6</td><td><span style="color:#1e8e4e">■</span> 遥测</td><td>MQTT telemetry（5Hz）/ device.* / cmd_result</td></tr>
+  </table>
+</section>
+
+</div>
+<footer>LEVEL 3 · 数据架构 · 继续：<a href="mechanisms.html">工作机制 →</a></footer>
+</body>
+</html>

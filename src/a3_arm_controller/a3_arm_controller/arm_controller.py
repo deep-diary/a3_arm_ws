@@ -372,6 +372,8 @@ class ArmController(Node):
             self.get_parameter("joint_names").get_parameter_value().string_array_value
         )
         self._n_joints = len(self._joint_names)
+        # F52 档位配对自检：收到首条 /joint_states 后校验实际关节数与配置一致
+        self._profile_check_done = False
         self._traj_topic = str(self.get_parameter("traj_topic").value)
         self._arm_status_topic = str(self.get_parameter("arm_status_topic").value)
 
@@ -916,6 +918,20 @@ class ArmController(Node):
         self._have_js = True
         # F48: 记录消息时间戳用于新鲜度检查（LL-020）
         self._last_js_stamp = self.get_clock().now()
+
+        # F52 档位配对自检（只告警不改行为）：执行层 /joint_states 的关节数与本节点
+        # joint_names 不一致 = motor_map_*j.yaml 与 arm_controller_*j.yaml 配对错误
+        # （或执行层档位未生效），继续运行会让目标轨迹与电机映射错位。
+        if not self._profile_check_done:
+            self._profile_check_done = True
+            observed = len(msg.name)
+            if observed != self._n_joints:
+                self.get_logger().error(
+                    f"F52 档位配对不一致：arm_controller 配了 {self._n_joints} 关节 "
+                    f"{list(self._joint_names)}，但 /joint_states 上报 {observed} 关节 "
+                    f"{list(msg.name)} —— 请检查 motor_map_*j.yaml 与 "
+                    "arm_controller_*j.yaml 是否配对（7J/6J/5J 三件套）"
+                )
 
         if self._recording:
             now = time.monotonic()
