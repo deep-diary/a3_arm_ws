@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A3 Arm Platform 软件架构 — 主页</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="mermaid-init.js"></script>
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="home" href="index.html">🏠 架构主页</a><span class="sep">|</span>
+  <a href="overview.html">宏观架构</a>
+  <a href="detail.html">微观架构</a>
+  <a href="components.html">组件关系</a>
+  <a href="control_flow.html">控制流</a>
+  <a href="signal_flow.html">信号流</a>
+  <a href="data.html">数据架构</a>
+  <a href="mechanisms.html">工作机制</a>
+  <span class="sep">|</span>
+  <a href="README.md" style="color:#ffd666">📄 Markdown 速览</a>
+</div></nav>
+
+<header class="main">
+  <h1>A3 Arm Platform — 软件架构图集</h1>
+  <p>EDULITE A3 七自由度机械臂 · ROS 2 Humble · RK3588 / SocketCAN / MIT 电机 / PS4 遥操作<br>
+  双产品线：<b>A3 Edge</b>（RK3588 板载全栈，主线）· <b>A3 CloudEdge</b>（内网服务器 + ESP32-S3，支线）<br>
+  以 <b>Mermaid 流程图</b> 为主展示宏观/微观架构、控制流与信号流<br>
+  需联网加载 CDN（jsdelivr）· 配套 Markdown 真源见 <code>docs/edge|cloud_edge|shared</code></p>
+  <div class="note info" style="margin-top:12px;text-align:left">
+    <b>2026-09 架构决策与落地现状：</b>
+    现场主路径为 <b>A3 Edge</b>——RK3588 板载完整 ROS 2 栈，SocketCAN（默认 <code>can1</code>，1 Mbps）直驱 7× MIT 电机（ID 1..7，主机 0xFD）；
+    所有执行层指令收敛到<b>轨迹总线</b> <code>/joint_group_effort_controller/joint_trajectory</code>，由 <code>motor_protocol_node</code> 以 ≤200 Hz 插值下发 MIT 帧，反馈 50 Hz 发布 <code>/joint_states</code>。
+    <b>编排门面</b> <code>a3_arm_controller</code>（11 态状态机 + 统一服务 <code>/a3/arm/*</code> + <code>/a3/arm_status</code> 10 Hz）为对外唯一交互入口；
+    独立看门狗 <code>a3_arm_monitor</code>（F50）做跨数据源比对与分级处置（stop→reset）。
+    <b>Web 遥测/控制</b>经 <code>a3_mqtt_bridge</code> ↔ EMQX（前缀 <code>deep-trace/HOME-DEMO/RK3588/</code>，5 Hz 节流，指令 op 白名单 + <code>cmd_result</code> 回执）。
+    <b>已落地关键机制</b>：F40 失能保护 park、F42 力矩方向钳位、F44 温度管理、F46 TX 帧率监视、F48 使能位置门禁、F49 重力标定、F50 看门狗、F51 使能安全门禁（重锚+软起步+保持抑制）、F52 缺电机降级档（7J/6J/5J）。
+    <b>CloudEdge 支线</b>：内网服务器集中规划（MoveIt/Pinocchio）+ ESP32-S3 micro-ROS 本地 200 Hz 插值 + CAN；本仓仅含 Linux 端 Agent/mock 验证栈。
+    细节真源：<code>docs/edge/ARCHITECTURE.md</code> · <code>docs/shared/TOPIC_CONTRACT.md</code> · <code>docs/edge/REQUIREMENTS.md</code>（F 系列）。
+  </div>
+</header>
+
+<div class="wrap">
+<section>
+  <h2>导航 — 按粒度选择</h2>
+  <div class="sub">建议：宏观 → 微观 → 组件 → 控制流 / 信号流 → 数据 → 机制</div>
+  <div class="grid2">
+    <a class="navcard" href="overview.html"><span class="tagline">LEVEL 1 · 系统级</span>
+      <h3>宏观架构</h3>
+      <p>双产品线分层 + 数据流 Mermaid、端到端价值流、四条硬原则、技术栈、启动组合图、Edge/CloudEdge 对照。</p></a>
+    <a class="navcard" href="detail.html" style="border-left-color:#7b4fb6"><span class="tagline">LEVEL 2 · 模块级</span>
+      <h3>微观架构</h3>
+      <p>a3_can_bridge 三节点内部、arm_controller 11 态状态机、夹爪力控闭环、MQTT 桥结构、仿真栈对应、PS4 映射架构。</p></a>
+    <a class="navcard" href="components.html" style="border-left-color:#2e74b5"><span class="tagline">LEVEL 3 · 组件级</span>
+      <h3>组件与关系</h3>
+      <p>包依赖总图、话题中枢 Hub-Spoke（轨迹/状态/模式/门控四总线）、设计模式、「改哪里」决策流、组件档案表。</p></a>
+    <a class="navcard" href="control_flow.html" style="border-left-color:#c0392b"><span class="tagline">LEVEL 4 · 控制</span>
+      <h3>控制流</h3>
+      <p>启动 / init→enable / web MQTT cmd 下行 / 电源序列 / 失能保护 park / 11 态状态机转移 —— flowchart + 时序图。</p></a>
+    <a class="navcard" href="signal_flow.html" style="border-left-color:#1a7a6d"><span class="tagline">LEVEL 4 · 信号</span>
+      <h3>信号流</h3>
+      <p>轨迹/状态/模式/门控四总线拓扑、QoS 矩阵、MQTT 上下行时序、跨节点分层保护信号。</p></a>
+    <a class="navcard" href="data.html" style="border-left-color:#538f53"><span class="tagline">LEVEL 3 · 数据</span>
+      <h3>数据架构</h3>
+      <p>配置层级链（包内 YAML → 用户层 ~/.a3 覆盖）、持久化（轨迹/点位/力矩统计/标定）、MQTT telemetry points 目录。</p></a>
+    <a class="navcard" href="mechanisms.html" style="border-left-color:#e08a3c"><span class="tagline">LEVEL 4 · 机制</span>
+      <h3>工作机制</h3>
+      <p>分层安全保护矩阵（F40/F42/F44/F48/F50/F51/F52）、插值语义、MQTT 展平节流/NaN 清洗、QoS 双订阅、降级档配对。</p></a>
+  </div>
+</section>
+
+<section>
+  <h2>一句话主路径</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart LR
+  subgraph src1 [A3 Edge 主线（RK3588 板载）]
+    direction LR
+    L["a3_bringup launch<br/>rsp + can_bridge + 可选 gravity/teleop/rviz"]
+    AC["a3_arm_controller 编排门面<br/>11态状态机 · /a3/arm/* 服务 · arm_status 10Hz"]
+    TB["轨迹总线<br/>/joint_group_effort_controller/joint_trajectory"]
+    MP["motor_protocol_node<br/>200Hz 插值 → MIT 帧"]
+    CAN["SocketCAN can1<br/>1 Mbps"]
+    JS["/joint_states 50Hz<br/>反馈汇总"]
+    MON["a3_arm_monitor<br/>F50 看门狗 20Hz"]
+    GR["a3_gripper_controller<br/>50Hz 力外环（L7）"]
+    L --> AC
+    AC -->|"/a3/arm/* + 轨迹"| TB
+    GR -->|"L7 单关节轨迹"| TB
+    TB --> MP
+    MP --> CAN --> M["7× MIT 电机"]
+    M --> CAN
+    CAN --> MP --> JS
+    JS --> AC & GR & MON
+  end
+  subgraph src2 [Web 遥测 / 控制（跨仓 deep-trace）]
+    direction LR
+    BR["a3_mqtt_bridge<br/>bridge.yaml 白名单展平 + op 下行"]
+    EMQX["EMQX Broker"]
+    WEB["浏览器<br/>mqtt.js 直连（3D/曲线/面板）"]
+    BR -->|"telemetry 5Hz / device.info·status"| EMQX --> WEB
+    WEB -->|"cmd op 白名单"| EMQX
+    EMQX -->|"cmd_result 回执"| WEB
+  end
+  subgraph src3 [A3 CloudEdge 支线（服务器 + ESP32）]
+    direction LR
+    MV["MoveIt / 规划"]
+    GC["gravity_compensation_node"]
+    AG["micro-ROS Agent"]
+    ESP["ESP32-S3<br/>200Hz 插值 + CAN MIT"]
+    MV --> GC --> AG <-->|"WiFi DDS"| ESP
+  end
+  AC <-->|"arm_status / 命令"| BR
+  JS -.->|"遥测源"| BR
+  MP -->|"motor/states·tx_stats"| BR
+  GR -->|"gripper_status"| BR
+  MON -->|"monitor/status"| BR
+
+  classDef ui fill:#2e74b5,stroke:#1a4a7a,color:#fff
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef data fill:#538f53,stroke:#2e5a2e,color:#fff
+  classDef cfg fill:#4fb6c7,stroke:#2a7a8a,color:#fff
+  classDef stat fill:#b06a8f,stroke:#7a3a5a,color:#fff
+  classDef goal fill:#8c8c8c,stroke:#555,color:#fff
+  class L cfg
+  class AC,MON eng
+  class TB,MP,GR,JS io
+  class BR,EMQX,WEB stat
+  class MV,GC,AG,ESP goal
+  class CAN,M data
+</pre>
+  </div>
+</section>
+
+<section>
+  <h2>图例</h2>
+  <div class="legend-inline">
+    <span class="lg-ui"><i></i>HMI/工具</span>
+    <span class="lg-cfg"><i></i>配置/Launch</span>
+    <span class="lg-eng"><i></i>编排/规划</span>
+    <span class="lg-io"><i></i>CAN 执行层</span>
+    <span class="lg-data"><i></i>硬件/数据</span>
+    <span class="lg-stat"><i></i>遥测/监视</span>
+    <span class="lg-ctrl"><i></i>控制流</span>
+    <span class="lg-sig"><i></i>信号流</span>
+  </div>
+  <div class="note info">图中实线多为调用/数据，虚线多为订阅/遥测或跨仓。离线环境若 CDN 无法加载，流程图将显示为源码文本。</div>
+</section>
+
+<section id="assessment">
+  <h2>架构评估与改进建议（2026-09）</h2>
+  <div class="sub">调研现有实现后整理的「不合理/风险点」。✅ = 已落地；「保持」= 已知约束或有意为之。</div>
+  <table>
+    <tr><th>#</th><th>问题</th><th>等级</th><th>处置/建议</th><th>状态</th></tr>
+    <tr><td>1</td><td><b>规则文件漂移</b>：<code>.trae/rules/</code>、<code>.cursor/rules/</code> 内容实为另一项目（deep-trace 云端 API/前端/边缘 modbus）的规则，与 a3_arm_ws（ROS2 机械臂）无关且相互矛盾</td><td>高</td><td>清理/替换为本项目规则，跨仓权威指向改为本项目真实文档</td><td>✅ 已完成（rules 已更新为 a3_arm_ws 内容）</td></tr>
+    <tr><td>2</td><td><b>死代码</b>：<code>a3_bringup</code> 的 <code>zero_to_work_publisher.py</code> 仅剩 <code>__pycache__</code> 残留、无源码、无 setup 入口</td><td>低</td><td>删除残留</td><td>✅ 已完成（src/build/install 残留已删）</td></tr>
+    <tr><td>3</td><td><b>模式总线多写者</b>：<code>/a3/control_mode</code> 由多节点共写、无单一 owner，曾致 <code>TRAJ_RUNNING</code> 永久锁存（F29）</td><td>中</td><td>轻量守卫告警：arm_monitor 增「模式锁存守卫」——TRAJ_RUNNING 且无活跃轨迹持续 <code>mode_stuck_s</code>(3s) → WARN + last_event，只告警不动作（F29 类回归早发现）</td><td>✅ 已完成（arm_monitor_node.py + arm_monitor.yaml）</td></tr>
+    <tr><td>4</td><td><b>配置档位配对脆弱</b>：F52 的 5J/6J/7J 三件套靠人工配对，配错才退回 7J 并 ERROR</td><td>中</td><td>arm_controller 首条 <code>/joint_states</code> 到达时校验实际关节数与 <code>joint_names</code> 一致，不一致 ERROR 点名（只告警不改行为）</td><td>✅ 已完成（arm_controller.py）</td></tr>
+    <tr><td>5</td><td><b>MQTT 跨仓契约耦合</b>（已知）：<code>bridge.yaml</code> 信号 code 必须与 deep-trace 设备 YAML <code>points[].code</code> 完全对齐</td><td>已知</td><td>保持现状，已由规则约束；文档中标注耦合点</td><td>保持</td></tr>
+    <tr><td>6</td><td><b>QoS 陷阱</b>（已知）：<code>/joint_states</code> 为 BEST_EFFORT，消费方必须双 QoS 订阅（LL-030）</td><td>已知</td><td>新消费方一律双 QoS；文档标注</td><td>保持</td></tr>
+    <tr><td>7</td><td><b>文档体系</b>：现有 <code>docs/edge/ARCHITECTURE.md</code> 与本图集内容重叠</td><td>低</td><td>README 划清定位：图集=可视化总览，md=细节真源</td><td>✅ 已完成（本目录 README 已划清）</td></tr>
+  </table>
+</section>
+</div>
+<footer>A3 Arm Platform 多层级架构文档 · Mermaid 流程图版 · 从 <a href="overview.html">宏观架构</a> 开始</footer>
+</body>
+</html>

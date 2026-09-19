@@ -505,6 +505,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   5. TEMP_UNRESPONSIVE：ArmStatus.temperatures ≥95°C 且 state ∉ {COOLING, SAFE_PARK, FAULT} 持续 3 s → reset（F44 失灵的兜底）
 - **抑制（防误报，LL-020 教训）：** mode ∈ {ZERO_TORQUE, GRAVITY_COMP} 跳过 1/2（零力矩臂悬浮是设计行为）；state ∈ {IDLE, INIT, DISABLED, COOLING, FAULT} 跳过 1/2/3（失能期 js 冻结合法）；无 MotorStates 数据跳过 4（仿真早期/桥未起）；启动 3 s 宽限（订阅发现）；触发后 5 s cooldown 防刷屏；条件消失 + 2 s clear_hold 回 OK。
 - **输出：** /a3/monitor/status（msg a3_msgs/MonitorStatus：status/**pending_faults**/fault/action/tracking_errors/max_tracking_error/last_event，20 Hz）+ WARN/ERROR 日志；MQTT 上行二期。launch：arm_controller.launch.py 追加 `enable_monitor:=true`（默认开，可用 `enable_monitor:=false` 关）。**status 语义（F51 起）**：OK / PENDING（条件已成立但未达持续阈值，瞬时抖动，不动作）/ TRIGGERED（已确认），`fault` 只表示已确认故障。
+- **模式锁存守卫（轻量告警·只告警不动作，2026-09 增）**：`control_mode` 停留 `TRAJ_RUNNING` 且看门狗自建轨迹窗口已关闭（`_traj=None`）持续 `mode_stuck_s`（默认 3 s）→ WARN 日志 + `last_event=MODE_LATCHED`，不进入 `status/fault`、不动作——F29 类「轨迹结束未回收模式」回归检测（编排层中途崩溃 / 漏发 READY/IDLE 时，夹爪力控、FJT、新轨迹会被互锁全部拒绝的早期发现）。SERVO/ZERO_TORQUE/GRAVITY_COMP 各有超时或显式启停语义，不检查。参数 `mode_stuck_s` / `mode_stuck_cooldown_s`（arm_monitor.yaml）。
 - **验收标准：**
   1. 仿真：健康 move_to 全程零触发（无误报）
   2. 仿真：SIGSTOP sim_motor → FOLLOW_STUCK → /a3/motor/stop 被调用（服务返回 success）

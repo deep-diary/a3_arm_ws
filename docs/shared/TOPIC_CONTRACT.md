@@ -139,6 +139,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 - **意图边界重基准（F51/LL-039）**：control_mode 从 ZERO_TORQUE/GRAVITY_COMP 转出、整臂 none→all 使能沿时，保持参照 `_last_goal` ← 当前实际位姿、清运动窗口，并给 `hold_rebaseline_grace_s`（2 s）宽限。缺了它，示教退出后执行层已合法重锚、看门狗仍拿上一条轨迹末点当参照 → 1 s 后假报 HOLD_DRIFT（LL-039 事故触发源）
 - **UNEXPECTED_DISABLE 持续窗须 < 编排层本地兜底**：看门狗 0.5 s < `arm_controller.yaml` 的 `unexpected_disable_sustain_s` 1.0 s。编排层先转 DISABLED 会使其检查状态窗失效、持续窗清零 → 真故障永远报不出来
 - **动作服务**：`/a3/motor/stop`（MotorStop motor_id=0）、`/a3/motor/reset`（MotorCommand motor_id=0 command=2）、`/a3/arm/disable`（Trigger）
+- **模式锁存守卫（只告警不动作，2026-09 增）**：`control_mode` 停留 `TRAJ_RUNNING` 且看门狗自建轨迹窗口已关闭持续 `mode_stuck_s`（默认 3 s）→ WARN + `last_event`，不进入 `status/fault`、不动作——F29 类「轨迹结束未回收模式」回归检测（编排层崩溃/漏发 READY 的早期发现，避免夹爪力控/FJT/新轨迹被互锁全部拒绝）。SERVO/ZERO_TORQUE/GRAVITY_COMP 不检查。参数 `mode_stuck_s` / `mode_stuck_cooldown_s`（arm_monitor.yaml）。
 
 ### MQTT 下行指令与回执（a3_mqtt_bridge ↔ Web，需求 F23）
 

@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>工作机制 — A3 Arm Platform</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="mermaid-init.js"></script>
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="home" href="index.html">🏠 主页</a><span class="sep">|</span>
+  <a href="overview.html">宏观架构</a>
+  <a href="detail.html">微观架构</a>
+  <a href="components.html">组件关系</a>
+  <a href="control_flow.html">控制流</a>
+  <a href="signal_flow.html">信号流</a>
+  <a href="data.html">数据架构</a>
+  <a href="mechanisms.html">工作机制</a>
+</div></nav>
+
+<header class="main">
+  <h1>LEVEL 4 · 工作机制</h1>
+  <p>分层安全保护 · 插值语义 · MQTT 机制 · QoS 双订阅 · 降级档配对 —— 「为什么这样设计」</p>
+</header>
+
+<div class="wrap">
+
+<section>
+  <h2>分层安全保护矩阵（F40-F52）</h2>
+  <div class="sub">保护各司其职、不越权：执行层保实时、编排层保状态、看门狗保跨源。</div>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart TB
+  subgraph L1 ["执行层（motor_protocol_node · C++ 200Hz 实时）"]
+    direction LR
+    F42["F42 力矩方向钳位<br/>撞堵立即冻结目标（latch）"]
+    F51["F51 使能安全门禁<br/>反馈不新鲜拒使能 · 目标重锚 · kp 软起步"]
+    F52["F52 档位<br/>清单外电机不参与/不发布"]
+  end
+  subgraph L2 ["编排层（arm_controller · 状态机）"]
+    direction LR
+    F40["F40 失能保护<br/>非 home 先 safe park 再失能"]
+    F44["F44 温度管理<br/>warn 90 · protect 95 · COOLING"]
+    F48["F48 使能位置门禁<br/>读数限位硬检查 + js 新鲜"]
+  end
+  subgraph L3 ["独立看门狗（arm_monitor · 20Hz 跨源）"]
+    direction LR
+    F50["F50 故障分级处置<br/>FOLLOW_STUCK/HOLD_DRIFT/STALE_JS/<br/>UNEXPECTED_DISABLE/TEMP_UNRESPONSIVE"]
+  end
+  L1 --> L2 --> L3
+  L3 -.->|"stop/reset（公开服务动作）"| L1
+
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  classDef stat fill:#b06a8f,stroke:#7a3a5a,color:#fff
+  class F42,F51,F52 io
+  class F40,F44,F48 eng
+  class F50 stat
+</pre>
+  </div>
+  <table>
+    <tr><th>机制</th><th>层</th><th>触发</th><th>处置</th><th>状态</th></tr>
+    <tr><td>F40 失能保护</td><td>编排</td><td>disable 非 home</td><td>SAFE_PARK → reset → DISABLED</td><td>completed（真机）</td></tr>
+    <tr><td>F42 力矩方向钳位</td><td>执行</td><td>|τ| ≥ 阈值（RS00 5 / EL05 3 Nm）</td><td>增矩方向冻结、反向放行；新轨迹清 latch</td><td>completed（真机）</td></tr>
+    <tr><td>F43 最大力矩持久化</td><td>编排</td><td>fresh+finite 更新</td><td>~/.a3/stats/torque_stats.yaml + mtqmax 遥测</td><td>completed</td></tr>
+    <tr><td>F44 温度管理</td><td>编排</td><td>warn ≥90 · protect ≥95</td><td>warn 仅告警；protect → park → COOLING</td><td>completed</td></tr>
+    <tr><td>F46 TX 帧率监视</td><td>执行</td><td>5 s 窗口</td><td>tx_stats 发布 + tx_rate_ok 校验</td><td>completed（真机）</td></tr>
+    <tr><td>F48 使能位置门禁</td><td>编排</td><td>读数越限 / js 陈旧</td><td>拒 enable 并点名关节；init 恢复路径 WARN 放行</td><td>implemented（真机）</td></tr>
+    <tr><td>F49 重力标定</td><td>工具</td><td>—</td><td>L-BFGS-B 拟合 12 参数 → inertia_params.yaml</td><td>implemented（RMSE 0.1592）</td></tr>
+    <tr><td>F50 看门狗</td><td>看门狗</td><td>5 故障类达持续窗</td><td>stop → 升级 reset / 仅报告</td><td>implemented（仿真验收）</td></tr>
+    <tr><td>F51 使能安全门禁</td><td>执行+看门狗+编排</td><td>反馈陈旧 / 意图边界</td><td>拒使能 / 重锚 / 软起步 / 重基准</td><td>completed（真机验收 P0-P8）</td></tr>
+    <tr><td>F52 缺电机降级档</td><td>全栈</td><td>电机缺失</td><td>清单外不参与校验/比对/遥测</td><td>completed（5J 档真机）</td></tr>
+  </table>
+  <div class="note">2026-09 增「模式锁存守卫」（轻量告警）：<code>control_mode</code> 停留 <code>TRAJ_RUNNING</code> 且看门狗自建轨迹窗口已关闭持续 <code>mode_stuck_s</code>（3 s）→ 仅 WARN + <code>last_event</code>，不动作——F29 类「轨迹结束未回收模式」回归检测（编排层崩溃/漏发 READY 的早期发现）。</div>
+</section>
+
+<section>
+  <h2>插值语义（执行层）</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart LR
+  TRAJ["JointTrajectory points"] --> M{"trajectory_interpolation_method"}
+  M -->|"auto：仅 positions"| LIN["线性插值"]
+  M -->|"auto：+velocities"| CUB["三次 Hermite（速度连续）"]
+  M -->|"auto：+accelerations"| QUI["五次样条"]
+  M -->|"effort 始终"| EL["effort 线性（JTC 对齐）"]
+  LIN & CUB & QUI --> TX["200Hz 下发 MIT 帧"]
+  EL --> TX
+
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef cfg fill:#4fb6c7,stroke:#2a7a8a,color:#fff
+  class TRAJ cfg
+  class M,LIN,CUB,QUI,EL,TX io
+</pre>
+  </div>
+  <div class="note">CloudEdge ESP32 插值语义与此对齐；<code>trajectory_spline.py</code> 供 sim 复用。</div>
+</section>
+
+<section>
+  <h2>MQTT 机制</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart TB
+  subgraph up ["上行展平/节流（F35/F31）"]
+    direction LR
+    CB["各话题回调 → 缓存置脏"] --> FL["flusher 0.05s<br/>telemetry_min_interval_sec=0.2（5Hz 上限）<br/>全量 points 最新值胜出"]
+    FL --> Q["有界队列 256 + 独立发布线程<br/>慢 socket 不阻塞回调/cmd"]
+    Q --> P["NaN/±Inf 清洗 + allow_nan=False"]
+  end
+  subgraph down ["下行指令"]
+    direction LR
+    CMD["cmd（QoS1）"] --> WH["op 白名单（24）"]
+    WH --> SVC["服务调用"]
+    SVC --> RES["cmd_result（永不丢）"]
+  end
+
+  classDef stat fill:#b06a8f,stroke:#7a3a5a,color:#fff
+  class CB,FL,Q,P stat
+  class CMD,WH,SVC,RES stat
+</pre>
+  </div>
+  <div class="note info">分级保障：telemetry 可丢（最新值胜出）；cmd_result / device.info / device.status 永不丢、不受节流；paho 发布在线程内天然线程安全。</div>
+</section>
+
+<section>
+  <h2>QoS 双订阅机制</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart LR
+  PUB["motor_protocol_node 发布<br/>/joint_states · /a3/motor/states<br/>SensorDataQoS（BEST_EFFORT）"] --> JSB["/joint_states"]
+  JSB --> CON["消费方（arm_controller/gripper/monitor/bridge）<br/>同时订阅 BEST_EFFORT + RELIABLE<br/>（LL-030：真机/仿真两端 QoS 必须兼容）"]
+  PUB --> MST["/a3/motor/states"]
+  MST --> CON
+
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  class PUB,JSB,MST io
+  class CON eng
+</pre>
+  </div>
+  <div class="note"><code>/power_sequence/gate_open</code> 为 transient_local（新订阅者能拿到当前门状态）；<code>/a3/control_mode</code> 为 VOLATILE 事件型（无周期兜底 → F29 锁存教训，需主动补发 IDLE/READY）。</div>
+</section>
+
+<section>
+  <h2>降级档配对机制（F52）</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart TB
+  MAP["motor_map*.yaml<br/>joint_names + motor_ids_by_index（等长）"] --> CFG0{"档位合法？"}
+  CFG0 -->|"合法"| ADAPT["全栈按 NumArmJoints() 自适应<br/>js 名字表 · MotorStates 条数 · F51 门禁范围<br/>F42 钳位数组 · 遥测点位 · 广播 id"]
+  CFG0 -->|"非法"| BACK["回退编译期 7J 档<br/>ERROR「F52 档位配置非法」"]
+  ADAPT --> PAIR["配套三件套必须配对<br/>control_gains_*j + motor_map_*j + arm_controller_*j"]
+
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef ctrl fill:#c0392b,stroke:#8a1a1a,color:#fff
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  class MAP,ADAPT,PAIR io
+  class CFG0 eng
+  class BACK ctrl
+</pre>
+  </div>
+  <div class="note">设计动因：事故后仅剩 L1–L5，7 关节写死导致整臂不可用且陈旧缓存值参与校验（LL-020/LL-039）。⚠️ 三件套靠人工配对属脆弱点（评估 #4）。</div>
+</section>
+
+<section>
+  <h2>看门狗抑制与确认语义（F50/F51）</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart LR
+  SUB["/joint_states + /a3/motor/states<br/>+ /a3/arm_status + 轨迹话题<br/>（双 QoS）"] --> TICK["20Hz 节拍 · 自建轨迹插值器<br/>（不依赖 ArmStatus.positions）"]
+  TICK --> COND{"持续窗判定"}
+  COND -->|"条件成立持续阈值"| TR["TRIGGERED（已确认）<br/>→ 动作"]
+  COND -->|"瞬时/抖动"| PEN["PENDING（未确认）<br/>→ 不动作（F51 消除噪声）"]
+  TICK --> SUPP{"抑制？"}
+  SUPP -->|"ZERO_TORQUE/GRAVITY_COMP 跳过运动类<br/>启动 3s 宽限 · 触发 5s cooldown<br/>条件消失 +2s 回 OK"| OK["OK"]
+
+  classDef stat fill:#b06a8f,stroke:#7a3a5a,color:#fff
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  class SUB,TICK,COND,SUPP stat
+  class TR,PEN,OK eng
+</pre>
+  </div>
+</section>
+
+</div>
+<footer>LEVEL 4 · 工作机制 · <a href="index.html">返回主页</a></footer>
+</body>
+</html>

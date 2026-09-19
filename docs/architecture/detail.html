@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>微观架构 — A3 Arm Platform</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="mermaid-init.js"></script>
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="home" href="index.html">🏠 主页</a><span class="sep">|</span>
+  <a href="overview.html">宏观架构</a>
+  <a href="detail.html">微观架构</a>
+  <a href="components.html">组件关系</a>
+  <a href="control_flow.html">控制流</a>
+  <a href="signal_flow.html">信号流</a>
+  <a href="data.html">数据架构</a>
+  <a href="mechanisms.html">工作机制</a>
+</div></nav>
+
+<header class="main">
+  <h1>LEVEL 2 · 微观架构</h1>
+  <p>模块内部结构 —— a3_can_bridge 三节点 / arm_controller 状态机 / 夹爪力控 / MQTT 桥 / 仿真栈 / PS4 映射 / CloudEdge 验证栈</p>
+</header>
+
+<div class="wrap layout">
+<nav class="toc">
+  <h4>本页目录</h4>
+  <a href="#can">a3_can_bridge 执行层</a>
+  <a href="#mp" class="l2">motor_protocol_node</a>
+  <a href="#ps" class="l2">power_sequence_node</a>
+  <a href="#ct" class="l2">can_transport_node</a>
+  <a href="#arm">a3_arm_controller 编排层</a>
+  <a href="#arm-st" class="l2">11 态状态机</a>
+  <a href="#arm-mon" class="l2">arm_monitor 看门狗</a>
+  <a href="#grip">a3_gripper_controller 夹爪力控</a>
+  <a href="#mq">a3_mqtt_bridge 遥测桥</a>
+  <a href="#sim">仿真栈对应</a>
+  <a href="#ps4">a3_teleop_ps4 遥操作</a>
+  <a href="#ce">a3_cloud_edge 验证栈</a>
+</nav>
+
+<div class="content">
+
+<section id="can">
+  <h2>a3_can_bridge — CAN 执行层（C++）</h2>
+  <div class="sub">全部为 C++（rclcpp）节点；配置经 <code>gains_file</code> / <code>motor_map_file</code> / <code>power_sequence_file</code> / <code>bridge_file</code> 注入；三节点经 <code>can_bridge.launch.py</code> 起。</div>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart TB
+  subgraph exec ["a3_can_bridge（真机节点）"]
+    direction LR
+    MP["motor_protocol_node<br/>轨迹插值 · MIT 编解码 · 反馈汇总<br/>F42钳位 · F46帧率 · F51门禁/重锚"]
+    PS["power_sequence_node<br/>Idle→Precheck→EnableInit→SoftStand→Running<br/>→SoftProne→ProneHold→Disable/Fault"]
+    CT["can_transport_node<br/>双总线队列（can0/can1）· rx_poll 2ms<br/>重试/丢弃统计 · hex 预览"]
+    MP -->|"/can_tx_frames"| CT
+    PS -->|"gate 控制帧"| CT
+    CT -->|"/can_rx_frames"| MP
+  end
+  CAN["SocketCAN"] --> CT
+  CT --> CAN
+
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef data fill:#538f53,stroke:#2e5a2e,color:#fff
+  class MP,PS,CT io
+  class CAN data
+</pre>
+  </div>
+  <div class="note">启动日志含 <code>F52 档位：N 关节 [...]</code>——档位清单由 <code>motor_map*.yaml</code> 的 <code>joint_names</code> + <code>motor_ids_by_index</code> 决定（默认编译期 7J 档，配错回退并 ERROR）。</div>
+</section>
+
+<section id="mp">
+  <h3>motor_protocol_node 内部</h3>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart LR
+  TRAJ["轨迹总线<br/>/joint_group_effort_controller/joint_trajectory"] --> ITP["trajectory_interpolator<br/>auto: 线性/三次/五次 · effort 线性"]
+  ITP --> CLAMP["ClampMotorCommand<br/>软限位 · joint_signs 换算 · F42 方向钳位 latch"]
+  CLAMP --> TX["发送 200Hz/电机<br/>MIT 帧 → /can_tx_frames"]
+  RX["/can_rx_frames"] --> DEC["protocol_codec / frame_codec<br/>MIT 反馈 · 命令回执 · 设备 ID/版本"]
+  DEC --> JS["/joint_states 50Hz（URDF 域 position/velocity<br/>effort 为电机域原值，LL-037）"]
+  DEC --> MST["/a3/motor/states（MotorStates 50Hz）<br/>+ /a3/motor/tx_stats（5s 窗口）"]
+  SET["/a3/motor/* 服务<br/>enable/reset/set_zero/scan/mit_command/..."] --> TX
+  ZT["/a3/zero_torque/start|stop"] --> TX
+
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef cfg fill:#4fb6c7,stroke:#2a7a8a,color:#fff
+  classDef data fill:#538f53,stroke:#2e5a2e,color:#fff
+  class TRAJ cfg
+  class ITP,CLAMP,TX,DEC io
+  class JS,MST data
+  class SET,ZT cfg
+</pre>
+  </div>
+  <div class="note info">关键行为：F42 力矩方向钳位（增矩方向冻结、反向放行、新轨迹清 latch）；F46 TX 帧率监视（5 s 窗口先发布再清零）；F51 使能安全门禁（反馈不新鲜整体拒使能、目标重锚反馈位、kp 软起步 0.8 s）；失能态保持抑制 latch（stop 后只发零增益保活帧）。参数全部在 <code>control_gains.yaml</code>（kp=80/kd=2.0、joint_signs、torque_protection_limit_nm、F52 档位等）。</div>
+</section>
+
+<section id="ps">
+  <h3>power_sequence_node 电源序列</h3>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart LR
+  S0["Idle"] --> S1["Precheck"] --> S2["EnableInit"] --> S3["SoftStand"] --> S4["Running（gate_open=true）"]
+  S4 --> S5["SoftProne"] --> S6["ProneHold"] --> S7["Disable"]
+  S7 --> S0
+  S1 -.->|"失败"| SF["Fault"]
+  SF -.->|"reset"| S0
+
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef ctrl fill:#c0392b,stroke:#8a1a1a,color:#fff
+  class S0,S1,S2,S3,S4,S5,S6,S7 io
+  class SF ctrl
+</pre>
+  </div>
+  <div class="note">驱动：PS4 按键（F3）或 <code>/power_sequence/command</code>；发布 <code>/power_sequence/gate_open</code>（Bool，transient_local）与 <code>/power_sequence/state</code>。gate 打开前执行层拒绝轨迹。</div>
+</section>
+
+<section id="ct">
+  <h3>can_transport_node 传输</h3>
+  <table>
+    <tr><th>项</th><th>值 / 说明</th></tr>
+    <tr><td>接口</td><td>订阅 <code>/can_tx_frames</code>，发布 <code>/can_rx_frames</code>、<code>/can_frames_tx_line</code>、<code>/can_frames_rx_line</code>（hex 预览）</td></tr>
+    <tr><td>总线</td><td>双总线 can0/can1（<code>bridge.yaml</code>）；控臂总线由 <code>motor_map.yaml</code> 的 <code>arm_bus</code> 单一参数决定（默认 <code>can1</code>）</td></tr>
+    <tr><td>参数</td><td><code>rx_poll_ms: 2</code>、<code>max_tx_per_cycle: 8</code>、<code>tx_queue_max: 2048</code></td></tr>
+  </table>
+</section>
+
+<section id="arm">
+  <h2>a3_arm_controller — 编排层（rclpy）</h2>
+  <div class="sub">统一对外门面 <code>arm_controller</code> + 独立看门狗 <code>arm_monitor_node</code>；launch <code>arm_controller.launch.py</code>（<code>enable_monitor:=true</code> 默认开）。</div>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart TB
+  AC["arm_controller<br/>状态机 · 初始化闭环 · 示教/回放<br/>状态聚合 ArmStatus 10Hz · 模式仲裁"]
+  AC -->|"客户端"| MC["/a3/motor/* set_zero/enable/reset"]
+  AC -->|"客户端"| ZT["/a3/zero_torque/start|stop"]
+  AC -->|"客户端"| GT["/a3/gravity_compensation/*"]
+  AC -->|"发布轨迹"| TB["轨迹总线"]
+  AC -->|"聚合发布"| AS["/a3/arm_status"]
+  MON["arm_monitor_node<br/>F50 看门狗 20Hz"] -->|"动作 stop/reset/disable"| MC
+
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef stat fill:#b06a8f,stroke:#7a3a5a,color:#fff
+  class AC,MON eng
+  class MC,ZT,GT,TB io
+  class AS stat
+</pre>
+  </div>
+</section>
+
+<section id="arm-st">
+  <h3>11 态状态机</h3>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart LR
+  IDLE["IDLE<br/>上电未初始化"] --> INIT["INIT<br/>设零→确认→使能"]
+  INIT --> READY["READY<br/>已使能待命"]
+  READY <--> TRAJ["TRAJ"]
+  READY <--> SERVO["SERVO"]
+  READY <--> TEACH["TEACH"]
+  READY <--> AI["AI"]
+  READY -->|"disable 非 home（F40）"| PARK["SAFE_PARK<br/>回 home"]
+  PARK -->|"reset 后"| DIS["DISABLED"]
+  READY -->|"温度保护（F44）→ SAFE_PARK"| COOLING["COOLING<br/>降温后 enable"]
+  PARK -.->|"park 超时 / reset 被拒 / motor fault"| FAULT["FAULT"]
+  COOLING --> READY
+  DIS -->|"显式 enable"| READY
+  FAULT -->|"disable 直达 reset"| DIS
+
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  classDef ctrl fill:#c0392b,stroke:#8a1a1a,color:#fff
+  classDef sig fill:#1a7a6d,stroke:#0a4a40,color:#fff
+  class IDLE,INIT,READY,TRAJ,SERVO,TEACH,AI,PARK,DIS,COOLING eng
+  class FAULT ctrl
+</pre>
+  </div>
+  <table>
+    <tr><th>服务</th><th>类型</th><th>说明</th></tr>
+    <tr><td><code>/a3/arm/init|enable|disable</code></td><td>Trigger</td><td>init=设零+异步确认 n/7+使能；enable=使能（F48 读数限位门禁）；disable=失能保护（F40，非 home 先 park）</td></tr>
+    <tr><td><code>/a3/arm/goto_named_pose</code></td><td>GotoNamedPose</td><td>按 named_poses.yaml 插值下发（zero/home/ready）</td></tr>
+    <tr><td><code>/a3/arm/set_joint_positions</code></td><td>SetJointPositions</td><td>Web 滑条 jog：限位 clamp + 短插值</td></tr>
+    <tr><td><code>/a3/arm/move_to</code></td><td>MoveToJointPositions</td><td>按时长插值平滑移动（F39/F41，≥50 Hz 点数）</td></tr>
+    <tr><td><code>/a3/arm/save_named_pose</code></td><td>SaveNamedPose</td><td>写用户层 ~/.a3/poses.yaml 并即时生效（F39）</td></tr>
+    <tr><td><code>/a3/arm/start_teach|stop_teach</code></td><td>Trigger</td><td>零力矩拖动示教启停（F38 防弹回）</td></tr>
+    <tr><td><code>/a3/arm/save_trajectory</code></td><td>SaveTrajectory</td><td>保存示教轨迹到本地文件</td></tr>
+    <tr><td><code>/a3/arm/playback</code></td><td>PlaybackTrajectory</td><td>回放（F38b 首点插值 ramp）</td></tr>
+    <tr><td><code>/a3/arm/enter_ai|exit_ai</code></td><td>Trigger</td><td>LeRobot 采集/回放模式切换</td></tr>
+    <tr><td><code>/a3/arm_status</code></td><td>ArmStatus（10Hz）</td><td>state/mode/positions/temperatures/max_torques/temp_warn —— 前端唯一状态入口</td></tr>
+  </table>
+</section>
+
+<section id="arm-mon">
+  <h3>arm_monitor 看门狗（F50/F51）</h3>
+  <div class="sub">独立节点，只做跨数据源比对、通过公开服务动作，不接管现有保护。</div>
+  <table>
+    <tr><th>故障类</th><th>触发条件</th><th>处置</th></tr>
+    <tr><td>FOLLOW_STUCK</td><td>运动窗口 max|q_d−q_actual| &gt; 0.25 rad 持续 0.5 s</td><td>stop → 3 s 未消升级 reset</td></tr>
+    <tr><td>HOLD_DRIFT</td><td>READY 保持期末点 vs 实际 &gt; 0.30 rad 持续 1.0 s</td><td>stop → 升级 reset</td></tr>
+    <tr><td>STALE_JS</td><td>js 过期 &gt; 1.0 s 且 state ∈ {READY,TRAJ,SAFE_PARK,SERVO,TEACH,AI}</td><td>reset（反馈死亡）</td></tr>
+    <tr><td>UNEXPECTED_DISABLE</td><td>state ∈ {READY,TRAJ,SAFE_PARK} 但电机 enabled=false 持续 0.5 s</td><td>仅报告（编排层转 DISABLED）</td></tr>
+    <tr><td>TEMP_UNRESPONSIVE</td><td>温度 ≥95 °C 且 state ∉ {COOLING,SAFE_PARK,FAULT} 持续 3 s</td><td>reset（F44 失灵兜底）</td></tr>
+  </table>
+  <div class="note info">输出 <code>/a3/monitor/status</code>（20 Hz）：status=OK/PENDING/TRIGGERED（fault 只表示已确认）；抑制：ZERO_TORQUE/GRAVITY_COMP 跳过运动类、启动 3 s 宽限、触发 5 s cooldown、条件消失 +2 s 回 OK；意图边界重基准（F51）清运动窗口。</div>
+</section>
+
+<section id="grip">
+  <h2>a3_gripper_controller — 夹爪力控（rclpy，L7）</h2>
+  <div class="sub">50 Hz PI 力外环 + 位置内环，输出 L7 单关节轨迹走现有执行层，不改 C++ 实时路径。</div>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart TB
+  subgraph grip ["gripper_controller_node 状态机"]
+    direction LR
+    GI["IDLE"] --> GP["POSITION<br/>0–1 开合"]
+    GI --> GF["FORCE_CLOSING<br/>PI 力外环逼近"]
+    GF --> GR["GRASPED<br/>目标带±10% 持续 settle_s"]
+    GR --> GRE["RELEASING<br/>低增益柔顺释放"]
+    GF -->|"超时/看门狗/超硬限"| GFA["FAULT"]
+  end
+  GCMD["/a3/gripper/command<br/>position/force/release/stop"] --> grip
+  JS["/joint_states eff_L7<br/>（gripper_torque_sign 校正）"] --> grip
+  grip -->|"L7 单关节 JointTrajectory"| TB["轨迹总线"]
+  grip -->|"发布 grip_status 10/50Hz"| GS["/a3/gripper_status"]
+  grip -->|"使能时写固件 0x700B 硬限"| MOT["/a3/motor/set_param"]
+
+  classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  classDef stat fill:#b06a8f,stroke:#7a3a5a,color:#fff
+  class GI,GP,GF,GR,GRE,GFA eng
+  class GCMD,JS,TB,MOT io
+  class GS stat
+</pre>
+  </div>
+  <div class="note">双保险：固件级 0x700B 力矩硬限（出厂 1.0 Nm 不可越界）+ 节点软件 clamp；参数 <code>gripper_config.yaml</code>（force_kp=0.25/force_ki=0.3、presets weak/medium/strong=0.3/0.6/1.0 Nm、grasp_timeout_s=15）；互锁：gate 关或臂在 TRAJ/SERVO/ZERO_TORQUE/GRAVITY_COMP 时拒 FORCE。</div>
+</section>
+
+<section id="mq">
+  <h2>a3_mqtt_bridge — 遥测/指令桥（rclpy）</h2>
+  <div class="sub">按白名单订阅 ROS 话题 → 展平 <code>points</code> → MQTT 发布；订阅 <code>&lt;prefix&gt;/cmd</code> → op 白名单 → ROS 服务 → <code>cmd_result</code>。</div>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart LR
+  subgraph mqin ["上行遥测（白名单 topic → 展平）"]
+    direction TB
+    JS2["/joint_states"] --> FLAT["flusher 0.05s<br/>telemetry_min_interval_sec=0.2（5Hz 上限）<br/>最新值胜出 · 有界队列256 + 独立发布线程"]
+    AS2["/a3/arm_status"] --> FLAT
+    GS2["/a3/gripper_status"] --> FLAT
+    MST2["/a3/motor/states"] --> FLAT
+    TX2["/a3/motor/tx_stats"] --> FLAT
+    GT2["/a3/gravity_torque"] --> FLAT
+    CM2["/a3/control_mode · gate · power state"] --> FLAT
+    FLAT --> EMQX2["EMQX<br/>prefix=deep-trace/HOME-DEMO/RK3588/"]
+  end
+  subgraph mqout ["下行指令"]
+    direction TB
+    EMQX2 -->|"cmd（op 白名单 24 个）"| CMD["op 分发<br/>init/enable/.../gripper_*/motor_*"]
+    CMD -->|"调服务"| SVC["/a3/arm/* · /a3/gripper/* · /a3/motor/*"]
+    SVC -->|"回执"| EMQX2
+  end
+
+  classDef stat fill:#b06a8f,stroke:#7a3a5a,color:#fff
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  class JS2,AS2,GS2,MST2,TX2,GT2,CM2 io
+  class FLAT,EMQX2,CMD,SVC stat
+</pre>
+  </div>
+  <div class="note info">要点：telemetry 全量聚合 5 Hz（最新值胜出，可丢）；<code>cmd_result</code>/<code>device/info</code>/<code>device/status</code> 永不丢、不受节流；paho 发布移出单线程 executor（慢 socket 不阻塞）；NaN/±Inf 递归清洗 + <code>allow_nan=False</code> 硬兜底（F31/LL-011）；信号 code 须与 deep-trace 设备 YAML <code>points[].code</code> 完全对齐（跨仓耦合，见 <a href="../shared/TOPIC_CONTRACT.md">TOPIC_CONTRACT</a>）。</div>
+</section>
+
+<section id="sim">
+  <h2>仿真栈对应（无 CAN 闭环）</h2>
+  <div class="sub">仿真 launch 用 <code>sim_motor_node</code> / <code>sim_power_sequence_node</code> / <code>sim_executor</code> 等价替代真机节点，同一话题/服务契约（sim 有意不实现 gate 互锁与部分安全机制）。</div>
+  <table>
+    <tr><th>真机</th><th>仿真替代</th><th>差异</th></tr>
+    <tr><td>motor_protocol_node</td><td>sim_motor_node（edge_web_sim 内以 name=motor_protocol_node 起）</td><td>一阶跟随 + L7 接触弹簧力矩；提供 /a3/motor/* 全服务（含 F32 MIT 保持/扫描）</td></tr>
+    <tr><td>power_sequence_node</td><td>sim_power_sequence_node</td><td>gate 恒 true、state=Running（1 Hz 重发）——仿真有意不实现互锁</td></tr>
+    <tr><td>can_transport_node + SocketCAN</td><td>sim_executor（track 轨迹 → /joint_states 50Hz）</td><td>无 CAN 帧层，仅轨迹插值</td></tr>
+    <tr><td>—</td><td>zero_to_ready_publisher（Wave A）</td><td>延时下发 zero→ready 轨迹</td></tr>
+  </table>
+  <div class="note">仿真验收入口：<code>edge_sim_wave_a.launch.py</code>（Wave A）、<code>edge_moveit_execute.launch.py use_sim:=true</code>（Wave B）、<code>edge_web_sim.launch.py</code>（Web 全链路）。</div>
+</section>
+
+<section id="ps4">
+  <h2>a3_teleop_ps4 — 遥操作（rclpy）</h2>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart LR
+  JOY["joy_node / ds4_hid_node<br/>/joy · /a3/ds4/imu·battery"] --> MAP["ps4_mapper<br/>YAML 驱动：analog_01/n11 · edge/longpress<br/>L1 死人开关 · R2 力控"]
+  MAP --> ACT["actions.py<br/>servo_lin/ang · joint_jog · goto_named_pose<br/>power_* · gripper_force（F36）"]
+  ACT -->|"TwistStamped"| SV["servo_node（可选）"]
+  ACT -->|"电源命令"| PS["power_sequence_node"]
+  ACT -->|"gripper force"| GR["/a3/gripper/command"]
+  MAP -->|"legacy jog（默认不启用）"| PS4T["ps4_arm_teleop"]
+
+  classDef ui fill:#2e74b5,stroke:#1a4a7a,color:#fff
+  classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
+  class JOY,MAP,ACT,PS4T ui
+  class SV,PS,GR io
+</pre>
+  </div>
+  <div class="note">配置：<code>ds4_linux.yaml</code>（蓝牙）/ <code>ds4_linux_usb.yaml</code>（USB）、<code>action_registry.yaml</code>（动作目录）、<code>mappings/default.yaml</code>（生产，L1 死人开关）/ <code>mappings/simple.yaml</code>（仿真调试）。</div>
+</section>
+
+<section id="ce">
+  <h2>a3_cloud_edge — CloudEdge 验证栈</h2>
+  <div class="sub">本仓仅 Linux 端：micro-ROS Agent + mock client + 测试轨迹发布，验证 XRCE 链路；ESP32 固件在外置仓库。</div>
+  <div class="mmd">
+<pre class="mermaid">
+flowchart LR
+  TP["trajectory_test_publisher<br/>/a3/planned_joint_trajectory"] --> AGT["micro-ROS Agent（UDP）"]
+  AGT <-->|"XRCE UDP"| MC["microros_mock_client<br/>订阅轨迹 · 发 joint_states 50Hz"]
+  GCE["gravity_compensation_node（C++）<br/>逐点填 effort 前馈 · 降采样 ≤32 点"] --> AGT
+
+  classDef goal fill:#8c8c8c,stroke:#555,color:#fff
+  class TP,MC,GCE goal
+  class AGT goal
+</pre>
+  </div>
+  <div class="note">launch：<code>micro_ros_agent.launch.py</code>、<code>cloud_edge_link_test.launch.py</code>、<code>cloud_edge_demo.launch.py</code>、<code>moveit_planning.launch.py</code>。外部固件路径探测见 <code>.trae/rules/iot-firmware-path.md</code>。</div>
+</section>
+
+</div>
+</div>
+<footer>LEVEL 2 · 微观架构 · 继续：<a href="components.html">组件关系 →</a></footer>
+</body>
+</html>

@@ -137,6 +137,10 @@ class ArmMonitorNode(Node):
             for f in FAULT_DEFAULTS
         }
         self._grace_until = time.monotonic() + p("startup_grace_s")
+        # ---- 模式锁存守卫（只告警，不改行为）----
+        self._mode_latch_since = 0.0       # mode=TRAJ_RUNNING 且无活跃轨迹的起始 mono
+        # -inf：首次触发不被 cooldown 吞掉（monotonic 起点近 0，0-0=0 < cooldown）
+        self._mode_latch_last_warn = float("-inf")
 
         self.create_timer(1.0 / p("tick_hz"), self._tick)
         self.get_logger().info(
@@ -169,6 +173,10 @@ class ArmMonitorNode(Node):
         d("clear_hold_s", 2.0)
         d("ladder_stop_to_reset_s", 3.0)
         d("service_timeout_s", 1.0)
+        # 模式锁存守卫（轻量告警，不动作）：TRAJ_RUNNING 且看门狗自建轨迹窗口已关闭
+        # 持续多久判「轨迹结束未回收模式」（F29 类回归）；告警 cooldown
+        d("mode_stuck_s", 3.0)
+        d("mode_stuck_cooldown_s", 10.0)
         for f, act in FAULT_DEFAULTS.items():
             d(f"{f.lower()}_action", act)
 
@@ -246,6 +254,39 @@ class ArmMonitorNode(Node):
         self.get_logger().info(
             f"[monitor] 保持参照重基准（{'；'.join(edges)}）：last_goal ← 当前实际位姿，"
             f"宽限 {grace:.1f}s")
+
+    def _check_mode_latch(self, now: float):
+        """轻量守卫（只告警，不改行为，不动作）：control_mode 停留 TRAJ_RUNNING 但
+        看门狗自建轨迹窗口已关闭（= 无轨迹在跑）——F29 类「轨迹结束不回收模式」锁存
+        回归检测（如编排层中途崩溃/未补发 READY/IDLE，导致夹爪力控、FJT、新轨迹
+        全部被互锁拒绝）。判据与执行语义独立：窗口关闭（_traj=None）在 _desired 中
+        发生，故本方法须在 _check 之后调用。
+
+        SERVO / ZERO_TORQUE / GRAVITY_COMP 各有超时或显式启停语义，不在此检查。
+        """
+        mode = self._arm_status.mode if self._arm_status else ""
+        latched = mode == "TRAJ_RUNNING" and self._traj is None
+        if not latched:
+            self._mode_latch_since = 0.0
+            return
+        if self._mode_latch_since == 0.0:
+            self._mode_latch_since = now
+            return
+        stuck = float(self.get_parameter("mode_stuck_s").value)
+        if now - self._mode_latch_since < stuck:
+            return
+        cooldown = float(self.get_parameter("mode_stuck_cooldown_s").value)
+        if now - self._mode_latch_last_warn < cooldown:
+            return
+        self._mode_latch_last_warn = now
+        dur = now - self._mode_latch_since
+        self.get_logger().warn(
+            "[monitor] 模式锁存疑似：control_mode 停留 TRAJ_RUNNING 且无活跃轨迹 "
+            f"已 {dur:.1f}s（F29 类回归）——轨迹结束后应由 arm_controller / FJT 补发 "
+            "READY/IDLE，请检查编排层是否存活、轨迹是否被卡住")
+        self._last_event = (
+            f"{time.strftime('%H:%M:%S')} MODE_LATCHED control_mode=TRAJ_RUNNING "
+            "无活跃轨迹")
 
     # ------------------------------------------------------------------ 期望位置
 
@@ -391,6 +432,8 @@ class ArmMonitorNode(Node):
         self._maybe_rebaseline(now)
 
         checks, errs, _win = self._check(now)
+        # 模式锁存守卫须在 _check 之后（_desired 已把窗口关闭的 _traj 置 None）
+        self._check_mode_latch(now)
         active = [f for f, ok in checks.items() if ok]
         # LL-039：fault 状态与动作同口径——条件持续达阈值才「确认」；瞬时成立只进
         # pending（真机事故前的 19:32 FOLLOW_STUCK 状态抖动就是未确认条件被当故障报）
