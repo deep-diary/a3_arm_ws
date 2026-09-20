@@ -1,7 +1,33 @@
 #!/usr/bin/env python3
-"""Full A3 arm bringup: robot_state_publisher + can bridge + trajectory bridge + optional PS4."""
+"""Unified A3 arm bringup: 全栈单入口，各组件用参数开关控制。
+
+执行底座（常开）:
+  robot_state_publisher + can_bridge（can_transport + motor_protocol + power_sequence）
+  + trajectory_bridge（reBot 话题桥接）
+
+可选（默认开）:
+  a3_arm_controller（编排层 F21 + F50 看门狗） use_arm_controller:=true
+  a3_mqtt_bridge（web 遥测/指令 F18/F23）      use_mqtt:=true
+  MoveIt move_group + FJT action（规划 + Execute）use_moveit:=true
+  a3_gripper_controller（夹爪力控 F24-F28）    use_gripper:=true
+  PS4 遥操作                                   use_teleop:=true
+
+可选（默认关）:
+  gravity_torque_node（重力 MIT 前馈）         use_gravity_compensation:=false
+  MoveIt Servo 笛卡尔 jog（与 move_group Execute 互斥）use_servo:=false
+  RViz                                         use_rviz:=false
+
+注意：MoveIt 不能 include a3_moveit_config/demo.launch.py（自带 RSP + ros2_control +
+spawner，会与 can_bridge 形成双 /joint_states / 双 RSP 冲突）；这里只起 move_group，
+执行路径由 follow_joint_trajectory_action 的 /arm_controller/follow_joint_trajectory
+action 落到 /joint_group_effort_controller/joint_trajectory → motor_protocol_node。
+真机 /joint_states 为 BEST_EFFORT（SensorDataQoS），move_group 默认 RELIABLE 订阅
+可能收不到（LL-030 同款坑），真机联调时需验证。
+"""
 
 import os
+
+import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -13,16 +39,37 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 
+def load_yaml(package_name, file_path):
+    package_path = get_package_share_directory(package_name)
+    absolute_file_path = os.path.join(package_path, file_path)
+    try:
+        with open(absolute_file_path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f)
+    except (OSError, IOError):
+        return None
+
+
 def generate_launch_description():
     desc_share = get_package_share_directory("a3_description")
     bridge_share = get_package_share_directory("a3_can_bridge")
+    moveit_share = get_package_share_directory("a3_moveit_config")
+    arm_ctrl_share = get_package_share_directory("a3_arm_controller")
+    mqtt_share = get_package_share_directory("a3_mqtt_bridge")
+    gripper_share = get_package_share_directory("a3_gripper_controller")
 
     use_rviz = LaunchConfiguration("use_rviz")
     use_sw_render = LaunchConfiguration("use_sw_render")
     use_target_ghost = LaunchConfiguration("use_target_ghost")
     use_teleop = LaunchConfiguration("use_teleop")
+    teleop_mapping = LaunchConfiguration("teleop_mapping")
     use_power_sequence = LaunchConfiguration("use_power_sequence")
     use_gravity_compensation = LaunchConfiguration("use_gravity_compensation")
+    use_arm_controller = LaunchConfiguration("use_arm_controller")
+    arm_controller_config = LaunchConfiguration("arm_controller_config")
+    use_mqtt = LaunchConfiguration("use_mqtt")
+    use_moveit = LaunchConfiguration("use_moveit")
+    use_gripper = LaunchConfiguration("use_gripper")
+    use_servo = LaunchConfiguration("use_servo")
     can0_name = LaunchConfiguration("can0_name")
     gains_file = LaunchConfiguration("gains_file")
     motor_map_file = LaunchConfiguration("motor_map_file")
@@ -51,6 +98,7 @@ def generate_launch_description():
         )
     )
 
+    # ---- 执行底座 ----
     rsp = Node(
         package="robot_state_publisher",
         executable="robot_state_publisher",
@@ -126,6 +174,115 @@ def generate_launch_description():
         condition=IfCondition(use_gravity_compensation),
     )
 
+    # ---- 编排层（F21 对外门面 + F50 看门狗）----
+    arm_controller = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(arm_ctrl_share, "launch", "arm_controller.launch.py")
+        ),
+        launch_arguments={
+            "config_file": arm_controller_config,
+        }.items(),
+        condition=IfCondition(use_arm_controller),
+    )
+
+    # ---- MQTT 桥（web 遥测上行 F18 / 指令下行 F23）----
+    mqtt_bridge = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(mqtt_share, "launch", "bridge.launch.py")
+        ),
+        condition=IfCondition(use_mqtt),
+    )
+
+    # ---- MoveIt：move_group + FJT action（默认关 RViz，见 use_rviz）----
+    with open(os.path.join(moveit_share, "config", "el_a3.srdf"), "r", encoding="utf-8") as f:
+        robot_description_semantic = f.read()
+    kinematics_yaml = load_yaml("a3_moveit_config", "config/kinematics.yaml")
+    joint_limits_yaml = load_yaml("a3_moveit_config", "config/joint_limits.yaml")
+    ompl_planning_yaml = load_yaml("a3_moveit_config", "config/ompl_planning.yaml")
+    moveit_controllers_yaml = load_yaml("a3_moveit_config", "config/moveit_controllers.yaml")
+
+    trajectory_execution = {
+        "moveit_manage_controllers": True,
+        "trajectory_execution.allowed_execution_duration_scaling": 1.2,
+        "trajectory_execution.allowed_goal_duration_margin": 0.5,
+        "trajectory_execution.allowed_start_tolerance": 0.01,
+    }
+    planning_scene_monitor_parameters = {
+        "publish_planning_scene": True,
+        "publish_geometry_updates": True,
+        "publish_state_updates": True,
+        "publish_transforms_updates": True,
+        "publish_planning_scene_hz": 4.0,
+    }
+
+    move_group = Node(
+        package="moveit_ros_move_group",
+        executable="move_group",
+        output="screen",
+        parameters=[
+            {"robot_description": robot_description},
+            {"robot_description_semantic": robot_description_semantic},
+            {"robot_description_planning": joint_limits_yaml},
+            {"robot_description_kinematics": kinematics_yaml},
+            {"move_group": ompl_planning_yaml},
+            trajectory_execution,
+            moveit_controllers_yaml,
+            planning_scene_monitor_parameters,
+        ],
+        condition=IfCondition(use_moveit),
+    )
+
+    fjt_action = Node(
+        package="a3_bringup",
+        executable="follow_joint_trajectory_action",
+        name="a3_fjt_action",
+        parameters=[{"require_gate": False}],
+        condition=IfCondition(use_moveit),
+    )
+
+    # ---- 夹爪力控（5J 档缺 L7 时置 use_gripper:=false）----
+    gripper = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(gripper_share, "launch", "gripper_controller.launch.py")
+        ),
+        condition=IfCondition(use_gripper),
+    )
+
+    # ---- MoveIt Servo 笛卡尔 jog（默认关；只起 servo 链，复用上面 RSP/描述，避免
+    #      include servo.launch.py 带来的双 RSP + sim_executor 冲突）----
+    servo_yaml = load_yaml("a3_moveit_config", "config/servo_config.yaml")
+    servo_params = {"moveit_servo": servo_yaml}
+    servo_params.update(servo_yaml)
+
+    servo_mode_bridge = Node(
+        package="a3_bringup",
+        executable="servo_mode_bridge",
+        name="a3_servo_mode_bridge",
+        parameters=[
+            {"twist_topic": "/servo_node/delta_twist_cmds"},
+            {"timeout_s": 0.5},
+        ],
+        condition=IfCondition(use_servo),
+    )
+    servo_node = Node(
+        package="moveit_servo",
+        executable="servo_node_main",
+        name="servo_node",
+        parameters=[
+            {"robot_description": robot_description},
+            {"robot_description_semantic": robot_description_semantic},
+            {"robot_description_kinematics": kinematics_yaml},
+            servo_params,
+        ],
+        remappings=[
+            ("~/delta_twist_cmds", "/servo_node/delta_twist_cmds"),
+            ("~/command_out", "/joint_group_effort_controller/joint_trajectory"),
+        ],
+        output="screen",
+        condition=IfCondition(use_servo),
+    )
+
+    # ---- PS4 遥操作 ----
     teleop = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
@@ -134,10 +291,14 @@ def generate_launch_description():
                 "ps4_teleop.launch.py",
             )
         ),
-        launch_arguments={"auto_start_servo": "false"}.items(),
+        launch_arguments={
+            "auto_start_servo": "false",
+            "mapping": teleop_mapping,
+        }.items(),
         condition=IfCondition(use_teleop),
     )
 
+    # ---- RViz ----
     rviz_cfg = os.path.join(desc_share, "config", "el_a3_dual_view.rviz")
     rviz = Node(
         package="rviz2",
@@ -157,11 +318,46 @@ def generate_launch_description():
             description="RViz 软件渲染 LIBGL_ALWAYS_SOFTWARE=1（RK3588 默认开，LL-027）",
         ),
         DeclareLaunchArgument("use_teleop", default_value="true"),
+        DeclareLaunchArgument(
+            "teleop_mapping",
+            default_value="simple",
+            description="手柄映射：simple（默认，无组合键）或 default（L1 死人开关，生产安全）",
+        ),
         DeclareLaunchArgument("use_power_sequence", default_value="true"),
         DeclareLaunchArgument(
             "use_gravity_compensation",
             default_value="false",
             description="启动 gravity_torque_node 并打开 motor_protocol 重力 MIT 前馈",
+        ),
+        DeclareLaunchArgument(
+            "use_arm_controller",
+            default_value="true",
+            description="编排层 a3_arm_controller + F50 看门狗（a3_arm_monitor）",
+        ),
+        DeclareLaunchArgument(
+            "arm_controller_config",
+            default_value=os.path.join(arm_ctrl_share, "config", "arm_controller.yaml"),
+            description="编排层参数文件（5J 档换 arm_controller_5j.yaml）",
+        ),
+        DeclareLaunchArgument(
+            "use_mqtt",
+            default_value="true",
+            description="MQTT 桥 a3_mqtt_bridge（web 遥测/指令，F18/F23）",
+        ),
+        DeclareLaunchArgument(
+            "use_moveit",
+            default_value="true",
+            description="MoveIt move_group + FJT action（规划 + Execute 到执行层）",
+        ),
+        DeclareLaunchArgument(
+            "use_gripper",
+            default_value="true",
+            description="夹爪力控 a3_gripper_controller（5J 档缺 L7 时置 false）",
+        ),
+        DeclareLaunchArgument(
+            "use_servo",
+            default_value="false",
+            description="MoveIt Servo 笛卡尔 jog（与 move_group Execute 互斥，需时显式开）",
         ),
         DeclareLaunchArgument("can0_name", default_value="can0"),
         # F52 档位：缺电机时（如事故后只剩 L1–L5）用 5J 档整套替换——
@@ -191,6 +387,13 @@ def generate_launch_description():
         can_bridge,
         traj_bridge,
         gravity,
+        arm_controller,
+        mqtt_bridge,
+        move_group,
+        fjt_action,
+        gripper,
+        servo_mode_bridge,
+        servo_node,
         teleop,
         rviz,
     ])

@@ -34,9 +34,8 @@
 flowchart TB
   BOOT["上电"] --> CANUP["can-up.service<br/>SocketCAN can0/can1 UP · 1 Mbps"]
   CANUP --> BRING["ros2 launch a3_bringup a3_bringup.launch.py"]
-  BRING --> NODES["rsp + can_bridge（3 节点）<br/>+ trajectory_bridge + 可选 gravity/teleop/rviz"]
-  NODES --> ARMCTRL["（可选叠加）arm_controller.launch.py<br/>arm_controller + arm_monitor"]
-  ARMCTRL --> PS4["ps4_teleop.launch.py<br/>（可选）"]
+  BRING --> NODES["rsp + can_bridge（3 节点）+ trajectory_bridge<br/>+ 编排层/看门狗 + MQTT 桥 + move_group + FJT + 夹爪力控（默认开）<br/>+ gravity/servo/rviz（默认关）"]
+  NODES --> PS4["ps4_teleop.launch.py<br/>（use_teleop 默认开，teleop_mapping 切换映射）"]
   BRING --> READY0["gate_open=false · IDLE 等待命令"]
   PS4 -->|"Square 长按 / power_sequence/command"| SEQ
 
@@ -46,7 +45,7 @@ flowchart TB
   classDef cfg fill:#4fb6c7,stroke:#2a7a8a,color:#fff
   class BOOT ui
   class CANUP,BRING,NODES cfg
-  class ARMCTRL,PS4 eng
+  class PS4 eng
   class READY0 io
 </pre>
   </div>

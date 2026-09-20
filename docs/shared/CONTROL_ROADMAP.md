@@ -488,7 +488,7 @@ flowchart TD
 
 | 路径 | Launch | 作用 |
 |------|--------|------|
-| 生产 | `a3_bringup.launch.py` | `a3_can_bridge` + 可选 PS4；真机 CAN |
+| 生产 | `a3_bringup.launch.py` | 统一入口：`a3_can_bridge` + 编排层 + MQTT + MoveIt + 夹爪 + PS4，参数开关；真机 CAN |
 | MoveIt/mock | `a3_moveit_config` demo / robot | 规划与仿真；当前真机硬件插件仍为 mock |
 
 **C1：** MoveIt 驱动现有话题/MIT 层。**C7：** 可选收敛到 ros2_control 真机 HAL。

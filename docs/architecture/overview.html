@@ -258,8 +258,8 @@ flowchart TB
 </section>
 
 <section>
-  <h2>启动组合图（a3_bringup.launch.py 主干）</h2>
-  <div class="sub">主入口 <code>ros2 launch a3_bringup a3_bringup.launch.py can0_name:=can0 use_teleop:=true use_rviz:=true</code></div>
+  <h2>启动组合图（a3_bringup.launch.py 统一入口）</h2>
+  <div class="sub">主入口 <code>ros2 launch a3_bringup a3_bringup.launch.py</code>（默认全开，组件参数开关）</div>
   <div class="mmd">
 <pre class="mermaid">
 flowchart TB
@@ -268,23 +268,28 @@ flowchart TB
   MAIN --> CB["can_bridge.launch.py"]
   CB --> CT["can_transport_node<br/>can0/can1 · rx_poll 2ms"]
   CB --> MP["motor_protocol_node<br/>gains_file · motor_map_file"]
-  CB --> PS["power_sequence_node（可选 use_power_sequence:=true）"]
+  CB --> PS["power_sequence_node（use_power_sequence 默认开）"]
   MAIN --> TB0["trajectory_bridge<br/>reBot 话题 ↔ 轨迹总线"]
-  MAIN --> GRAV["gravity_torque_node（可选 use_gravity_compensation）"]
-  MAIN --> TEL["ps4_teleop.launch.py（可选 use_teleop:=true）"]
-  MAIN --> RVIZ["rviz（可选 use_rviz:=false）"]
+  MAIN --> ARMCTRL["arm_controller + arm_monitor<br/>（use_arm_controller 默认开）"]
+  MAIN --> MQTT["a3_mqtt_bridge<br/>（use_mqtt 默认开）"]
+  MAIN --> MOVEIT["move_group + FJT action<br/>（use_moveit 默认开）"]
+  MAIN --> GRIP["a3_gripper_controller<br/>（use_gripper 默认开）"]
+  MAIN --> GRAV["gravity_torque_node（use_gravity_compensation 默认关）"]
+  MAIN --> SERVO["servo_mode_bridge + servo_node<br/>（use_servo 默认关）"]
+  MAIN --> TEL["ps4_teleop.launch.py（use_teleop 默认开，teleop_mapping）"]
+  MAIN --> RVIZ["rviz（use_rviz 默认关）"]
 
   classDef ui fill:#2e74b5,stroke:#1a4a7a,color:#fff
   classDef eng fill:#7b4fb6,stroke:#4a2a7a,color:#fff
   classDef io fill:#e08a3c,stroke:#a05a1a,color:#fff
   classDef cfg fill:#4fb6c7,stroke:#2a7a8a,color:#fff
   class MAIN,TEL,RVIZ ui
-  class GRAV,TB0 eng
+  class ARMCTRL,MQTT,MOVEIT,GRIP,SERVO,GRAV,TB0 eng
   class CB,CT,MP,PS io
   class RSP cfg
 </pre>
   </div>
-  <div class="note">其它 launch：<code>a3_hardware.launch.py</code>（无头板级）、<code>edge_web_sim.launch.py</code>（仿真闭环：sim_motor + sim_power_sequence + arm_controller + mqtt_bridge + gripper）、<code>edge_moveit_execute.launch.py</code>（FJT + IK + 可选画矩形）、<code>servo.launch.py</code>（MoveIt Servo）、<code>edge_teleop_sim.launch.py</code>（PS4 仿真）。编排层另起 <code>arm_controller.launch.py</code>（含可选 monitor）。</div>
+  <div class="note">其它 launch：<code>a3_hardware.launch.py</code>（无头板级）、<code>edge_web_sim.launch.py</code>（仿真闭环：sim_motor + sim_power_sequence + arm_controller + mqtt_bridge + gripper）、<code>edge_moveit_execute.launch.py</code>（FJT + IK + 可选画矩形）、<code>servo.launch.py</code>（MoveIt Servo，自带 RSP + sim_executor 的独立仿真路径）、<code>edge_teleop_sim.launch.py</code>（PS4 仿真）。MoveIt 经 <code>use_moveit</code> 只起 move_group + FJT action（不 include demo.launch.py，避免双 RSP / 双 /joint_states）。</div>
 </section>
 
 </div>

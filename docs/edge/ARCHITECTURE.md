@@ -76,18 +76,40 @@ flowchart TB
 
 主入口：`ros2 launch a3_bringup a3_bringup.launch.py`
 
+统一入口（全栈单 launch，各组件参数开关，默认全开）：
+
 ```
 a3_bringup.launch.py
-├── robot_state_publisher
-├── can_bridge.launch.py
+├── robot_state_publisher（常开）
+├── can_bridge.launch.py（常开）
 │   ├── can_transport_node
 │   ├── motor_protocol_node
-│   └── power_sequence_node（可选）
-├── trajectory_bridge
-├── a3_arm_controller（编排层，另起 `arm_controller.launch.py`，可选叠加）
-├── ps4_teleop.launch.py（可选，`use_teleop:=true`）
-├── edge_teleop_sim.launch.py（仿真：Servo + mapper + sim_executor + 可选 RViz）
-└── rviz（可选）
+│   └── power_sequence_node（use_power_sequence，默认开）
+├── trajectory_bridge（常开，reBot 话题桥接）
+├── a3_arm_controller + a3_arm_monitor（use_arm_controller，默认开；arm_controller_config 可换 5J 档）
+├── a3_mqtt_bridge（use_mqtt，默认开；web 遥测/指令 F18/F23）
+├── move_group + follow_joint_trajectory_action（use_moveit，默认开；规划 + Execute 到执行层）
+├── a3_gripper_controller（use_gripper，默认开；5J 档缺 L7 时置 false）
+├── servo_mode_bridge + servo_node（use_servo，默认关；MoveIt Servo 笛卡尔 jog，与 move_group Execute 互斥）
+├── ps4_teleop.launch.py（use_teleop，默认开）
+├── gravity_torque_node（use_gravity_compensation，默认关）
+└── rviz（use_rviz，默认关）
+```
+
+MoveIt 不 include `demo.launch.py`（自带 RSP + ros2_control + spawner，会与 can_bridge 双
+/joint_states / 双 RSP 冲突）：只起 move_group，Execute 经
+`follow_joint_trajectory_action` 的 `/arm_controller/follow_joint_trajectory` action 落到
+`/joint_group_effort_controller/joint_trajectory` → motor_protocol_node。
+
+仿真/专项 launch 仍独立：
+
+```
+edge_sim_wave_a.launch.py      Wave A 无 CAN 仿真（sim_executor + gravity + zero→ready）
+edge_moveit_execute.launch.py  Wave B 仿真执行栈（sim_executor + FJT + IK + trajectory_bridge）
+edge_teleop_sim.launch.py      PS4 遥操作仿真（Servo + mapper + sim_executor + 可选 RViz）
+edge_web_sim.launch.py         Web 仿真闭环（sim_motor + arm_controller + mqtt_bridge + gripper）
+servo.launch.py                MoveIt Servo 独立路径（自带 RSP + sim_executor）
+urdf_dir_check.launch.py       RViz 双模型 URDF 方向校验
 ```
 
 ## 话题契约
