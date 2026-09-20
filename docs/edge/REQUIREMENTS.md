@@ -651,6 +651,84 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F57（warp 初版，本项重写其 `_time_warp_points`）、F56（速度前馈——V 域携带 warp 输出）、F38（回放）、[LL-057](../../lessons_learned/LL-057-warp-reinflation-marginal-l2-torque.md)
 - **状态：** `implemented`（2026-09-18 代码终版=粗网格恰解 + 纯函数单测 + 仿真验收过；真机验收待做）
 
+## F60 PS4 键位重设计（一键使能 / 单键硬急停 / 示教三键）
+
+- **说明：** F55 键位在真机联调中暴露三个操作问题：(1) 上电与使能分属 Square 长按 + L3 两键两层，操作员分不清「已开机但未 READY」；(2) 急停是 Triangle 长按，与 Triangle 命名位姿的通用助记冲突；(3) 示教/回放分散在 Share/Options/Circle。重新设计 `config/mappings/default.yaml`（`simple.yaml` 保留作无 deadman 调试档）：
+
+  | 按键 | 手势 | 动作 |
+  |---|---|---|
+  | L3 | 短按 | `arm_power_enable`：执行层 `power start` → 等 gate_open+Running → 编排层 `/a3/arm/enable`，一键到 READY（非阻塞轮询，5 s 超时） |
+  | R3 | 短按 | `arm_disable`（F40：离 home 先 SAFE_PARK 再失能） |
+  | Cross(X) | **长按 1 s** | `power_shutdown` 硬急停：门禁关、电机失能；恢复需重新 L3 |
+  | Triangle | 短按（rising） | goto 命名位姿 `ready` |
+  | Circle | 短按（rising） | goto 命名位姿 `home`（非 zero——机械零位 servo IK 奇异，LL-007） |
+  | Share | 短按 | `teach_start` |
+  | Options | 短按 / 长按 3 s | `teach_stop`（自动保存 latest，F54）/ `power_set_zero` |
+  | Square | 短按 | `playback_latest`（空名 ≡ latest 槽位） |
+  | PS | 短按 | `arm_init`（set_zero + 到位校验 + 自动 enable） |
+  | L1 | 按住 | deadman，**仅门控摇杆平移/偏航轴**（applies_to=analog_n11） |
+  | R2 | 模拟量 | 夹爪力控，**不经 L1 门控**（kind=analog_01，F36 迟滞/力矩映射不变） |
+  | R1 | 按住 | 速度档 0.35 ↔ 1.0 |
+  | 左摇杆 | 模拟量 | servo 平移 Y（left_x）/ Z（left_y），需 READY + L1 |
+  | 右摇杆 | 模拟量 | servo 平移 X（right_y）/ 偏航 Z 预留（right_x），需 READY + L1 |
+
+  预留不绑定：D-pad 四键、触摸板键（蓝牙 js0 无此键事件，LL-052）、L2。命名位姿改走编排层服务 `/a3/arm/goto_named_pose`（a3_msgs/GotoNamedPose），不再由 teleop 本地插值直发 JointTrajectory——状态机进入 TRAJ（紫灯可见）并获得 F53 拒绝语义；删除 teleop 内 `/a3/goto_named_pose`（String）订阅（无其他发布者）。真机 launch 默认映射由 `simple` 改为 `default`。
+- **验收标准：**
+  1. mapper 启动 `validate_mapping` 零报错；options 双键列表各自独立边沿跟踪（短按释放判定不连带长按绑定）
+  2. 合成 /joy 仿真（F62，domain 45）：12 场景全部 PASS——PS init→READY；Triangle/Circle 收敛容差 0.08 rad 且过程 state=TRAJ；L3 在已 READY 时幂等；R2 不按 L1 可开合 L7；摇杆不按 L1 不动、按住 L1 才动；Share/Options/Square 示教回放链保存 latest.yaml；R3 SAFE_PARK→DISABLED；X 长按 1 s gate 关闭；L3 可从关机/失能两态恢复 READY；Options 长按 3 s 发 set_zero
+  3. teleop `/joint_states` 订阅为 BEST_EFFORT（真机 SensorDataQoS 兼容，LL-059）
+  4. 文档：包 README 全键表 + SAFETY.md 急停/失能/deadman 段更新 + 操作员手册 PS4_OPERATOR_GUIDE.md
+- **关联：** 取代 F55 键位表；F40（R3 失能保护）、F48（enable 越限拒绝）、F51（使能重锚）、F54（示教自动保存）、F36（R2 力控）、F61（灯/震反馈）、F62（合成验证）；[shared/SAFETY.md](../shared/SAFETY.md)
+- **状态：** `implemented-pending-sim`（2026-09-20 代码 + 配置；待 F62 合成验收 + 用户实操）
+
+## F61 DS4 灯带 + 震动反馈（状态五色系）
+
+- **说明：** 操作员持手柄无任何状态反馈，不知道臂处在哪一层。新增 `ds4_feedback_node`（a3_teleop_ps4）：hidraw 直接写 DS4 HID 输出报告（USB 0x05/32 B；蓝牙 0x11/78 B + 0xC0 控制字节 + CRC32 LE seed 0xA2；报告构造移植自 `scripts/ps4/deep_dog_ds4_hid.py`，设备发现/2 s 热插拔移植自 `ds4_hid_node.py`，反馈 fd 以 O_RDWR 独立打开，与只读 ds4_hid_node 并存）。灯效 10–20 Hz 节拍定时器驱动，仅状态变化/呼吸节拍/震动变更时写 hidraw，rumble 定时自动清零。
+
+  | 派生状态 | 灯带 | 震动 |
+  |---|---|---|
+  | FAULT（arm FAULT / temp_warn / monitor TRIGGERED） | 红色双闪 | 进入时双震 |
+  | 关机/硬急停（shutdown 边沿，或 Idle+gate 关） | 红色闪 | 强震 600 ms |
+  | INIT / 上电序列中（Precheck/EnableInit/SoftStand）；gate 开但 IDLE/DISABLED | 橙色常亮 | — |
+  | init 完成边沿（→READY 首次） | 白色闪一次 | — |
+  | READY / SERVO（jog 中仍 READY） | 绿色常亮 | READY/DISABLED 转换沿弱震 120 ms |
+  | TEACH | 蓝色呼吸 | — |
+  | TRAJ（命名位姿/回放/SAFE_PARK） | 紫色常亮 | — |
+
+  订阅 `/a3/arm_status`（ArmStatus，默认 QoS）、`/power_sequence/state` + `/power_sequence/gate_open`（TRANSIENT_LOCAL）、`/a3/monitor/status`、`/power_sequence/command`（急停归因边沿）。无 DS4 设备时 WARN 一次但节点存活，降级为只发诊断话题。诊断话题 `/a3/ds4/feedback`（std_msgs/String，JSON：state/gate/fault/color/rumble/reason，volatile depth 10），供无手柄的仿真/CI 断言。参数 `enable`（默认 true）、`bus`（auto/usb/bt）。
+- **验收标准：**
+  1. 无设备：节点不崩，持续发 `/a3/ds4/feedback`，状态迁移与上表颜色/rumble 字段一致（F62 合成场景断言）
+  2. 有设备（USB 先行；BT CRC 路径真机补验）：五色/闪烁/呼吸/三类震动在对应状态沿可见可闻；热插拔 2 s 内恢复
+  3. 反馈写 hidraw 不影响 ds4_hid_node 只读事件流（两 fd 并存）
+  4. 同状态不重复写设备（变化/节拍才写），rumble 到时自动清零
+- **关联：** F60（状态来源键位）、F50（monitor TRIGGERED）、F44（温度预警）；[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（/a3/ds4/feedback）
+- **状态：** `implemented-pending-sim`（2026-09-20 代码；无设备逻辑随 F62 仿真验收，USB/BT 真机灯效待手柄重连补验）
+
+## F62 合成 /joy 全功能仿真验证（无手柄自动化）
+
+- **说明：** 真机联调前先用脚本模拟手柄输出逐键验证，避免「人感觉按键失效」的不可重复排查。新增：
+  1. `a3_bringup/launch/edge_teleop_full_sim.launch.py`：include `edge_web_sim`（use_rviz:=false, use_target_ghost:=true, use_gripper:=true）+ 内联 MoveIt Servo 块（复用 a3_bringup.launch.py 的 servo_mode_bridge + servo_node_main 写法，禁止叠加会双 RSP/双 /joint_states 的 servo.launch）+ ps4_teleop（use_joy_node:=false, mapping:=default, enable_feedback:=true）+ 双模型 RViz（软件渲染，LL-027）。
+  2. `scripts/a3_test/ps4_sim_test.py`：50 Hz 合成 `sensor_msgs/Joy`（axes[8]/buttons[14]，ds4_linux 索引；开场 ≥25 拍全零基线满足 mapper alive 计数，每步回零）；BEST_EFFORT 订阅 /joint_states；纯 rclpy 计时（LL-050，不用 ros2 CLI 做时序断言）；Reporter 风格逐步打印 PASS/FAIL + 关节位移证据。
+  3. 隔离域 ROS_DOMAIN_ID=45。
+  12 场景：基线橙 → PS init → Triangle ready → L3 幂等 → R2 脱离 L1 开合 L7 → 摇杆 deadman 逐轴方向表 + R1 速度档 → Circle home → 示教三件套（断言 latest.yaml mtime）→ R3 失能 → L3 恢复 → X 长按硬急停+恢复 → Options 长按 set_zero。
+  仿真与真机已知差异**只记录不断言**：sim_power shutdown 无 SoftProne 动画/无 F51 联动；sim 不校验 set_zero 状态前提；sim /joint_states 为 RELIABLE（F60 的 QoS 修复在仿真不可复现，仅代码审查）；sim 不强制门禁。
+- **验收标准：**
+  1. `ros2 launch a3_bringup edge_teleop_full_sim.launch.py`（DOMAIN 45）起栈无致命错误，双模型 RViz 可见
+  2. `python3 scripts/a3_test/ps4_sim_test.py` 12 场景全绿，输出每步关节/状态/灯效证据；摇杆方向表用于标定各轴 invert
+  3. 全绿后用户实操（真手柄）复测一轮作为最终签收
+- **关联：** F60（被测键位）、F61（被测灯效诊断话题）、LL-027（软件渲染）、LL-050（纯 rclpy 时序）、LL-059（仿真 QoS 画像掩盖真机不兼容）
+- **状态：** `implemented-pending-sim`（2026-09-20 launch + 脚本；验收执行随本次任务）
+
+## F63 joynet Linux DS4 独立布局（pygame/SDL 6 轴 + hat，对齐 joy_node 协议）
+
+- **说明：** joynet 在 RK3588（Ubuntu 22.04）上经 pygame/SDL 读取 DS4，真机实测（2026-09-20，蓝牙 `Wireless Controller`）与 Windows 开发环境不同：`axes=6`（0/1 左摇杆、2=L2、3/4 右摇杆、5=R2；摇杆上/左为负、右/下为正；扳机静息 −1、按满 +1），`buttons=13`（0 cross、1 circle、2 triangle、3 square、4 l1、5 r1、8 share、9 options、10 ps、11 l3、12 r3；6/7 是扳机数字点击），十字键是 **hat 0** 不是轴。原 `DS4_LINUX` 表把十字键放在轴 6/7（该 8 轴形态只存在于 joydev/`joy_node` 侧）且 `detect_layout` 对 6 轴手柄错判为 `ds4_sdl`，导致用户实测键位全错。修正：`DS4_LINUX` 改 `dpad="hat"`、摇杆 polarity +1（SDL 已是右/下正），扳机仍走 `(v+1)/2`；`detect_layout` 对「Wireless Controller + 6 轴 + 轴 2 静息 −1（扳机）/ 1 hat」选 `ds4_linux`。joynet 以 **TCP client** 接入 `a3_teleop_ps4` 现成的 `ds4_tcp_joy_node`（127.0.0.1:8890），由其发布标准 ds4_linux 协议 `/joy`（8 轴 / 14 键），ROS 侧不新增代码。
+- **验收标准：**
+  1. `layout: auto` 时本机手柄自动选中 `ds4_linux`
+  2. `ds4_linux` 抽象快照：摇杆推上/左输出负、右/下正，扳机静息 0 / 按满 1，十字键四方向具名按钮正确
+  3. joynet 自带 pytest 全绿；端到端 `ds4_tcp_joy_node` 发布的 `/joy` 与 `a3_teleop_ps4/config/ds4_linux.yaml` 契约一致（axes `[LX,LY,L2,RX,RY,R2,DPAD_X,DPAD_Y]`、buttons `[cross,circle,triangle,square,l1,r1,l2,r2,share,options,ps,l3,r3,touch]`）
+- **关联：** F60（PS4 键位）、F62（合成 /joy 仿真）；LL-060（SDL 6 轴 + hat vs joydev 8 轴、ds4_sdl 误判、venv pytest 污染）
+- **状态：** `in-progress`（2026-09-20，代码+pytest 61 全绿、auto 检测/快照极性/dump 均已实测；evdev 原始事件证实 joydev 侧契约上=−1/下=+1（LL-061）。TCP 桥端到端仅完成分段验证+空闲帧，剩一次带按键的实时帧采集）
+
 ### F40 — 失能保护（disable → 自动回 home → 失能）
 
 - **说明：** `/a3/arm/disable` 不再是「无条件直接失能」——不在 home 容差内时先平滑回 home 再失能，防止 ready 位直接掉臂。新增参数：`disable_home_pose_name: "home"`、`disable_home_tol_rad: 0.15`、`disable_home_duration_s: 3.0`、`disable_home_confirm_s: 0.5`、`disable_park_timeout_s: 8.0`。新辅助 `_at_home()`（全关节 |q−home| ≤ tol）与 `_safe_park_then_disable()`（同步阻塞：发布 home 轨迹抢占活跃轨迹——执行层 OnTrajectory 天然支持替换，无需排队 → `SAFE_PARK`（期间拒绝新运动指令）→ 轮询连续 `confirm_s` 收敛 → reset → `DISABLED`）。服务语义（同步阻塞返回，`success=true ⟺ 已失能`）：READY/TRAJ 容差内 → 直达 reset → DISABLED；容差外 → safe park → reset → DISABLED（message 含耗时）；IDLE → 直达 reset；DISABLED/COOLING → 幂等不动电机；FAULT → 紧急直达 reset；INIT/TEACH/SERVO/AI → 拒绝 busy；SAFE_PARK → 拒绝「already safe parking」。park 超时 → **FAULT 不 reset**（保持使能、停在半途，人工介入）；reset 被 gate 拒 → park 前 `success=false` + 原文 + "(stop power sequence first)"，park 完成后被拒 → 回 READY（已在 home 位，安全）；`_have_js==False` → 直达 reset + WARN（保持旧行为）。`/a3/motor/reset` 直达保留作紧急失能。
@@ -749,7 +827,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 2. `ros2 launch a3_bringup a3_bringup.launch.py` 无致命错误
 3. PS4 启动后 `/power_sequence/gate_open` 为 `true`
 4. 测试轨迹（见 [QUICKSTART.md](QUICKSTART.md)）在 2 s 内完成运动
-5. Triangle shutdown 后电机 disable，gate 关闭
+5. F60：Cross(X) 长按 1 s 硬急停后 gate 关闭；R3 失能（F40）；L3 一键 start+enable 到 READY
 6. MoveIt demo 可规划（mock 或真机模式）
 7. F6–F9：Wave A 见 [dev/WAVE_A_SIM_TEST_REPORT.md](../dev/WAVE_A_SIM_TEST_REPORT.md)
 8. F10–F15：见 QUICKSTART Wave B / [dev/WAVE_B_SIM_NOTES.md](../dev/WAVE_B_SIM_NOTES.md) / [dev/WAVE_B_SIM_TEST_REPORT.md](../dev/WAVE_B_SIM_TEST_REPORT.md)

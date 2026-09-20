@@ -6,7 +6,9 @@ arm:
   kinematics_solver_attempts: 1
   mode: local
   position_threshold: 0.001
-  orientation_threshold: 0.01
+  # 必须与 servo publish_period(0.02s) 联动：阈值 ≥ 每 tick 角度增量时 local 求解器
+  # 直接把 seed 当解返回，偏航静默（LL-063）。满杆常速档每 tick=1.0*0.35*0.02=0.007。
+  orientation_threshold: 0.001
   cost_threshold: 0.001
   minimal_displacement_weight: 0.001
   gd_step_size: 0.0001

@@ -1,16 +1,21 @@
-# Default PS4 → A3 mapping. Change this file to rebind; no code change needed.
+# Default PS4 → A3 mapping (F60, 2026-09-20 重设计). Change this file to rebind; no code change needed.
 # Source names: buttons/axes keys from ds4_linux.yaml, plus virtual_buttons.
 #
-# == 全功能速查（F55；完整操作手册见本包 README.md）==
-#   示教三键:  Share 短按=开始示教 / Options 短按=结束示教(自动保存) / Circle 短按=执行回放(latest)
-#   功能键:    PS=init(蓝牙下触摸板按键不进 js0, 唤醒改用 PS) / L3=使能 / R3=失能
-#   双义键:    Options 短按=teach_stop, 长按 3s=调零 (buttons 用 list 绑两条, 各自独立边沿)
-#   安全键:    Triangle 长按=关机(唯一手柄急停) / Square 长按=上电 / Cross=立即停 / L1=死人开关
+# == 全功能速查（完整操作手册见 docs/edge/PS4_OPERATOR_GUIDE.md，参考表见本包 README.md）==
+#   电源:      L3 短按=一键上电开门禁+使能 / R3 短按=safe-park 后失能 / Cross 长按 1s=硬急停(断电关闸)
+#   位姿:      Triangle 短按=ready / Circle 短按=home（home 非机械零位；zero 不绑定手柄）
+#   示教:      Share 短按=开始示教 / Options 短按=结束并自动保存 / Square 短按=回放 latest
+#   功能:      PS 短按=init(调零+自动使能) / Options 长按 3s=set_zero
+#   运动:      L1 按住=摇杆死人开关(仅锁摇杆) / R1 按住=全速 1.0, 松开 0.35
+#              左摇杆=平移 Y(左右)/Z(上下)；右摇杆=平移 X(前后, right_y)，right_x=偏航(预留实测)
+#   夹爪:      R2=直接力控（不需要 L1），按得越深抓得越紧，松开即全开
+#   预留不绑:  dpad 四键、touchpad（蓝牙无键事件 LL-052）、l2
 
 deadman:
   enabled: true
   button: l1
-  applies_to: [analog_01, analog_n11]
+  # F60：死人开关只锁摇杆轴；R2(analog_01) 夹爪任何时候都可用
+  applies_to: [analog_n11]
 
 # Default speed when R1 is not held.
 speed_normal: 0.35
@@ -21,16 +26,17 @@ axes:
     fn: gripper_force
     kind: analog_01
     source: trigger
-  right_x:
+  left_x:
     fn: servo_lin_y
     kind: analog_n11
-  right_y:
+  left_y:
     fn: servo_lin_z
     kind: analog_n11
-  left_y:
+  right_y:
     fn: servo_lin_x
     kind: analog_n11
-  left_x:
+  # 偏航先保留绑定；方向/是否启用待合成验证逐轴标定后决定
+  right_x:
     fn: servo_ang_z
     kind: analog_n11
   # Optional HID extras (enable after ds4_hid_node is up):
@@ -42,47 +48,31 @@ axes:
   #   kind: analog_n11
 
 buttons:
-  dpad_up:
-    fn: goto_named_pose
-    kwargs: {name: ready}
-    edge: rising
-  dpad_down:
-    fn: goto_named_pose
-    kwargs: {name: zero}
-    edge: rising
-  dpad_left:
-    fn: goto_named_pose
-    kwargs: {name: home}
-    edge: rising
-  dpad_right:
-    fn: goto_named_pose
-    kwargs: {name: ready}
-    edge: rising
   cross:
-    fn: stop_motion
-    edge: rising
-  square:
-    fn: power_start
-    edge: longpress
-    hold_s: 1.0
-  triangle:
     fn: power_shutdown
     edge: longpress
     hold_s: 1.0
-  # F55：示教三键 + 功能键 + 双义键
+  triangle:
+    fn: goto_named_pose
+    kwargs: {name: ready}
+    edge: rising
+  circle:
+    fn: goto_named_pose
+    kwargs: {name: home}
+    edge: rising
   share:
     fn: teach_start
     edge: shortpress
     hold_s: 3.0
   options:
-    # 双义：短按(释放时 <3s)=结束示教；长按 3s=调零（互斥，长按不会连带触发短按）
+    # 双义：短按(释放时 <3s)=结束示教并保存；长按 3s=调零（互斥，长按不连带短按）
     - fn: teach_stop
       edge: shortpress
       hold_s: 3.0
     - fn: power_set_zero
       edge: longpress
       hold_s: 3.0
-  circle:
+  square:
     fn: playback_latest
     edge: shortpress
     hold_s: 3.0
@@ -90,20 +80,16 @@ buttons:
     fn: arm_init
     edge: shortpress
     hold_s: 3.0
-  # 蓝牙下触摸板按键在独立 input 设备("Wireless Controller Touchpad")，js0 收不到 → 不绑定；
-  # 有线(insmod ds4_generic.ko)时触摸板键可能回到 js0，届时若需再启用。
-  # touchpad:
-  #   fn: arm_init
-  #   edge: shortpress
-  #   hold_s: 3.0
   l3:
-    fn: arm_enable
+    fn: arm_power_enable
     edge: shortpress
     hold_s: 3.0
   r3:
     fn: arm_disable
     edge: shortpress
     hold_s: 3.0
+  # 蓝牙下触摸板按键在独立 input 设备("Wireless Controller Touchpad")，js0 收不到 → 不绑定（LL-052）
+  # dpad 四键与 l2 预留，不绑定
 
 held:
   r1:

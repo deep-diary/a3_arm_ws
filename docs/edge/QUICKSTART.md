@@ -11,7 +11,7 @@
    - 重力补偿 MIT 前馈（默认关）：`use_gravity_compensation:=true`
    - 或运行时：`ros2 param set /motor_protocol_node enable_gravity_compensation true`
    - 组件开关（默认值见 [ARCHITECTURE.md](ARCHITECTURE.md)「Launch 链」）：`use_arm_controller` / `use_mqtt` / `use_moveit` / `use_gripper` / `use_teleop` 默认开，`use_servo` / `use_rviz` / `use_gravity_compensation` 默认关。例：缺 L7 的 5J 档加 `use_gripper:=false`
-4. PS4 电源：Square 长按 = start；Options 长按 = set_zero；Triangle = shutdown。笛卡尔/夹爪见第 10 节。
+4. PS4 电源（F60）：L3 短按 = 一键开门禁 + 使能；R3 短按 = safe-park 后失能；Cross 长按 1 s = 硬急停（断电关闸，恢复需重新 L3）。完整键位/灯效见第 10 节与 [PS4_OPERATOR_GUIDE.md](PS4_OPERATOR_GUIDE.md)。
 5. Send test trajectory:
    ```bash
    ros2 topic pub --once /a3/joint_trajectory trajectory_msgs/msg/JointTrajectory "{joint_names: [L1_joint,L2_joint,L3_joint,L4_joint,L5_joint,L6_joint,L7_joint], points: [{positions: [0,0.5,-0.5,0,0,0,0], time_from_start: {sec: 2}}]}"
@@ -49,22 +49,33 @@
    ```
    Interact → 拖末端球 → 面板 **Plan** / **Execute**。橙色半透明 = 目标模；Scene Robot = `/joint_states` 实际模。不发 CAN。
 
-10. **PS4 映射遥操作（仿真，F16）：**
-    ```bash
-    ls /dev/input/js*                    # 确认手柄节点
-    ros2 launch a3_teleop_ps4 ps4_teleop.launch.py dump:=true
-    # 另开终端：摇遍轴/键，核对索引后写入 src/a3_teleop_ps4/config/ds4_linux.yaml
+10. **PS4 映射遥操作（F60 键位 / F61 灯带震动 / F62 合成验证）：**
 
+    **(a) 全功能仿真闭环 + 双模型 RViz（无手柄、无 CAN，推荐逐键验收入口）：**
+    ```bash
+    source scripts/a3_shell_env.sh        # 含 PYTHONNOUSERSITE=1；勿 source install/setup.bash
+    export ROS_DOMAIN_ID=45
     export DISPLAY=:0
-    # 重复 launch 前先清僵尸进程：pkill -f 'edge_teleop|a3_sim_executor|ps4_mapper|servo_node'
-    ros2 launch a3_bringup edge_teleop_sim.launch.py use_rviz:=true
-    # 默认 mapping:=simple（无 L1 组合键）；恢复 L1 死人开关 + 全功能：mapping:=default
+    ros2 launch a3_bringup edge_teleop_full_sim.launch.py
+    # 另开终端（同域）：合成 /joy 12 场景 36 项自动验收，逐项打印 PASS/FAIL + 关节证据：
+    python3 scripts/a3_test/ps4_sim_test.py
     ```
-    - **simple（默认）**：右摇杆基座系左右/上下；左摇杆 Y 前后；L2→L6、R2→夹爪力控（F36：松开全开，按过 0.2 后 0.2..1 → 0.1..1.0 Nm）；Square/Circle 夹爪开/合
-    - **default（真机生产映射，F55）**：示教三步 **Share=开始 / Options=结束(自动保存) / Circle=执行回放(latest)**；Touchpad=init、L3=使能、R3=失能；Options 长按 3s=调零；Triangle 长按=关机（唯一手柄急停）；L1=死人开关、R1=加速。**完整映射表见 `src/a3_teleop_ps4/README.md`**
-    - D-pad 上/下/左/右：`ready` / `zero` / `home` / `ready`（上键暂与右键同，work 已并入 ready）；Cross 急停
-    - 改映射只编 `config/mappings/*.yaml`（本包 README 有速查表）；轴序校准见 `ds4_linux.yaml`
-    - 真机：统一入口默认已含 PS4 mapper（`teleop_mapping:=default` 切换 L1 死人开关映射）；笛卡尔 jog 加 `use_servo:=true` 一起起（勿另开 `servo.launch.py`，会双 RSP + sim_executor 冲突；板测待办）
+    - RViz 双模型：实体色 = 实际反馈（`/joint_states`），半透明 = 目标 ghost（`target/` TF）。
+    - 本机 RViz 两个必备前缀已由 launch 自动加：`LIBGL_ALWAYS_SOFTWARE=1`（LL-027）、`LD_PRELOAD=~/.a3/hide_randr/libhide_randr.so`（LL-065）。
+    - S0 基线检查只能在干净栈上通过；重复跑只 FAIL 这两项属预期，首次 36/36 为准。
+
+    **(b) 真机 / 校准：**
+    ```bash
+    ls /dev/input/js*                    # 确认手柄节点（USB 无节点见 LL-032）
+    ros2 launch a3_teleop_ps4 ps4_teleop.launch.py dump:=true   # 轴索引校准
+    # 统一入口默认已含 mapper + ds4_feedback_node，默认 mapping:=default：
+    ros2 launch a3_bringup a3_bringup.launch.py use_servo:=true # jog 需 servo 一起起
+    ```
+    - **default（真机生产映射，F60）**：L3 一键开门禁+使能、R3 safe-park 失能、Cross 长按 1 s 硬急停；Triangle=ready、Circle=home；示教三步 **Share=开始 / Options=结束(自动保存) / Square=回放(latest)**；PS=init、Options 长按 3 s=set_zero；**L1 按住=摇杆死人开关（仅锁摇杆）、R2 夹爪力控不需要 L1**；R1 按住全速 1.0；左摇杆平移 Y/Z，右摇杆 right_y 平移 X、right_x 偏航。D-pad/touchpad/L2 预留不绑。
+    - **灯带五色（F61）**：红闪=失电/硬急停、红双闪=FAULT、橙=已上电未使能、绿=READY/SERVO、蓝呼吸=TEACH、紫=TRAJ（goto/回放/safe-park）、白闪一次=init 完成。震动：使能/失能 120 ms 弱震，硬急停 600 ms 强震，FAULT 双震。无手柄时逻辑帧看 `/a3/ds4/feedback`（JSON）。
+    - **操作员手册：[PS4_OPERATOR_GUIDE.md](PS4_OPERATOR_GUIDE.md)；完整参考表：`src/a3_teleop_ps4/README.md`。**
+    - 改键位只编 `config/mappings/default.yaml`（零代码）；轴索引校准见 `config/ds4_linux.yaml`。
+    - 勿另开 `servo.launch.py`（双 RSP + sim_executor 冲突）。
 
 11. **机械臂编排节点（F21，a3_arm_controller）：**
     ```bash

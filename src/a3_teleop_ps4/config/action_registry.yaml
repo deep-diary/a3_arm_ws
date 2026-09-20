@@ -7,7 +7,11 @@ functions:
   goto_named_pose:
     kind: discrete
     kwargs: {name: string}
-    description: Interpolate current joints to named pose (zero/home/ready)
+    description: Call /a3/arm/goto_named_pose (F60; 编排层插值, TRAJ 态, zero/home/ready)
+
+  arm_power_enable:
+    kind: discrete
+    description: F60 L3 一键上电开门禁 + 使能（power start 后轮询 gate/Running 再异步 enable，非阻塞）
 
   power_start:
     kind: discrete

@@ -676,6 +676,29 @@ class ArmController(Node):
             if message:
                 self._message = message
         self.get_logger().info(f"state -> {state}" + (f" ({message})" if message else ""))
+        # 状态边沿必须即刻发布：INIT 等短寿命状态（sim 里仅几毫秒）在周期
+        # status_hz 节拍间生灭，下游（DS4 白闪/ web / MQTT）永远收不到。LL-064。
+        if hasattr(self, "_arm_status_pub"):
+            self._arm_status_pub.publish(self._build_status_msg())
+
+    def _build_status_msg(self):
+        st = ArmStatus()
+        st.header.stamp = self.get_clock().now().to_msg()
+        with self._lock:
+            st.state = self._state
+            st.message = self._message
+        st.mode = self._mode
+        st.joint_names = list(self._joint_names)
+        st.positions = [float(p) for p in self._positions]
+        st.velocities = [float(v) for v in self._velocities]
+        st.efforts = [float(e) for e in self._efforts]
+        st.temperatures = [float(t) for t in self._temperatures]
+        st.max_torques = [
+            float(self._torque_stats.get(jn, {}).get("max_abs", 0.0))
+            for jn in self._joint_names
+        ]
+        st.temp_warn = bool(self._temp_warn)
+        return st
 
     def _publish_mode(self, mode: str) -> None:
         msg = String()
@@ -1066,24 +1089,7 @@ class ArmController(Node):
         ):
             self._save_torque_stats()
 
-        st = ArmStatus()
-        st.header.stamp = self.get_clock().now().to_msg()
-        with self._lock:
-            st.state = self._state
-            st.message = self._message
-        st.mode = self._mode
-        st.joint_names = list(self._joint_names)
-        st.positions = [float(p) for p in self._positions]
-        st.velocities = [float(v) for v in self._velocities]
-        st.efforts = [float(e) for e in self._efforts]
-        # F43/F44: 温度（无反馈 0.0）+ 历史最大力矩绝对值（无数据 0.0）
-        st.temperatures = [float(t) for t in self._temperatures]
-        st.max_torques = [
-            float(self._torque_stats.get(jn, {}).get("max_abs", 0.0))
-            for jn in self._joint_names
-        ]
-        st.temp_warn = bool(self._temp_warn)
-        self._arm_status_pub.publish(st)
+        self._arm_status_pub.publish(self._build_status_msg())
 
     # ------------------------------------------------------------------ services
 

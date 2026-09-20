@@ -28,7 +28,12 @@ class ServoModeBridge(Node):
         )
         self.create_timer(0.05, self._on_timer)
 
-    def _on_twist(self, _msg: TwistStamped) -> None:
+    def _on_twist(self, msg: TwistStamped) -> None:
+        tw = msg.twist
+        if (tw.linear.x == 0.0 and tw.linear.y == 0.0 and tw.linear.z == 0.0
+                and tw.angular.x == 0.0 and tw.angular.y == 0.0
+                and tw.angular.z == 0.0):
+            return
         self._last = self.get_clock().now()
         if not self._active:
             self._active = True

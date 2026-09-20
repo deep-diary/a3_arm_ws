@@ -4,7 +4,6 @@ from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 import os
 
@@ -28,6 +27,7 @@ def _launch_nodes(context, *args, **kwargs):
             package="joy",
             executable="joy_node",
             name="joy_node",
+            condition=IfCondition(LaunchConfiguration("use_joy_node")),
             parameters=[{
                 "device_name": LaunchConfiguration("device_name").perform(context),
                 "deadzone": float(LaunchConfiguration("deadzone").perform(context)),
@@ -63,6 +63,13 @@ def _launch_nodes(context, *args, **kwargs):
         ),
         Node(
             package="a3_teleop_ps4",
+            executable="ds4_feedback_node",
+            name="ds4_feedback_node",
+            condition=IfCondition(LaunchConfiguration("enable_feedback")),
+            output="screen",
+        ),
+        Node(
+            package="a3_teleop_ps4",
             executable="ps4_arm_teleop",
             name="ps4_arm_teleop",
             condition=IfCondition(LaunchConfiguration("use_legacy_jog")),
@@ -73,16 +80,26 @@ def _launch_nodes(context, *args, **kwargs):
 
 def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "use_joy_node",
+            default_value="true",
+            description="起内核 joy_node（合成 /joy 测试传 false）",
+        ),
         DeclareLaunchArgument("device_name", default_value=""),
         DeclareLaunchArgument("deadzone", default_value="0.12"),
         DeclareLaunchArgument("dump", default_value="false"),
         DeclareLaunchArgument("enable_hid", default_value="false"),
+        DeclareLaunchArgument(
+            "enable_feedback",
+            default_value="true",
+            description="DS4 灯带/震动反馈节点（F61；无手柄时降级为 /a3/ds4/feedback）",
+        ),
         DeclareLaunchArgument("use_legacy_jog", default_value="false"),
         DeclareLaunchArgument("auto_start_servo", default_value="false"),
         DeclareLaunchArgument(
             "mapping",
-            default_value="simple",
-            description="config/mappings/<name>.yaml；simple=无 L1 组合键",
+            default_value="default",
+            description="config/mappings/<name>.yaml；default=F60 L1 摇杆死人开关，simple=legacy",
         ),
         DeclareLaunchArgument(
             "layout",

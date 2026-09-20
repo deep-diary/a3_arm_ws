@@ -3,20 +3,18 @@
 from __future__ import annotations
 
 import math
-import os
-from typing import Dict, List, Optional
+from typing import List, Optional
 
-import yaml
-from ament_index_python.packages import get_package_share_directory
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import TwistStamped
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-from a3_msgs.srv import GripperCommand, PlaybackTrajectory
+from a3_msgs.srv import GotoNamedPose, GripperCommand, PlaybackTrajectory
 
 
 JOINTS = [
@@ -52,20 +50,15 @@ def _duration(sec: float) -> Duration:
     return d
 
 
-def _load_named_poses() -> Dict:
-    share = get_package_share_directory("a3_description")
-    path = os.path.join(share, "config", "named_poses.yaml")
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
 class ActionExecutor:
     def __init__(self, node: Node, *, twist_frame: str = "base_link") -> None:
         self._n = node
         self.max_linear = float(node.declare_parameter("max_linear_mps", 0.35).value)
         self.max_angular = float(node.declare_parameter("max_angular_rps", 1.0).value)
-        self.pose_duration = float(node.declare_parameter("named_pose_duration_s", 2.5).value)
-        self.pose_waypoints = int(node.declare_parameter("named_pose_waypoints", 11).value)
+        # F60：命名位姿改走 /a3/arm/goto_named_pose（编排层 TRAJ 态）；
+        # 该值仅为服务响应缺失时的摇杆封锁兜底，正常取响应里的实际时长。
+        self.goto_fallback_s = float(node.declare_parameter("named_pose_duration_s", 3.0).value)
+        self.goto_busy_margin = float(node.declare_parameter("goto_busy_margin_s", 0.5).value)
         self.twist_frame = twist_frame
         self.traj_topic = str(
             node.declare_parameter(
@@ -89,12 +82,6 @@ class ActionExecutor:
         )
         self.jog_speed = float(node.declare_parameter("base_jog_speed", 0.35).value)
 
-        poses = _load_named_poses()
-        self._pose_joints: List[str] = list(poses.get("joint_names") or JOINTS)
-        self._poses: Dict[str, List[float]] = {
-            name: list(spec["positions"]) for name, spec in (poses.get("poses") or {}).items()
-        }
-
         self._cmd_pub = node.create_publisher(String, self.command_topic, 10)
         self._traj_pub = node.create_publisher(JointTrajectory, self.traj_topic, 10)
         self._twist_pub = node.create_publisher(TwistStamped, self.twist_topic, 10)
@@ -112,6 +99,8 @@ class ActionExecutor:
         self._teach_start = node.create_client(Trigger, "/a3/arm/start_teach")
         self._teach_stop = node.create_client(Trigger, "/a3/arm/stop_teach")
         self._playback = node.create_client(PlaybackTrajectory, "/a3/arm/playback")
+        # F60：命名位姿改走编排层服务（TRAJ 态可被灯带感知；F53 显式拒绝语义）
+        self._goto_pose_cli = node.create_client(GotoNamedPose, "/a3/arm/goto_named_pose")
 
         self.speed_scale = 0.35
         self._servo_paused = False
@@ -119,20 +108,27 @@ class ActionExecutor:
         self._ang = [0.0, 0.0, 0.0]
         self._jog = [0.0] * 6
         self._q = [0.0] * 7
-        self._have_js = False
         self._gripper = GRIPPER_CLOSE
         self._last_l6_sent: Optional[float] = None
         self._last_l7_sent: Optional[float] = None
         self._pose_busy_until = 0.0
-        self._pending_pose: Optional[str] = None
-        self._pending_since = 0.0
-        self._last_goto_pose: Optional[str] = None
+        self._goto_in_flight = False
         self._last_goto_time = 0.0
         self._goto_min_interval = float(
             node.declare_parameter("named_pose_min_interval_s", 3.0).value
         )
         self._stopped = False
         self._servo_started = False
+
+        # F60 L3 一键上电+使能挂起态（非阻塞，50Hz tick 轮询推进）
+        self._gate_open = False
+        self._power_state = ""
+        self._enable_pending = False
+        self._enable_called = False
+        self._enable_started_at = 0.0
+        self._power_enable_timeout = float(
+            node.declare_parameter("power_enable_timeout_s", 5.0).value
+        )
 
         # F36：R2 扳机力控状态机
         self._force_engaged = False
@@ -142,19 +138,31 @@ class ActionExecutor:
         self._release_wants_retry = False
         self._release_next_retry_at = 0.0
 
-        node.create_subscription(JointState, "/joint_states", self._on_js, 10)
-        node.create_subscription(String, "/a3/goto_named_pose", self._on_goto_topic, 10)
+        # LL-059：真机 /joint_states 是 SensorDataQoS/BEST_EFFORT；RELIABLE 订阅静默
+        # 收不到。BEST_EFFORT 订阅同时兼容仿真（RELIABLE 发布）。
+        js_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
+        node.create_subscription(JointState, "/joint_states", self._on_js, js_qos)
+        # gate/state 真机（C++）与仿真均以 reliable+TRANSIENT_LOCAL depth1 锁存发布
+        latch_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        node.create_subscription(Bool, "/power_sequence/gate_open", self._on_gate, latch_qos)
+        node.create_subscription(String, "/power_sequence/state", self._on_power_state, latch_qos)
 
     def _on_js(self, msg: JointState) -> None:
         name_to_pos = {n: p for n, p in zip(msg.name, msg.position)}
         for i, jn in enumerate(JOINTS):
             if jn in name_to_pos:
                 self._q[i] = float(name_to_pos[jn])
-        self._have_js = True
         self._gripper = self._q[6]
 
-    def _on_goto_topic(self, msg: String) -> None:
-        self.goto_named_pose(str(msg.data).strip())
+    def _on_gate(self, msg: Bool) -> None:
+        self._gate_open = bool(msg.data)
+
+    def _on_power_state(self, msg: String) -> None:
+        self._power_state = str(msg.data)
 
     def tick_begin(self) -> None:
         self._lin = [0.0, 0.0, 0.0]
@@ -163,9 +171,44 @@ class ActionExecutor:
         self._stopped = False
 
     def pose_blocking(self, now: float) -> bool:
-        if self._pending_pose is not None:
+        if self._goto_in_flight:
             return True
         return now < self._pose_busy_until
+
+    def poll(self, now: float) -> None:
+        """每 tick 调用一次：推进 L3 上电+使能挂起态（不得阻塞 50Hz tick）。"""
+        if not self._enable_pending or self._enable_called:
+            return
+        if self._gate_open and self._power_state == "Running":
+            if self._arm_enable.service_is_ready():
+                self._enable_called = True
+                future = self._arm_enable.call_async(Trigger.Request())
+                future.add_done_callback(self._on_enable_done)
+                self._n.get_logger().info(
+                    "gate open + Running; /a3/arm/enable called, waiting response"
+                )
+            return
+        if now - self._enable_started_at > self._power_enable_timeout:
+            self._enable_pending = False
+            self._enable_called = False
+            self._n.get_logger().error(
+                f"L3 power+enable timeout after {self._power_enable_timeout:.1f}s "
+                f"(gate={self._gate_open}, power_state='{self._power_state}')"
+            )
+
+    def _on_enable_done(self, future) -> None:
+        self._enable_pending = False
+        self._enable_called = False
+        try:
+            resp = future.result()
+        except Exception as exc:  # noqa: BLE001
+            self._n.get_logger().error(f"arm/enable call failed: {exc}")
+            return
+        if resp is not None and resp.success:
+            self._n.get_logger().info("L3 sequence complete: arm enabled (READY)")
+        else:
+            message = getattr(resp, "message", "no response")
+            self._n.get_logger().error(f"arm/enable rejected: {message}")
 
     def apply_discrete(self, fn: str, kwargs: Optional[dict] = None) -> None:
         kwargs = kwargs or {}
@@ -183,15 +226,6 @@ class ActionExecutor:
         method(float(value))
 
     def tick_end(self, now: float, motion_allowed: bool, dt: float) -> None:
-        if self._pending_pose is not None:
-            # One zero Twist, then silence so Servo times out before the pose traj.
-            if now - self._pending_since < 0.04:
-                self._publish_twist(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-            elif now - self._pending_since >= 0.35:
-                self._publish_named_pose(self._pending_pose, now)
-                self._pending_pose = None
-            return
-
         if now < self._pose_busy_until:
             return
 
@@ -244,31 +278,6 @@ class ActionExecutor:
         traj.points = [pt]
         self._traj_pub.publish(traj)
 
-    def _publish_named_pose(self, name: str, now: float) -> None:
-        if name not in self._poses:
-            self._n.get_logger().error(f"unknown named pose {name}")
-            return
-        if not self._have_js:
-            self._n.get_logger().warn("no /joint_states yet; skip named pose")
-            return
-        q0 = list(self._q)
-        q1 = list(self._poses[name])
-        if len(q1) < 7:
-            q1 = q1 + [0.0] * (7 - len(q1))
-        n = max(2, self.pose_waypoints)
-        duration = max(0.2, self.pose_duration)
-        msg = JointTrajectory()
-        msg.joint_names = list(self._pose_joints)
-        for i in range(n):
-            alpha = i / (n - 1)
-            pt = JointTrajectoryPoint()
-            pt.positions = [a + alpha * (b - a) for a, b in zip(q0, q1)]
-            pt.time_from_start = _duration(duration * alpha)
-            msg.points.append(pt)
-        self._traj_pub.publish(msg)
-        self._pose_busy_until = now + duration + 0.15
-        self._n.get_logger().info(f"named pose → {name} ({duration:.1f}s)")
-
     def _power(self, command: str) -> None:
         msg = String()
         msg.data = command
@@ -298,18 +307,50 @@ class ActionExecutor:
     # --- discrete ---
 
     def goto_named_pose(self, name: str) -> None:
+        # F60：改走 /a3/arm/goto_named_pose（编排层插值 + TRAJ 态 + F53 拒绝语义），
+        # 不再本地直发 JointTrajectory 绕过状态机。
         now = self._n.get_clock().now().nanoseconds * 1e-9
-        if self._pending_pose is not None or now < self._pose_busy_until:
+        if self._goto_in_flight or now < self._pose_busy_until:
             return
         if now - self._last_goto_time < self._goto_min_interval:
             return
-        self._pending_pose = name
-        self._pending_since = now
-        self._last_goto_pose = name
+        if not self._goto_pose_cli.service_is_ready():
+            self._n.get_logger().warn("arm/goto_named_pose not available; skip")
+            return
+        req = GotoNamedPose.Request()
+        req.pose_name = name
+        future = self._goto_pose_cli.call_async(req)
+        if future is None:
+            self._n.get_logger().error(f"goto_named_pose {name} call failed")
+            return
+        self._goto_in_flight = True
         self._last_goto_time = now
+        # pause 后伺服停止发布轨迹，bridge 在 timeout 后自动翻 IDLE；
+        # 不能在服务调用前发零 twist——bridge 把零 twist 也当活动，会抢先翻 SERVO 导致拒绝。
         self._servo_pause()
-        self._publish_twist(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        self._n.get_logger().info(f"goto_named_pose queued: {name}")
+        future.add_done_callback(lambda f, n=name: self._on_goto_done(f, n))
+        self._n.get_logger().info(f"goto_named_pose requested: {name}")
+
+    def _on_goto_done(self, future, name: str) -> None:
+        now = self._n.get_clock().now().nanoseconds * 1e-9
+        self._goto_in_flight = False
+        try:
+            resp = future.result()
+        except Exception as exc:  # noqa: BLE001
+            self._n.get_logger().error(f"goto_named_pose {name} call failed: {exc}")
+            return
+        if resp is not None and resp.success:
+            # 服务响应不带时长：arm_controller 固定 goto_duration_s(3.0)+0.3 回 READY，
+            # 用兜底窗口封锁摇杆，结束后首个运动 tick 自动 unpause 伺服。
+            self._pose_busy_until = now + self.goto_fallback_s + self.goto_busy_margin
+            self._n.get_logger().info(
+                f"goto_named_pose {name} accepted; jog locked "
+                f"{self.goto_fallback_s + self.goto_busy_margin:.1f}s"
+            )
+        else:
+            message = getattr(resp, "message", "no response")
+            self._n.get_logger().error(f"goto_named_pose {name} rejected: {message}")
+            self._servo_unpause()
 
     def power_start(self) -> None:
         self._power("start")
@@ -319,6 +360,21 @@ class ActionExecutor:
 
     def power_set_zero(self) -> None:
         self._power("set_zero")
+
+    def arm_power_enable(self) -> None:
+        """F60 L3：一键「执行层上电开门禁 + 编排层使能」，非阻塞。
+
+        发 power start（Running 态仅被忽略，幂等）后进入挂起态，由 poll()
+        在 gate_open && Running 时异步调 /a3/arm/enable；5s 未就绪打 ERROR。
+        """
+        now = self._n.get_clock().now().nanoseconds * 1e-9
+        if self._enable_pending:
+            return
+        self._power("start")
+        self._enable_pending = True
+        self._enable_called = False
+        self._enable_started_at = now
+        self._n.get_logger().info("L3 arm_power_enable: power start sent; polling gate")
 
     # --- F55: 编排层服务（/a3/arm/*，arm_controller） ---
 
@@ -348,7 +404,6 @@ class ActionExecutor:
 
     def stop_motion(self) -> None:
         self._stopped = True
-        self._pending_pose = None
         self._pose_busy_until = 0.0
         self._lin = [0.0, 0.0, 0.0]
         self._ang = [0.0, 0.0, 0.0]

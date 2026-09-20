@@ -320,8 +320,8 @@ def generate_launch_description():
         DeclareLaunchArgument("use_teleop", default_value="true"),
         DeclareLaunchArgument(
             "teleop_mapping",
-            default_value="simple",
-            description="手柄映射：simple（默认，无组合键）或 default（L1 死人开关，生产安全）",
+            default_value="default",
+            description="手柄映射：default（F60 默认，L1 摇杆死人开关）或 simple（legacy）",
         ),
         DeclareLaunchArgument("use_power_sequence", default_value="true"),
         DeclareLaunchArgument(

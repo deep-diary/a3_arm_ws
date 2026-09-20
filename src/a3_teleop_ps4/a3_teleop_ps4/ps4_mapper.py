@@ -118,6 +118,7 @@ class Ps4Mapper(Node):
             return
 
         self._maybe_start_servo()
+        self._exec.poll(now)
         joy = self._joy
         deadman_pressed = self._layout.button(joy, self._deadman_name)
         motion_allowed = (not self._deadman_enabled) or deadman_pressed
@@ -133,7 +134,9 @@ class Ps4Mapper(Node):
 
         pose_block = self._exec.pose_blocking(now)
 
-        if motion_allowed and not pose_block:
+        # F60：死人开关按轴 kind 门控（applies_to），不锁整环——
+        # R2(analog_01) 不在 applies_to 内，无 L1 也要能动夹爪
+        if not pose_block:
             for axis_name, spec in iter_axis_bindings(self._mapping):
                 fn = str(spec.get("fn"))
                 kind = str(spec.get("kind", "analog_n11"))

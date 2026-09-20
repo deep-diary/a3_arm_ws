@@ -58,7 +58,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/move_to_pose_ik` | `a3_msgs/srv/MoveToPoseIK` | 仅 IK |
 | `/a3/move_to_pose` | `a3_msgs/action/MoveToPose` | IK + 执行 |
 | `/a3/gravity_torque` | `sensor_msgs/JointState` | URDF 系重力力矩（effort） |
-| `/a3/goto_named_pose` | `std_msgs/String` | 命名姿态（`zero`/`home`/`ready`） |
+| ~~`/a3/goto_named_pose`~~ | `std_msgs/String` | **已废弃（F60）**：唯一订阅方 teleop 改走 `/a3/arm/goto_named_pose` 服务（TRAJ 状态可见 + F53 拒绝语义），无其他发布者 |
 | `/a3/gripper_cmd` | `std_msgs/Float32` | 夹爪归一化 0–1（POSITION 模式，web 直驱与遗留路径；由 `gripper_controller_node` 订阅执行）。PS4 R2 自 F36 起不再走此话题，改走 `/a3/gripper/command` 力控服务 |
 | `/a3/gripper_status` | `a3_msgs/msg/GripperStatus` | 夹爪力控状态快照（模式/目标与实际力矩/目标与实际位置/接触标志/错误码），默认 10 Hz，力控期间 50 Hz |
 | `/a3/gripper/command` | `a3_msgs/srv/GripperCommand` | 夹爪命令：`position`（开合 0–1）/ `force`（按 `torque_nm` 抓取）/ `release` / `stop` |
@@ -66,24 +66,25 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/joy` | `sensor_msgs/Joy` | PS4 轴与按键 |
 | `/a3/ds4/imu` | `sensor_msgs/Imu` | 可选 DualShock 4 HID 惯性 |
 | `/a3/ds4/battery` | `std_msgs/Float32` | 可选电量 0–1 |
+| `/a3/ds4/feedback` | `std_msgs/String` | DS4 灯/震反馈诊断（F61）：JSON `{state, gate, fault, color, rumble, reason}`，volatile depth 10，10–20 Hz。无手柄设备时节点仍持续发布（仿真/CI 据此断言灯效） |
 
 **插值语义（执行层）：** 仅 positions → 线性；+velocities → 三次；+accelerations → 五次；effort 始终线性（JTC 对齐）。参数 `trajectory_interpolation_method`（默认 `auto`）。
 
 ### 关节状态（发布侧）
 
-| 话题 | 说明 |
-|------|------|
-| `/joint_states` | 电机反馈汇总，默认 50 Hz |
-| `/rebotarm/joint_states` | `trajectory_bridge` 镜像输出，供 reBot 消费 |
+| 话题 | QoS | 说明 |
+|------|-----|------|
+| `/joint_states` | 真机 SensorDataQoS（**BEST_EFFORT**）；sim_motor 为 RELIABLE | 电机反馈汇总，默认 50 Hz。消费方必须用 BEST_EFFORT 订阅（兼容两种发布端；RELIABLE 订阅在真机静默零投递，LL-005/LL-025/LL-030/LL-059） |
+| `/rebotarm/joint_states` | — | `trajectory_bridge` 镜像输出，供 reBot 消费 |
 
 ### 电源序列
 
-| 话题 | 方向 | 说明 |
-|------|------|------|
-| `/power_sequence/gate_open` | 发布 | `true` 后轨迹方可下发 CAN |
-| `/power_sequence/command` | 订阅 | `start` / `shutdown` / `set_zero` |
-| `/power_sequence/state` | 发布 | 序列状态 |
-| `/power_sequence/set_zero_event` | 发布 | 调零事件（可选） |
+| 话题 | QoS | 方向 | 说明 |
+|------|-----|------|------|
+| `/power_sequence/gate_open` | **TRANSIENT_LOCAL**（latched） | 发布 | `true` 后轨迹方可下发 CAN；晚加入订阅者立即收当前值 |
+| `/power_sequence/command` | volatile | 订阅 | `start` / `shutdown` / `set_zero` |
+| `/power_sequence/state` | **TRANSIENT_LOCAL**（latched） | 发布 | 序列状态（Idle/Precheck/EnableInit/SoftStand/Running/SoftProne/ProneHold/Disable/Fault） |
+| `/power_sequence/set_zero_event` | volatile | 发布 | 调零事件（可选） |
 
 配置见 [power_sequence.yaml](../../src/a3_can_bridge/config/power_sequence.yaml)。
 
@@ -257,7 +258,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 - 迟滞：按过 **0.22** 进入力控；松开低于 **0.15** 才发一次 `release`（全开），避免抖动来回切换。
 - 力矩映射：扳机 0.2..1 → 目标力矩 **0.1..1.0 Nm** 线性（下限 0.1：目标 ≤0 触发「直接全开」硬逻辑、接触判定下限 0.1 Nm；上限对齐 `max_grasp_torque_nm` 硬上限）。
 - 持按期间目标变化 **≥0.1 Nm** 才重发 `force`（频繁重发会重置力环积分退化成纯 P）；`timeout_s=15`（与节点默认一致，GRASPED 后持续持握）。
-- 服务未就绪或互锁拒绝（臂在 `TRAJ_RUNNING`/`SERVO`/`ZERO_TORQUE`/`GRAVITY_COMP`）→ 每 **0.5 s** 重试，松手即停；`default.yaml` 仍受 L1 死人开关门控（松 L1 而 R2 按住 → mapper 停发 → 保持当前夹持，再按 L1 恢复跟随）。
+- 服务未就绪或互锁拒绝（臂在 `TRAJ_RUNNING`/`SERVO`/`ZERO_TORQUE`/`GRAVITY_COMP`）→ 每 **0.5 s** 重试，松手即停。**F60 起 R2 不经 L1 死人开关门控**（L1 只锁摇杆 jog；F55 时代「松 L1 即保持夹持」语义废止）。
 - 遗留位置路径（`set_gripper`/`set_joint_L7`/Square/Circle 按键）常量已对齐 2026-09-06 标定（开=0/闭=1.79）。
 
 ## 电机调试（motor_protocol_node，需求 F32）

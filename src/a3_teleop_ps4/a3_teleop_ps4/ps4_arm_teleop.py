@@ -21,6 +21,7 @@ from typing import List, Optional
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Joy, JointState
 from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -60,8 +61,11 @@ class Ps4ArmTeleop(Node):
             JointTrajectory, self.get_parameter("traj_topic").value, 10
         )
         self.create_subscription(Joy, self.get_parameter("joy_topic").value, self._on_joy, 10)
+        # LL-059：真机 /joint_states 为 BEST_EFFORT（SensorDataQoS），默认 RELIABLE
+        # 订阅静默收不到；BEST_EFFORT 同时兼容仿真 RELIABLE 发布。
+        js_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(
-            JointState, self.get_parameter("joint_states_topic").value, self._on_js, 10
+            JointState, self.get_parameter("joint_states_topic").value, self._on_js, js_qos
         )
 
         self._q = [0.0] * 7

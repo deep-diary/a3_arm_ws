@@ -46,6 +46,8 @@ docs/
 │   ├── ARCHITECTURE.md
 │   ├── STATE_MACHINE.md       编排层状态机（指令×状态矩阵）
 │   ├── QUICKSTART.md
+│   ├── PS4_OPERATOR_GUIDE.md  PS4 手柄操作员手册（F60 键位/五色灯/震动）
+│   ├── ROS_COMMANDS.md        ROS 命令速查（source/构建/launch/服务/排障）
 │   └── PLATFORM_CAN.md
 ├── cloud_edge/               A3 CloudEdge 支线
 │   ├── REQUIREMENTS.md
@@ -77,6 +79,8 @@ docs/
 | [edge/ARCHITECTURE.md](edge/ARCHITECTURE.md) | 运行时分层与数据流 |
 | [edge/STATE_MACHINE.md](edge/STATE_MACHINE.md) | 编排层状态机（11 态 + 指令×状态×模式矩阵，F53） |
 | [edge/QUICKSTART.md](edge/QUICKSTART.md) | 真机快速上手清单 |
+| [edge/PS4_OPERATOR_GUIDE.md](edge/PS4_OPERATOR_GUIDE.md) | PS4 操作员手册：流程、五色灯、震动（F60） |
+| [edge/ROS_COMMANDS.md](edge/ROS_COMMANDS.md) | ROS 命令速查：source/构建/launch/服务/排障 |
 | [edge/PLATFORM_CAN.md](edge/PLATFORM_CAN.md) | RK3588 SocketCAN 上板配置 |
 
 ### A3 CloudEdge（支线）
