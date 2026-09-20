@@ -9,6 +9,11 @@ RViz 实际模型由 /joint_states（电机反馈）驱动——手转各关节�
 
 安全护栏：任一电机 mode_status=2（已使能）时暂停下发轨迹（目标 ghost 照发），
 避免后续会话中臂已使能时被本节点的摆动轨迹驱动。
+
+主 launch 复用本节点只发 ghost：publish_traj:=false 时不创建轨迹发布器与电机
+状态订阅（ghost 纯话题通道，不碰执行层）；backoff_on_foreign_msgs:=true 时
+订阅自身话题，收到内容与本节点最近一次发布不同的消息（手动 ros2 topic pub
+注入）即让位 foreign_backoff_s，停发后自动恢复 home 注入。
 """
 import math
 import time
@@ -42,26 +47,48 @@ class UrdfDirCheckPub(Node):
         ).value
         self._js_rate = float(self.declare_parameter("target_js_rate_hz", 50.0).value)
         self._traj_period = float(self.declare_parameter("traj_period_s", 0.5).value)
+        self._publish_traj = bool(self.declare_parameter("publish_traj", True).value)
+        self._backoff_on_foreign = bool(
+            self.declare_parameter("backoff_on_foreign_msgs", False).value
+        )
+        self._foreign_backoff = float(
+            self.declare_parameter("foreign_backoff_s", 3.0).value
+        )
 
         self._js_pub = self.create_publisher(
             JointState, "/a3/display_target_joint_states", 10
         )
-        self._traj_pub = self.create_publisher(
-            JointTrajectory, "/joint_group_effort_controller/joint_trajectory", 10
-        )
-        self._js_timer = self.create_timer(1.0 / self._js_rate, self._publish_js)
-        self._traj_timer = self.create_timer(self._traj_period, self._publish_traj)
-
+        self._traj_pub = None
+        self._traj_timer = None
+        self._states_sub = None
         self._any_enabled = False
-        from a3_can_bridge.msg import MotorStates  # 延迟导入避免启动报错刷屏
-        qos = QoSProfile(
-            depth=1, reliability=ReliabilityPolicy.BEST_EFFORT,
-            history=HistoryPolicy.KEEP_LAST,
-        )
-        self._states_sub = self.create_subscription(
-            MotorStates, "/a3/motor/states",
-            lambda m: self._on_states(m), qos,
-        )
+        if self._publish_traj:
+            self._traj_pub = self.create_publisher(
+                JointTrajectory, "/joint_group_effort_controller/joint_trajectory", 10
+            )
+            self._traj_timer = self.create_timer(self._traj_period, self._publish_traj)
+            from a3_can_bridge.msg import MotorStates  # 延迟导入避免启动报错刷屏
+            qos = QoSProfile(
+                depth=1, reliability=ReliabilityPolicy.BEST_EFFORT,
+                history=HistoryPolicy.KEEP_LAST,
+            )
+            self._states_sub = self.create_subscription(
+                MotorStates, "/a3/motor/states",
+                lambda m: self._on_states(m), qos,
+            )
+        self._js_timer = self.create_timer(1.0 / self._js_rate, self._publish_js)
+
+        # 手动注入让位：订阅自身话题，内容与本节点最近一次发布不同即视为外部
+        # 注入（同名 topic 多发布者时 last-writer-wins，rsp 只认最后一条）
+        self._last_sent = None
+        self._last_foreign = None
+        if self._backoff_on_foreign:
+            self._own_sub = self.create_subscription(
+                JointState, "/a3/display_target_joint_states", self._on_own_js, 10
+            )
+        else:
+            self._own_sub = None
+
         self._last_warn = 0.0
         self._t0 = time.monotonic()
         self.get_logger().info(
@@ -78,12 +105,28 @@ class UrdfDirCheckPub(Node):
             for i in range(7)
         ]
 
+    def _on_own_js(self, msg):
+        # 与本节点最近一次发布内容不同的消息 = 外部手动注入（ros2 topic pub
+        # 等）→ 自动注入让位 foreign_backoff_s；外部停发后恢复 home
+        if self._last_sent is not None and msg.position != self._last_sent:
+            self._last_foreign = time.monotonic()
+            self.get_logger().info(
+                "检测到手动注入（内容与本节点发布不同）——自动注入让位 "
+                f"{self._foreign_backoff:.0f} s",
+                throttle_duration_sec=10.0,
+            )
+
     def _publish_js(self):
+        if self._backoff_on_foreign and self._last_foreign is not None:
+            if time.monotonic() - self._last_foreign < self._foreign_backoff:
+                return
+            self._last_foreign = None
         t = time.monotonic() - self._t0
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.name = self._joints
         msg.position = self._target(t)
+        self._last_sent = msg.position
         self._js_pub.publish(msg)
 
     def _publish_traj(self):

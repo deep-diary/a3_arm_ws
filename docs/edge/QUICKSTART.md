@@ -402,6 +402,30 @@ DISPLAY=:0 ros2 launch a3_bringup urdf_dir_check.launch.py
 - 校验对象：URDF 关节轴方向/旋转正负与电机实际方向一致（手转关节看实际模型是否同向转动、幅度是否吻合）。
 - 测试后注意：读数偏离 home 属正常（手转过）；重新使能会先回 last_commanded，且 F48 门禁要求读数在 URDF 限位内——测试期间勿断电。
 
+### RViz 双模型（实际 vs 目标 ghost，真机主 launch 内置）
+
+真机主 launch（`a3_bringup.launch.py`）的 RViz 默认就是双模型：`ArmActual_实际反馈`（`/joint_states` 电机反馈驱动，**原色橙/深棕**）+ `ArmTarget_目标`（`/target_robot_description` 换色 URDF，TF Prefix `target`，**青蓝半透明 ghost**，由 `/a3/display_target_joint_states` 注入驱动）。**核心场景：臂断电后实际模型停住，仍可手动注入目标角离线调试「应该到哪」。** 目标 ghost 不依赖电机/电源，纯话题通道。
+
+主 launch **默认自带 ghost 三件套**（target rsp + 恒等静态 TF + home 静止注入节点 `urdf_dir_check_pub`，`publish_traj:=false` 只发纯话题、不碰执行层轨迹）——没有注入源时 target rsp 整树不发 TF、ghost 全白（LL-055/LL-056），所以注入不能缺。`edge_web_sim.launch.py` 同样默认带三件套（其默认 RViz 是单模型 `el_a3_view.rviz`，ghost 不可见；换/另开 `el_a3_dual_view.rviz` 才显示）。不需要 ghost 时两 launch 均可 `use_target_ghost:=false` 整体关掉。
+
+```bash
+# 1) 真机栈（断电调试只起下面任意一段拿到 rsp_target 即可，无需本段）
+sudo systemctl start can-up.service
+source scripts/a3_shell_env.sh
+ros2 launch a3_bringup a3_bringup.launch.py use_rviz:=true   # HDMI :0；无屏 use_rviz:=false
+#    ↑ 启动后 ghost 自动停在 home；无需任何手动注入即正常着色
+# 2) 手动注入目标角（7J 档整臂）：注入节点检测到内容不同的外来消息会自动让位
+#    （backoff 3 s，--rate 持续发就持续让位）；停发后 3 s 自动恢复 home
+ros2 topic pub --rate 10 /a3/display_target_joint_states sensor_msgs/msg/JointState \
+  "{name: ['L1_joint','L2_joint','L3_joint','L4_joint','L5_joint','L6_joint','L7_joint'],
+    position: [0.0, 0.0, 0.0, -0.6, 0.3, 0.0, 0.0]}"
+```
+
+- **关节名必须放齐 7 个**（5J 档 `gains_file:=control_gains_5j.yaml motor_map_file:=motor_map_5j.yaml` 起栈也一样）：物理上 L6/L7 缺失，但 `target` ghost 用的 URDF 恒为 7 关节，`robot_state_publisher` **只对 message 里出现的关节名发布 TF**——名字缺失的关节不会按 URDF 默认位渲染，而是整个分支没有变换，RViz 显示 no transform：`target/l5_l6_urdf_asm`（`L6_joint` 子）、`target/end_effector`（`l5_l6_urdf_asm` 下固定关节的子）、`target/gripper_link`（`L7_joint` 子）消失。5J 档请把 L6/L7 用 0.0 占位（与上面命令同形式，7 名 7 值），ghost 手腕/夹爪停 URDF 零位。
+- 目标 ghost 由独立 `target_robot_state_publisher`（`frame_prefix="target/"`，LL-028）+ 恒等静态 TF `base_link→target/base_link` 接入 TF 树。
+- 主 launch / sim launch 自带的注入是 **ghost-only 模式**（`urdf_dir_check_pub publish_traj:=false`）：不创建轨迹发布器与电机状态订阅，纯话题不碰执行层，断电也安全。方向校验用的「轨迹 + 摆动」模式只在上一节 `urdf_dir_check.launch.py`（其护栏只认 mode_status=2）。
+- 手动注入让位机制：注入节点订阅自己的话题，凡内容与最近一次自发不同（`ros2 topic pub` 等外部来源）即停发让位 3 s 并滚动续期；同名话题多发布者是 last-writer-wins，rsp 只认最后一条。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

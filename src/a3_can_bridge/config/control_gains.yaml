@@ -40,6 +40,10 @@
     enable_trajectory_interpolation: true
     trajectory_interp_rate_hz: 200.0
     trajectory_interpolation_method: auto
+    # F56/LL-053: 帧 V 域填每 tick 目标速度（champ_smoothed 差分），kd 从"拖刹车"变
+    # "朝目标速度阻尼"，消除 20ms 尺度速度纹波（实测基线 rms|v_act-v_cmd|≈0.146 rad/s）
+    trajectory_vel_ff_enable: true
+    trajectory_vel_ff_gain: 1.0
     zero_torque_kp: 0.0
     zero_torque_kd: 1.0
     control_mode_topic: /a3/control_mode
@@ -83,3 +87,6 @@
     publish_tx_stats: true
     tx_stats_topic: /a3/motor/tx_stats
     tx_rate_ok_ratio: 0.9
+    # F58/LL-053: stop 重力支撑保持——停原位中低刚度 + 活重力前馈，杜绝裸卸力掉臂
+    stop_hold_kp: 25.0
+    stop_hold_kd: 2.0

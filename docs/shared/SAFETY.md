@@ -104,7 +104,7 @@ Web 端单电机调试（CAN 扫描 / MIT 直驱 / 保持）的安全边界：
 
 1. **互锁（gate 关闭才可调试写）：** `gate_open=true`（电源序列运行中）时，`motor_protocol_node` 拒绝使能/复位/设零/MIT/模式切换/参数写入（带 gate 文案的 `success=false`）。扫描、读类（device_id/version）与 `motor_stop` **永不拦截**——停止能力在任何时刻都必须可用。
 2. **保持自动取消：** `gate_open` 由关→开的瞬间，正在进行的 MIT 保持被 C++ 侧自动取消并记 WARN；前端不承担安全职责。
-3. **停止即卸力：** `/a3/motor/stop` 取消保持并逐电机发送一帧 `kp=kd=t=0`（p=最近反馈角）卸力。保持期间若 CAN 中断，电机固件按帧停超时自然卸力（与轨迹路径同一机制）。
+3. **停止即重力支撑保持：** `/a3/motor/stop` 取消保持并发送 **重力保持帧**——反馈新鲜（`feedback_fresh_timeout_s`）时逐电机 `kp=stop_hold_kp / kd=stop_hold_kd / t=重力前馈`、p=最近反馈角（F58），停在原位不垂落；反馈陈旧/缺失时才退回 `kp=kd=t=0` 裸卸力帧（没有反馈就不能信任保持）。保持期间若 CAN 中断，电机固件按帧停超时自然卸力（与轨迹路径同一机制）。**危险位形（重力敏感）下 stop 不再掉臂。**
 4. **参数安全：** `mit_command` 的 `motor_id` 禁止 0 广播（只允许 1..127 单电机）；位置/速度/增益/力矩在服务端 clamp 到 `ProtocolCodec` 常量；保持时长上限 `max_hold_duration_s`（默认 30 s），发送频率上限 `min(200, max_tx_rate_per_motor_hz)`。
 5. **保持与轨迹互斥：** 调试保持仅限 gate 关闭期间（此时轨迹插值与 refresh 均被 gate 阻断），保持是唯一 CAN 发送者，无总线争用；gate 打开瞬间保持即取消。
 6. **仿真有意分歧：** sim 闭环不实现互锁（`sim_power_sequence_node` gate 恒 true），互锁只真机验证；前端在 `gate_open=true` 时展示提示横幅但不自行拦截（拒绝文案经 `cmd_result` 回传）。
@@ -152,6 +152,7 @@ Web 端单电机调试（CAN 扫描 / MIT 直驱 / 保持）的安全边界：
 `a3_arm_monitor`（20 Hz，独立节点，随编排层默认启动）：**分层保护的最后一层兜底**——F42（200 Hz 力矩钳位）、F44/F40（编排层温度/失能保护）保留原位，看门狗只做它们覆盖不到的**跨数据源比对**（js vs 轨迹 vs 电机状态 vs 编排状态），动作只走公开服务（stop → 升级 reset），不直接改任何节点内部状态。
 
 - 故障类：FOLLOW_STUCK / HOLD_DRIFT（stop → 3 s 未消升级 reset）、STALE_JS（reset）、UNEXPECTED_DISABLE（仅报告，避免 F40 park 在失能电机上失败）、TEMP_UNRESPONSIVE（reset，F44 失灵兜底）。阈值与阶梯见 [TOPIC_CONTRACT.md](TOPIC_CONTRACT.md)「故障监视看门狗」。
+- **自动 reset 过重力门禁（F58/LL-053）**：stop→reset 阶梯在升级前查新鲜 `max|τ_grav|`（`/a3/gravity_torque`，1 s 内）——危险位形（超 `reset_max_gravity_torque_nm: 5.0`）**拒绝自动 reset**，记 `RESET_DENIED_gravity_unsafe` 并保持重力支撑不动，等人工介入（先回安全位再 reset）。样本缺失/陈旧按旧行为放行（不破坏无 gravity 节点场景与 F51-F52 回归）。**失败路径仍可人工 disable/急停。**
 - 抑制规则：零力矩/重力补偿模式、失能态、启动宽限、触发 cooldown、清除保持——设计目标是**零误报**（误报会让操作者关掉看门狗）。
 - 期望位置用自建轨迹插值器（time_from_start 线性插值），不依赖 ArmStatus.positions（目标快照语义）。
 - 实现要点：服务客户端必须挂独立 ReentrantCallbackGroup + MultiThreadedExecutor + 纯轮询等 future，回调内 `spin_until_future_complete` 会死锁自身（LL-034）；过期判据用接收时刻 monotonic 时间戳，不可与消息墙钟 stamp 混减（LL-034）。
@@ -161,7 +162,7 @@ Web 端单电机调试（CAN 扫描 / MIT 直驱 / 保持）的安全边界：
 **使能 = 保当前位置，绝不执行历史目标。** 2026-09-14 真机事故：示教退出后目标被重锚到拖动位姿（1.98 rad），看门狗假触发 stop→reset（臂卸力、人工搬回 home 0.03 rad），使能时**无人校验「目标 vs 实际」**，kp=80 对 1.956 rad 误差满增益输出 → L2 3.1 s 冲 1.97 rad → 甩断 L6 打印关节（F42 是防撞设计，拦不住满速甩动）。
 
 1. **使能前必须校验目标-实际距离**：执行层使能时逐电机把 MIT 目标重锚到**新鲜反馈位**；反馈缺失或陈旧（> `feedback_fresh_timeout_s` 0.30 s）→ **整体拒绝使能**（`success=false`，一帧不发）。不知实际位置就使能 = 盲拉（LL-018/LL-022）。
-2. **停止的 NaN 语义必须真正成立**：`/a3/motor/stop` 与 reset/set_zero 置**保持抑制 latch**，之后只发零增益保活帧（p=反馈位、kp=kd=τ=0），不得把目标锚回旧位姿——卸力帧不改变电机 mode，单靠 NaN 会在 5 ms 内被 refresh 播种分支覆盖（事故二级根因，日志中 `cmd_angle=nan` 0 次）。
+2. **停止绝不锚回旧目标，但可重力支撑**：`/a3/motor/stop` 与 reset/set_zero 置**保持抑制 latch**，之后 keepalive 的 **p 始终锚回反馈位**（不得把目标锚回旧位姿，事故二级根因，日志中 `cmd_angle=nan` 0 次）；反馈新鲜时 keepalive 增益为 `stop_hold_kp/kd` + 重力前馈（F58 重力支撑保持），反馈陈旧/失能模式才退回零增益（p=反馈位、kp=kd=τ=0）——消除「stop → refresh 零增益覆盖」导致的整窗裸卸力掉臂窗口。
 3. **使能软起步**：kp/kd 在 0.8 s 内从 0 线性升到额定，残余误差不被满增益放大成甩动（τ_ff 重力前馈不受影响）。
 4. **失能期陈旧目标要出声**：失能态下 `|目标−反馈| > 0.15 rad` 限频 WARN——事故时该状态静默保留了 2 分钟。
 5. **意图边界必须重基准**：看门狗在示教/零力矩退出、整臂失能→使能沿，把保持参照 `_last_goal ← 当前实际位姿`、清运动窗口、给 2 s 宽限。否则「合法的新位姿」被判成保持漂移 → 假触发 stop→reset（事故触发源）。修假阳性**必须同时验证真阳性**：带外失能仍要报 UNEXPECTED_DISABLE 且编排层转 DISABLED。

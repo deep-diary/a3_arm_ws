@@ -240,6 +240,12 @@ public:
     command_max_velocity_rad_s_ = this->declare_parameter<double>("command_max_velocity_rad_s", 6.0);
     limit_velocity_only_during_smoothing_ = this->declare_parameter<bool>(
       "limit_velocity_only_during_smoothing", true);
+    // F56/LL-053: 轨迹帧 V 域填每 tick 目标速度（champ_smoothed 差分），kd 不再拖刹车
+    trajectory_vel_ff_enable_ = this->declare_parameter<bool>("trajectory_vel_ff_enable", true);
+    trajectory_vel_ff_gain_ = this->declare_parameter<double>("trajectory_vel_ff_gain", 1.0);
+    // F58/LL-053: stop 处置改重力支撑保持（kp/kd 中低刚度 + 活重力前馈）
+    stop_hold_kp_ = this->declare_parameter<double>("stop_hold_kp", 25.0);
+    stop_hold_kd_ = this->declare_parameter<double>("stop_hold_kd", 2.0);
     enable_mode_rising_smoothing_ = this->declare_parameter<bool>("enable_mode_rising_smoothing", true);
     motor_enabled_mode_status_ = this->declare_parameter<int>("motor_enabled_mode_status", 2);
     enable_feedback_step_limit_ = this->declare_parameter<bool>("enable_feedback_step_limit", true);
@@ -647,6 +653,10 @@ public:
     last_refresh_stamp_ns_.fill(0);
     latest_input_champ_rad_.fill(0.0);
     has_latest_input_.fill(false);
+    // F56: 速度前馈状态（prev 置 NaN 使首帧不计差分，last_vff 清 0 → 首次 v_ff=0 防尖峰）
+    vel_ff_filtered_rad_s_.fill(0.0);
+    prev_vff_champ_rad_.fill(std::numeric_limits<double>::quiet_NaN());
+    last_vff_ns_.fill(0);
 
     if (joint_cmd_min_rad_.size() != NumArmJoints() || joint_cmd_max_rad_.size() != NumArmJoints()) {
       RCLCPP_WARN(this->get_logger(), "joint_cmd_min_rad/max size mismatch, using default [-3.14, 3.14]x12");
@@ -1129,11 +1139,38 @@ private:
       return;
     }
 
+    // F56/LL-053: 帧 V 域填每 tick 目标速度 = champ_smoothed 差分（与位置目标逐 tick 一致），
+    // 指数滤波 + 限幅到电机速度量程。kd 从按 V=0 拖刹车变成朝目标速度阻尼。
+    // 必须在「真正 publish」的分支内：续流断开（>4 tick 未发 / 桥复位）时 dt 超限 →
+    // 滤波器清零防尖峰；last_vff 只在 publish 时推进，保证 V 与位置同步。
+    double vel_ff_mit = 0.0;
+    if (
+      trajectory_vel_ff_enable_ && idx < prev_vff_champ_rad_.size() && idx < last_vff_ns_.size() &&
+      last_vff_ns_[idx] > 0)
+    {
+      const int64_t dt_ns = now_ns - last_vff_ns_[idx];
+      const int64_t max_dt_ns = static_cast<int64_t>(4e9 / trajectory_interp_rate_hz_);
+      if (
+        dt_ns > 0 && dt_ns < max_dt_ns &&
+        std::isfinite(prev_vff_champ_rad_[idx]))
+      {
+        const double dchamp = champ_smoothed - prev_vff_champ_rad_[idx];
+        const double v_champ = trajectory_vel_ff_gain_ * dchamp / (static_cast<double>(dt_ns) * 1e-9);
+        vel_ff_filtered_rad_s_[idx] = 0.3 * v_champ + 0.7 * vel_ff_filtered_rad_s_[idx];
+        const double spd = SpeedRangeRadSFor(route.motor_id);
+        vel_ff_mit = joint_signs_[idx] * std::max(-spd, std::min(spd, vel_ff_filtered_rad_s_[idx]));
+      } else {
+        vel_ff_filtered_rad_s_[idx] = 0.0;  // 续流断开 → 清零防尖峰
+      }
+    }
+    last_vff_ns_[idx] = now_ns;
+    prev_vff_champ_rad_[idx] = champ_smoothed;
+
     const auto frame = ProtocolCodec::BuildMitControlFrame(
       ArmMapper::ArmBus(),
       route.motor_id,
       static_cast<float>(protected_position),
-      static_cast<float>(default_velocity_),
+      static_cast<float>(vel_ff_mit),
       static_cast<float>(use_kp),
       static_cast<float>(use_kd),
       static_cast<float>(use_tau),
@@ -1204,6 +1241,7 @@ private:
         route.motor_id < last_commanded_mit_rad_.size() ? last_commanded_mit_rad_[route.motor_id] :
         std::numeric_limits<double>::quiet_NaN();
       bool seeded = false;
+      bool stop_hold = false;  // F58/LL-053: motor_stop 后的重力支撑保持（不是零增益卸力）
       if (!std::isfinite(mapped_position)) {
         // F48/LL-022 播种：桥（重）启后从未下发过轨迹时 refresh 无目标可发 →
         // 总线静默 → 电机不主动上报反馈（LL-018）→ /joint_states 冻结（stamp 陈旧）。
@@ -1220,14 +1258,14 @@ private:
         // F51/LL-039：motor_stop/reset 置位的抑制标志——停止后不得再把目标锚回旧位姿
         const bool suppressed =
           route.motor_id < hold_suppressed_.size() && hold_suppressed_[route.motor_id];
+        const bool fb_finite =
+          route.motor_id < last_feedback_mit_rad_.size() &&
+          std::isfinite(last_feedback_mit_rad_[route.motor_id]);
+        const bool fb_fresh =
+          idx < last_feedback_stamp_ns_.size() &&
+          (now_ns - last_feedback_stamp_ns_[idx]) <
+            static_cast<int64_t>(feedback_fresh_timeout_s_ * 1e9);
         if (!suppressed && mode != -1 && mode != 0) {
-          const bool fb_finite =
-            route.motor_id < last_feedback_mit_rad_.size() &&
-            std::isfinite(last_feedback_mit_rad_[route.motor_id]);
-          const bool fb_fresh =
-            idx < last_feedback_stamp_ns_.size() &&
-            (now_ns - last_feedback_stamp_ns_[idx]) <
-              static_cast<int64_t>(feedback_fresh_timeout_s_ * 1e9);
           if (!fb_finite || !fb_fresh) {
             continue;
           }
@@ -1237,17 +1275,21 @@ private:
           }
           // seeded=false → 用 runtime kp/kd/tau 保持（一次性锚定，不随反馈蠕动）
         } else {
-          if (route.motor_id < last_feedback_mit_rad_.size() &&
-              std::isfinite(last_feedback_mit_rad_[route.motor_id])) {
+          if (suppressed && mode != -1 && mode != 0 && fb_finite && fb_fresh) {
+            // F58/LL-053: stop 后电机仍使能且反馈新鲜 → 重力支撑保持帧。目标锚定当前
+            // 反馈位（静止无误差），kp/kd 用 stop_hold 中低刚度，tau 用活重力前馈——
+            // 只"撑住臂"，不重锚旧位姿（hold_suppressed_ 语义不变），掉臂窗口消失。
+            // 反馈陈旧的 stop 后电机不可信，仍退回零增益保活。
             mapped_position = last_feedback_mit_rad_[route.motor_id];
+            stop_hold = true;
           } else {
-            mapped_position = 0.0;
+            mapped_position = fb_finite ? last_feedback_mit_rad_[route.motor_id] : 0.0;
+            seeded = true;
           }
-          seeded = true;
-          if (suppressed && mode != -1 && mode != 0) {
+          if (suppressed && mode != -1 && mode != 0 && !stop_hold) {
             RCLCPP_WARN_THROTTLE(
               this->get_logger(), *this->get_clock(), 2000,
-              "F51 hold suppressed after motor_stop: motor=%u 零增益保活，不重锚旧目标",
+              "F58 stop: motor=%u 反馈不可用 → 零增益保活（无法重力保持）",
               static_cast<unsigned>(route.motor_id));
           }
         }
@@ -1271,11 +1313,19 @@ private:
           }
         }
       }
-      const double use_kp =
-        (seeded ? 0.0 : ResolveKp(static_cast<int>(route.motor_id), bus_kp)) * enable_ramp;
-      const double use_kd =
-        (seeded ? 0.0 : ResolveKd(static_cast<int>(route.motor_id), bus_kd)) * enable_ramp;
-      const double use_tau = seeded ? 0.0 : ComputeMitTorqueFf(idx, is_front);
+      double use_kp = 0.0, use_kd = 0.0, use_tau = 0.0;
+      if (stop_hold) {
+        // F58: 重力支撑保持——完整刚度 + 重力前馈（不走使能斜坡，stop 随时可能发生）
+        use_kp = stop_hold_kp_;
+        use_kd = stop_hold_kd_;
+        use_tau = ComputeMitTorqueFf(idx, is_front);
+      } else {
+        use_kp =
+          (seeded ? 0.0 : ResolveKp(static_cast<int>(route.motor_id), bus_kp)) * enable_ramp;
+        use_kd =
+          (seeded ? 0.0 : ResolveKd(static_cast<int>(route.motor_id), bus_kd)) * enable_ramp;
+        use_tau = seeded ? 0.0 : ComputeMitTorqueFf(idx, is_front);
+      }
       const auto frame = ProtocolCodec::BuildMitControlFrame(
         ArmMapper::ArmBus(),
         route.motor_id,
@@ -1984,9 +2034,9 @@ private:
       ids.push_back(req->motor_id);
     }
     // stop 永不被 gate 拒绝（安全路径）。
-    // 终止流语义（F32 真机回归教训）：单帧卸力在有插值流/refresh 保持时 ~5 ms 内
+    // 终止流语义（F32 真机回归教训）：单帧保持在有插值流/refresh 保持时 ~5 ms 内
     // 即被旧目标帧覆盖——必须先终止所有后续帧源（hold、插值流、refresh 保持），
-    // 再发卸力帧，使其成为总线上的最后一帧。
+    // 再发重力保持帧，使其成为总线上的最后一帧（其后 refresh 抑制分支续发同款保持）。
     if (mit_hold_.active && (req->motor_id == 0 || mit_hold_.motor_id == req->motor_id)) {
       RCLCPP_WARN(
         this->get_logger(),
@@ -2020,19 +2070,41 @@ private:
       }
     }
     size_t sent = 0;
+    size_t held = 0;
+    const int64_t now_ns = this->now().nanoseconds();
     for (const uint8_t mid : ids) {
-      // 卸力帧：kp=kd=t=0，p=最近 MIT 域反馈位置（无反馈用 0）
+      // F58/LL-053: stop 帧从「裸卸力」改「重力支撑保持」。反馈新鲜（且路由可解）时发
+      // kp=stop_hold_kp/kd=stop_hold_kd/τ=活重力前馈，p=最近反馈位（静止无误差，只撑住臂）；
+      // 反馈死亡时不盲发保持（不知实际位置，kp 会拉错位）→ 维持全零卸力帧。
       const double p = (mid < last_feedback_mit_rad_.size() &&
         std::isfinite(last_feedback_mit_rad_[mid])) ?
         last_feedback_mit_rad_[mid] : 0.0;
+      double kp = 0.0, kd = 0.0, tau = 0.0;
+      bool fresh = false;
+      if (const auto hr = GetRouteByMotorId(mid); hr.has_value()) {
+        const size_t fidx = std::min(
+          hr->trajectory_index, static_cast<size_t>(NumArmJoints() - 1));
+        fresh =
+          fidx < last_feedback_stamp_ns_.size() && std::isfinite(p) &&
+          (now_ns - last_feedback_stamp_ns_[fidx]) <
+            static_cast<int64_t>(feedback_fresh_timeout_s_ * 1e9);
+        if (fresh) {
+          kp = stop_hold_kp_;
+          kd = stop_hold_kd_;
+          tau = ComputeMitTorqueFf(fidx, ArmMapper::ArmBus() == CanBus::CAN0);
+        }
+      }
       PublishFrame(ProtocolCodec::BuildMitControlFrame(
-        ArmMapper::ArmBus(), mid, static_cast<float>(p), 0.0f, 0.0f, 0.0f, 0.0f,
+        ArmMapper::ArmBus(), mid, static_cast<float>(p), 0.0f,
+        static_cast<float>(kp), static_cast<float>(kd), static_cast<float>(tau),
         static_cast<float>(TorqueRangeNmFor(mid)),
         static_cast<float>(SpeedRangeRadSFor(mid))));
       ++sent;
+      held += fresh ? 1 : 0;
     }
     resp->success = true;
-    resp->message = "stopped (" + std::to_string(sent) + " limp frame(s))";
+    resp->message = "stopped (" + std::to_string(sent) + " frame(s), " +
+      std::to_string(held) + " gravity-hold)";
   }
 
   void HandleSetModeService(
@@ -2845,6 +2917,15 @@ private:
   double kd_{1.5};
   double default_velocity_{0.0};
   double default_tau_ff_{0.0};
+  // F56/LL-053: 轨迹帧 V 域速度前馈状态
+  bool trajectory_vel_ff_enable_{true};
+  double trajectory_vel_ff_gain_{1.0};
+  std::array<double, ArmMapper::kMaxArmJoints> vel_ff_filtered_rad_s_{};
+  std::array<double, ArmMapper::kMaxArmJoints> prev_vff_champ_rad_;   // NaN 初值在 ResetRuntimeState
+  std::array<int64_t, ArmMapper::kMaxArmJoints> last_vff_ns_{};
+  // F58/LL-053: stop 重力支撑保持（停在原地 + 活重力前馈抵消自重）
+  double stop_hold_kp_{25.0};
+  double stop_hold_kd_{2.0};
   std::string runtime_tune_topic_;
   bool publish_feedback_joint_states_{true};
   std::string feedback_joint_states_topic_;

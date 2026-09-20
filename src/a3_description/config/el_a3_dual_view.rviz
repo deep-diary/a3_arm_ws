@@ -4,11 +4,10 @@ Panels:
     Name: Displays
     Property Tree Widget:
       Expanded:
-        - /RobotModel1
-        - /RobotModel1/Mass Properties1
-        - /RobotModel1/Description Topic1
-        - /RobotModel1/Links1
+        - /ArmTarget_目标1
+        - /ArmTarget_目标1/Status1
         - /TF1
+        - /TF1/Status1
       Splitter Ratio: 0.5
     Tree Height: 1078
   - Class: rviz_common/Views
@@ -106,8 +105,82 @@ Visualization Manager:
       Mass Properties:
         Inertia: false
         Mass: false
-      Name: RobotModel
+      Name: ArmActual_实际反馈
       TF Prefix: ""
+      Update Interval: 0
+      Value: true
+      Visual Enabled: true
+    - Alpha: 0.44999998807907104
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description File: ""
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /target_robot_description
+      Enabled: true
+      Links:
+        All Links Enabled: true
+        Expand Joint Details: false
+        Expand Link Details: false
+        Expand Tree: false
+        Link Tree Style: Links in Alphabetic Order
+        base_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        end_effector:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        gripper_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        l1_link_urdf_asm:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        l1_urdf_urdf_asm:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        l2_l3_urdf_asm:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        l3_lnik_urdf_asm:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        l4_l5_urdf_asm:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        l5_l6_urdf_asm:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        part_9:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+      Mass Properties:
+        Inertia: false
+        Mass: false
+      Name: ArmTarget_目标
+      TF Prefix: target
       Update Interval: 0
       Value: true
       Visual Enabled: true
@@ -136,6 +209,26 @@ Visualization Manager:
           Value: true
         part_9:
           Value: true
+        target/base_link:
+          Value: true
+        target/end_effector:
+          Value: true
+        target/gripper_link:
+          Value: true
+        target/l1_link_urdf_asm:
+          Value: true
+        target/l1_urdf_urdf_asm:
+          Value: true
+        target/l2_l3_urdf_asm:
+          Value: true
+        target/l3_lnik_urdf_asm:
+          Value: true
+        target/l4_l5_urdf_asm:
+          Value: true
+        target/l5_l6_urdf_asm:
+          Value: true
+        target/part_9:
+          Value: true
       Marker Scale: 0.10000000149011612
       Name: TF
       Show Arrows: true
@@ -154,6 +247,18 @@ Visualization Manager:
                           {}
                         gripper_link:
                           {}
+          target/base_link:
+            target/l1_urdf_urdf_asm:
+              target/l1_link_urdf_asm:
+                target/l2_l3_urdf_asm:
+                  target/l3_lnik_urdf_asm:
+                    target/l4_l5_urdf_asm:
+                      target/part_9:
+                        target/l5_l6_urdf_asm:
+                          target/end_effector:
+                            {}
+                          target/gripper_link:
+                            {}
       Update Interval: 0
       Value: true
   Enabled: true
@@ -192,10 +297,10 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.6200000643730164
+      Pitch: 0.12500007450580597
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 2.5849997997283936
+      Yaw: 2.125
     Saved: ~
 Window Geometry:
   Displays:

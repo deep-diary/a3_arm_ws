@@ -602,6 +602,54 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F54（自动保存/空名=latest）、F38（示教回放）、F51（使能安全）、F40（失能保护）、F36（力控扳机）；[shared/SAFETY.md](../shared/SAFETY.md)、`src/a3_teleop_ps4/README.md`
 - **状态：** `implemented`（2026-09-17，代码 + 文档；仿真验收通过；真机需用户在场按手柄）
 
+## F56 MIT 帧目标速度前馈（帧 V 域填每 tick 目标速度）
+
+- **说明：** 轨迹帧的 V 域此前恒为 `default_velocity_=0.0`——伺服只能靠 kp 追位置，kd=2 又按 `kd·(0−v_act)` 对 2 帧（20 ms）尺度的速度纹波**主动拖刹车**（实测基线 rms|v_act−v_cmd|≈0.146 rad/s、max 0.81）。修复：执行层 `SendMitFrame` 内用上一 tick 的 `champ_smoothed` 差分除以真实 dt 得到目标角速度（逐 tick 与位置目标一致，不与 `SmoothJointCommand` 的限速/启动平滑打架），指数滤波（α=0.3）后乘 `joint_signs` 写进帧 V 域，并按电机型号速度量程钳位（`SpeedRangeRadSFor`）。kd 语义从「拖刹车」变成「朝目标速度阻尼」，20 ms 纹波应显著下降。参数：`trajectory_vel_ff_enable: true`、`trajectory_vel_ff_gain: 1.0`（三份 `control_gains*.yaml` 同步）。dt 上限硬守（>4 tick 视为续流不连续 → 清零防尖峰）；更新与位置逐 tick 同拍，保持位路径 V=0 不变。
+- **验收标准：**
+  1. 仿真：回放期 `tx_stats` 帧速率无回退；无异常日志
+  2. 真机：capture 对比同类回放，rms|v_act−v_cmd| 较基线 0.146 rad/s 显著下降；速度纹波谱 20 ms 峰消除
+- **关联：** F38（回放）、F57（回放时间重排）、[LL-053](../../lessons_learned/LL-053-f56-f57-f58.md)（根因：V=0 → kd 拖刹）
+- **状态：** `implemented`（2026-09-17，代码 + 配置；仿真/真机验收待做）
+
+## F57 回放匀速重排 + 保存时轻量平滑
+
+- **说明：** 回放「一顿一顿」除 F56 的 20 ms 纹波外，第二层根因是**时间轴 = 手拖起-停节奏的忠实复刻**——位置波形平滑动不了时间轴，第 7 点 MA 治不了。修复分两端：
+  1. **回放端**：`arm_controller._time_warp_points` 等速重排——位置不动，时间轴按「逐段最大关节位移」标度匀速化：`v_eff = min(总路径/原时长, vmax)`（只压缩不拉伸），每段 `dt = max(段位移/v_eff, dt_min)`（零位移段取地板 → 点严格递增），保留几何路径、压掉停顿。参数 `playback_time_warp: true`、`playback_warp_vmax_rad_s: 0.6`（实测 0.6 rad/s 跟踪干净，≤1.5 command 限速）、`playback_warp_dt_min_s: 0.02`（@50Hz 网格地板）。在 `_smooth_points`（仍开，压尖峰）之后执行。
+  2. **保存端**：`_dump_recording` 保存时对 positions 做轻量平滑（复用 `_smooth_points` 凸组合不越包络），`teach_save_smooth_samples: 5`（0/1/2 关闭）——latest.yaml / teach_*.yaml 落盘即干净，`latest` 槽与时间戳备份任何消费方受益；时间轴不变。
+- **验收标准：**
+  1. 纯函数：喂起-停人工点阵，停顿段被压缩、time 单调递增、位置不动、总时长 ≤ 原时长
+  2. 仿真回放：日志出现 `playback time-warp: v_eff<=0.6, duration Xs`；`/joint_group_effort_controller/joint_trajectory` 时间轴严格递增且匀速；monitor 不误报
+  3. 真机：回放手感顺（无起-停抖动）；`teach_save_smooth_samples` ≥3 时保存的 yaml 位置已平滑、时间轴不变
+- **关联：** F38（回放）、F54（自动保存 latest）、F56（速度前馈）、[LL-053](../../lessons_learned/LL-053-f56-f57-f58.md)
+- **状态：** `implemented`（2026-09-17，代码 + 配置；验收待做）
+
+## F58 stop 处置改「重力支撑保持」+ 自动 reset 姿态门禁
+
+- **说明：** 用户追问「回放追不上 → stop 裸卸力 → 3s 后 reload 会不会掉臂」——**会**。原 stop 路径：monitor `FOLLOW_STUCK→stop` 发 kp=kd=tau=0 裸卸力帧（`HandleMotorStopService`），且 refresh 的 `hold_suppressed_` 分支随后以零增益 keepalive 续发——整条 stop→3s ladder→reset 窗口内 7 个电机无约束力矩，重力敏感位形（L3/L4 水平轴）下臂直接垂落（9/14 真机事故甩断 L6/L7 同根）。修复两层：
+  1. **执行层（`motor_protocol_node`）**：stop 处置帧在**反馈新鲜**时发「重力支撑保持」——目标锚定反馈位（静止无误差）+ `stop_hold_kp=25`/`stop_hold_kd=2` 中低刚度 + 活重力前馈 `ComputeMitTorqueFf`；refresh 的 `hold_suppressed_` 分支对 `mode ∉ {0,-1}` 且反馈新鲜的电机同样发保持帧（不再零增益盖掉）。反馈陈旧（不能信任保持）/ 失能期才退回零增益卸力帧。`hold_suppressed_` 语义不变（仍不重锚旧位姿）。参数：`stop_hold_kp: 25.0`、`stop_hold_kd: 2.0`（三份 `control_gains*.yaml` 同步）。
+  2. **监视端（`arm_monitor_node`）**：自动 reset 前查重力门禁——订阅 `/a3/gravity_torque`（BestEffort，JointState），样本新鲜（`reset_gravity_fresh_s: 1.0` 内）且 `max|τ_grav| > reset_max_gravity_torque_nm: 5.0` → 拒绝 reset，`_last_event = RESET_DENIED_gravity_unsafe (保持中)`，只保持不重置（记录 `act_done="reset_denied"` 防 ladder 3 s 重试刷屏）。样本陈旧/缺失 → 按旧行为放行（无 gravity 节点 / F51-F52 回归不破坏）。失败路径仍可人工 `/a3/arm/disable`。
+- **验收标准：**
+  1. 真机人为制造大误差触发 `FOLLOW_STUCK→stop`：stop 后臂**停在原地不垂落**（重力保持），对比旧版裸卸力垂落
+  2. 危险位形（超阈）下自动 reset 被拒（日志 `RESET_DENIED_gravity_unsafe`），安全位移回后条件消失可再触发；无 gravity 节点时行为同旧版
+  3. F52 缺电机档（5J）enable + stop 路径不回归（stop_hold 各关节有效）
+  4. 反馈陈旧/失能期的 stop 仍发零增益卸力帧（不信任保持）
+- **关联：** F50（看门狗处置阶梯）、F42（力矩钳位）、[shared/SAFETY.md](../shared/SAFETY.md)（stop 语义更新）、LL-039（裸卸力掉臂事故谱系）、[LL-053](../../lessons_learned/LL-053-f56-f57-f58.md)
+- **状态：** `implemented`（2026-09-17，代码 + 配置；真机验收待做）
+
+## F59 回放 warp 平滑化重写（弧长均匀重采样 + 加速度限幅时间膨胀）
+
+- **说明：** F57 的 `_time_warp_points` 有确认缺陷（真机 2026-09-17 三次回放暴露）：`dt = max(段位移/v_eff, dt_min)` **保留全部点**，零位移停顿段每点吃 0.02 s 地板 → 停顿被重新充气回时间轴（16.6 s 示教 → 30.9 s 回放，违反自己「只压缩不拉伸」的契约），且停顿↔运动交界处速度单 tick 内 0→0.31 rad/s 阶跃（加速度尖峰 11.4 rad/s²）——叠加 F56 速度前馈后 V 域忠实携带阶跃下伺服，真机上同一轨迹 3 次回放 2 次 FOLLOW_STUCK（L2 重力负载爬升段，断点位置各异 = 边际力矩）。重写为两段式：
+  1. **弧长均匀重采样**：按「逐段最大关节位移」累计弧长 S，`v_eff = min(S/原时长, vmax)`，以 `ds = v_eff×dt_min` 在弧长上等步行走、位置在段上线性插值（不新增路径、只做弧长参数化）。停顿段弧长为 0 不占时间 → **停顿天然折叠**，输出时长 ≈ S/v_eff ≤ 原时长，修掉膨胀缺陷。
+  2. **粗网格加速度限幅时间膨胀（LL-057 终版）**：每 5 个细点取锚点（0.1 s 窗），粗网格上跑「前后窗口分工」二次恰解 `amax·dt²+vp·dt−Δq=0`（disc<0 走有界 ×1.5 兜底，≤40 轮），只拉 dt 不动位置，窗口内 dt 均匀回填 50 Hz 细网格。**不在 20 ms 细网格上逐点恰解**——细步 |Δv| 混有「最大关节换帅」离散伪影（真实数据 top-20 |Δv| 全部精确 =v_eff=0.274 rad/s）与 ±1 mrad 编码器噪声（伪加速度 ~5 rad/s²），逐点恰解被噪声带飞、前后向往返震荡（21.6 s 输入膨胀到 38.8 s）；粗网格噪声底降到 ~0.4 rad/s²（对 amax 2.0 有 5× 裕量），只响应真实拐角。限幅口径对准故障时间尺度：FOLLOW_STUCK 是持续力矩饱和（0.5 s 窗），单步 kink 只造成 mrad 跟随暂态。
+  - 参数：`playback_warp_accel_max_rad_s2: 2.0`（0 = 关闭膨胀 pass）。
+- **验收标准：**
+  1. 纯函数：起-停人工点阵 → 停顿段折叠（**带/不带停顿的同一几何路径 warp 输出逐点全同**）、时间严格递增、dt ≥ 网格地板、位置全部落在原轨迹段上（插值不越界）。✅ 2026-09-18 `/tmp/f59_unit.py`：case1 151 pts / 3.09 s
+  2. 实测回归（teach_20260917_214930.yaml，全管线 ramp5s→MA7→warp）：输出时长 ≈ 原时长（F57 版 31.9 s 膨胀不再）；粗网格（0.1 s 窗）max|accel| ≤ amax。✅ 实测：1080 pts / **21.77 s**（输入 21.59 s，v_eff=0.274），stride5-accel **0.98 ≤ 2.0**，位置不越平滑后包络
+  3. 仿真回放：日志 duration 接近原时长；时间轴严格递增；monitor 不误报。✅ 2026-09-18 edge_web_sim 回放同文件：success，1080 pts / 21.9 s，无 FOLLOW_STUCK/fault
+  4. 真机：重放同一轨迹——全程无 FOLLOW_STUCK（对比 F57 版同文件 3 次 2 断）、无停顿膨胀、手感顺。⏳ 待用户上电（任务 #18，同时抓 L2 力矩饱和证据与 F56 V 域真值）
+- **关联：** F57（warp 初版，本项重写其 `_time_warp_points`）、F56（速度前馈——V 域携带 warp 输出）、F38（回放）、[LL-057](../../lessons_learned/LL-057-warp-reinflation-marginal-l2-torque.md)
+- **状态：** `implemented`（2026-09-18 代码终版=粗网格恰解 + 纯函数单测 + 仿真验收过；真机验收待做）
+
 ### F40 — 失能保护（disable → 自动回 home → 失能）
 
 - **说明：** `/a3/arm/disable` 不再是「无条件直接失能」——不在 home 容差内时先平滑回 home 再失能，防止 ready 位直接掉臂。新增参数：`disable_home_pose_name: "home"`、`disable_home_tol_rad: 0.15`、`disable_home_duration_s: 3.0`、`disable_home_confirm_s: 0.5`、`disable_park_timeout_s: 8.0`。新辅助 `_at_home()`（全关节 |q−home| ≤ tol）与 `_safe_park_then_disable()`（同步阻塞：发布 home 轨迹抢占活跃轨迹——执行层 OnTrajectory 天然支持替换，无需排队 → `SAFE_PARK`（期间拒绝新运动指令）→ 轮询连续 `confirm_s` 收敛 → reset → `DISABLED`）。服务语义（同步阻塞返回，`success=true ⟺ 已失能`）：READY/TRAJ 容差内 → 直达 reset → DISABLED；容差外 → safe park → reset → DISABLED（message 含耗时）；IDLE → 直达 reset；DISABLED/COOLING → 幂等不动电机；FAULT → 紧急直达 reset；INIT/TEACH/SERVO/AI → 拒绝 busy；SAFE_PARK → 拒绝「already safe parking」。park 超时 → **FAULT 不 reset**（保持使能、停在半途，人工介入）；reset 被 gate 拒 → park 前 `success=false` + 原文 + "(stop power sequence first)"，park 完成后被拒 → 回 READY（已在 home 位，安全）；`_have_js==False` → 直达 reset + WARN（保持旧行为）。`/a3/motor/reset` 直达保留作紧急失能。

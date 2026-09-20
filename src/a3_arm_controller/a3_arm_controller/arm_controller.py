@@ -111,6 +111,175 @@ def _smooth_points(
     return result
 
 
+def _time_warp_points(
+    points: List[JointTrajectoryPoint],
+    vmax_rad_s: float,
+    dt_min_s: float,
+    accel_max_rad_s2: float,
+) -> List[JointTrajectoryPoint]:
+    """F59/LL-057: 回放时间轴匀速重排（两段式：弧长均匀重采样 + 加速度限幅膨胀）。
+
+    F57 初版缺陷：`dt = max(s/v_eff, dt_min)` 保留全部点——零位移停顿段每点吃
+    dt_min 地板，停顿被重新充气回时间轴（实测 16.6s 示教 → 30.9s 回放，违反「只
+    压缩不拉伸」），且停顿↔运动交界速度单 tick 0→v_eff 阶跃（加速度尖峰 11.4
+    rad/s²，叠加 F56 V 域前馈后下伺服追不上）。重写：
+
+    1. 弧长均匀重采样——逐段最大关节位移累计弧长 S，v_eff=min(S/原时长, vmax)，
+       按 ds=v_eff*dt_min 等弧长步行走、位置在段上线性插值（不新增路径）。停顿段
+       （弧长 0）不占时间 → 停顿天然折叠；输出时长 ≈ S/v_eff ≤ 原时长。
+    2. 加速度限幅时间膨胀——在步长 5 的粗网格（0.1s 窗）上跑逐窗口恰解，只拉
+       dt、不动位置：细步差分混有 ±1 mrad 编码器噪声与「最大关节换帅」离散伪影
+       （伪加速度 ~5 rad/s²，逐点恰解会被噪声带飞、往返震荡，实测 21.6s 输入
+       膨胀到 38.8s）；粗网格把噪声底降到 ~0.4 rad/s²，只响应真实拐角。窗口内
+       dt 均匀回填细网格（50Hz 网格地板保留）。
+
+    与 _smooth_points 配合：先平滑压录制尖峰，再重排压停顿/限加速度。
+    """
+    n = len(points)
+    if n < 3:
+        return points
+    m = len(points[0].positions)
+    dq = [
+        max(abs(points[i + 1].positions[j] - points[i].positions[j]) for j in range(m))
+        for i in range(n - 1)
+    ]
+    total = sum(dq)
+    if total <= 1e-6:
+        return points
+    t_end = (
+        points[-1].time_from_start.sec + points[-1].time_from_start.nanosec * 1e-9
+    )
+    v_eff = min(total / t_end, vmax_rad_s) if t_end > 0 else vmax_rad_s
+
+    # ---- 第 1 段：弧长均匀重采样（等弧长步行走，位置段上线性插值）----
+    ds = v_eff * dt_min_s
+    n_grid = int(math.floor(total / ds)) + 1
+    res: List[List[float]] = []
+    seg, csum = 0, 0.0  # 当前段索引与「段起点处的累计弧长」
+    for k in range(n_grid):
+        s = min(k * ds, total)
+        while seg < n - 1 and s > csum + dq[seg] + 1e-12:  # 零位移段弧长 0，直接滑过
+            csum += dq[seg]
+            seg += 1
+        if seg >= n - 1:
+            res.append(list(points[-1].positions))
+            continue
+        frac = (s - csum) / dq[seg] if dq[seg] > 1e-12 else 0.0
+        frac = min(max(frac, 0.0), 1.0)
+        res.append(
+            [
+                points[seg].positions[j]
+                + frac * (points[seg + 1].positions[j] - points[seg].positions[j])
+                for j in range(m)
+            ]
+        )
+    n2 = len(res)
+
+    # ---- 第 2 段：加速度限幅时间膨胀（只拉时间、不动位置）----
+    # 粗网格（步长 5 锚点，0.1s 窗）上跑「前后窗口分工恰解」：
+    #   前向窗口：k 的进窗口侧速度阶跃由 dt_k 吸收（恰解 v_k = v_{k-1} + amax*dt_k）；
+    #   后向窗口：k-1 的出窗口侧减速阶跃由 dt_{k-1} 吸收。
+    # 恰解式 amax*dt² + vp*dt - dq = 0 的正根；判别式 <0（数值噪声）走有界 ×1.5
+    # 增长兜底保证终止。边界窗口按 sqrt(|Δq|/amax) 起停（零初速）。窗口内 dt 均匀
+    # 回填细网格，保留 50Hz 地板。
+    dts = [dt_min_s] * (n2 - 1)
+    if accel_max_rad_s2 > 0.0 and n2 > 2:
+        stride = 5
+        anchors = list(range(0, n2, stride))
+        if anchors[-1] != n2 - 1:
+            anchors.append(n2 - 1)
+        na = len(anchors)
+        cpos = [res[i] for i in anchors]
+        cdts = [float(anchors[i + 1] - anchors[i]) * dt_min_s for i in range(na - 1)]
+        cdts[0] = max(
+            cdts[0],
+            max(
+                math.sqrt(abs(cpos[1][j] - cpos[0][j]) / accel_max_rad_s2)
+                for j in range(m)
+            ),
+        )
+        cdts[-1] = max(
+            cdts[-1],
+            max(
+                math.sqrt(abs(cpos[-1][j] - cpos[-2][j]) / accel_max_rad_s2)
+                for j in range(m)
+            ),
+        )
+        for _ in range(40):
+            vels = [
+                [(cpos[k + 1][j] - cpos[k][j]) / cdts[k] for j in range(m)]
+                for k in range(na - 1)
+            ]
+            changed = False
+            for k in range(1, na - 1):
+                while True:
+                    worst, wj = 0.0, -1
+                    for j in range(m):
+                        viol = (cpos[k + 1][j] - cpos[k][j]) / cdts[k] - vels[k - 1][j]
+                        if viol > worst:
+                            worst, wj = viol, j
+                    if worst <= accel_max_rad_s2 * cdts[k] * (1.0 + 1e-9):
+                        break
+                    vp = vels[k - 1][wj]
+                    dqj = cpos[k + 1][wj] - cpos[k][wj]
+                    disc = vp * vp + 4.0 * accel_max_rad_s2 * dqj
+                    if disc >= 0:
+                        cdts[k] = (-vp + math.sqrt(disc)) / (2.0 * accel_max_rad_s2)
+                    else:
+                        while (
+                            (cpos[k + 1][wj] - cpos[k][wj]) / cdts[k] - vp
+                            > accel_max_rad_s2 * cdts[k] * (1.0 + 1e-9)
+                        ):
+                            cdts[k] *= 1.5
+                    changed = True
+                    vels[k] = [
+                        (cpos[k + 1][j] - cpos[k][j]) / cdts[k] for j in range(m)
+                    ]
+            for k in range(na - 2, 1, -1):
+                while True:
+                    worst, wj = 0.0, -1
+                    for j in range(m):
+                        viol = (cpos[k][j] - cpos[k - 1][j]) / cdts[k - 1] - vels[k][j]
+                        if viol > worst:
+                            worst, wj = viol, j
+                    if worst <= accel_max_rad_s2 * cdts[k - 1] * (1.0 + 1e-9):
+                        break
+                    vp = vels[k][wj]
+                    dqj = cpos[k][wj] - cpos[k - 1][wj]
+                    disc = vp * vp + 4.0 * accel_max_rad_s2 * dqj
+                    if disc >= 0:
+                        cdts[k - 1] = (-vp + math.sqrt(disc)) / (2.0 * accel_max_rad_s2)
+                    else:
+                        while (
+                            (cpos[k][wj] - cpos[k - 1][wj]) / cdts[k - 1] - vp
+                            > accel_max_rad_s2 * cdts[k - 1] * (1.0 + 1e-9)
+                        ):
+                            cdts[k - 1] *= 1.5
+                    changed = True
+                    vels[k - 1] = [
+                        (cpos[k][j] - cpos[k - 1][j]) / cdts[k - 1] for j in range(m)
+                    ]
+            if not changed:
+                break
+        dts = []
+        for i in range(na - 1):
+            per = cdts[i] / (anchors[i + 1] - anchors[i])
+            dts += [per] * (anchors[i + 1] - anchors[i])
+
+    ts: List[float] = []
+    acc = 0.0
+    for i in range(n2 - 1):
+        acc += dts[i]
+        ts.append(acc)
+    out: List[JointTrajectoryPoint] = []
+    for i in range(n2):
+        q = JointTrajectoryPoint()
+        q.positions = list(res[i])
+        q.time_from_start = _duration(ts[i - 1] if i > 0 else 0.0)
+        out.append(q)
+    return out
+
+
 def _sanitize_name(name: str) -> str:
     s = re.sub(r"[^A-Za-z0-9_-]", "_", (name or "").strip())
     return s or "trajectory"
@@ -154,6 +323,16 @@ class ArmController(Node):
         # 加速度 119/86 → ~8 rad/s²（-93%），几何扰动 ≤20 mrad；0/1 关闭。手拖录制天然带
         # 加速度尖峰，伺服忠实复现即"抖"——平滑压尖峰而非改路径。热设置回放前读取。
         self.declare_parameter("playback_smooth_samples", 7)
+        # F57/F59/LL-053: 回放时间轴匀速重排（弧长均匀重采样压停顿 + 加速度限幅膨胀
+        # 消速度跳变，保几何路径）。vmax 是单关节速度上限——实测 0.6 rad/s 跟踪干净；
+        # dt_min 是 @50Hz 网格地板；accel_max 只拉时间不动位置（0 = 关闭膨胀 pass）。
+        self.declare_parameter("playback_time_warp", True)
+        self.declare_parameter("playback_warp_vmax_rad_s", 0.6)
+        self.declare_parameter("playback_warp_dt_min_s", 0.02)
+        self.declare_parameter("playback_warp_accel_max_rad_s2", 2.0)
+        # F57/LL-053: 保存时轻量平滑（中心滑动平均窗口采样数；0/1/2 = 不保存平滑）。
+        # 落盘即干净（latest.yaml / teach_*.yaml 任何消费方受益），时间轴不变。
+        self.declare_parameter("teach_save_smooth_samples", 5)
         # F54: 示教停止自动保存的最小样本数——start 后立刻 stop 的误触发（1~2 个样本）不许
         # 用退化单点文件覆盖上一条好的 latest。~0.2s 拖动即可超过（@50Hz 10 样本）。
         self.declare_parameter("teach_auto_save_min_samples", 10)
@@ -1357,7 +1536,28 @@ class ArmController(Node):
         return resp
 
     def _dump_recording(self) -> dict:
-        """F54: 把当前内存录制(self._record: (t, pos) 列表)序列化为磁盘 YAML 数据。"""
+        """F54: 把当前内存录制(self._record: (t, pos) 列表)序列化为磁盘 YAML 数据。
+
+        F57/LL-053: 保存时对 positions 做轻量平滑（teach_save_smooth_samples，默认 5 点
+        中心滑动平均，复用 _smooth_points 凸组合不越包络）——latest.yaml 与
+        teach_*.yaml 落盘即干净，任何消费方受益；时间轴不动。w<3 时原样保存。
+        """
+        rec = self._record
+        w = int(self.get_parameter("teach_save_smooth_samples").value)
+        if w >= 3 and len(rec) >= 4:
+            tmp: List[JointTrajectoryPoint] = []
+            for t, pos in rec:
+                q = JointTrajectoryPoint()
+                q.positions = [float(p) for p in pos]
+                q.time_from_start = _duration(float(t))
+                tmp.append(q)
+            rec = [
+                (
+                    pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9,
+                    pt.positions,
+                )
+                for pt in _smooth_points(tmp, w)
+            ]
         data = {
             "joint_names": list(self._joint_names),
             "points": [
@@ -1365,7 +1565,7 @@ class ArmController(Node):
                     "positions": [float(p) for p in pos],
                     "time_from_start_sec": float(t),
                 }
-                for t, pos in self._record
+                for t, pos in rec
             ],
         }
         return data
@@ -1481,6 +1681,22 @@ class ArmController(Node):
             self.get_logger().info(
                 f"playback smooth: {smooth_s}-pt moving avg applied "
                 f"({len(traj.points)} pts)"
+            )
+
+        # F57/F59/LL-053: 最后做时间轴匀速重排（位置已平滑，弧长均匀重采样压停顿
+        # + 加速度限幅膨胀消速度跳变，保几何路径）。停顿折叠 → 输出时长 ≤ 原时长。
+        if bool(self.get_parameter("playback_time_warp").value):
+            vmax = float(self.get_parameter("playback_warp_vmax_rad_s").value)
+            dt_min = float(self.get_parameter("playback_warp_dt_min_s").value)
+            amax = float(self.get_parameter("playback_warp_accel_max_rad_s2").value)
+            traj.points = _time_warp_points(traj.points, vmax, dt_min, amax)
+            warp_dur = (
+                traj.points[-1].time_from_start.sec
+                + traj.points[-1].time_from_start.nanosec * 1e-9
+            )
+            self.get_logger().info(
+                f"playback time-warp: v_eff<={vmax} rad/s, amax<={amax} rad/s2, "
+                f"duration {warp_dur:.1f}s ({len(traj.points)} pts)"
             )
 
         duration = (

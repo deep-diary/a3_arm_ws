@@ -48,6 +48,9 @@
     enable_trajectory_interpolation: true
     trajectory_interp_rate_hz: 200.0
     trajectory_interpolation_method: auto
+    # F56/LL-053: 帧 V 域目标速度前馈（见 control_gains.yaml 注释）
+    trajectory_vel_ff_enable: true
+    trajectory_vel_ff_gain: 1.0
     zero_torque_kp: 0.0
     zero_torque_kd: 1.0
     control_mode_topic: /a3/control_mode
@@ -85,3 +88,6 @@
     publish_tx_stats: true
     tx_stats_topic: /a3/motor/tx_stats
     tx_rate_ok_ratio: 0.9
+    # F58/LL-053: stop 重力支撑保持（见 control_gains.yaml 注释）
+    stop_hold_kp: 25.0
+    stop_hold_kd: 2.0

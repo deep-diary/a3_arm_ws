@@ -18,6 +18,13 @@ a3_arm_monitor:
     escalation_cooldown_s: 5.0
     clear_hold_s: 2.0
     ladder_stop_to_reset_s: 3.0
+    # F58/LL-053: 自动 reset 前重力门禁——危险位形（max|τ_grav| 超阈且样本新鲜）拒绝
+    # 重置：stop 处置已改重力支撑保持（motor_protocol_node stop_hold*），直接 reset
+    # 会解除保持 → 重力敏感位形下臂可能垂落。样本陈旧/缺失时按旧行为放行
+    # （无 gravity 节点场景 / F51-F52 回归不破坏）。
+    gravity_torque_topic: /a3/gravity_torque
+    reset_max_gravity_torque_nm: 5.0
+    reset_gravity_fresh_s: 1.0
     # FOLLOW_STUCK：运动窗口内跟随误差
     follow_error_max_rad: 0.25
     follow_error_sustain_s: 0.5

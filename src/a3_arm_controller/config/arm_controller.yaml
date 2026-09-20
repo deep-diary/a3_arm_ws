@@ -24,6 +24,21 @@
     # 加速度尖峰（实测 reBot L2 113 rad/s²），伺服忠实复现即"抖动"；7 点平滑把尖峰
     # 砍 ~93%（→~8 rad/s²），路径几何扰动 ≤20 mrad，停点几乎不动。0/1 关闭，热设置生效。
     playback_smooth_samples: 7
+    # F57/LL-053: 回放时间轴匀速重排（弧长均匀重采样压手拖起-停停顿、保几何路径）。
+    # vmax 是单关节速度上限——实测 0.6 rad/s 跟踪干净；dt_min 是 @50Hz 网格地板。
+    # F59/LL-057: accel_max 是加速度限幅——在 0.1s 粗网格（步长 5）上做「时间膨胀」
+    # （只拉时间不动位置）消掉弧长重采样在真实拐角的速度跳变。细步差分的尖峰大部分
+    # 是「最大关节换帅」离散伪影 + 编码器噪声（非持续需求，只造成 mrad 级跟随误差
+    # 暂态，不会触发 FOLLOW_STUCK）；持续饱和（kp*err+重力 > 5Nm 限幅）才是断点根因，
+    # 故限幅只约束粗网格的持续加速度需求（实测 21.6s 输入 → 21.8s 输出，F57 版为
+    # 30.9s）；0 = 关闭膨胀。
+    playback_time_warp: true
+    playback_warp_vmax_rad_s: 0.6
+    playback_warp_dt_min_s: 0.02
+    playback_warp_accel_max_rad_s2: 2.0
+    # F57/LL-053: 保存时轻量平滑（中心滑动平均窗口，@50Hz 采样数；0/1/2 = 不保存）。
+    # latest.yaml / teach_*.yaml 落盘即干净，任何消费方受益。
+    teach_save_smooth_samples: 5
     # F41: move_to/goto/ramp 兜底——最短时长 + ≥50Hz 插值点
     move_to_min_duration_s: 3.0
     move_to_points_hz: 50.0

@@ -107,6 +107,13 @@ class ArmMonitorNode(Node):
         self._status_pub = self.create_publisher(
             MonitorStatus, p("monitor_status_topic"), 10)
 
+        # F58/LL-053: 重力前馈样本（reset 姿态门禁用）。BestEffort 按真机 QoS；
+        # 无 gravity 节点发布时样本缺失 → 门禁放行（F51/F52 回归兼容）。
+        self._grav_effort = None      # 最近 max|effort|（None=无样本）
+        self._grav_stamp_mono = 0.0   # 最近到达的 monotonic 时刻（新鲜度判据）
+        self.create_subscription(
+            JointState, p("gravity_torque_topic"), self._on_gravity, _SENSOR_QOS)
+
         # ---- 服务客户端（处置阶梯）----
         # 客户端须独立可重入回调组：timer 回调内同步等待响应时，响应回调要靠
         # 执行器其余线程并发处理（arm_controller 同款坑：默认互斥组下回调阻塞
@@ -169,6 +176,11 @@ class ArmMonitorNode(Node):
         d("clear_hold_s", 2.0)
         d("ladder_stop_to_reset_s", 3.0)
         d("service_timeout_s", 1.0)
+        # F58/LL-053: 自动 reset 前重力门禁——危险位形拒绝重置（stop 已改重力支撑保持，
+        # 直接 reset 会解除保持 → 臂在重力敏感位形下可能掉）。缺新鲜样本时放行。
+        d("gravity_torque_topic", "/a3/gravity_torque")
+        d("reset_max_gravity_torque_nm", 5.0)
+        d("reset_gravity_fresh_s", 1.0)
         for f, act in FAULT_DEFAULTS.items():
             d(f"{f.lower()}_action", act)
 
@@ -191,6 +203,11 @@ class ArmMonitorNode(Node):
             return
         self._motor_stamp_s = stamp
         self._motor = {s.motor_id: s for s in msg.states}
+
+    def _on_gravity(self, msg: JointState):
+        self._grav_stamp_mono = time.monotonic()
+        if msg.effort:
+            self._grav_effort = max(abs(float(e)) for e in msg.effort)
 
     def _on_traj(self, msg: JointTrajectory):
         # 新轨迹抢占活跃轨迹（与执行层 OnTrajectory 语义一致）
@@ -306,6 +323,21 @@ class ArmMonitorNode(Node):
         self.get_logger().warn(f"[monitor] {label}: success={ok} {msg}")
         return ok
 
+    def _gravity_reset_allowed(self) -> bool:
+        """F58/LL-053: 自动 reset 前重力检查。True=允许重置。
+
+        样本新鲜（reset_gravity_fresh_s 内）才判阈值；样本陈旧/缺失按旧行为放行
+        （无 gravity 节点场景 / F51-F52 回归不破坏）。危险位形（max|τ_grav| 超阈）
+        拒绝 reset 只保持——stop 现已是重力支撑保持，直接 reset 会解除保持而可能掉臂。
+        """
+        if self._grav_effort is None:
+            return True
+        if time.monotonic() - self._grav_stamp_mono > float(
+                self.get_parameter("reset_gravity_fresh_s").value):
+            return True
+        limit = float(self.get_parameter("reset_max_gravity_torque_nm").value)
+        return self._grav_effort <= limit
+
     def _execute(self, fault: str, action: str):
         """执行处置动作；返回是否实际执行了服务调用（report 视为执行）。"""
         now = time.monotonic()
@@ -316,6 +348,19 @@ class ArmMonitorNode(Node):
             self._call_service(
                 self._stop_cli, MotorStop.Request(motor_id=0), label)
         elif action == "reset":
+            # F58/LL-053: 重力门禁——危险位形拒绝自动重置（保持重力支撑），记
+            # act_done 防 ladder 每 3s 重试刷屏；待用户移回安全位后条件消失可再触发。
+            if not self._gravity_reset_allowed():
+                self.get_logger().error(
+                    f"[monitor] {label} DENIED — 重力不安全 "
+                    f"(max|τ_grav|={self._grav_effort:.2f} Nm > "
+                    f"{self.get_parameter('reset_max_gravity_torque_nm').value} Nm)，"
+                    f"保持重力支撑；人工: /a3/arm/disable 或移回安全位后重试")
+                self._act_done[fault] = ("reset_denied", now)
+                self._last_event = (
+                    f"{time.strftime('%H:%M:%S')} {fault} "
+                    f"RESET_DENIED_gravity_unsafe (保持中)")
+                return False
             self._call_service(
                 self._reset_cli, MotorCommand.Request(motor_id=0, command=2), label)
         elif action == "disable":
