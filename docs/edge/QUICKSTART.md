@@ -7,9 +7,10 @@
    - 板载终端环境：`source ~/a3_arm_ws/scripts/a3_shell_env.sh`（`~/.bashrc` 已接入则新开终端自动生效）。看板载 HDMI 用 `DISPLAY=:0`，SSH **不要** `-X`/`-Y`。
 1. Platform CAN（RK3588 真机）：见 [PLATFORM_CAN.md](PLATFORM_CAN.md)
 2. Build packages listed in [../../README.md](../../README.md)
-3. `ros2 launch a3_bringup a3_bringup.launch.py`
+3. `ros2 launch a3_bringup a3_bringup.launch.py`（统一入口，默认起编排层 + MQTT 桥 + MoveIt + 夹爪力控 + PS4；按需关组件见下方）
    - 重力补偿 MIT 前馈（默认关）：`use_gravity_compensation:=true`
    - 或运行时：`ros2 param set /motor_protocol_node enable_gravity_compensation true`
+   - 组件开关（默认值见 [ARCHITECTURE.md](ARCHITECTURE.md)「Launch 链」）：`use_arm_controller` / `use_mqtt` / `use_moveit` / `use_gripper` / `use_teleop` 默认开，`use_servo` / `use_rviz` / `use_gravity_compensation` 默认关。例：缺 L7 的 5J 档加 `use_gripper:=false`
 4. PS4 电源：Square 长按 = start；Options 长按 = set_zero；Triangle = shutdown。笛卡尔/夹爪见第 10 节。
 5. Send test trajectory:
    ```bash
@@ -62,13 +63,13 @@
     - **simple（默认）**：右摇杆基座系左右/上下；左摇杆 Y 前后；L2→L6、R2→夹爪力控（F36：松开全开，按过 0.2 后 0.2..1 → 0.1..1.0 Nm）；Square/Circle 夹爪开/合
     - D-pad 上/下/左/右：`ready` / `zero` / `home` / `ready`（上键暂与右键同，work 已并入 ready）；Cross 急停
     - 改映射只编 `config/mappings/*.yaml`；轴序校准见 `ds4_linux.yaml`
-    - 真机：`a3_bringup.launch.py use_teleop:=true mapping:=default` 起 mapper；笛卡尔还需另开 `servo.launch.py`（板测待办）
+    - 真机：统一入口默认已含 PS4 mapper（`teleop_mapping:=default` 切换 L1 死人开关映射）；笛卡尔 jog 加 `use_servo:=true` 一起起（勿另开 `servo.launch.py`，会双 RSP + sim_executor 冲突；板测待办）
 
 11. **机械臂编排节点（F21，a3_arm_controller）：**
     ```bash
-    # 先起底层执行栈（真机），编排层独立启动：
-    ros2 launch a3_bringup a3_bringup.launch.py
-    ros2 launch a3_arm_controller arm_controller.launch.py
+    # 真机：统一入口默认已含编排层（use_arm_controller:=true，含 F50 看门狗），直接调服务即可；
+    # 若需单独起（如用非默认 config_file）：a3_bringup 加 use_arm_controller:=false，再：
+    # ros2 launch a3_arm_controller arm_controller.launch.py config_file:=...
 
     # 初始化（设零 + 确认 7 电机到位 + 使能）：
     ros2 service call /a3/arm/init std_srvs/srv/Trigger
@@ -115,9 +116,8 @@
 13. **Web 端机械臂控制面板（F23，跨仓 deep-trace）：**
     浏览器经 MQTT 直连 EMQX 下发机械臂指令，无需 Django 经手；编排状态实时回显。
     ```bash
-    # 设备侧：起编排节点 + MQTT 桥接（bridge.yaml 已含 /a3/arm_status 展平）
-    ros2 launch a3_arm_controller arm_controller.launch.py
-    ros2 launch a3_mqtt_bridge bridge.launch.py
+    # 设备侧：统一入口默认已含编排节点 + MQTT 桥接（bridge.yaml 已含 /a3/arm_status 展平）
+    ros2 launch a3_bringup a3_bringup.launch.py   # use_mqtt:=true 默认
     ```
     - 前端（外部仓 `/home/cat/deep-trace`，分支 `rk3588`）：RK3588 详情页 → 「机械臂编排节点」(`a3_arm_controller`) 卡片 → 点击展开控制面板。
     - 面板含状态区（`arm_state`/`arm_mode`/`arm_message`，随 `/a3/arm_status` 刷新）、10 个动作按钮（初始化/使能/失能/示教起止/保存/回放/goto/进入退出 AI）、操作消息列表。
@@ -318,13 +318,14 @@ cat ~/.a3/stats/torque_stats.yaml
 can1 上只剩部分电机时（事故后只剩 L1–L5），用**档位**整套替换——`motor_map_file` 与 `gains_file` **必须配对**（逐关节数组长度 = `joint_names` 长度），否则执行层报「F52 档位配置非法」并退回 7J 默认档（不静默降级）：
 
 ```bash
-# 真机 5J 档（L6/L7 缺失）：停掉 7J 栈后
+# 真机 5J 档（L6/L7 缺失）：停掉 7J 栈后；统一入口显式关夹爪（缺 L7）与 MoveIt（SRDF 7 关节，
+# FJT 若执行会把 7 关节轨迹打到 5 关节执行层），编排层换 5J 配置
 source scripts/a3_shell_env.sh
 CFG=$HOME/a3_arm_ws/install/a3_can_bridge/share/a3_can_bridge/config
 ros2 launch a3_bringup a3_bringup.launch.py use_power_sequence:=false use_teleop:=false \
-    gains_file:=$CFG/control_gains_5j.yaml motor_map_file:=$CFG/motor_map_5j.yaml
-ros2 launch a3_arm_controller arm_controller.launch.py \
-    config_file:=$HOME/a3_arm_ws/install/a3_arm_controller/share/a3_arm_controller/config/arm_controller_5j.yaml
+    use_gripper:=false use_moveit:=false \
+    gains_file:=$CFG/control_gains_5j.yaml motor_map_file:=$CFG/motor_map_5j.yaml \
+    arm_controller_config:=$HOME/a3_arm_ws/install/a3_arm_controller/share/a3_arm_controller/config/arm_controller_5j.yaml
 # 起栈自检：执行层日志 "F52 档位：5 关节 [...]"、/joint_states 恰好 5 个名字、MotorStates 5 条、
 #           控制器日志 "a3_arm_controller ready: joints=5"、看门狗 /a3/monitor/status = OK
 ```
@@ -345,8 +346,9 @@ ros2 launch a3_arm_controller arm_controller.launch.py \
 
 ```bash
 # 0) 前置：硬件栈在跑、臂 enable 到 READY、周围清空、手边可断电；量夹爪全开
+#    统一入口默认已含编排层（READY 门禁 + 温度守护数据源）；重力采集不需要 MoveIt/Servo，
+#    可加 use_moveit:=false use_servo:=false 减负载
 ros2 launch a3_bringup a3_bringup.launch.py use_power_sequence:=false use_teleop:=false
-ros2 launch a3_arm_controller arm_controller.launch.py      # 另开终端：READY 门禁 + 温度守护数据源
 
 # 1) 先看要动的点位与时长（不动臂）
 python3 scripts/gravity_calibration.py --dry-run --no-rest-anchor \

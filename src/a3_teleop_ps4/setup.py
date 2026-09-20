@@ -30,6 +30,7 @@ setup(
             "ps4_mapper = a3_teleop_ps4.ps4_mapper:main",
             "joy_dump = a3_teleop_ps4.joy_dump:main",
             "ds4_hid_node = a3_teleop_ps4.ds4_hid_node:main",
+            "ds4_tcp_joy_node = a3_teleop_ps4.ds4_tcp_joy_node:main",
         ],
     },
 )
