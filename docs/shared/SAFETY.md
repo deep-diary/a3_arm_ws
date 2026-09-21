@@ -29,6 +29,8 @@ A3 Edge 与 A3 CloudEdge 共同遵守的安全设计原则。具体参数以配�
 
 - gate 关闭时：强制退出运动相关模式，禁止新轨迹
 - Servo：`incoming_command_timeout` 超时后应回 `IDLE` 并停止下发
+- **Servo 通道分离（F65）：** Servo 50 Hz 单点帧走独立话题 `/a3/servo/joint_trajectory`，与编排层多点轨迹主话题 `/joint_group_effort_controller/joint_trajectory` 物理隔离。执行层对两条通道各自互锁：主话题在 `SERVO` 模式仍**一律丢弃**；servo 话题**仅在 gate 开 + 非零力矩 + `SERVO` 模式**消费，目标超 `servo_target_timeout_s`（0.3 s）过期即停刷新，丢弃计数在 MP gate 窗日志 `servo[cb/apply/drop]` 可观测。仿真节点不做此互锁（有意简化，仅仿真）。
+- **L3 使能幂等（F65）：** 电源序列 EnableInit 已使能 7 电机时，L3 一键使能不再重复调 `/a3/motor/enable`（会被 F32 gate 拒绝），直接进 READY；判定要求全部电机状态新鲜且已使能。
 - 零力矩 ≠ 纯 `tau=0`：默认同重力前馈叠加，退出时恢复原 `kp`/`kd`
 - **手柄双模式死人开关（F60；F64 修订）：** 生产映射 `mapping:=default` 时，摇杆按动作分两个死人开关——**L1 按住** 才允许摇杆**平移** Twist（左摇杆 Y/Z、右摇杆 X），**R1 按住** 才允许摇杆**旋转** Twist（右摇杆左右=偏航）；松开立即发零速度（servo_mode_bridge 0.5 s 超时兜底停）。平移/旋转速度档相互独立，由 **D-pad 上下调平移档、左右调旋转档**（步进 0.15，clamp 0.1..1.0，F64；R1 的「全速档」绑定已删除）。**R2 夹爪力控不经 L1/R1 门控**（夹持操作需要独立于 jog 死人开关，F60 起）。`mapping:=simple` 调试档关闭门控（见 `config/mappings/simple.yaml`）。命名位姿/示教/电源键不要求 L1/R1。
 - **键位总览（F60，F64 修订，取代 F55）：** L3 短按=一键上电+使能（power start → gate → enable）、R3 短按=失能（F40 safe park）、**Cross(X) 长按 1 s=硬急停**（power shutdown，门禁关）、Triangle/Circle 短按=ready/home 命名位姿、Share/Options 短按/ Square = 示教开始/结束（自动保存）/回放、PS 短按=init、Options 长按 3 s=调零、**L1/R1 按住=平移/旋转死人开关**、D-pad 上下/左右=平移/旋转速度档。完整映射表见 `src/a3_teleop_ps4/README.md`，操作员流程见 [docs/edge/PS4_OPERATOR_GUIDE.md](../edge/PS4_OPERATOR_GUIDE.md)。
@@ -103,7 +105,7 @@ MIT 电机上电用单圈编码器 + 多圈推算恢复绝对角：zero_sta=1（
 
 Web 端单电机调试（CAN 扫描 / MIT 直驱 / 保持）的安全边界：
 
-1. **互锁（gate 关闭才可调试写）：** `gate_open=true`（电源序列运行中）时，`motor_protocol_node` 拒绝使能/复位/设零/MIT/模式切换/参数写入（带 gate 文案的 `success=false`）。扫描、读类（device_id/version）与 `motor_stop` **永不拦截**——停止能力在任何时刻都必须可用。
+1. **互锁（gate 关闭才可调试写）：** `gate_open=true`（电源序列运行中）时，`motor_protocol_node` 拒绝复位/设零/MIT/模式切换/参数写入（带 gate 文案的 `success=false`）。**唯一例外（F66）**：`enable` 在 gate Running + `control_mode=IDLE` + 无活动轨迹时放行——这是 L3 从「编排层 DISABLED/橙灯但 gate 仍 Running」恢复的通道，且仍走完整 F51/F66 重锚+软起步。扫描、读类（device_id/version）与 `motor_stop` **永不拦截**——停止能力在任何时刻都必须可用。
 2. **保持自动取消：** `gate_open` 由关→开的瞬间，正在进行的 MIT 保持被 C++ 侧自动取消并记 WARN；前端不承担安全职责。
 3. **停止即重力支撑保持：** `/a3/motor/stop` 取消保持并发送 **重力保持帧**——反馈新鲜（`feedback_fresh_timeout_s`）时逐电机 `kp=stop_hold_kp / kd=stop_hold_kd / t=重力前馈`、p=最近反馈角（F58），停在原位不垂落；反馈陈旧/缺失时才退回 `kp=kd=t=0` 裸卸力帧（没有反馈就不能信任保持）。保持期间若 CAN 中断，电机固件按帧停超时自然卸力（与轨迹路径同一机制）。**危险位形（重力敏感）下 stop 不再掉臂。**
 4. **参数安全：** `mit_command` 的 `motor_id` 禁止 0 广播（只允许 1..127 单电机）；位置/速度/增益/力矩在服务端 clamp 到 `ProtocolCodec` 常量；保持时长上限 `max_hold_duration_s`（默认 30 s），发送频率上限 `min(200, max_tx_rate_per_motor_hz)`。
@@ -168,6 +170,17 @@ Web 端单电机调试（CAN 扫描 / MIT 直驱 / 保持）的安全边界：
 4. **失能期陈旧目标要出声**：失能态下 `|目标−反馈| > 0.15 rad` 限频 WARN——事故时该状态静默保留了 2 分钟。
 5. **意图边界必须重基准**：看门狗在示教/零力矩退出、整臂失能→使能沿，把保持参照 `_last_goal ← 当前实际位姿`、清运动窗口、给 2 s 宽限。否则「合法的新位姿」被判成保持漂移 → 假触发 stop→reset（事故触发源）。修假阳性**必须同时验证真阳性**：带外失能仍要报 UNEXPECTED_DISABLE 且编排层转 DISABLED。
 6. **带外失能双通道**：看门狗 UNEXPECTED_DISABLE（持续窗 0.5 s）**必须短于**编排层本地兜底（1.0 s），否则编排层先转 DISABLED 会让看门狗持续窗清零、真故障永远报不出来。
+
+## 使能意图安全（F66，LL-070 事故条款——F51 覆盖裸 CAN 使能缺口）
+
+**硬急停作废全部意图；任何使能路径都必须重锚。** 2026-09-22 F51 同类事故复发并第二次甩断 L6/L7：X 长按与 L3 上电走的是 `power_sequence_node` 裸 CAN 帧（disable 0x04 / enable 0x03），**不经 ROS 服务**，F51 重锚/软起步全部不执行；`enable_mode_rising_smoothing` 又在真机 yaml 被关。人工搬臂回 home 后裸使能 → refresh 续发陈旧目标（1.0839 rad，kp=80）→ 甩回失能前位姿。
+
+1. **gate 关闭沿 = 全部运动意图作废**：执行层收到 `/power_sequence/gate_open=false` 边沿，立即清插值轨迹、servo 缓存、全部 MIT 目标缓存（NaN）、LL-040 命名轨迹回退表、软起步状态，并置保持抑制——gate 关期间只发零增益保活。任何「带外失能」语义等同。
+2. **使能模式上升沿无条件重锚（不再受参数开关控制）**：反馈中电机模式 0/未知→使能态的上升沿，无论是服务使能还是电源序列裸 0x03 使能，都执行 F51 三件套（新鲜反馈重锚 + 清回退缓存 + 0.8 s 软起步）；偏差 >0.15 rad 打 ERROR（`F66 enable rising edge`）。桥启动时电机已锁存使能（LL-042）同样在首帧反馈沿重锚。
+3. **refresh 防甩兜底**：无活动轨迹/servo 意图时，有限目标与新鲜实测位偏差 > `stale_target_snap_guard_rad`(0.25 rad) 且无软起步在身 → 拒绝发送、重锚实测位并软起步（第三道保险，正常跟踪残差 <0.02 rad 不触发）。
+4. **F32 恢复通道**：gate Running + 编排层 IDLE + 无活动轨迹时**允许 enable**（L3 从橙灯 DISABLED 恢复的唯一路径，走完整重锚+软起步）；reset/set_zero/save_param 在 gate 开时仍无条件拒绝。
+5. **使能帧补发 + 看门狗宽限**：EnableInit 保持期每 50 ms 重发 0x03（防 EPScan 同窗口竞争漏帧）；看门狗在 none/partial→all 使能沿后 2 s 宽限窗内豁免 UNEXPECTED_DISABLE（真实失能宽限 + 0.5 s sustain 后仍必报）。
+6. **回归**：`scripts/a3_test/f66_gate_enable_regression.py` 精确复刻事故时序；修复前二进制在该测试下复现「目标 1.090 / 首帧 kp=80 / mock 被甩到 1.090」真阳性。
 
 ## 产品线实现差异
 

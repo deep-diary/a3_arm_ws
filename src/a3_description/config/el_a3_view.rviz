@@ -7,10 +7,9 @@ Panels:
         - /RobotModel1
         - /RobotModel1/Mass Properties1
         - /RobotModel1/Description Topic1
-        - /RobotModel1/Links1
         - /TF1
       Splitter Ratio: 0.5
-    Tree Height: 1078
+    Tree Height: 755
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
@@ -136,6 +135,26 @@ Visualization Manager:
           Value: true
         part_9:
           Value: true
+        target/base_link:
+          Value: true
+        target/end_effector:
+          Value: true
+        target/gripper_link:
+          Value: true
+        target/l1_link_urdf_asm:
+          Value: true
+        target/l1_urdf_urdf_asm:
+          Value: true
+        target/l2_l3_urdf_asm:
+          Value: true
+        target/l3_lnik_urdf_asm:
+          Value: true
+        target/l4_l5_urdf_asm:
+          Value: true
+        target/l5_l6_urdf_asm:
+          Value: true
+        target/part_9:
+          Value: true
       Marker Scale: 0.10000000149011612
       Name: TF
       Show Arrows: true
@@ -154,6 +173,18 @@ Visualization Manager:
                           {}
                         gripper_link:
                           {}
+          target/base_link:
+            target/l1_urdf_urdf_asm:
+              target/l1_link_urdf_asm:
+                target/l2_l3_urdf_asm:
+                  target/l3_lnik_urdf_asm:
+                    target/l4_l5_urdf_asm:
+                      target/part_9:
+                        target/l5_l6_urdf_asm:
+                          target/end_effector:
+                            {}
+                          target/gripper_link:
+                            {}
       Update Interval: 0
       Value: true
   Enabled: true
@@ -184,28 +215,28 @@ Visualization Manager:
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.06734233349561691
-        Y: 0.08941935747861862
-        Z: 0.09669988602399826
+        X: 0.007090275175869465
+        Y: -0.01027845498174429
+        Z: 0.0988183319568634
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.6200000643730164
+      Pitch: 0.6050000786781311
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 2.5849997997283936
+      Yaw: 2.3350000381469727
     Saved: ~
 Window Geometry:
   Displays:
     collapsed: false
-  Height: 2096
+  Height: 1562
   Hide Left Dock: false
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd000000010000000000000190000007d4fc0200000002fb000000100044006900730070006c006100790073010000003e000004ba000000ca00fffffffb0000000a0056006900650077007301000004fe00000314000000a600ffffff00000d24000007d400000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd000000010000000000000190000005befc0200000002fb000000100044006900730070006c006100790073010000003e00000377000000ca00fffffffb0000000a0056006900650077007301000003bb00000241000000a600ffffff00000975000005be00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: false
-  Width: 3770
-  X: 70
-  Y: 27
+  Width: 2827
+  X: 1000
+  Y: 164

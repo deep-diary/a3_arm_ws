@@ -276,7 +276,8 @@ def generate_launch_description():
         ],
         remappings=[
             ("~/delta_twist_cmds", "/servo_node/delta_twist_cmds"),
-            ("~/command_out", "/joint_group_effort_controller/joint_trajectory"),
+            # L6：servo 输出独立话题，执行层仅 SERVO 模式消费（不与多点轨迹互串）
+            ("~/command_out", "/a3/servo/joint_trajectory"),
         ],
         output="screen",
         condition=IfCondition(use_servo),

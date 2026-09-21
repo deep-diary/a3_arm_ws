@@ -238,7 +238,7 @@ reBot 同样是：**MoveIt 做规划 IK + Pinocchio 做重力补偿**。A3 对�
 | **验收** | 连续笛卡尔运动；奇异附近可降速或停 |
 | **常见坑** | 配置存在但未接入 launch；与轨迹模式未仲裁 |
 | **规划位置** | reBot 官方亦弱；属 A3 **Wave B** 差异化（C4），可在对齐后再做 |
-| **A3 现状（2026-08）** | **仿真已集成**：F14 `servo.launch.py` + F16 `edge_teleop_sim.launch.py`（Servo + `ps4_mapper` + `sim_executor` 同图）；Servo 6 关节流与 D-pad 多点轨迹在 `sim_executor` 仲裁；无 `/joy` 时不发令。**真机**：`use_teleop:=true` 仅接 mapper，Servo 与 CAN 执行层仍须分 launch 板测 |
+| **A3 现状（2026-09-21）** | **仿真+真机代码均已集成**：F14/F16 仿真一体 launch；F65 真机入环——Servo 输出走独立话题 `/a3/servo/joint_trajectory`，`motor_protocol_node` 仅在 gate 开 + `SERVO` 模式消费（200 Hz tick 复用 MIT 发送路径，0.3 s 过期保护），mapper 按需 `start_servo`，与编排层多点轨迹物理隔离。仿真 F62 合成 46/0；**真机板测待上电确认**（历史根因：SERVO 模式下主轨迹话题被互锁丢弃，仿真无此互锁） |
 
 ### L7 — 动力学与示教
 
@@ -290,7 +290,7 @@ flowchart LR
 | L3 模型/FK·IK | ✅ | ✅ MoveIt IK + Pinocchio 动力学 | ✅ MoveIt kinematics + **Pinocchio `g(q)`** |
 | L4 规划 | ✅ | ✅ MoveIt demo | ✅ MoveIt demo（mock） |
 | L5 真机 Plan+Execute | ✅ | ✅ `hardware.launch` | ✅ 仿真 `zero→ready`；真机统一 launch 板测中 |
-| L6 Servo | ✅ | ❌ | ⚠️ 仿真 F14+F16 已集成；真机 CAN 待验 |
+| L6 Servo | ✅ | ❌（官方亦弱） | 🟡 F65 真机代码已入环、仿真 46/0（独立 `/a3/servo/joint_trajectory`），真机板测待验（2026-09-21） |
 | L7 重力补偿/示教 | ✅ | ✅ Pinocchio 服务 | ✅ 仿真 Pinocchio + 模式互锁；真机拖动板测中 |
 | L8 力控柔顺 | ✅（末端 F/T） | ❌ | ❌ |
 
@@ -313,7 +313,7 @@ flowchart LR
 | 应用 demo（画方/抓取级） | ✅ | ⚠️ 画矩形 demo | Wave B **F11** | C1 |
 | ros2_control 仿真 | ✅ | ✅ | — 已齐 | — |
 | ros2_control 真机 HAL | ❌ | ❌ | Wave B 可选 | C7 |
-| MoveIt Servo | ❌ | ✅ F14 + F16 仿真一体 launch | Wave B **仿真已齐** | C4 |
+| MoveIt Servo | ❌ | ✅ F14 + F16 仿真一体 launch；F65 真机独立 servo 话题入环 | Wave B **仿真已齐，真机待板验（2026-09-21）** | C4 |
 | PS4 笛卡尔遥操作 | ※ 社区 fork | ✅ F16 YAML 映射 | Wave B **仿真已齐** | C4 |
 | PS4 / 电源·关节 jog | ※ | ✅ F3 | A3 已超 | — |
 | 零力矩明确模式 | ⚠️ | ✅ F13 | Wave B | C5 |
@@ -338,7 +338,7 @@ flowchart LR
 | 项目 | 强项 | 对齐前主要缺口 |
 |------|------|----------------|
 | **reBot 生态** | 真机 MoveIt 闭环、重力补偿、双机型 SDK、demo | Servo、力控、官方真机遥操作、ros2_control 真机 HAL |
-| **A3 Edge** | C++ 低延迟 CAN、电源门控、PS4、**仿真 Wave A（插值+Pinocchio 重力）**、**仿真 L6 Servo+PS4（F14/F16）** | 真机 MoveIt 统一 launch、真机 Servo 入环、真机重力拖动入环、画方级 demo |
+| **A3 Edge** | C++ 低延迟 CAN、电源门控、PS4、**仿真 Wave A（插值+Pinocchio 重力）**、**仿真 L6 Servo+PS4（F14/F16/F64）**、**F65 真机 Servo 入环代码（独立话题，待板验）** | 真机 MoveIt 统一 launch、真机 Servo/重力拖动板测确认、画方级 demo |
 
 ---
 

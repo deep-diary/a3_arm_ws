@@ -102,6 +102,11 @@ class ArmMonitorNode(Node):
         self._last_goal = None  # dict name -> pos（最近一条轨迹末点，保持期参照）
         self.create_subscription(
             JointTrajectory, p("traj_topic"), self._on_traj, 10)
+        # L6 servo 入环：servo 高频单点帧走独立话题，同样更新保持参照——否则
+        # L1/R1 jog 结束（mode SERVO→IDLE）后看门狗会把 jog 后的新位姿相对
+        # jog 前旧参照判成 HOLD_DRIFT 误停。
+        self.create_subscription(
+            JointTrajectory, p("servo_traj_topic"), self._on_traj, 10)
 
         # ---- 发布 ----
         self._status_pub = self.create_publisher(
@@ -161,6 +166,7 @@ class ArmMonitorNode(Node):
         d("arm_status_topic", "/a3/arm_status")
         d("motor_states_topic", "/a3/motor/states")
         d("traj_topic", "/joint_group_effort_controller/joint_trajectory")
+        d("servo_traj_topic", "/a3/servo/joint_trajectory")
         d("monitor_status_topic", "/a3/monitor/status")
         d("motor_stop_service", "/a3/motor/stop")
         d("motor_reset_service", "/a3/motor/reset")
@@ -255,8 +261,9 @@ class ArmMonitorNode(Node):
         self._prev_mode = mode
 
         mstate = self._motors_enable_state()
-        if mstate == "all" and self._prev_motors_state == "none":
-            edges.append("motors none->all(使能沿)")
+        # F66：裸 CAN 使能逐电机传播时可能先出现 partial，旧逻辑只认 none->all 会漏边
+        if mstate == "all" and self._prev_motors_state in ("none", "partial"):
+            edges.append(f"motors {self._prev_motors_state or '?'}->all(使能沿)")
         if mstate is not None:
             self._prev_motors_state = mstate
 
@@ -449,12 +456,18 @@ class ArmMonitorNode(Node):
         )
 
         # 4. 意外失能（编排层认为在跑，电机却已失能；fresh 门控防旧数据误判）
+        # F66（LL-070）：使能意图边界宽限窗内豁免——电源序列裸 CAN 使能逐电机传播，
+        # READY 建立瞬间个别电机 mode 字尚未刷新/使能帧补发在途，会被旧逻辑在 19 ms 内
+        # 误报 UNEXPECTED_DISABLE（真机橙灯振荡/死锁的直接触发器）。真实失能持续超过
+        # 宽限+0.5s sustain 后仍会被捕获，不损失安全兜底。
         unexpected = False
         if state in ENABLED_EXPECTED_STATES and self._motor:
             for s in self._motor.values():
                 if s.fresh and not s.enabled:
                     unexpected = True
                     break
+            if unexpected and now < self._hold_grace_until:
+                unexpected = False
         out["UNEXPECTED_DISABLE"] = unexpected
 
         # 5. 温度兜底（F44 失灵的最后一层）

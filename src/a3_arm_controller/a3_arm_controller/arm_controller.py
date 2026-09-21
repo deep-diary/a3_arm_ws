@@ -405,6 +405,11 @@ class ArmController(Node):
         # F44: 温度/故障监视（fresh 门控；无反馈温度=0.0，勿当 NaN 判读）
         self._temperatures: List[float] = [0.0] * self._n_joints
         self._temp_fresh: List[bool] = [False] * self._n_joints
+        # F60：电机使能态（来自 /a3/motor/states，fresh 门控）——电源序列
+        # EnableInit 已使能电机时，/a3/arm/enable 不再重复发 F32 门禁互锁的
+        # /a3/motor/enable 调试写。
+        self._motor_enabled: List[bool] = [False] * self._n_joints
+        self._motor_state_fresh: List[bool] = [False] * self._n_joints
         self._temp_warn = False
         self._temp_protect_pending = False
         self._fault_reset_pending = False
@@ -734,6 +739,13 @@ class ArmController(Node):
             time.sleep(0.01)
         return bool(future.done() and future.result() is not None)
 
+    def _all_motors_enabled(self) -> bool:
+        """所有有新鲜反馈的电机均已使能（且至少一路 fresh）。"""
+        fresh_enabled = [
+            en for en, fr in zip(self._motor_enabled, self._motor_state_fresh) if fr
+        ]
+        return bool(fresh_enabled) and all(fresh_enabled)
+
     def _motor_command(self, client, command: int) -> Tuple[bool, str]:
         if not self._wait_service(client):
             return False, "motor service unavailable"
@@ -980,6 +992,7 @@ class ArmController(Node):
         n = self._n_joints
         temps = [0.0] * n
         fresh = [False] * n
+        enabled = [False] * n
         for st in msg.states:
             idx = int(st.motor_id) - 1
             if idx < 0 or idx >= n:
@@ -990,8 +1003,11 @@ class ArmController(Node):
             if st.fresh:
                 temps[idx] = float(st.temperature_c)
                 fresh[idx] = True
+                enabled[idx] = bool(st.enabled)
         self._temperatures = temps
         self._temp_fresh = fresh
+        self._motor_enabled = enabled
+        self._motor_state_fresh = fresh
 
         if not self.get_parameter("temp_protect_enabled").value:
             return
@@ -1195,6 +1211,20 @@ class ArmController(Node):
                     " zero pose then /a3/arm/init)"
                 )
                 return resp
+        # F60：电源序列 EnableInit 在门禁关闭的预检阶段已使能全部电机。gate 打开
+        # 后 F32 互锁会拒绝 /a3/motor/enable 调试写——电机既已使能就无需再写：
+        # F48 限位检查已过、执行层在 SoftStand 锚定当前反馈位、看门狗已在
+        # none→all 使能沿重基准保持参照，直接转 READY。
+        if self._all_motors_enabled():
+            self._set_state(
+                STATE_READY,
+                "motors already enabled by power sequence EnableInit -> READY")
+            self.get_logger().info(
+                "enable: all motors already enabled by power sequence "
+                "(skip motor debug op blocked by F32 gate) -> READY")
+            resp.success = True
+            resp.message = "already enabled by power sequence"
+            return resp
         ok, msg = self._motor_command(self._enable_cli, 1)
         if ok:
             self._set_state(STATE_READY, "enabled")

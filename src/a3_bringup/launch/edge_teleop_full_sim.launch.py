@@ -102,7 +102,7 @@ def generate_launch_description():
         ],
         remappings=[
             ("~/delta_twist_cmds", "/servo_node/delta_twist_cmds"),
-            ("~/command_out", "/joint_group_effort_controller/joint_trajectory"),
+            ("~/command_out", "/a3/servo/joint_trajectory"),
         ],
         output="screen",
     )

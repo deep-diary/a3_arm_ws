@@ -19,6 +19,10 @@ class SimExecutor(Node):
         self.declare_parameter(
             "trajectory_topic", "/joint_group_effort_controller/joint_trajectory"
         )
+        # L6：servo 独立话题（servo.launch.py 的 command_out remap 已切到该话题）
+        self.declare_parameter(
+            "servo_trajectory_topic", "/a3/servo/joint_trajectory"
+        )
         self.declare_parameter("joint_states_topic", "/joint_states")
         self.declare_parameter("rate_hz", 50.0)
         self.declare_parameter("trajectory_interpolation_method", "auto")
@@ -54,6 +58,12 @@ class SimExecutor(Node):
 
         self._sub = self.create_subscription(
             JointTrajectory, traj_topic, self._on_traj, 10
+        )
+        self._servo_sub = self.create_subscription(
+            JointTrajectory,
+            self.get_parameter("servo_trajectory_topic").value,
+            self._on_traj,
+            10,
         )
         self._pub = self.create_publisher(JointState, js_topic, 10)
         period = 1.0 / max(rate_hz, 1.0)

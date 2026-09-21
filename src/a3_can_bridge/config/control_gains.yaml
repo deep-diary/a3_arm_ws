@@ -51,7 +51,7 @@
     startup_smoothing_duration_s: 2.0
     command_max_velocity_rad_s: 1.5
     limit_velocity_only_during_smoothing: true
-    enable_mode_rising_smoothing: false
+    enable_mode_rising_smoothing: true   # F66 起废弃：使能沿重锚/软起步无条件执行，此开关不再生效（保留仅为参数兼容）
     motor_enabled_mode_status: 2
     enable_feedback_step_limit: false
     feedback_step_limit_rad: 2.0

@@ -6,6 +6,8 @@ a3_arm_monitor:
     arm_status_topic: /a3/arm_status
     motor_states_topic: /a3/motor/states
     traj_topic: /joint_group_effort_controller/joint_trajectory
+    # L6 servo 入环：servo 高频单点帧（保持参照同样更新，防 jog 后 HOLD_DRIFT 误判）
+    servo_traj_topic: /a3/servo/joint_trajectory
     monitor_status_topic: /a3/monitor/status
     # 服务
     motor_stop_service: /a3/motor/stop

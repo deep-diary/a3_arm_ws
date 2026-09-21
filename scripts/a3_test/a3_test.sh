@@ -213,6 +213,8 @@ EOF
 stage_incident() {
   log "阶段八a 执行层 F51 事故回归（mock 电机 ↔ motor_protocol_node）"
   PYTHONNOUSERSITE=1 python3 "$DIR/incident_regression_test.py" || return 1
+  log "阶段八a2 F66 gate 关意图作废 + 电源序列裸 CAN 使能沿重锚（LL-070 真机再断 L6/L7 复刻）"
+  PYTHONNOUSERSITE=1 python3 "$DIR/f66_gate_enable_regression.py" || return 1
   log "阶段八b 看门狗 F50/编排层事故回归（sim 栈 + arm_controller/arm_monitor）"
   PYTHONNOUSERSITE=1 python3 "$DIR/incident_monitor_regression_test.py" || return 1
   log "阶段八c F52 缺电机降级档（5J 可用 / 7J 遇缺电机必拒 / 非法档位不静默降级）"

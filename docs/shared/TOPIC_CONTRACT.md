@@ -33,12 +33,15 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 
 | 话题 | 优先级 | 说明 |
 |------|--------|------|
-| `/joint_group_effort_controller/joint_trajectory` | 主 | 执行层默认输入（含 `effort` 重力补偿后） |
+| `/joint_group_effort_controller/joint_trajectory` | 主 | 执行层默认输入（含 `effort` 重力补偿后）；编排层多点轨迹/FJT/重力保持/web 单关节。**`control_mode=SERVO` 时执行层互锁丢弃** |
+| `/a3/servo/joint_trajectory` | Servo 专用 | L6：MoveIt Servo `command_out` 50Hz 单点帧（F65）。执行层**仅在 gate 开 + `SERVO` 模式**消费，插值 tick 200Hz 直接刷新 MIT 目标；看门狗订阅本话题同步保持参照。与主轨迹话题物理分离，互不抢占 |
 | `/a3/planned_joint_trajectory` | 规划输出 | CloudEdge：MoveIt / 测试发布器 → 重力补偿节点 |
 | `/a3/joint_trajectory` | 桥接 | 测试与外部集成 |
 | `/rebotarm/joint_trajectory` | 桥接 | reBot 工具链输出 |
 
 `a3_bringup/trajectory_bridge` 将上述话题统一转发到 `/joint_group_effort_controller/joint_trajectory`。
+
+> **仿真分歧**：`sim_motor_node`/`sim_executor` 同时订阅两个轨迹话题且**不做** gate/SERVO 模式互锁（仿真有意简化，见 [SAFETY.md](SAFETY.md) F32）；真机互锁以 `motor_protocol_node` 为准。
 
 ### FollowJointTrajectory Action（执行层）
 
@@ -120,7 +123,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 
 ### 订阅 / 发布
 
-- **订阅**：`/joint_states` 与 `/a3/motor/states`（均双 QoS：BEST_EFFORT + RELIABLE，LL-030）、`/a3/arm_status`、`/joint_group_effort_controller/joint_trajectory`
+- **订阅**：`/joint_states` 与 `/a3/motor/states`（均双 QoS：BEST_EFFORT + RELIABLE，LL-030）、`/a3/arm_status`、`/joint_group_effort_controller/joint_trajectory`、`/a3/servo/joint_trajectory`（F65：servo jog 同步更新保持参照，防 HOLD_DRIFT 误跳）
 - **发布**：`/a3/monitor/status`（`a3_msgs/msg/MonitorStatus`，20 Hz）：`status`(OK/PENDING/TRIGGERED)、`fault`、`pending_faults`、`action`、`tracking_errors[7]`、`max_tracking_error`、`last_event`
   - `status=PENDING` 表示「条件已满足但持续窗未满（未确认）」；`fault` 只填**已确认**（达持续阈值）的故障类。
     调用方只应对 `TRIGGERED` 动作（F51/LL-039：之前瞬时条件即报 TRIGGERED，抖动与确认不可分）。

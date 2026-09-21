@@ -90,7 +90,7 @@ a3_bringup.launch.py
 ├── a3_mqtt_bridge（use_mqtt，默认开；web 遥测/指令 F18/F23）
 ├── move_group + follow_joint_trajectory_action（use_moveit，默认开；规划 + Execute 到执行层）
 ├── a3_gripper_controller（use_gripper，默认开；5J 档缺 L7 时置 false）
-├── servo_mode_bridge + servo_node（use_servo，默认关；MoveIt Servo 笛卡尔 jog，与 move_group Execute 互斥）
+├── servo_mode_bridge + servo_node（use_servo，遥操作 profile 开；MoveIt Servo 笛卡尔 jog，与 move_group Execute 互斥；F65 起输出走独立话题 `/a3/servo/joint_trajectory`，mapper 按需 start_servo）
 ├── ps4_teleop.launch.py（use_teleop，默认开）
 ├── gravity_torque_node（use_gravity_compensation，默认关）
 └── rviz（use_rviz，默认关）
@@ -118,10 +118,11 @@ urdf_dir_check.launch.py       RViz 双模型 URDF 方向校验
 
 摘要：
 
-- 轨迹输入：`/joint_group_effort_controller/joint_trajectory`（及桥接话题）
+- 轨迹输入：`/joint_group_effort_controller/joint_trajectory`（编排层多点/FJT/重力保持）+ `/a3/servo/joint_trajectory`（F65：Servo 50Hz 单点，仅 gate 开 + SERVO 模式消费；两通道互锁分离）
 - 关节输出：`/joint_states`（50 Hz）
-- 门控：`/power_sequence/gate_open`
+- 门控：`/power_sequence/gate_open`（F66：gate **关沿作废全部运动意图**——轨迹/servo/MIT 目标缓存全清；gate 开后仅以新鲜反馈重锚，杜绝硬急停后人工挪臂、再使能被甩回旧位姿）
 - 命令：`/power_sequence/command` = `start|shutdown|set_zero`
+- 使能：电源序列 EnableInit 裸 CAN `0x03`（保持期 50 ms 补发防漏帧）与 `/a3/motor/enable` 服务两条路径；F66 起使能模式上升沿在 motor_protocol_node 反馈处理中**无条件**执行重锚+0.8 s kp/kd 软起步（不再受 `enable_mode_rising_smoothing` 开关控制）；refresh 另有 0.25 rad 防甩兜底；gate Running + IDLE 无轨迹时 enable 服务放行（F32 恢复通道，解锁橙灯死锁）
 
 ## 控制参数
 

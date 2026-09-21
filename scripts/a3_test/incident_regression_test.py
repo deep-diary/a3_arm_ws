@@ -349,21 +349,28 @@ def main():
         else:
             log(f"T1 示教退出目标已锚定拖动位姿 ≈{Q_DRAG}（帧 {len(held)}）")
 
-        # ---- T2 /a3/motor/stop：不得再续发 kp>0 的旧目标 ----
+        # ---- T2 /a3/motor/stop：不得再续发满增益旧目标 ----
+        # F58（LL-053）后语义更新：stop 后电机仍使能且反馈新鲜时允许「重力支撑保持」
+        # （stop_hold_kp=25，目标逐帧锚定当前实测位）——禁止的是 kp=80 拉旧目标。
         t_stop = node.t()
         r = call(node, cli["stop"], MotorStop.Request(motor_id=0))
         if r is None or not r.success:
             failures.append(f"T2 motor_stop 调用失败: {getattr(r, 'message', None)}")
         time.sleep(1.2)
         after = node.mit_frames(2, t_from=t_stop + 0.2)
-        bad = [f for f in after if f[4] > 0.01]
         if not after:
             failures.append("T2 stop 后完全停帧（保活流断，LL-020 会致 js 冻结）")
-        elif bad:
-            failures.append(
-                f"T2 F51 失败：stop 后仍续发 kp>0 旧目标 {[(round(f[3],3), round(f[4],1)) for f in bad[:3]]}")
         else:
-            log(f"T2 stop 后 {len(after)} 帧全为零增益保活（kp=0），未重锚旧目标 ✓")
+            bad_gain = [f for f in after if f[4] > 25.5]   # F58 上限 stop_hold_kp=25
+            bad_pull = [f for f in after if abs(f[3] - node.pos[2]) > 0.10]
+            if bad_gain or bad_pull:
+                failures.append(
+                    f"T2 F51/F58 失败：stop 后续发满增益/拉离实测位 "
+                    f"gain={[(round(f[3], 3), round(f[4], 1)) for f in (bad_gain or bad_pull)[:3]]}"
+                    f"（实测位 {node.pos[2]:.3f}）")
+            else:
+                log(f"T2 stop 后 {len(after)} 帧：kp≤25 重力保持且目标锚定实测位 "
+                    f"{node.pos[2]:.3f}，未拉旧目标 ✓")
 
         # ---- T3 看门狗阶梯 reset → mode 0 ----
         r = call(node, cli["reset"], MotorCommand.Request(motor_id=0, command=2))

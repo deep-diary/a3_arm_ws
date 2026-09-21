@@ -14,8 +14,11 @@ scale:
 
 ## Properties of outgoing commands
 publish_period: 0.02  # 50Hz
+# L6 真机 Servo 入环：command_out 走独立话题，与编排层多点轨迹
+# /joint_group_effort_controller/joint_trajectory 分离（执行层仅在
+# control_mode=SERVO 时消费本话题；launch 内 remap 与本字段保持一致）
 command_out_type: trajectory_msgs/JointTrajectory
-command_out_topic: /joint_group_effort_controller/joint_trajectory
+command_out_topic: /a3/servo/joint_trajectory
 cartesian_command_in_topic: ~/delta_twist_cmds
 joint_topic: /joint_states
 

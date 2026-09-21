@@ -241,20 +241,23 @@ def run_case(name, procs_cfg, motors, expect, failures):
                             f"实际位 {[round(harness.pos[m], 3) for m in motors]}）✓")
                     pub.destroy()
 
-            # stop 后仍须零增益保活（F51 语义在降级档下不放松）
+            # stop 后禁止满增益拉旧目标（F58/LL-053：允许 ≤25 的重力支撑保持，
+            # 目标逐帧锚定实测位；降级档下该语义同样不放松）
             t_stop = harness.t()
             r_stop = call(harness, cli_stop, MotorStop.Request(motor_id=0))
             time.sleep(1.2)
             after = [fr for m in motors for fr in harness.mit_frames(m, t_from=t_stop + 0.2)]
-            bad = [fr for fr in after if fr[4] > 0.01]
+            bad_gain = [fr for fr in after if fr[4] > 25.5]
+            bad_pull = [fr for fr in after if abs(fr[3] - harness.pos[fr[1]]) > 0.10]
             if r_stop is None or not r_stop.success:
                 failures.append(f"{name}: stop 调用失败: {getattr(r_stop, 'message', None)}")
             elif not after:
                 failures.append(f"{name}: stop 后完全停帧（保活流断，LL-020）")
-            elif bad:
-                failures.append(f"{name}: stop 后仍续发 kp>0 帧 {len(bad)} 个")
+            elif bad_gain or bad_pull:
+                failures.append(
+                    f"{name}: stop 后续发满增益/拉离实测位 帧 {len(bad_gain or bad_pull)} 个")
             else:
-                log(f"{name}: stop 后 {len(after)} 帧零增益保活 ✓")
+                log(f"{name}: stop 后 {len(after)} 帧 kp≤25 重力保持锚定实测位 ✓")
         else:
             if r is not None and r.success:
                 failures.append(f"{name}: 使能本应被拒（缺电机）却成功")

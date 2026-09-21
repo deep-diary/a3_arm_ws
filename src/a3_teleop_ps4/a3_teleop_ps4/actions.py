@@ -250,6 +250,10 @@ class ActionExecutor:
         if self._servo_paused and moving:
             self._servo_unpause()
         if moving:
+            # 真机 launch 默认 auto_start_servo=false：首次死人开关+摇杆时按需
+            # 启动 servo（服务不存在=未叠 use_servo，静默跳过，下个 tick 重试）。
+            if not self._servo_started:
+                self.try_start_servo()
             self._publish_twist(lx, ly, lz, ax, ay, az)
 
         if any(abs(v) > 1e-9 for v in self._jog) and not moving:

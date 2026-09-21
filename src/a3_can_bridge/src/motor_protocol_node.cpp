@@ -310,6 +310,9 @@ public:
       "enable_reanchor_tolerance_rad", 0.15);
     enable_kp_ramp_ = this->declare_parameter<bool>("enable_kp_ramp", true);
     enable_ramp_duration_s_ = this->declare_parameter<double>("enable_ramp_duration_s", 0.8);
+    // F66（LL-070）：无活动意图时陈旧目标 vs 实测位的防甩阈值
+    stale_target_snap_guard_rad_ = this->declare_parameter<double>(
+      "stale_target_snap_guard_rad", 0.25);
     joint_signs_ = this->declare_parameter<std::vector<double>>(
       "joint_signs", std::vector<double>(NumArmJoints(), 1.0));
 
@@ -366,6 +369,13 @@ public:
       "trajectory_interp_rate_hz", 200.0);
     traj_interp_method_ = ParseTrajInterpMethod(
       this->declare_parameter<std::string>("trajectory_interpolation_method", "auto"));
+    // L6 真机 Servo 入环：MoveIt Servo command_out 走独立话题（与编排层多点轨迹
+    // 分离），仅在 gate 开 + control_mode=SERVO 时由 200Hz 插值 tick 直接刷新
+    // MIT 目标；普通轨迹话题在 SERVO 模式继续互锁丢弃。
+    servo_trajectory_topic_ = this->declare_parameter<std::string>(
+      "servo_trajectory_topic", "/a3/servo/joint_trajectory");
+    servo_target_timeout_s_ = this->declare_parameter<double>(
+      "servo_target_timeout_s", 0.3);
     zero_torque_kp_ = this->declare_parameter<double>("zero_torque_kp", 0.0);
     zero_torque_kd_ = this->declare_parameter<double>("zero_torque_kd", 1.0);
     control_mode_topic_ = this->declare_parameter<std::string>(
@@ -380,6 +390,10 @@ public:
     traj_sub_ = this->create_subscription<JointTrajectory>(
       "/joint_group_effort_controller/joint_trajectory", rclcpp::QoS(10).reliable(),
       std::bind(&MotorProtocolNode::OnTrajectory, this, std::placeholders::_1));
+    // L6 真机 Servo 入环：servo 高频单点帧独立话题（QoS 与普通轨迹同为 reliable）
+    servo_traj_sub_ = this->create_subscription<JointTrajectory>(
+      servo_trajectory_topic_, rclcpp::QoS(10).reliable(),
+      std::bind(&MotorProtocolNode::OnServoTrajectory, this, std::placeholders::_1));
     rx_sub_ = this->create_subscription<UInt8MultiArray>(
       "/can_rx_frames", rclcpp::SensorDataQoS(),
       std::bind(&MotorProtocolNode::OnRxFrame, this, std::placeholders::_1));
@@ -629,6 +643,10 @@ public:
     } else {
       RCLCPP_INFO(this->get_logger(), "Power sequence gate disabled, trajectory forwarding always enabled");
     }
+    RCLCPP_INFO(
+      this->get_logger(),
+      "L6 servo in-loop: topic='%s' (forwarded only while gate open + control_mode=SERVO, timeout=%.2fs)",
+      servo_trajectory_topic_.c_str(), servo_target_timeout_s_);
     ResetRuntimeTuning();
     last_commanded_mit_rad_.fill(std::numeric_limits<double>::quiet_NaN());
     last_feedback_mit_rad_.fill(std::numeric_limits<double>::quiet_NaN());
@@ -847,6 +865,36 @@ private:
     last_gravity_stamp_ns_ = this->now().nanoseconds();
   }
 
+  /// L6 真机 Servo 入环：仅缓存 servo 独立话题的最新单点帧；真正下发在
+  /// OnTrajectoryInterpTimer（恒定 200Hz 节拍，与普通轨迹共用 MIT 刷新/保护链路）。
+  void OnServoTrajectory(const JointTrajectory::SharedPtr msg)
+  {
+    ++servo_cb_window_;
+    if (msg->points.empty() || msg->points.back().positions.size() != msg->joint_names.size()) {
+      return;
+    }
+    if (enable_power_sequence_gate_ && !power_gate_open_) {
+      ++servo_drop_window_;
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *this->get_clock(), 2000,
+        "Ignore servo trajectory: power gate closed");
+      return;
+    }
+    if (zero_torque_active_ || last_control_mode_ != "SERVO") {
+      ++servo_drop_window_;
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *this->get_clock(), 2000,
+        "Ignore servo trajectory: control_mode=%s (require SERVO)",
+        last_control_mode_.c_str());
+      return;
+    }
+    std::lock_guard<std::mutex> lock(servo_mutex_);
+    servo_joint_names_ = msg->joint_names;
+    servo_positions_ = msg->points.back().positions;  // 50Hz 单点帧（含 halt 同点帧）
+    servo_target_stamp_ns_ = this->now().nanoseconds();
+    has_servo_target_ = true;
+  }
+
   void OnTrajectory(const JointTrajectory::SharedPtr msg)
   {
     ++traj_cb_count_window_;
@@ -901,6 +949,40 @@ private:
   void OnTrajectoryInterpTimer()
   {
     if (!enable_trajectory_interpolation_) {
+      return;
+    }
+
+    // L6 真机 Servo 入环：SERVO 模式下插值 tick 只服务 servo 独立话题的高频单点
+    // 帧（servo 内部已有 Butterworth 平滑 + 奇异/关节限位减速），多点轨迹缓冲
+    // 一律作废（死人开关 jog 抢占旧意图，语义同 OnTrajectory 的新轨迹抢占）。
+    // 帧超时或模式刚切离时同样不走多点路径：MIT refresh 续流保持最后目标。
+    if (last_control_mode_ == "SERVO" && !zero_torque_active_) {
+      if (enable_power_sequence_gate_ && !power_gate_open_) {
+        return;
+      }
+      std::vector<double> positions;
+      std::vector<std::string> names;
+      bool fresh = false;
+      const int64_t now_ns = this->now().nanoseconds();
+      {
+        std::lock_guard<std::mutex> slock(servo_mutex_);
+        if (has_servo_target_ &&
+            (now_ns - servo_target_stamp_ns_) <
+              static_cast<int64_t>(servo_target_timeout_s_ * 1e9))
+        {
+          positions = servo_positions_;
+          names = servo_joint_names_;
+          fresh = true;
+        }
+      }
+      {
+        std::lock_guard<std::mutex> tlock(traj_mutex_);
+        has_active_traj_ = false;
+      }
+      if (fresh && !positions.empty()) {
+        ++servo_apply_window_;
+        ApplyPositionTargets(positions, names);
+      }
       return;
     }
 
@@ -1242,6 +1324,45 @@ private:
         std::numeric_limits<double>::quiet_NaN();
       bool seeded = false;
       bool stop_hold = false;  // F58/LL-053: motor_stop 后的重力支撑保持（不是零增益卸力）
+      // F66（LL-070）兜底防甩：有限目标 + 无任何活动意图（轨迹/servo 均无）+ 电机使能 +
+      // 反馈新鲜，但目标与当前实测相差悬殊 → 必是跨使能沿残留的陈旧指令（使能沿重锚的
+      // 双保险，也覆盖模式沿丢失的极端时序）。拒绝满增益拉拽，重锚到反馈位并软起步。
+      // 正常保持/跟踪残差 <0.02 rad，阈值取 0.25 rad，绝不影响正常运动。
+      if (std::isfinite(mapped_position) && !has_active_traj_ &&
+          route.motor_id < last_commanded_mit_rad_.size()) {
+        bool servo_alive = false;
+        {
+          std::lock_guard<std::mutex> slk(servo_mutex_);
+          servo_alive = has_servo_target_;
+        }
+        const int gmode =
+          idx < last_feedback_mode_status_.size() ? last_feedback_mode_status_[idx] : 0;
+        const double gfb =
+          route.motor_id < last_feedback_mit_rad_.size() ?
+          last_feedback_mit_rad_[route.motor_id] :
+          std::numeric_limits<double>::quiet_NaN();
+        const bool gfresh =
+          idx < last_feedback_stamp_ns_.size() &&
+          (now_ns - last_feedback_stamp_ns_[idx]) <
+            static_cast<int64_t>(feedback_fresh_timeout_s_ * 1e9);
+        const bool ramp_idle =
+          route.motor_id >= enable_ramp_start_ns_.size() ||
+          enable_ramp_start_ns_[route.motor_id] == 0;
+        if (!servo_alive && gmode != 0 && gmode != -1 && std::isfinite(gfb) && gfresh &&
+            ramp_idle && std::fabs(mapped_position - gfb) > stale_target_snap_guard_rad_) {
+          RCLCPP_ERROR(
+            this->get_logger(),
+            "F66 snap guard motor=%u: 无活动轨迹但陈旧目标 %.4f 与实测 %.4f 偏差 %.4f rad"
+            "（> %.3f），拒绝甩动——重锚到实测位 + 软起步",
+            static_cast<unsigned>(route.motor_id), mapped_position, gfb,
+            mapped_position - gfb, stale_target_snap_guard_rad_);
+          mapped_position = gfb;
+          last_commanded_mit_rad_[route.motor_id] = gfb;
+          if (enable_kp_ramp_ && route.motor_id < enable_ramp_start_ns_.size()) {
+            enable_ramp_start_ns_[route.motor_id] = now_ns;
+          }
+        }
+      }
       if (!std::isfinite(mapped_position)) {
         // F48/LL-022 播种：桥（重）启后从未下发过轨迹时 refresh 无目标可发 →
         // 总线静默 → 电机不主动上报反馈（LL-018）→ /joint_states 冻结（stamp 陈旧）。
@@ -1472,9 +1593,12 @@ private:
       skip_bus_disabled_window_);
     RCLCPP_INFO_THROTTLE(
       this->get_logger(), *this->get_clock(), 1000,
-      "MP gate window(5s): gate_open=%d skip_gate=%zu",
+      "MP gate window(5s): gate_open=%d skip_gate=%zu servo[cb=%zu apply=%zu drop=%zu]",
       power_gate_open_ ? 1 : 0,
-      skip_power_gate_window_);
+      skip_power_gate_window_,
+      servo_cb_window_,
+      servo_apply_window_,
+      servo_drop_window_);
 
     tx_traj_active_ns_window_ = 0;
     tx_traj_last_tx_ns_ = 0;
@@ -1489,7 +1613,45 @@ private:
     skip_max_rate_limit_window_ = 0;
     skip_bus_disabled_window_ = 0;
     skip_power_gate_window_ = 0;
+    servo_cb_window_ = 0;
+    servo_apply_window_ = 0;
+    servo_drop_window_ = 0;
     tx_frame_count_per_motor_window_.fill(0);
+  }
+
+  /// F66（LL-070）：作废全部运动意图。硬急停/gate 关闭/带外失能后，任何缓存的有限
+  /// 目标都不允许在重新使能时被续发——目标只能从新的反馈/新的显式指令重新建立。
+  void InvalidateAllMotionIntent(const char * reason)
+  {
+    {
+      std::lock_guard<std::mutex> lk(traj_mutex_);
+      active_traj_ = JointTrajectory{};
+      traj_start_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
+      has_active_traj_ = false;
+    }
+    {
+      std::lock_guard<std::mutex> lk(servo_mutex_);
+      has_servo_target_ = false;
+      servo_positions_.clear();
+      servo_joint_names_.clear();
+      servo_target_stamp_ns_ = 0;
+    }
+    for (const auto & route : ArmRoutes()) {
+      const uint8_t mid = route.motor_id;
+      hold_suppressed_[mid] = true;  // gate 关期间 refresh 只准发零增益保活帧
+      last_commanded_mit_rad_[mid] = std::numeric_limits<double>::quiet_NaN();
+      enable_ramp_start_ns_[mid] = 0;
+      const size_t idx = std::min(
+        route.trajectory_index, static_cast<size_t>(NumArmJoints() - 1));
+      if (idx < has_latest_input_.size()) {
+        has_latest_input_[idx] = false;  // LL-040：命名轨迹回退表同源副本
+      }
+    }
+    RCLCPP_WARN(
+      this->get_logger(),
+      "F66 motion intent invalidated (%s): 插值/servo 缓存已清，%zu 电机陈旧目标置 NaN + 保持抑制"
+      "——重新使能只会锚定当前反馈位",
+      reason, ArmRoutes().size());
   }
 
   void OnPowerGate(const Bool::SharedPtr msg)
@@ -1503,6 +1665,11 @@ private:
       // F42: 门禁关闭时清力矩钳位 latch，避免恢复后沿用陈旧冻结位
       torque_latch_active_.fill(false);
       torque_latch_sign_.fill(0.0);
+      // F66（LL-070，LL-039 同类事故复发）：硬急停/电源 shutdown 走裸 CAN disable，
+      // 不经过 motor_stop/reset 服务——若不在此作废全部运动意图，陈旧的有限目标会
+      // 留在 last_commanded_mit_rad_/插值缓存里，下一次 EnableInit 裸使能后 refresh
+      // 立刻以 kp=80 续发旧目标，把人工搬到 home 的臂甩回失能前位姿（真机再断 L6/L7）。
+      InvalidateAllMotionIntent("power gate closed (X 硬急停/shutdown)");
     }
     RCLCPP_WARN(this->get_logger(), "Power sequence gate changed: gate_open=%d", power_gate_open_ ? 1 : 0);
     if (power_gate_open_) {
@@ -1575,11 +1742,24 @@ private:
     // 互锁（F32）：enable/reset/set_zero/save_param 为写操作，gate 打开（电源序列 Running）时拒绝；
     // 0=get_device_id / 4=request_version 为读操作，不受限
     if (command == 1 || command == 2 || command == 3 || command == 5) {
+      // F66（LL-070）：enable（command==1）在 gate Running 下也允许——L3 恢复路径：
+      // 编排层 DISABLED 但电源序列仍 Running（如看门狗误报后橙灯死锁）。此时控制模式
+      // 必为 IDLE 且无活动轨迹；enable 服务自带 F51 重锚+软起步，安全。
+      // reset/set_zero/save_param 仍严格拒绝（带电状态下卸力/写 flash 危险）。
+      const bool recovery_enable =
+        command == 1 && enable_power_sequence_gate_ && power_gate_open_ &&
+        last_control_mode_ == "IDLE" && !has_active_traj_;
       std::string why;
-      if (DebugOpBlockedByGate(&why)) {
+      if (!recovery_enable && DebugOpBlockedByGate(&why)) {
         resp->success = false;
         resp->message = why;
         return;
+      }
+      if (recovery_enable) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "F66 recovery enable: gate 仍 Running 但编排层 IDLE 无活动轨迹，允许使能"
+          "（解除橙灯死锁，走 F51 重锚+软起步）");
       }
     }
     std::vector<uint8_t> ids;
@@ -2377,16 +2557,41 @@ private:
 
       const int mode_curr = static_cast<int>(feedback->mode_status);
       const uint8_t mid = feedback->motor_id;
-      if (enable_mode_rising_smoothing_) {
+      {
         const bool prev_known = has_mode_status_[mid];
         const int mode_prev = last_mode_status_[mid];
         const bool rising_to_enabled = IsEnabledMode(mode_curr) && (!prev_known || !IsEnabledMode(mode_prev));
         if (rising_to_enabled) {
+          // F66（LL-070，LL-039 复发）：任何使能路径——/a3/motor/enable 服务 或
+          // power-sequence EnableInit 裸 CAN 0x03——进入使能态，一律在模式上升沿执行
+          // F51 三件套：以当前新鲜反馈重锚目标、清命名轨迹回退缓存、启动 kp/kd 软起步。
+          // 不再受 enable_mode_rising_smoothing 开关控制（真机 yaml 把它关成 false，
+          // 正是这次人工搬臂后被甩回旧位、再断 L6/L7 的根因）。
+          const double fb_mit = feedback->current_angle;
+          const double prev_cmd = last_commanded_mit_rad_[mid];
+          if (std::isfinite(prev_cmd) && std::isfinite(fb_mit) &&
+              std::fabs(prev_cmd - fb_mit) > enable_reanchor_tolerance_rad_) {
+            RCLCPP_ERROR(
+              this->get_logger(),
+              "F66 enable rising edge motor=%u mode %d->%d: 陈旧目标 %.4f 与当前反馈 %.4f 偏差 %.4f rad，"
+              "强制重锚到反馈位（避免甩臂）",
+              static_cast<unsigned>(mid), mode_prev, mode_curr, prev_cmd, fb_mit,
+              prev_cmd - fb_mit);
+          } else {
+            RCLCPP_WARN(
+              this->get_logger(),
+              "F66 enable rising edge motor=%u mode %d->%d: 重锚目标到当前反馈 %.4f rad + 软起步",
+              static_cast<unsigned>(mid), mode_prev, mode_curr, fb_mit);
+          }
+          last_commanded_mit_rad_[mid] = fb_mit;
+          hold_suppressed_[mid] = false;
+          if (idx < has_latest_input_.size()) {
+            has_latest_input_[idx] = false;  // LL-040 回退表同源副本
+          }
+          if (enable_kp_ramp_ && mid < enable_ramp_start_ns_.size()) {
+            enable_ramp_start_ns_[mid] = now.nanoseconds();
+          }
           ResetSmoothingForJoint(idx, champ_feedback, now);
-          RCLCPP_WARN(
-            this->get_logger(),
-            "Mode rising edge detected: motor=%u mode %d->%d, reset smoothing anchor to %.4f rad",
-            static_cast<unsigned>(mid), mode_prev, mode_curr, champ_feedback);
         }
       }
       has_mode_status_[mid] = true;
@@ -2994,6 +3199,8 @@ private:
   double enable_reanchor_tolerance_rad_{0.15};
   bool enable_kp_ramp_{true};
   double enable_ramp_duration_s_{0.8};
+  // F66（LL-070）：无活动轨迹时陈旧目标与实测位偏差超过该值即重锚防甩
+  double stale_target_snap_guard_rad_{0.25};
   std::array<double, 256> last_feedback_mit_rad_{};
   std::array<double, 256> last_feedback_mit_vel_rad_s_{};
   std::array<uint8_t, 256> last_feedback_master_id_{};
@@ -3049,6 +3256,10 @@ private:
   size_t skip_max_rate_limit_window_{0};
   size_t skip_bus_disabled_window_{0};
   size_t skip_power_gate_window_{0};
+  // L6 servo 入环窗口计数：cb=收到帧 / apply=SERVO tick 实际下发 / drop=被门禁或模式丢弃
+  size_t servo_cb_window_{0};
+  size_t servo_apply_window_{0};
+  size_t servo_drop_window_{0};
   // F42: 力矩方向钳位状态（per trajectory_index）
   bool enable_torque_protection_{true};
   std::vector<double> torque_protection_limit_nm_;
@@ -3086,7 +3297,17 @@ private:
   rclcpp::Time traj_start_{0, 0, RCL_ROS_TIME};
   bool has_active_traj_{false};
 
+  // L6 真机 Servo 入环：servo 独立话题最新单点帧（interp tick 消费）
+  std::string servo_trajectory_topic_;
+  double servo_target_timeout_s_{0.3};
+  std::mutex servo_mutex_;
+  bool has_servo_target_{false};
+  int64_t servo_target_stamp_ns_{0};
+  std::vector<std::string> servo_joint_names_;
+  std::vector<double> servo_positions_;
+
   rclcpp::Subscription<JointTrajectory>::SharedPtr traj_sub_;
+  rclcpp::Subscription<JointTrajectory>::SharedPtr servo_traj_sub_;
   rclcpp::Subscription<UInt8MultiArray>::SharedPtr rx_sub_;
   rclcpp::Subscription<String>::SharedPtr tune_sub_;
   rclcpp::Subscription<Bool>::SharedPtr gate_sub_;

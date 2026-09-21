@@ -68,6 +68,11 @@ class SimMotorNode(Node):
         self.declare_parameter(
             "trajectory_topic", "/joint_group_effort_controller/joint_trajectory"
         )
+        # L6：sim 侧同时消费 servo 独立话题（与真机执行层话题拆分对齐；
+        # sim 不做 gate/SERVO 模式互锁，见 TOPIC_CONTRACT 仿真分歧）
+        self.declare_parameter(
+            "servo_trajectory_topic", "/a3/servo/joint_trajectory"
+        )
         self.declare_parameter("joint_states_topic", "/joint_states")
         self.declare_parameter("rate_hz", 50.0)
         self.declare_parameter("trajectory_interpolation_method", "auto")
@@ -132,6 +137,12 @@ class SimMotorNode(Node):
 
         self._sub = self.create_subscription(
             JointTrajectory, traj_topic, self._on_traj, 10
+        )
+        self._servo_sub = self.create_subscription(
+            JointTrajectory,
+            self.get_parameter("servo_trajectory_topic").value,
+            self._on_traj,
+            10,
         )
         self._gate_sub = self.create_subscription(
             Bool, gate_topic, self._on_gate, 10

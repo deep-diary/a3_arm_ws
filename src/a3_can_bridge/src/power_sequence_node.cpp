@@ -384,6 +384,16 @@ private:
         if (!init_sent_) {
           DoEnableInitFrames();
           init_sent_ = true;
+        } else if (send_enable_in_startup_) {
+          // F66（LL-070）：0x03 使能帧历史上只发一次，与 EPScan 参数写同窗口竞争时
+          // 个别电机漏帧 → 逐电机使能传播出现数百 ms 空洞 → 看门狗把 READY 误判成
+          // UNEXPECTED_DISABLE（橙灯振荡）。EnableInit 保持期内每 50 ms 补发一次
+          // （0x03 幂等，已使能电机重入 MIT 无副作用），保证 7 个电机全部收到。
+          enable_resend_acc_s_ += dt;
+          if (enable_resend_acc_s_ >= enable_resend_interval_s_) {
+            enable_resend_acc_s_ = 0.0;
+            SendCmdAll(kCmdEnable);
+          }
         }
         PublishHoldPose(prone_z_);
         if (elapsed_in_state_s_ >= init_hold_duration_s_) {
@@ -497,6 +507,7 @@ private:
     state_ = next;
     elapsed_in_state_s_ = 0.0;
     init_sent_ = false;
+    enable_resend_acc_s_ = 0.0;
     disable_sent_ = false;
     PublishState();
     RCLCPP_WARN(this->get_logger(), "power_sequence state -> %s", StateName(state_));
@@ -827,6 +838,8 @@ private:
   double elapsed_in_state_s_{0.0};
   bool gate_open_{false};
   bool init_sent_{false};
+  double enable_resend_acc_s_{0.0};
+  static constexpr double enable_resend_interval_s_{0.05};  // F66：使能帧补发
   bool disable_sent_{false};
 
   double start_hold_s_{0.0};

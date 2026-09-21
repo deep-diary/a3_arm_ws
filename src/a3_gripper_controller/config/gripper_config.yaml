@@ -32,8 +32,8 @@
     # 两阶段：接触前恒速软闭合（不积分）；接触后 PI 调节，e = target - measured
     # 接触后：e>0 力不足 → dq/dt=-(kp*e+ki*∫e) 继续闭合；e<0 超力 → 按 kp 回退，绝不继续夹
     # 2026-09-07：kp/ki 减半（0.5/0.6 → 0.25/0.3），收敛更平缓、超调更小
-    force_kp: 0.25         # rad/s/Nm
-    force_ki: 0.3          # rad/s^2/Nm
+    force_kp: 0.5         # rad/s/Nm
+    force_ki: 0.6          # rad/s^2/Nm
     integral_limit_nm: 0.5 # 积分项限幅（Nm），防饱和猛夹
     max_close_speed_rad_s: 0.3
     max_open_speed_rad_s: 0.6
