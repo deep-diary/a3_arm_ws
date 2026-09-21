@@ -1,6 +1,9 @@
 # DualShock 4 on Linux (hid-sony / hid-playstation → /dev/input/js*).
 # Calibrate with: ros2 run a3_teleop_ps4 joy_dump
 # Indices below match the common kernel mapping; overwrite after dump.
+# 注意：ros-humble-joy 是 SDL2 实现，必须 SDL_JOYSTICK_HIDAPI=0 强制 evdev
+# 驱动才有本文件的 8 轴布局（否则 hidapi 报「PS4 Controller」6 轴 16 键，LL-068）。
+# 蓝牙 hid-sony 实际发 13 个按钮（无 touchpad 13），索引 0-12 不变。
 
 deadzone: 0.12
 

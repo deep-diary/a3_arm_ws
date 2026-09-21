@@ -104,7 +104,7 @@ ros2 topic pub --once /joint_group_effort_controller/joint_trajectory trajectory
 ./scripts/a3_test/a3_test.sh all          # 分层全套（部分需硬件）
 
 export ROS_DOMAIN_ID=45
-python3 scripts/a3_test/ps4_sim_test.py   # F62：合成 /joy 12 场景 36 项
+python3 scripts/a3_test/ps4_sim_test.py   # F62/F64：合成 /joy 12 场景 46 项（干净栈，域 45）
 ./scripts/verify_wave_a_sim.sh            # ROS_DOMAIN_ID=55
 ./scripts/verify_wave_b_sim.sh            # ROS_DOMAIN_ID=77
 ```

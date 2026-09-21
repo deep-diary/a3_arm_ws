@@ -33,6 +33,10 @@ def _launch_nodes(context, *args, **kwargs):
                 "deadzone": float(LaunchConfiguration("deadzone").perform(context)),
                 "autorepeat_rate": 30.0,
             }],
+            # SDL2 2.0.14+ 默认 HIDAPI 驱动把蓝牙 DS4 认成「PS4 Controller」
+            # （6 轴 16 键、dpad 变按钮），与 ds4_linux.yaml 的 8 轴布局不符；
+            # 强制走 evdev 驱动（LL-068）。
+            additional_env={"SDL_JOYSTICK_HIDAPI": "0"},
             output="screen",
         ),
         Node(

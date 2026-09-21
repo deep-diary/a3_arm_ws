@@ -25,7 +25,7 @@ from collections import deque
 
 import rclpy
 from a3_msgs.msg import ArmStatus, GripperStatus
-from geometry_msgs.msg import TransformStamped  # noqa: F401  (tf2 反序列化需要)
+from geometry_msgs.msg import TransformStamped, TwistStamped  # noqa: F401  (tf2 反序列化需要)
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState, Joy
@@ -84,6 +84,7 @@ class Ps4SimTest(Node):
         self._gate = None
         self._grip = None
         self._fb_hist = deque(maxlen=4000)  # (monotonic, dict)
+        self._twist_hist = deque(maxlen=8000)  # (monotonic, |lin|, |ang|)
 
         sensor_qos = QoSProfile(
             depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -100,6 +101,9 @@ class Ps4SimTest(Node):
         self.create_subscription(Bool, "/power_sequence/gate_open", self._on_gate, latch_qos)
         self.create_subscription(GripperStatus, "/a3/gripper_status", self._on_grip, 10)
         self.create_subscription(String, "/a3/ds4/feedback", self._on_fb, 10)
+        self.create_subscription(
+            TwistStamped, "/servo_node/delta_twist_cmds", self._on_twist, 10
+        )
         self.create_timer(0.02, self._pub_joy)  # 50Hz
 
     # ---- joy 发布 ----
@@ -143,6 +147,19 @@ class Ps4SimTest(Node):
             self._fb_hist.append((time.monotonic(), json.loads(msg.data)))
         except (ValueError, TypeError):
             pass
+
+    def _on_twist(self, msg):
+        t = msg.twist.linear
+        a = msg.twist.angular
+        lin = math.sqrt(t.x * t.x + t.y * t.y + t.z * t.z)
+        ang = math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z)
+        self._twist_hist.append((time.monotonic(), lin, ang))
+
+    def twist_max(self, t0):
+        vals = [(l, a) for t, l, a in self._twist_hist if t >= t0]
+        if not vals:
+            return 0.0, 0.0
+        return max(v[0] for v in vals), max(v[1] for v in vals)
 
     # ---- 工具 ----
     def spin_for(self, dt):
@@ -338,7 +355,7 @@ def main():
     q_end = node.joints()[6]
     rep.check("S4 松手释放：L7 回到 ≤0.15rad", q_end <= 0.15, f"q7={q_end:.3f}")
 
-    # ---- 场景 5：摇杆死人开关 + 逐轴 ----
+    # ---- 场景 5：F64 双死人开关（L1 平移 / R1 旋转）+ D-pad 独立调速 ----
     # 必须从 ready 标定位开始：平移扫轴会漂向腕部奇异区，折叠 home 位 servo 直接
     # IK -31 / emergency stop（LL-007 族，实测见 /tmp 栈日志）。
     print("[INFO] 场景5 预备: Triangle 回 ready（逐轴前离开奇异区）", flush=True)
@@ -347,13 +364,18 @@ def main():
     node.wait_arm("READY", 3.0)
     node.sleep(4.0)  # 等 mapper pose_block（goto 后锁 3.5s）释放
 
-    print("[INFO] 场景5a: 不按 L1 推左摇杆 1.2s，必须不动", flush=True)
+    print("[INFO] 场景5a: 不按 L1/R1 推左右摇杆，必须不动", flush=True)
     q_lock = node.joints()
     node._axes[AX_LX] = 1.0
     node.sleep(1.2)
     node._axes[AX_LX] = 0.0
+    node.sleep(0.3)
+    node._axes[AX_RX] = 1.0
+    node.sleep(1.0)
+    node._axes[AX_RX] = 0.0
     d_lock = max(abs(a - b) for a, b in zip(node.joints(), q_lock))
-    rep.check("S5a 无 L1 摇杆死锁（关节 Δ<0.03rad）", d_lock < 0.03, f"maxΔ={d_lock:.4f}")
+    rep.check("S5a 无死人开关摇杆死锁（关节 Δ<0.03rad）", d_lock < 0.03,
+              f"maxΔ={d_lock:.4f}")
     node.sleep(0.6)
 
     axis_cases = [
@@ -379,56 +401,171 @@ def main():
                   f"Δ{ee_key}={d:+.3f}m  ee0={['%.3f' % v for v in (ee0 or [])]}"
                   f"→{['%.3f' % v for v in (ee1 or [])]}")
 
-    # right_x → 偏航：实测 yaw 同时驱动 L1+L5（反向）；三轴平移后构型会漂向奇异，
-    # 先回 ready 再测，断言两关节合转动。
-    print("[INFO] 场景5b: 偏航前 Triangle 回 ready（平移漂移会导致 yaw IK 奇异）",
+    # 平移扫轴后构型漂向奇异；回 ready 再做门控互斥/偏航。
+    print("[INFO] 场景5b 预备: Triangle 回 ready（门控互斥前离开奇异区）",
           flush=True)
     node.tap(B_TRIANGLE)
     node.wait_pose(READY_POSE, POSE_TOL, 9.0)
     node.wait_arm("READY", 3.0)
     node.sleep(4.0)
+
+    # F64 门控互斥 1：L1 按住推 right_x，偏航必须不动
+    print("[INFO] 场景5b: L1+right_x：偏航必须不动", flush=True)
     node.press(B_L1)
     node.sleep(0.2)
-    q0_yaw = node.joints()
+    q0 = node.joints()
+    node._axes[AX_RX] = 1.0
+    node.sleep(1.2)
+    node._axes[AX_RX] = 0.0
+    q1 = node.joints()
+    node.release(B_L1)
+    node.sleep(0.8)
+    d_yaw_lock = abs(q1[0] - q0[0]) + abs(q1[4] - q0[4])
+    rep.check("S5b L1 门控：偏航不动（L1+L5 合 Δ<0.03rad）",
+              d_yaw_lock < 0.03, f"合Δ={d_yaw_lock:.4f}")
+
+    # F64 门控互斥 2：R1 按住推 right_x，偏航必须动（同时记录 0.35 档 twist）
+    print("[INFO] 场景5b: R1+right_x：偏航必须动", flush=True)
+    t_yaw0 = node.marker()
+    node.press(B_R1)
+    node.sleep(0.2)
+    q0 = node.joints()
     node._axes[AX_RX] = 1.0
     node.sleep(1.4)
     node._axes[AX_RX] = 0.0
-    q1_yaw = node.joints()
-    node.release(B_L1)
+    q1 = node.joints()
+    node.release(B_R1)
     node.sleep(0.8)
-    dl1 = q1_yaw[0] - q0_yaw[0]
-    dl5 = q1_yaw[4] - q0_yaw[4]
-    signs["right_x → ang_z(yaw)"] = dl1
-    rep.check("S5b right_x → 偏航：L1+L5 合转动 ≥0.05rad",
+    dl1 = q1[0] - q0[0]
+    dl5 = q1[4] - q0[4]
+    _, v_ang_base = node.twist_max(t_yaw0)
+    signs["right_x → ang_z(yaw) @R1"] = dl1
+    rep.check("S5b R1 门控：偏航动（L1+L5 合 Δ≥0.05rad）",
               abs(dl1) + abs(dl5) >= 0.05,
-              f"ΔL1={dl1:+.3f} ΔL5={dl5:+.3f}rad")
-    rep.info("方向符号表（轴+1 → 位移，供 invert 标定）: "
-             + "; ".join(f"{k}={v:+.3f}" for k, v in signs.items()))
+              f"ΔL1={dl1:+.3f} ΔL5={dl5:+.3f} twist|ang|max={v_ang_base:.3f}")
 
-    # 松 L1 停住：0.5s bridge 超时后，0.8s 窗口内不再动
-    node.sleep(0.7)
-    qh0 = node.joints()
-    node.sleep(0.8)
-    d_halt = max(abs(a - b) for a, b in zip(node.joints(), qh0))
-    rep.check("S5c 松 L1 后 ~1s 停住（Δ<0.03rad）", d_halt < 0.03, f"maxΔ={d_halt:.4f}")
-
-    # R1 加速档：同方向 1.0s，位移应明显大于 0.35 档
-    node.press(B_L1)
+    # F64 门控互斥 3：R1 按住推左摇杆，平移必须不动
+    print("[INFO] 场景5b: R1+left_x：平移必须不动", flush=True)
     node.press(B_R1)
     node.sleep(0.2)
     ee0 = node.ee_xyz()
     node._axes[AX_LX] = 1.0
-    node.sleep(1.0)
+    node.sleep(1.2)
     node._axes[AX_LX] = 0.0
     ee1 = node.ee_xyz()
     node.release(B_R1)
-    node.release(B_L1)
     node.sleep(0.8)
-    d_boost = abs(ee1[1] - ee0[1]) if (ee0 and ee1) else 0.0
-    d_base = abs(signs["left_x → lin_y"])
-    ratio = (d_boost / 1.0) / (d_base / 1.4) if d_base > 1e-6 else 0.0
-    rep.check("S5d R1 速度档 1.0（归一速度比 >1.2）", ratio > 1.2,
-              f"boost={d_boost:.3f}m/1.0s base={d_base:.3f}m/1.4s ratio={ratio:.2f}")
+    d_lin_lock = (max(abs(a - b) for a, b in zip(ee0, ee1))
+                  if (ee0 and ee1) else 9.9)
+    rep.check("S5b R1 门控：平移不动（EE Δ<0.01m）",
+              d_lin_lock < 0.01,
+              f"maxΔEE={d_lin_lock:.4f} ee0={['%.3f' % v for v in (ee0 or [])]}"
+              f"→{['%.3f' % v for v in (ee1 or [])]}")
+    rep.info("方向符号表（轴+1 → 位移，供 invert 标定）: "
+             + "; ".join(f"{k}={v:+.3f}" for k, v in signs.items()))
+
+    # 松 gate 停住：0.5s bridge 超时后，0.8s 窗口内不再动
+    node.sleep(0.7)
+    qh0 = node.joints()
+    node.sleep(0.8)
+    d_halt = max(abs(a - b) for a, b in zip(node.joints(), qh0))
+    rep.check("S5c 松死人开关后 ~1s 停住（Δ<0.03rad）",
+              d_halt < 0.03, f"maxΔ={d_halt:.4f}")
+
+    # ---- S5d：D-pad 双独立速度档（用下发 twist 模长断言）----
+    def measure_linear():
+        node.press(B_L1)
+        node.sleep(0.2)
+        t0 = node.marker()
+        node._axes[AX_LX] = 1.0
+        node.sleep(0.7)
+        node._axes[AX_LX] = 0.0
+        lin, _ = node.twist_max(t0)
+        node.release(B_L1)
+        node.sleep(0.9)
+        return lin
+
+    def measure_angular():
+        node.press(B_R1)
+        node.sleep(0.2)
+        t0 = node.marker()
+        node._axes[AX_RX] = 1.0
+        node.sleep(0.7)
+        node._axes[AX_RX] = 0.0
+        _, ang = node.twist_max(t0)
+        node.release(B_R1)
+        node.sleep(0.9)
+        return ang
+
+    def dpad_tap(axis, sign):
+        node._axes[axis] = float(sign)
+        node.sleep(0.25)
+        node._axes[axis] = 0.0
+        node.sleep(0.3)
+
+    print("[INFO] 场景5d: 基线 twist（初始档 0.35）", flush=True)
+    v_lin0 = measure_linear()
+    rep.check("S5d 基线平移 twist >0.05m/s", v_lin0 > 0.05,
+              f"|lin|max={v_lin0:.3f}")
+
+    print("[INFO] 场景5d: D-pad 上持续按住（0→-1 单边沿，平移档 0.35→0.50）",
+          flush=True)
+    node._axes[AX_DY] = -1.0
+    node.sleep(0.4)
+    v_lin1 = measure_linear()
+    r = v_lin1 / v_lin0 if v_lin0 > 1e-6 else 0.0
+    rep.check("S5d D-pad 上：平移提速（比 1.25..1.65）",
+              1.25 <= r <= 1.65, f"{v_lin0:.3f}→{v_lin1:.3f} ratio={r:.2f}")
+
+    print("[INFO] 场景5d: 继续按住 1.5s，必须不连发", flush=True)
+    node.sleep(1.5)
+    v_lin2 = measure_linear()
+    node._axes[AX_DY] = 0.0
+    node.sleep(0.3)
+    r = v_lin2 / v_lin1 if v_lin1 > 1e-6 else 0.0
+    rep.check("S5d 持续按住不连发（比 0.85..1.15）",
+              0.85 <= r <= 1.15, f"{v_lin1:.3f}→{v_lin2:.3f} ratio={r:.2f}")
+
+    print("[INFO] 场景5d: 平移档不影响旋转通道", flush=True)
+    v_ang1 = measure_angular()
+    r = v_ang1 / v_ang_base if v_ang_base > 1e-6 else 0.0
+    rep.check("S5d 旋转 twist 不变（比 0.85..1.15）",
+              0.85 <= r <= 1.15, f"{v_ang_base:.3f}→{v_ang1:.3f} ratio={r:.2f}")
+
+    print("[INFO] 场景5d: D-pad 右一次（旋转档 0.35→0.50）", flush=True)
+    dpad_tap(AX_DX, 1.0)
+    v_ang2 = measure_angular()
+    r = v_ang2 / v_ang1 if v_ang1 > 1e-6 else 0.0
+    rep.check("S5d D-pad 右：旋转提速（比 1.25..1.65）",
+              1.25 <= r <= 1.65, f"{v_ang1:.3f}→{v_ang2:.3f} ratio={r:.2f}")
+
+    print("[INFO] 场景5d: 旋转档不影响平移通道", flush=True)
+    v_lin3 = measure_linear()
+    r = v_lin3 / v_lin2 if v_lin2 > 1e-6 else 0.0
+    rep.check("S5d 平移 twist 不变（比 0.85..1.15）",
+              0.85 <= r <= 1.15, f"{v_lin2:.3f}→{v_lin3:.3f} ratio={r:.2f}")
+
+    print("[INFO] 场景5d: D-pad 左一次（旋转档 0.50→0.35）", flush=True)
+    dpad_tap(AX_DX, -1.0)
+    v_ang3 = measure_angular()
+    r = v_ang3 / v_ang2 if v_ang2 > 1e-6 else 0.0
+    rep.check("S5d D-pad 左：旋转降速（比 0.55..0.90）",
+              0.55 <= r <= 0.90, f"{v_ang2:.3f}→{v_ang3:.3f} ratio={r:.2f}")
+
+    print("[INFO] 场景5d: 连续上 6 次到 clamp 1.0；连续下 6 次回 0.1",
+          flush=True)
+    for _ in range(6):
+        dpad_tap(AX_DY, -1.0)
+    v_lin_hi = measure_linear()
+    r = v_lin_hi / v_lin0 if v_lin0 > 1e-6 else 0.0
+    rep.check("S5d clamp 1.0（比 2.4..3.1）",
+              2.4 <= r <= 3.1, f"{v_lin0:.3f}→{v_lin_hi:.3f} ratio={r:.2f}")
+    for _ in range(6):
+        dpad_tap(AX_DY, 1.0)
+    v_lin_lo = measure_linear()
+    r = v_lin_lo / v_lin0 if v_lin0 > 1e-6 else 0.0
+    rep.check("S5d 降回 ≤0.10 档（比 ≤0.45）",
+              r <= 0.45, f"{v_lin0:.3f}→{v_lin_lo:.3f} ratio={r:.2f}")
 
     # ---- 场景 6：Circle → home ----
     node.sleep(1.0)

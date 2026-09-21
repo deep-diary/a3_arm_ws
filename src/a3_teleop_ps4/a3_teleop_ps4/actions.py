@@ -102,7 +102,9 @@ class ActionExecutor:
         # F60：命名位姿改走编排层服务（TRAJ 态可被灯带感知；F53 显式拒绝语义）
         self._goto_pose_cli = node.create_client(GotoNamedPose, "/a3/arm/goto_named_pose")
 
-        self.speed_scale = 0.35
+        # F64：平移/旋转速度档相互独立（D-pad 上下/左右分别步进）
+        self.linear_scale = 0.35
+        self.angular_scale = 0.35
         self._servo_paused = False
         self._lin = [0.0, 0.0, 0.0]
         self._ang = [0.0, 0.0, 0.0]
@@ -236,13 +238,14 @@ class ActionExecutor:
         if not motion_allowed:
             return
 
-        scale = max(0.0, min(1.0, self.speed_scale))
-        lx = self._lin[0] * self.max_linear * scale
-        ly = self._lin[1] * self.max_linear * scale
-        lz = self._lin[2] * self.max_linear * scale
-        ax = self._ang[0] * self.max_angular * scale
-        ay = self._ang[1] * self.max_angular * scale
-        az = self._ang[2] * self.max_angular * scale
+        lscale = max(0.0, min(1.0, self.linear_scale))
+        ascale = max(0.0, min(1.0, self.angular_scale))
+        lx = self._lin[0] * self.max_linear * lscale
+        ly = self._lin[1] * self.max_linear * lscale
+        lz = self._lin[2] * self.max_linear * lscale
+        ax = self._ang[0] * self.max_angular * ascale
+        ay = self._ang[1] * self.max_angular * ascale
+        az = self._ang[2] * self.max_angular * ascale
         moving = any(abs(v) > 1e-6 for v in (lx, ly, lz, ax, ay, az))
         if self._servo_paused and moving:
             self._servo_unpause()
@@ -252,7 +255,7 @@ class ActionExecutor:
         if any(abs(v) > 1e-9 for v in self._jog) and not moving:
             target = list(self._q)
             for i in range(6):
-                target[i] += self._jog[i] * self.jog_speed * dt * scale
+                target[i] += self._jog[i] * self.jog_speed * dt * lscale
             self._publish_joints(JOINTS, target, dt)
 
     def _publish_twist(
@@ -425,12 +428,6 @@ class ActionExecutor:
         # 2026-09-06 标定：开≈0、闭≈1.79，半程 0.9
         self.set_gripper(0.0 if self._gripper < 0.9 else 1.0)
 
-    def set_speed_slow(self) -> None:
-        self.speed_scale = 0.25
-
-    def set_speed_normal(self) -> None:
-        self.speed_scale = 1.0
-
     def zero_torque_start(self) -> None:
         self._call_trigger(self._zt_start, "zero_torque/start")
 
@@ -566,8 +563,19 @@ class ActionExecutor:
             throttle_duration_sec=2.0,
         )
 
-    def set_speed_scale(self, v: float) -> None:
-        self.speed_scale = max(0.0, min(1.0, float(v)))
+    # F64：D-pad 边沿步进（步长 0.15，clamp 0.1..1.0），不连发
+    def step_linear_scale(self, delta: float) -> None:
+        self.linear_scale = self._step_scale(self.linear_scale, delta)
+        self._n.get_logger().info(f"linear speed scale -> {self.linear_scale:.2f}")
+
+    def step_angular_scale(self, delta: float) -> None:
+        self.angular_scale = self._step_scale(self.angular_scale, delta)
+        self._n.get_logger().info(f"angular speed scale -> {self.angular_scale:.2f}")
+
+    @staticmethod
+    def _step_scale(value: float, delta: float) -> float:
+        stepped = round(float(value) + float(delta), 2)
+        return max(0.1, min(1.0, stepped))
 
     # --- analog_n11 ---
 

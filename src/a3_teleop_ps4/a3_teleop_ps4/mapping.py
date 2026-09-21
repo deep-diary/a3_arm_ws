@@ -196,8 +196,11 @@ def validate_mapping(
         specs = spec if isinstance(spec, list) else [spec]
         for i, s in enumerate(specs):
             check(str(s.get("fn")), "discrete", f"buttons.{btn}[{i}]")
-    for btn, spec in (mapping.get("held") or {}).items():
-        check(str(spec.get("fn")), str(spec.get("kind", "analog_01")), f"held.{btn}")
+    for i, spec in enumerate(mapping.get("dpad") or []):
+        for side in ("neg", "pos"):
+            entry = spec.get(side) or {}
+            if entry:
+                check(str(entry.get("fn")), "discrete", f"dpad[{i}].{side}")
     return errors
 
 
@@ -223,7 +226,3 @@ def iter_button_bindings(
         else:
             out.append((str(btn), str(btn), spec))
     return out
-
-
-def iter_held_bindings(mapping: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
-    return list((mapping.get("held") or {}).items())

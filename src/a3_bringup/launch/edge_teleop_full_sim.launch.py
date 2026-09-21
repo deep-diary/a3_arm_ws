@@ -45,6 +45,7 @@ def generate_launch_description():
     use_sw_render = LaunchConfiguration("use_sw_render")
     use_gripper = LaunchConfiguration("use_gripper")
     mapping = LaunchConfiguration("mapping")
+    use_joy_node = LaunchConfiguration("use_joy_node")
 
     desc_share = get_package_share_directory("a3_description")
     moveit_share = get_package_share_directory("a3_moveit_config")
@@ -116,7 +117,7 @@ def generate_launch_description():
                 )
             ),
             launch_arguments={
-                "use_joy_node": "false",
+                "use_joy_node": use_joy_node,
                 "mapping": mapping,
                 "auto_start_servo": "true",
                 "enable_feedback": "true",
@@ -150,6 +151,11 @@ def generate_launch_description():
             description="RViz 软件渲染 LIBGL_ALWAYS_SOFTWARE=1（RK3588 默认开，LL-027）",
         ),
         DeclareLaunchArgument("use_gripper", default_value="true"),
+        DeclareLaunchArgument(
+            "use_joy_node",
+            default_value="false",
+            description="true=起 joy_node 接真手柄；false（合成测试默认）=/joy 由脚本/TCP 注入",
+        ),
         DeclareLaunchArgument(
             "mapping",
             default_value="default",

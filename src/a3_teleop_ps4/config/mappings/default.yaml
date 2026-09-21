@@ -1,4 +1,4 @@
-# Default PS4 → A3 mapping (F60, 2026-09-20 重设计). Change this file to rebind; no code change needed.
+# Default PS4 → A3 mapping (F60, F64 修订 2026-09-21). Change this file to rebind; no code change needed.
 # Source names: buttons/axes keys from ds4_linux.yaml, plus virtual_buttons.
 #
 # == 全功能速查（完整操作手册见 docs/edge/PS4_OPERATOR_GUIDE.md，参考表见本包 README.md）==
@@ -6,20 +6,14 @@
 #   位姿:      Triangle 短按=ready / Circle 短按=home（home 非机械零位；zero 不绑定手柄）
 #   示教:      Share 短按=开始示教 / Options 短按=结束并自动保存 / Square 短按=回放 latest
 #   功能:      PS 短按=init(调零+自动使能) / Options 长按 3s=set_zero
-#   运动:      L1 按住=摇杆死人开关(仅锁摇杆) / R1 按住=全速 1.0, 松开 0.35
-#              左摇杆=平移 Y(左右)/Z(上下)；右摇杆=平移 X(前后, right_y)，right_x=偏航(预留实测)
-#   夹爪:      R2=直接力控（不需要 L1），按得越深抓得越紧，松开即全开
-#   预留不绑:  dpad 四键、touchpad（蓝牙无键事件 LL-052）、l2
+#   运动:      L1 按住+摇杆=末端平移死人开关 / R1 按住+摇杆=末端旋转死人开关(首批仅偏航)
+#              左摇杆=平移 Y(左右)/Z(上下)；右摇杆上下=平移 X(前后)，右摇杆左右=偏航
+#   调速:      D-pad 上/下=平移速度档 +/-；D-pad 左/右=旋转速度档 -/+（步进 0.15，clamp 0.1..1.0）
+#   夹爪:      R2=直接力控（不需要 L1/R1），按得越深抓得越紧，松开即全开
+#   预留不绑:  touchpad（蓝牙无键事件 LL-052）、l2
 
-deadman:
-  enabled: true
-  button: l1
-  # F60：死人开关只锁摇杆轴；R2(analog_01) 夹爪任何时候都可用
-  applies_to: [analog_n11]
-
-# Default speed when R1 is not held.
+# 初始速度档（平移/旋转两通道各自的起点；之后由 D-pad 独立步进）
 speed_normal: 0.35
-speed_boost: 1.0
 
 axes:
   r2:
@@ -29,23 +23,28 @@ axes:
   left_x:
     fn: servo_lin_y
     kind: analog_n11
+    gates: [l1]
   left_y:
     fn: servo_lin_z
     kind: analog_n11
+    gates: [l1]
   right_y:
     fn: servo_lin_x
     kind: analog_n11
-  # 偏航先保留绑定；方向/是否启用待合成验证逐轴标定后决定
+    gates: [l1]
   right_x:
     fn: servo_ang_z
     kind: analog_n11
-  # Optional HID extras (enable after ds4_hid_node is up):
-  # gyro_yaw:
-  #   fn: servo_ang_z
-  #   kind: analog_n11
-  # touch_x:
-  #   fn: servo_lin_y
-  #   kind: analog_n11
+    gates: [r1]
+
+# F64：D-pad hat 轴（-1/0/+1）0→±1 边沿各触发一次；持续按住不连发，回中后才能再步
+dpad:
+  - axis: dpad_y
+    neg: {fn: step_linear_scale, kwargs: {delta: 0.15}}    # 上：平移档 +
+    pos: {fn: step_linear_scale, kwargs: {delta: -0.15}}   # 下：平移档 -
+  - axis: dpad_x
+    neg: {fn: step_angular_scale, kwargs: {delta: -0.15}}  # 左：旋转档 -
+    pos: {fn: step_angular_scale, kwargs: {delta: 0.15}}   # 右：旋转档 +
 
 buttons:
   cross:
@@ -89,11 +88,3 @@ buttons:
     edge: shortpress
     hold_s: 3.0
   # 蓝牙下触摸板按键在独立 input 设备("Wireless Controller Touchpad")，js0 收不到 → 不绑定（LL-052）
-  # dpad 四键与 l2 预留，不绑定
-
-held:
-  r1:
-    fn: set_speed_scale
-    kind: analog_01
-    pressed: 1.0
-    released: 0.35

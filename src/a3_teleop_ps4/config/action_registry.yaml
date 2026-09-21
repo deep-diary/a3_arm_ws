@@ -45,13 +45,13 @@ functions:
     kind: discrete
     description: Toggle L7 between close and open
 
-  set_speed_slow:
+  step_linear_scale:
     kind: discrete
-    description: Linear/angular scale 0.25
+    description: 'F64 D-pad: step translation speed scale (kwargs delta, step 0.15, clamp 0.1..1.0)'
 
-  set_speed_normal:
+  step_angular_scale:
     kind: discrete
-    description: Linear/angular scale 1.0
+    description: 'F64 D-pad: step rotation speed scale (kwargs delta, step 0.15, clamp 0.1..1.0)'
 
   zero_torque_start:
     kind: discrete
@@ -100,10 +100,6 @@ functions:
   set_joint_L7:
     kind: analog_01
     description: L7 gripper position from trigger 0 closed .. 1 open
-
-  set_speed_scale:
-    kind: analog_01
-    description: Override current speed multiplier
 
   servo_lin_x:
     kind: analog_n11

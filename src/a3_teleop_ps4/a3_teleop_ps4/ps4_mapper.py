@@ -17,7 +17,6 @@ from a3_teleop_ps4.mapping import (
     analog_01_from_axis,
     iter_axis_bindings,
     iter_button_bindings,
-    iter_held_bindings,
     load_yaml,
     package_config_path,
     validate_mapping,
@@ -51,20 +50,16 @@ class Ps4Mapper(Node):
         self._edges = ButtonEdgeTracker()
         twist_frame = str(mapping.get("twist_frame", "base_link"))
         self._exec = ActionExecutor(self, twist_frame=twist_frame)
-        self._exec.speed_scale = float(mapping.get("speed_normal", 0.35))
+        initial_scale = float(mapping.get("speed_normal", 0.35))
+        self._exec.linear_scale = initial_scale
+        self._exec.angular_scale = initial_scale
         self._joy: Optional[Joy] = None
         self._joy_received_at = 0.0
         self._joy_alive_ticks = 0
         self._joy_alive_threshold = int(mapping.get("joy_alive_ticks", 25))
         self._extra: Dict[str, float] = {}
-        deadman_cfg = mapping.get("deadman") or {}
-        self._deadman_enabled = bool(deadman_cfg.get("enabled", True))
-        self._deadman_name = str(deadman_cfg.get("button") or "l1")
-        self._deadman_kinds = set(
-            deadman_cfg.get("applies_to") or ["analog_01", "analog_n11"]
-        )
-        if not self._deadman_enabled:
-            self.get_logger().info("deadman disabled — axes active without L1")
+        # F64：hat 轴各方向 0→±1 边沿只触发一次，回中后才能再步（不连发）
+        self._dpad_active: Dict[str, int] = {}
         self._auto_servo = bool(self.get_parameter("auto_start_servo").value)
         self._gyro_scale = float(self.get_parameter("gyro_scale").value)
         self._servo_started = False
@@ -120,32 +115,17 @@ class Ps4Mapper(Node):
         self._maybe_start_servo()
         self._exec.poll(now)
         joy = self._joy
-        deadman_pressed = self._layout.button(joy, self._deadman_name)
-        motion_allowed = (not self._deadman_enabled) or deadman_pressed
         self._exec.tick_begin()
-
-        for name, spec in iter_held_bindings(self._mapping):
-            pressed = self._layout.button(joy, name)
-            fn = str(spec.get("fn"))
-            if pressed:
-                self._exec.apply_analog(fn, float(spec.get("pressed", 1.0)))
-            else:
-                self._exec.apply_analog(fn, float(spec.get("released", 0.35)))
-
         pose_block = self._exec.pose_blocking(now)
 
-        # F60：死人开关按轴 kind 门控（applies_to），不锁整环——
-        # R2(analog_01) 不在 applies_to 内，无 L1 也要能动夹爪
+        # F64：逐轴 gates——轴任一 gate 按住才取样；未列 gates 的轴不门控（R2 夹爪）
         if not pose_block:
             for axis_name, spec in iter_axis_bindings(self._mapping):
+                gates = spec.get("gates") or []
+                if gates and not any(self._layout.button(joy, g) for g in gates):
+                    continue
                 fn = str(spec.get("fn"))
                 kind = str(spec.get("kind", "analog_n11"))
-                if (
-                    self._deadman_enabled
-                    and kind in self._deadman_kinds
-                    and not deadman_pressed
-                ):
-                    continue
                 if kind == "analog_01":
                     source = str(spec.get("source", "trigger" if axis_name in ("l2", "r2") else "unit"))
                     if axis_name in self._extra and source != "trigger":
@@ -178,7 +158,17 @@ class Ps4Mapper(Node):
                 kwargs = dict(spec.get("kwargs") or {})
                 self._exec.apply_discrete(str(spec.get("fn")), kwargs)
 
-        self._exec.tick_end(now, motion_allowed and not pose_block, self._dt)
+        for dspec in self._mapping.get("dpad") or []:
+            axis_name = str(dspec.get("axis", ""))
+            raw = self._layout.axis_raw(joy, axis_name)
+            sign = 1 if raw > 0.5 else (-1 if raw < -0.5 else 0)
+            if sign != 0 and self._dpad_active.get(axis_name, 0) == 0:
+                entry = dspec.get("pos" if sign > 0 else "neg") or {}
+                kwargs = dict(entry.get("kwargs") or {})
+                self._exec.apply_discrete(str(entry.get("fn")), kwargs)
+            self._dpad_active[axis_name] = sign
+
+        self._exec.tick_end(now, not pose_block, self._dt)
 
 
 def _clamp(v: float) -> float:

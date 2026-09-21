@@ -1,11 +1,11 @@
-# a3_teleop_ps4 — PS4 全功能映射（F60：遥控 / 示教 / 回放 + 灯带震动）
+# a3_teleop_ps4 — PS4 全功能映射（F60/F64：双死人开关 / 示教 / 回放 + 灯带震动）
 
 > **查键位看这里。改键位只编 `config/mappings/default.yaml`，零代码。**
 > 操作员手册（流程/灯/震动）：[docs/edge/PS4_OPERATOR_GUIDE.md](../../docs/edge/PS4_OPERATOR_GUIDE.md)
-> 需求与验收：[docs/edge/REQUIREMENTS.md](../../docs/edge/REQUIREMENTS.md) F60/F61/F62；
+> 需求与验收：[docs/edge/REQUIREMENTS.md](../../docs/edge/REQUIREMENTS.md) F60–F64；
 > 安全合同：[docs/shared/SAFETY.md](../../docs/shared/SAFETY.md)。
 
-## 完整映射表（`mapping:=default`，F60）
+## 完整映射表（`mapping:=default`，F60 + F64）
 
 | 键 | 边沿 | 动作 | 底层调用 |
 |----|------|------|----------|
@@ -19,14 +19,16 @@
 | **Options** | 长按 3 s | 调零 set_zero | `/power_sequence/command set_zero` |
 | **Square（■）** | 短按 | 回放最新轨迹 | `/a3/arm/playback {name: ""}` ≡ latest |
 | **PS** | 短按 | init（设零 + 到位确认 + 自动使能） | `/a3/arm/init` |
-| **L1** | 按住 | 摇杆死人开关（**仅锁摇杆**） | 松开约 0.5 s servo 超时停 |
-| **R1** | 按住 | 速度档 1.0（松开 0.35） | set_speed_scale |
-| **R2** | 模拟 | 夹爪力控（**不需要 L1**），松开全开 | gripper_force |
-| 左摇杆 X / Y | 模拟 | 平移 Y（左右）/ Z（上下） | servo_lin_y / servo_lin_z |
-| 右摇杆 Y / X | 模拟 | 平移 X（前后）/ 偏航 | servo_lin_x / servo_ang_z |
-| D-pad / touchpad / L2 | — | **预留不绑**（蓝牙触摸板无键事件，LL-052） | — |
+| **L1** | 按住 | **平移死人开关**：仅放行平移轴（F64 gates） | 松开约 0.5 s servo 超时停 |
+| **R1** | 按住 | **旋转死人开关**：仅放行偏航轴 | 同上 |
+| **R2** | 模拟 | 夹爪力控（**不需要 L1/R1**），松开全开 | gripper_force |
+| 左摇杆 X / Y | 模拟（L1） | 平移 Y（左右）/ Z（上下） | servo_lin_y / servo_lin_z |
+| 右摇杆 Y / X | 模拟 | 平移 X（前后，gate l1）/ 偏航（gate r1） | servo_lin_x / servo_ang_z |
+| **D-pad 上 / 下** | 点按 | 平移速度 ±0.15（0.10–1.0，按住不连发） | step_linear_scale |
+| **D-pad 右 / 左** | 点按 | 旋转速度 ±0.15（独立于平移档） | step_angular_scale |
+| touchpad / L2 | — | **预留不绑**（蓝牙触摸板无键事件，LL-052） | — |
 
-口诀：**L3 开工、R3 收工、✕ 长按急停；▲ ready、● home；Share-Options-■ = 示教-保存-回放；PS 初始化。**
+口诀：**L3 开工、R3 收工、✕ 长按急停；▲ ready、● home；Share-Options-■ = 示教-保存-回放；PS 初始化；L1 平移、R1 旋转、十字键调两速。**
 
 ## DS4 灯带 / 震动（F61，`ds4_feedback_node`）
 
@@ -69,7 +71,10 @@ buttons:
 ```bash
 # 全仿真（无手柄无 CAN，域 45）：双模型 RViz + 合成 /joy 验收
 ros2 launch a3_bringup edge_teleop_full_sim.launch.py
-python3 scripts/a3_test/ps4_sim_test.py          # 12 场景 36 项，逐项 PASS/FAIL
+python3 scripts/a3_test/ps4_sim_test.py          # 12 场景 46 项，逐项 PASS/FAIL
+
+# 仿真接真手柄实操（合成全绿后）：
+ros2 launch a3_bringup edge_teleop_full_sim.launch.py use_joy_node:=true
 
 # 真机：统一入口默认已含 mapper + ds4_feedback_node（mapping:=default）
 sudo systemctl start can-up.service

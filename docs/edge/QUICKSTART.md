@@ -49,7 +49,7 @@
    ```
    Interact → 拖末端球 → 面板 **Plan** / **Execute**。橙色半透明 = 目标模；Scene Robot = `/joint_states` 实际模。不发 CAN。
 
-10. **PS4 映射遥操作（F60 键位 / F61 灯带震动 / F62 合成验证）：**
+10. **PS4 映射遥操作（F60/F64 键位 / F61 灯带震动 / F62 合成验证）：**
 
     **(a) 全功能仿真闭环 + 双模型 RViz（无手柄、无 CAN，推荐逐键验收入口）：**
     ```bash
@@ -57,12 +57,13 @@
     export ROS_DOMAIN_ID=45
     export DISPLAY=:0
     ros2 launch a3_bringup edge_teleop_full_sim.launch.py
-    # 另开终端（同域）：合成 /joy 12 场景 36 项自动验收，逐项打印 PASS/FAIL + 关节证据：
+    # 另开终端（同域）：合成 /joy 12 场景 46 项自动验收，逐项打印 PASS/FAIL + 关节证据：
     python3 scripts/a3_test/ps4_sim_test.py
     ```
     - RViz 双模型：实体色 = 实际反馈（`/joint_states`），半透明 = 目标 ghost（`target/` TF）。
     - 本机 RViz 两个必备前缀已由 launch 自动加：`LIBGL_ALWAYS_SOFTWARE=1`（LL-027）、`LD_PRELOAD=~/.a3/hide_randr/libhide_randr.so`（LL-065）。
-    - S0 基线检查只能在干净栈上通过；重复跑只 FAIL 这两项属预期，首次 36/36 为准。
+    - S0 基线检查只能在干净栈上通过；重复跑须重启栈（速度档/位姿有记忆），首次 46/46 为准。
+    - 合成全绿后，手柄实操把启动命令换成 `ros2 launch a3_bringup edge_teleop_full_sim.launch.py use_joy_node:=true`（域不变）。
 
     **(b) 真机 / 校准：**
     ```bash
@@ -71,7 +72,7 @@
     # 统一入口默认已含 mapper + ds4_feedback_node，默认 mapping:=default：
     ros2 launch a3_bringup a3_bringup.launch.py use_servo:=true # jog 需 servo 一起起
     ```
-    - **default（真机生产映射，F60）**：L3 一键开门禁+使能、R3 safe-park 失能、Cross 长按 1 s 硬急停；Triangle=ready、Circle=home；示教三步 **Share=开始 / Options=结束(自动保存) / Square=回放(latest)**；PS=init、Options 长按 3 s=set_zero；**L1 按住=摇杆死人开关（仅锁摇杆）、R2 夹爪力控不需要 L1**；R1 按住全速 1.0；左摇杆平移 Y/Z，右摇杆 right_y 平移 X、right_x 偏航。D-pad/touchpad/L2 预留不绑。
+    - **default（真机生产映射，F60+F64）**：L3 一键开门禁+使能、R3 safe-park 失能、Cross 长按 1 s 硬急停；Triangle=ready、Circle=home；示教三步 **Share=开始 / Options=结束(自动保存) / Square=回放(latest)**；PS=init、Options 长按 3 s=set_zero；**L1=平移死人开关、R1=旋转死人开关（F64）、R2 夹爪力控不需要死人开关**；D-pad 上下调平移速度、左右调旋转速度（独立、步长 0.15、范围 0.10–1.0、按住不连发）；左摇杆平移 Y/Z，右摇杆 right_y 平移 X、right_x 偏航。touchpad/L2 预留不绑。
     - **灯带五色（F61）**：红闪=失电/硬急停、红双闪=FAULT、橙=已上电未使能、绿=READY/SERVO、蓝呼吸=TEACH、紫=TRAJ（goto/回放/safe-park）、白闪一次=init 完成。震动：使能/失能 120 ms 弱震，硬急停 600 ms 强震，FAULT 双震。无手柄时逻辑帧看 `/a3/ds4/feedback`（JSON）。
     - **操作员手册：[PS4_OPERATOR_GUIDE.md](PS4_OPERATOR_GUIDE.md)；完整参考表：`src/a3_teleop_ps4/README.md`。**
     - 改键位只编 `config/mappings/default.yaml`（零代码）；轴索引校准见 `config/ds4_linux.yaml`。
