@@ -8,6 +8,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_lifecycle/state.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -25,6 +26,7 @@ namespace
 {
 constexpr double kDefaultKp = 80.0;
 constexpr double kDefaultKd = 2.0;
+constexpr double kDefaultEffortKd = 2.0;
 
 double ParseDouble(const std::string & value, double fallback)
 {
@@ -79,6 +81,8 @@ public:
     can_interface_ = GetParam(hp, "can_interface", "can1");
     kp_ = ParseDouble(GetParam(hp, "kp", ""), kDefaultKp);
     kd_ = ParseDouble(GetParam(hp, "kd", ""), kDefaultKd);
+    effort_kd_ = ParseDouble(GetParam(hp, "effort_kd", ""), kDefaultEffortKd);
+    effort_kd_ = std::clamp(effort_kd_, 0.0, 5.0);
     bus_ = (can_interface_ == "can0") ? CanBus::CAN0 : CanBus::CAN1;
 
     joints_.clear();
@@ -151,6 +155,51 @@ public:
       interfaces.emplace_back(j.name, "effort", &j.cmd_eff);
     }
     return interfaces;
+  }
+
+  hardware_interface::return_type prepare_command_mode_switch(
+    const std::vector<std::string> &,
+    const std::vector<std::string> &) override
+  {
+    return hardware_interface::return_type::OK;
+  }
+
+  hardware_interface::return_type perform_command_mode_switch(
+    const std::vector<std::string> & start_interfaces,
+    const std::vector<std::string> & stop_interfaces) override
+  {
+    const auto contains_effort = [](const std::vector<std::string> & ifaces) {
+      for (const auto & i : ifaces) {
+        if (i.find("/effort") != std::string::npos) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    if (contains_effort(start_interfaces) && !effort_mode_.load()) {
+      effort_mode_.store(true);
+      RCLCPP_WARN(
+        rclcpp::get_logger(kLoggerName),
+        "command mode -> EFFORT (gravity-comp free drive): kp=0 kd=%.2f",
+        effort_kd_);
+    }
+    if (contains_effort(stop_interfaces) && effort_mode_.load()) {
+      effort_mode_.store(false);
+      // Re-anchor position commands at measured pose so activating a
+      // position controller after free-drive cannot snap the arm back.
+      std::lock_guard<std::mutex> lock(fb_mutex_);
+      for (auto & j : joints_) {
+        j.cmd_pos = j.hw_pos;
+        j.cmd_vel = 0.0;
+        j.cmd_eff = 0.0;
+      }
+      RCLCPP_INFO(
+        rclcpp::get_logger(kLoggerName),
+        "command mode -> POSITION: kp=%.1f kd=%.2f, commands re-anchored",
+        kp_, kd_);
+    }
+    return hardware_interface::return_type::OK;
   }
 
   CallbackReturn on_configure(const rclcpp_lifecycle::State &) override
@@ -280,6 +329,35 @@ public:
       return hardware_interface::return_type::OK;
     }
 
+    if (effort_mode_.load()) {
+      // MIT torque mode: kp=0 removes the position spring; kd keeps joint
+      // damping; torque_ff is the joint-space command mapped to the motor
+      // axis (motor τ = joint τ / direction; directions are ±1). Position
+      // field is the current measured motor angle (no position target).
+      std::vector<double> motor_positions(joints_.size());
+      {
+        std::lock_guard<std::mutex> lock(fb_mutex_);
+        for (size_t i = 0; i < joints_.size(); ++i) {
+          motor_positions[i] =
+            joints_[i].direction * joints_[i].hw_pos + joints_[i].position_offset;
+        }
+      }
+      for (size_t i = 0; i < joints_.size(); ++i) {
+        const auto & j = joints_[i];
+        const double motor_torque =
+          std::clamp(j.cmd_eff, -j.torque_max, j.torque_max) * j.direction;
+        const auto frame = ProtocolCodec::BuildMitControlFrame(
+          bus_, j.motor_id, motor_positions[i], 0.0, 0.0, effort_kd_,
+          motor_torque, j.torque_max, j.speed_max);
+        std::string error;
+        if (!transport_.Send(frame, &error)) {
+          RCLCPP_WARN_THROTTLE(
+            rclcpp::get_logger(kLoggerName), clock_, 1000, "%s", error.c_str());
+        }
+      }
+      return hardware_interface::return_type::OK;
+    }
+
     for (const auto & j : joints_) {
       // MIT position mode: velocity/torque FF stay 0 — JTC position commands
       // already carry a smooth spline; kp/kd close the loop on the motor.
@@ -339,6 +417,8 @@ private:
   CanBus bus_{CanBus::CAN1};
   double kp_{kDefaultKp};
   double kd_{kDefaultKd};
+  double effort_kd_{kDefaultEffortKd};
+  std::atomic_bool effort_mode_{false};
 
   std::vector<JointMapping> joints_;
   std::array<double, 8> torque_max_by_motor_{};

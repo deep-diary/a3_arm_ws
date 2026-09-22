@@ -12,6 +12,8 @@ the joint direction mapping (motor 2=+0.785, motor 3=+0.785).
 """
 
 import argparse
+import json
+import os
 import socket
 import struct
 import time
@@ -69,17 +71,61 @@ def send_feedback(sock, m):
     sock.send(pack_frame(can_id, raw))
 
 
+class ExternalForce:
+    """Operator push in motor coordinates, read from a JSON file.
+
+    Format: {"motor": 3, "torque": 0.6}; {} clears. Only applied in effort
+    mode (control frames with kp~0), where the controller's t_ff already
+    cancels gravity, so the environment load is -t_ff + ext.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.mtime = 0.0
+        self.last_check = 0.0
+        self.motor = None
+        self.torque = 0.0
+
+    def poll(self):
+        now = time.monotonic()
+        if now - self.last_check < 0.05:
+            return
+        self.last_check = now
+        try:
+            mtime = os.path.getmtime(self.path)
+        except OSError:
+            return
+        if mtime == self.mtime:
+            return
+        self.mtime = mtime
+        try:
+            with open(self.path) as f:
+                data = json.load(f)
+            self.motor = int(data["motor"])
+            self.torque = float(data["torque"])
+        except (OSError, ValueError, KeyError, TypeError):
+            self.motor = None
+            self.torque = 0.0
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--interface", default="vcan0")
     parser.add_argument("--alpha", type=float, default=0.2,
                         help="first-order follow gain per control frame")
+    parser.add_argument("--ext-file", default="/tmp/f73_ext.json",
+                        help="external-force injection file (effort mode only)")
+    parser.add_argument("--inertia", type=float, default=0.08,
+                        help="assumed rotor-side inertia for effort dynamics")
+    parser.add_argument("--viscous", type=float, default=0.1,
+                        help="assumed rotor-side viscous damping")
     args = parser.parse_args()
 
     sock = socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
     sock.bind((args.interface,))
 
     motors = {i: MotorState(i) for i in range(1, 8)}
+    ext = ExternalForce(args.ext_file)
     print(f"vcan motor sim on {args.interface}, alpha={args.alpha}", flush=True)
 
     while True:
@@ -110,12 +156,25 @@ def main():
             now = time.monotonic()
             dt = max(1e-3, now - m.last_t)
             m.last_t = now
-            prev = m.angle
-            m.angle += args.alpha * (target - m.angle)
-            m.speed = max(-vmax, min(vmax, (m.angle - prev) / dt))
-            m.torque = max(-TORQUE_MAX[motor_id],
-                           min(TORQUE_MAX[motor_id],
-                               t_ff + kp * (target - m.angle) + kd * (target_v - m.speed)))
+            if kp < 1.0:
+                # Effort mode: t_ff cancels gravity; the environment adds
+                # -t_ff plus any operator push from the ext file.
+                ext.poll()
+                push = ext.torque if ext.motor == motor_id else 0.0
+                m.torque = max(-TORQUE_MAX[motor_id],
+                               min(TORQUE_MAX[motor_id],
+                                   t_ff + kp * (target - m.angle) + kd * (target_v - m.speed)))
+                net = m.torque - t_ff + push
+                accel = (net - args.viscous * m.speed) / args.inertia
+                m.speed = max(-vmax, min(vmax, m.speed + accel * dt))
+                m.angle += m.speed * dt
+            else:
+                prev = m.angle
+                m.angle += args.alpha * (target - m.angle)
+                m.speed = max(-vmax, min(vmax, (m.angle - prev) / dt))
+                m.torque = max(-TORQUE_MAX[motor_id],
+                               min(TORQUE_MAX[motor_id],
+                                   t_ff + kp * (target - m.angle) + kd * (target_v - m.speed)))
             send_feedback(sock, m)
 
 

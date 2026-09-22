@@ -14,7 +14,7 @@ controller_manager:
       type: joint_trajectory_controller/JointTrajectoryController
 
     zero_torque_controller:
-      type: a3_can_bridge/ZeroTorqueController
+      type: a3_hardware_interface/GravityCompensationController
 
 joint_state_broadcaster:
   ros__parameters:
@@ -96,8 +96,8 @@ zero_torque_controller:
       - L4_joint
       - L5_joint
       - L6_joint
-      - L7_joint
-    kd: 1.0
-    # Resolved dynamically in launch files via get_package_share_directory()
+    # URDF resolved at configure time: controller node robot_description param,
+    # then urdf_path file, then the controller_manager node parameter.
+    robot_description: ""
     urdf_path: ""
-    inertia_config_path: ""
+    controller_manager_name: controller_manager

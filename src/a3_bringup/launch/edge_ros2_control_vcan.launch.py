@@ -91,6 +91,20 @@ def generate_launch_description():
         output="screen",
     )
 
+    # F73: 重力补偿自由拖动控制器以 inactive 状态常驻，
+    # 示教时用标准 switch_controllers 与 arm_controller 互斥切换。
+    free_drive_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "zero_torque_controller",
+            "--inactive",
+            "--controller-manager",
+            "/controller_manager",
+        ],
+        output="screen",
+    )
+
     with open(os.path.join(moveit_share, "config", "el_a3.srdf"), "r", encoding="utf-8") as f:
         robot_description_semantic = f.read()
     kinematics_yaml = load_yaml("a3_moveit_config", "config/kinematics.yaml")
@@ -138,6 +152,7 @@ def generate_launch_description():
 
     # 同 F70 顺序：先 JTC 后 JSB（LL-072）。
     delay_arm = TimerAction(period=3.0, actions=[arm_spawner])
+    delay_free_drive = TimerAction(period=5.0, actions=[free_drive_spawner])
     delay_jsb = TimerAction(period=7.0, actions=[jsb_spawner])
 
     return LaunchDescription([
@@ -147,5 +162,6 @@ def generate_launch_description():
         move_group,
         delay_jsb,
         delay_arm,
+        delay_free_drive,
         rviz,
     ])

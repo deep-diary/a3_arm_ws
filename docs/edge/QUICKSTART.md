@@ -514,6 +514,25 @@ python3 scripts/a3_test/f72_ros2_control_vcan_acceptance.py
 - 真机上电时：`sudo systemctl start can-up.service`，xacro 参数换 `can_interface:=can1`（或后续提供真机 launch），其余不动；先低压低速复测同一脚本。
 - Humble 无 xacro:elif、launch Command 的 `"xacro "` 前缀、install launch 是 build 副本等五个接线坑详见 [LL-074](../lessons_learned/LL-074-ros2-control-system-interface-vcan-xacro-humble-pitfalls.md)。
 
+### 重力补偿自由拖动验收（F73，effort 模式 + ZeroTorque 对标控制器）
+
+工业级示教路径，取代手搓 zero-torque：`zero_torque_controller`（`a3_hardware_interface/GravityCompensationController`，RNEA 重力矩写 `/effort`）以 `--inactive` 常驻，进入/退出全部走标准 `ros2 control switch_controllers`，与 arm_controller 互斥；硬件插件在 effort 模式发 kp=0/kd=2/torque_ff=关节重力矩×direction。
+
+```bash
+# 沿用 F72 的 vcan0 模拟器 + 标准栈（ROS_DOMAIN_ID=59）
+python3 scripts/a3_test/f73_gravity_comp_vcan_acceptance.py
+#   通过标准：末尾「总体: ALL PASS」（41 项：home/ready/mid 三姿态互斥切换；
+#   CAN kp=0/kd=2/位置字段=实测位，torque_ff 对独立 RNEA 偏差 ≤0.0003 Nm；
+#   外力注入 L3 同号跟随、撤力漂移 0.0008 rad；切回后 JTC 回归 0.0003）
+
+# 手动进入/退出自由拖动（真机与 vcan 通用）
+ros2 control switch_controllers --deactivate arm_controller --activate zero_torque_controller
+ros2 control switch_controllers --deactivate zero_torque_controller --activate arm_controller
+# 观测：ros2 topic echo /zero_torque_controller/gravity_torque
+```
+
+- Humble `get_name()` 全名语义、旧 shell AMENT_PREFIX_PATH 致 pluginlib 只认 mock 等六个坑详见 [LL-075](../lessons_learned/LL-075-gravity-comp-controller-fullname-stale-ament-pitfalls.md)。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

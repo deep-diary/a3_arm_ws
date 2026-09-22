@@ -1,0 +1,13 @@
+<library path="a3_hardware_interface">
+  <class
+    name="a3_hardware_interface/GravityCompensationController"
+    type="a3_hardware_interface::GravityCompensationController"
+    base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Gravity-compensation free-drive controller: claims joint effort command
+      interfaces and writes Pinocchio RNEA gravity torques. Activated with the
+      standard ros2_control switch_controllers (mutually exclusive with
+      joint_trajectory_controller), replacing custom zero-torque teach paths.
+    </description>
+  </class>
+</library>
