@@ -550,6 +550,24 @@ ROS_DOMAIN_ID=60 python3 scripts/a3_test/f74_fjt_backend_mock_acceptance.py
 
 - move_group 只规划 arm 组、safe-park 须补发 L7 gripper 轨迹；L2/L3 单向限位越限会被 JTC 静默夹紧——详见 [LL-076](../lessons_learned/LL-076-moveit-arm-group-leaves-l7-jtc-clamps-one-sided-limits.md)。
 
+### 全产品 mock-hardware 标准栈验收（F75，零自研 sim 节点）
+
+单一 bringup 拉起与真机 F72 栈同构的产品级拓扑：mock GenericSystem + controller_manager（JSB active、arm/gripper 两 JTC **inactive 启动**）+ move_group + retime 节点 + 编排层（`control_backend=fjt_action`、`motor_service_backend=controller_switch`，enable/disable 走标准 `/controller_manager/switch_controller`）+ 产品夹爪节点（轨迹出口指 JTC 原生话题）+ MQTT 桥。全程不加载 sim_motor_node / sim_power_sequence / gravity_torque。
+
+```bash
+source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
+# 1) 起栈（无 CAN / 无电机；use_rviz:=true 可加 RViz）
+ROS_DOMAIN_ID=61 ros2 launch a3_bringup edge_full_mock.launch.py
+# 2) 验收（另一终端）
+ROS_DOMAIN_ID=61 python3 scripts/a3_test/f75_full_mock_acceptance.py
+#   通过标准：末尾「F75 acceptance: 15/15」（boot 两 JTC inactive/零自研 sim 节点/
+#   产品节点齐、enable→READY 两 JTC active、jog×3 含 L7、goto ready/home、
+#   playback retime、夹爪位置命令经标准 JTC 驱动 L7、safe-park 双落定后失能、MQTT 存活）
+```
+
+- goto/move_to 走 move_group 同样漏 L7（统一补发）；失能落定必须位置 AND 速度双条件；重启栈先按 PID 清全部子进程——详见 [LL-077](../lessons_learned/LL-077-goto-l7-dispatch-settle-pos-vel-double-stack.md)。
+- 真机上电后：`edge_full_mock.launch.py` 的 mock 拓扑即真机 bringup 的改造模板（xacro 切 `use_real_hardware:=true`、F72 SystemInterface 已提供使能语义），真机验收待上电。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

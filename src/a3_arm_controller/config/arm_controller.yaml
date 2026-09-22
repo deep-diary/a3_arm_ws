@@ -49,6 +49,9 @@
     disable_home_duration_s: 5.0
     disable_home_confirm_s: 0.5
     disable_park_timeout_s: 8.0
+    # F75: 工业级落定判据——位置 AND 速度双落定连续 confirm_s 才允许失能
+    disable_home_settle_tol_rad: 0.02
+    disable_home_settle_vel_rad_s: 0.05
     # F43: 最大力矩持久化
     motor_states_topic: /a3/motor/states
     torque_stats_file: "~/.a3/stats/torque_stats.yaml"

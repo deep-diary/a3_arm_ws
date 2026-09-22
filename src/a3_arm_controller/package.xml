@@ -18,6 +18,7 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>trajectory_msgs</exec_depend>
   <exec_depend>control_msgs</exec_depend>
+  <exec_depend>controller_manager_msgs</exec_depend>
   <exec_depend>moveit_msgs</exec_depend>
   <exec_depend>builtin_interfaces</exec_depend>
   <exec_depend>diagnostic_updater</exec_depend>

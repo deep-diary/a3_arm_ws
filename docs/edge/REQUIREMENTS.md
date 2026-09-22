@@ -882,6 +882,19 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F70（JTC/标准栈）、F72/F73（真机/力矩栈）、F67/F68（上层规划/重定时，本需求是其兜底路径的执行落地）；审计任务 #10；LL-076（组外 L7 补发、单向关节夹紧）
 - **状态：** `completed`（2026-09-22 仿真验收，F70 mock 双 JTC 栈，ROS_DOMAIN_ID=60，`scripts/a3_test/f74_fjt_backend_mock_acceptance.py` 12/12：显式 enable→READY；jog ×3（含 L7）落点误差 ≤0.0192；goto 线性兜底 ready/home 到位；playback 61 点正弦经 ruckig retime → 拆 arm/gripper FJT 执行，落 home err=0.0079；连续 jog 抢占语义正确（P1 dist=0.502 未跟踪）；旧话题全程零消息；disable safe-park move_group 后补发 L7 gripper 轨迹→全 7 关节收敛 home、reset 调用 1 次→DISABLED。L2/L3 单向限位目标必须在界内（JTC 越限静默夹紧）
 
+## F75 全产品 mock-hardware 标准栈 bringup（零自研 sim 节点：控制器 inactive 启动 + 编排层 switch_controller 使能）
+
+- **说明：** F70–F74 建成标准执行/规划栈后，「整体启动」仍走 `edge_web_sim.launch.py` 的三个自研模拟节点（sim_motor_node / sim_power_sequence_node / gravity_torque_node），且真机栈的使能语义（`/a3/motor/enable|reset|set_zero` 服务）在标准栈上没有对应物。本需求统一产品级 bringup 拓扑，与真机 F72 栈同构：
+  1. 编排层新增参数 `motor_service_backend`（默认 `"can_service"`，旧行为零变化；`"controller_switch"` = 标准栈）：enable → `/controller_manager/switch_controller` STRICT 激活 `arm_controller` + `gripper_controller`（硬件插件 `on_activate` 内 reset→enable，见 F72）；reset → 同服务去激活两控制器（`on_deactivate` 零增益刷新 + MIT stop）；set_zero → 标准栈绝对编码帧无此操作，返回成功跳过。switch 是幂等操作，`_enable_cb` 在本后端不再依赖 `/a3/motor/states` 的使能镜像；`_init_cb` 在本后端跳过 set_zero 与零位确认，直接激活控制器（在当前反馈位重锚）。
+  2. 新增 `edge_full_mock.launch.py`：xacro `use_mock_hardware:=true` → `mock_components/GenericSystem`；两个 JTC 经 spawner `--inactive` 启动（上电不使能，等待显式 enable），JSB 保活提供 `/joint_states`；move_group + retime + 编排层（`control_backend=fjt_action`、`motor_service_backend=controller_switch`、`require_gate=false`）+ 夹爪产品节点（`traj_topic:=/gripper_controller/joint_trajectory`——JTC 原生话题入口，位置类命令直入标准控制器）+ MQTT 桥 + arm_monitor（可选）。**全程无 sim_motor_node / sim_power_sequence_node / gravity_torque_node。**
+- **验收标准：**
+  1. 启动后节点清单无任何自研 sim 节点；boot 态两个 JTC `inactive`、FSM `IDLE`
+  2. enable → 两 JTC `active`、FSM `READY`；jog / goto(move_group) / playback(retime) 落点 ≤0.02，`/joint_states` 速度字段有效（LL-072 顺序不回退）
+  3. 夹爪 `/a3/gripper/command` 位置命令 → L7 经标准 JTC 话题实际运动
+  4. disable safe-park → 两 JTC `inactive`、FSM `DISABLED`；MQTT 桥节点存活无崩溃
+- **关联：** F70（标准栈）、F72（硬件 on_activate/deactivate 使能语义）、F74（FJT action 后端）；LL-072（JTC/JSB 启动顺序与单点语义）、LL-076、LL-077（goto L7 补发 + 位置/速度双落定）；审计任务 #10
+- **状态：** `completed`（2026-09-22 仿真验收，ROS_DOMAIN_ID=61，`scripts/a3_test/f75_full_mock_acceptance.py` 15/15：boot 两 JTC inactive、FSM IDLE、零自研 sim 节点、产品节点齐；enable→controllers activated→READY、两 JTC active；jog ×3（含 L7）落点 err ≤0.0199、速度字段有效 max_vel=0.429；goto move_group ready/home err ≤0.0094（L7 同步补发）；playback 61 点正弦经 retime+双 JTC 落 home err=0.0118；夹爪位置命令经标准 JTC 话题驱动 L7（0→1.780→0）；disable safe-park 位置/速度双落定后两 JTC inactive、FSM DISABLED；MQTT 桥全程存活）
+
 ### F40 — 失能保护（disable → 自动回 home → 失能）
 
 - **说明：** `/a3/arm/disable` 不再是「无条件直接失能」——不在 home 容差内时先平滑回 home 再失能，防止 ready 位直接掉臂。新增参数：`disable_home_pose_name: "home"`、`disable_home_tol_rad: 0.15`、`disable_home_duration_s: 3.0`、`disable_home_confirm_s: 0.5`、`disable_park_timeout_s: 8.0`。新辅助 `_at_home()`（全关节 |q−home| ≤ tol）与 `_safe_park_then_disable()`（同步阻塞：发布 home 轨迹抢占活跃轨迹——执行层 OnTrajectory 天然支持替换，无需排队 → `SAFE_PARK`（期间拒绝新运动指令）→ 轮询连续 `confirm_s` 收敛 → reset → `DISABLED`）。服务语义（同步阻塞返回，`success=true ⟺ 已失能`）：READY/TRAJ 容差内 → 直达 reset → DISABLED；容差外 → safe park → reset → DISABLED（message 含耗时）；IDLE → 直达 reset；DISABLED/COOLING → 幂等不动电机；FAULT → 紧急直达 reset；INIT/TEACH/SERVO/AI → 拒绝 busy；SAFE_PARK → 拒绝「already safe parking」。park 超时 → **FAULT 不 reset**（保持使能、停在半途，人工介入）；reset 被 gate 拒 → park 前 `success=false` + 原文 + "(stop power sequence first)"，park 完成后被拒 → 回 READY（已在 home 位，安全）；`_have_js==False` → 直达 reset + WARN（保持旧行为）。`/a3/motor/reset` 直达保留作紧急失能。

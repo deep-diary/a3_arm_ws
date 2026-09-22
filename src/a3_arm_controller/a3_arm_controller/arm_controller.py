@@ -21,6 +21,7 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory
+from controller_manager_msgs.srv import SwitchController
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -331,6 +332,13 @@ class ArmController(Node):
         self.declare_parameter("control_backend", "topic")
         self.declare_parameter("arm_fjt_action", "/arm_controller/follow_joint_trajectory")
         self.declare_parameter("gripper_fjt_action", "/gripper_controller/follow_joint_trajectory")
+        # F75: 使能后端。can_service（默认，真机/旧栈，零行为变化）走 /a3/motor/*
+        # 服务；controller_switch（标准 ros2_control 栈）走 /controller_manager/
+        # switch_controller，硬件插件 on_activate/deactivate 内完成 reset→enable。
+        self.declare_parameter("motor_service_backend", "can_service")
+        self.declare_parameter("controller_manager_switch_srv",
+                               "/controller_manager/switch_controller")
+        self.declare_parameter("switch_controllers", ["arm_controller", "gripper_controller"])
         self.declare_parameter("status_hz", 10.0)
         self.declare_parameter("init_zero_tol_rad", 0.05)
         self.declare_parameter("init_timeout_s", 5.0)
@@ -389,6 +397,9 @@ class ArmController(Node):
         self.declare_parameter("disable_home_duration_s", 3.0)
         self.declare_parameter("disable_home_confirm_s", 0.5)
         self.declare_parameter("disable_park_timeout_s", 8.0)
+        # F75: 工业级落定判据——位置 AND 速度同时落定才允许失能
+        self.declare_parameter("disable_home_settle_tol_rad", 0.02)
+        self.declare_parameter("disable_home_settle_vel_rad_s", 0.05)
         # F43: 最大力矩持久化
         self.declare_parameter("motor_states_topic", "/a3/motor/states")
         self.declare_parameter("torque_stats_file", "~/.a3/stats/torque_stats.yaml")
@@ -547,6 +558,12 @@ class ArmController(Node):
         self._reset_cli = self.create_client(MotorCommand, "/a3/motor/reset", callback_group=self._cb_group)
         self._zt_start_cli = self.create_client(Trigger, "/a3/zero_torque/start", callback_group=self._cb_group)
         self._zt_stop_cli = self.create_client(Trigger, "/a3/zero_torque/stop", callback_group=self._cb_group)
+        # F75: 标准栈使能客户端（motor_service_backend=controller_switch 时用）
+        self._switch_cli = self.create_client(
+            SwitchController,
+            str(self.get_parameter("controller_manager_switch_srv").value),
+            callback_group=self._cb_group,
+        )
 
         # F67: MoveGroup action client（节点启动时不阻塞等待；用前查 server_is_ready）
         self._moveit_cli = ActionClient(
@@ -812,7 +829,39 @@ class ArmController(Node):
         ]
         return bool(fresh_enabled) and all(fresh_enabled)
 
+    def _using_controller_switch(self) -> bool:
+        return str(self.get_parameter("motor_service_backend").value) == "controller_switch"
+
+    def _cm_switch(self, command: int) -> Tuple[bool, str]:
+        """F75: 经标准 /controller_manager/switch_controller 使能/失能控制器。
+
+        command: 1 enable(activate) / 2 reset(deactivate) / 3 set_zero（绝对编码
+        帧无此操作，跳过返回成功）。switch 幂等，硬件 on_activate 内 reset→enable，
+        on_deactivate 内零增益刷新 + MIT stop（F72）。
+        """
+        if command == 3:
+            return True, "ros2_control absolute frame: set_zero skipped"
+        activate = command == 1
+        names = list(self.get_parameter("switch_controllers").value)
+        if not self._wait_service(self._switch_cli, 3.0):
+            return False, "controller_manager switch service unavailable"
+        req = SwitchController.Request()
+        if activate:
+            req.activate_controllers = names
+        else:
+            req.deactivate_controllers = names
+        req.strictness = SwitchController.Request.STRICT
+        future = self._switch_cli.call_async(req)
+        if self._wait_future(future, 3.0):
+            res = future.result()
+            if not bool(res.ok):
+                return False, "switch_controller rejected (STRICT)"
+            return True, "controllers " + ("activated" if activate else "deactivated")
+        return False, "switch_controller timeout"
+
     def _motor_command(self, client, command: int) -> Tuple[bool, str]:
+        if self._using_controller_switch():
+            return self._cm_switch(command)
         if not self._wait_service(client):
             return False, "motor service unavailable"
         req = MotorCommand.Request()
@@ -945,6 +994,27 @@ class ArmController(Node):
                 f"FJT backend: {label} 结束码 {names.get(code, code)}"
             )
 
+    def _dispatch_l7_linear(self, target: float, speed: float = 0.5) -> float:
+        """LL-077: move_group 只规划 arm 组（L1–L6），L7 单独线性轨迹补下发。
+
+        返回轨迹时长；|Δ|≤1e-3 不下发返回 0.0。
+        """
+        delta = target - self._positions[6]
+        if abs(delta) <= 1e-3:
+            return 0.0
+        g_dur = min(max(abs(delta) / speed, 1.0), 3.0)
+        n = self._traj_point_count(g_dur)
+        gtraj = JointTrajectory()
+        gtraj.joint_names = [JOINTS[6]]
+        for i in range(n):
+            alpha = i / (n - 1)
+            pt = JointTrajectoryPoint()
+            pt.positions = [self._positions[6] + alpha * delta]
+            pt.time_from_start = _duration(g_dur * alpha)
+            gtraj.points.append(pt)
+        self._dispatch_trajectory(gtraj)
+        return g_dur
+
     def _safe_park_then_disable(self) -> Tuple[bool, str]:
         """F40: 平滑回 home → 连续确认收敛 → 失能（同步阻塞，仿 _init_cb 轮询先例）。
 
@@ -953,11 +1023,10 @@ class ArmController(Node):
         停在半途，需人工介入）。
         """
         home = self._home_pose()
-        tol = float(self.get_parameter("disable_home_tol_rad").value)
         confirm_s = float(self.get_parameter("disable_home_confirm_s").value)
         timeout_s = float(self.get_parameter("disable_park_timeout_s").value)
 
-        # F67: 优先 move_group（L1–L6 回 home；L7 保持）
+        # F67: 优先 move_group（L1–L6 回 home）
         duration = 0.0
         planned = False
         if bool(self.get_parameter("goto_use_moveit").value):
@@ -968,20 +1037,8 @@ class ArmController(Node):
                 self.get_logger().warn(f"safe park: {msg} -- local linear fallback")
 
         # move_group 只规划 arm 组（L1–L6）；L7（夹爪）单独发 gripper FJT 回 home
-        if planned and abs(self._positions[6] - home[6]) > 1e-3:
-            g_dur = min(max(abs(self._positions[6] - home[6]) / 0.5, 1.0), 3.0)
-            gtraj = JointTrajectory()
-            gtraj.joint_names = [JOINTS[6]]
-            n = self._traj_point_count(g_dur)
-            for i in range(n):
-                alpha = i / (n - 1)
-                pt = JointTrajectoryPoint()
-                pt.positions = [
-                    self._positions[6] + alpha * (home[6] - self._positions[6])
-                ]
-                pt.time_from_start = _duration(g_dur * alpha)
-                gtraj.points.append(pt)
-            self._dispatch_trajectory(gtraj)
+        if planned:
+            duration = max(duration, self._dispatch_l7_linear(home[6]))
 
         if not planned:
             duration = max(
@@ -999,8 +1056,17 @@ class ArmController(Node):
         if planned:
             self._set_state(STATE_SAFE_PARK, f"safe park -> home (move_group, {duration:.1f}s)")
         t0 = time.monotonic()
+        settle_tol = float(self.get_parameter("disable_home_settle_tol_rad").value)
+        settle_vel = float(self.get_parameter("disable_home_settle_vel_rad_s").value)
+
+        def settled() -> bool:
+            # F75: 位置 AND 速度双落定（宽 tol=0.15 会在臂仍运动时放行失能，LL-077）
+            err = max(abs(p - h) for p, h in zip(self._positions, home))
+            speed = max(abs(v) for v in self._velocities)
+            return err <= settle_tol and speed <= settle_vel
 
         converge_start = 0.0
+        corrective_sent = False
         while time.monotonic() - t0 < duration + timeout_s and rclpy.ok():
             # F51/LL-039: 电机已带外失能 → park 不可能收敛，立即退出（保持“已失能”事实）
             if self._pending_unexpected_disable:
@@ -1011,8 +1077,17 @@ class ArmController(Node):
                 self._set_state(STATE_DISABLED, f"safe park aborted：{why}")
                 self.get_logger().error(f"[arm_controller] safe park aborted: {why}")
                 return False, f"safe park aborted: {why}"
-            at_home, _ = self._at_home(tol)
-            if at_home:
+            # move_group 轨迹执行异常未落定时，补一条 7 关节本地插值纠偏（仅一次）
+            if not corrective_sent and time.monotonic() - t0 > duration + 1.0 \
+                    and not settled():
+                gap = max(abs(p - h) for p, h in zip(self._positions, home))
+                c_dur = min(max(gap / 0.3, 2.0), 6.0)
+                self._dispatch_trajectory(
+                    self._linear_trajectory(list(self._positions), home, c_dur)
+                )
+                duration = (time.monotonic() - t0) + c_dur
+                corrective_sent = True
+            if settled():
                 if converge_start == 0.0:
                     converge_start = time.monotonic()
                 elif time.monotonic() - converge_start >= confirm_s:
@@ -1021,10 +1096,9 @@ class ArmController(Node):
                 converge_start = 0.0
             time.sleep(0.05)
 
-        at_home, _ = self._at_home(tol)
-        if not at_home:
-            self._set_state(STATE_FAULT, "safe park timeout: not at home, still enabled")
-            return False, "safe park timeout: not at home, still enabled"
+        if not settled():
+            self._set_state(STATE_FAULT, "safe park timeout: not settled at home, still enabled")
+            return False, "safe park timeout: not settled at home, still enabled"
         ok, msg = self._motor_command(self._reset_cli, 2)
         if not ok:
             # reset 被拒（如 gate 互锁）：臂已在 home 位（安全），回 READY 待人工
@@ -1313,6 +1387,21 @@ class ArmController(Node):
                     + " — set_zero defines CURRENT pose as zero; only valid at a known pose"
                 )
 
+        if self._using_controller_switch():
+            # F75 标准栈：绝对编码帧无需 set_zero，也无零位确认；activate 时硬件
+            # 在当前反馈位重锚，直接激活控制器。
+            self._set_state(STATE_INIT, "init: activate controllers")
+            ok, msg = self._motor_command(self._enable_cli, 1)
+            if not ok:
+                self._set_state(STATE_FAULT, f"enable failed: {msg}")
+                resp.success = False
+                resp.message = msg
+                return resp
+            self._set_state(STATE_READY, "init ok (controller_switch)")
+            resp.success = True
+            resp.message = "init ok: controllers activated"
+            return resp
+
         self._set_state(STATE_INIT, "init: set_zero")
         ok, msg = self._motor_command(self._motor_cli, 3)  # set_zero
         if not ok:
@@ -1391,7 +1480,7 @@ class ArmController(Node):
         # 后 F32 互锁会拒绝 /a3/motor/enable 调试写——电机既已使能就无需再写：
         # F48 限位检查已过、执行层在 SoftStand 锚定当前反馈位、看门狗已在
         # none→all 使能沿重基准保持参照，直接转 READY。
-        if self._all_motors_enabled():
+        if not self._using_controller_switch() and self._all_motors_enabled():
             self._set_state(
                 STATE_READY,
                 "motors already enabled by power sequence EnableInit -> READY")
@@ -1610,10 +1699,11 @@ class ArmController(Node):
         elif len(q1) > self._n_joints:
             q1 = q1[: self._n_joints]
 
-        # F67: 优先 move_group（OMPL + TOTG），L7 不参与 goto
+        # F67: 优先 move_group（OMPL + TOTG）；LL-077 move_group 只规划 arm 组，L7 补下发
         if bool(self.get_parameter("goto_use_moveit").value):
             ok, duration, msg = self._moveit_move(q1[:6], JOINTS[:6], f"goto {name}")
             if ok:
+                duration = max(duration, self._dispatch_l7_linear(q1[6]))
                 self._schedule_back_to_ready(duration + 0.3)
                 resp.success = True
                 resp.message = msg
@@ -1658,10 +1748,11 @@ class ArmController(Node):
 
         q1 = [float(v) for v in req.positions]
 
-        # F67: 优先 move_group（L1–L6；L7 保持）
+        # F67: 优先 move_group（L1–L6）；LL-077 L7 补下发
         if bool(self.get_parameter("goto_use_moveit").value):
             ok, duration, msg = self._moveit_move(q1[:6], JOINTS[:6], "move_to")
             if ok:
+                duration = max(duration, self._dispatch_l7_linear(q1[6]))
                 self._schedule_back_to_ready(duration + 0.3)
                 resp.success = True
                 resp.message = msg
