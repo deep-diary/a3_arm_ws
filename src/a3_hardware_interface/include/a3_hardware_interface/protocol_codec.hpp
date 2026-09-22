@@ -51,6 +51,7 @@ public:
   static constexpr uint16_t kParamSpdKp = 0x701F;
   static constexpr uint16_t kParamSpdKi = 0x7020;
   static constexpr uint16_t kParamEpScanTime = 0x7026;
+  static constexpr uint16_t kParamCanTimeout = 0x7028; // CAN 超时（float, s）：0=电机端不超时
   static constexpr uint16_t kParamZeroSta = 0x7029;    // 零点标志位（uint8）：0=0~2π 重建，1=-π~π 重建
 
   static constexpr float kPMin = -12.57f;
@@ -136,6 +137,14 @@ public:
   {
     auto out = BuildCommandFrame(bus, motor_id, kMotorCmdReset);
     out.data[1] = 0xC0;  // 触发返回软件版本号
+    return out;
+  }
+
+  // F83：失能并清除故障锁存（厂商 EnableArm 第一步，Type 4 data[0]=1）
+  static CanFrameMessage BuildClearFaultFrame(CanBus bus, uint8_t motor_id)
+  {
+    auto out = BuildCommandFrame(bus, motor_id, kMotorCmdReset);
+    out.data[0] = 0x01;
     return out;
   }
 

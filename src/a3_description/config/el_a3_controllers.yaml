@@ -4,6 +4,14 @@ controller_manager:
   ros__parameters:
     update_rate: 200  # Hz
 
+    # F83/LL-086: hardware starts INACTIVE — the operator enable (controller
+    # switch claiming command interfaces) is the first activation. Humble
+    # otherwise eagerly activates hardware at controller_manager boot.
+    # The active JSB claims state interfaces only and does NOT trigger this.
+    hardware_components_initial_state:
+      inactive:
+        - RsA3System
+
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster
 

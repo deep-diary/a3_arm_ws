@@ -661,6 +661,21 @@ ros2 topic echo /diagnostics_agg                   # 聚合分组树
 rqt_robot_monitor                                  # 图形化分组健康面板
 ```
 
+### 厂商标准使能编排验收（F83）
+
+硬件以 INACTIVE 启动（`hardware_components_initial_state`），操作员 enable 是总线上的第一个动作。FSM 显式驱动组件生命周期（`set_hardware_component_state` ACTIVE/INACTIVE，LL-086——Humble 下 switch_controller 不会激活 INACTIVE 启动的硬件）；`on_activate` 内按厂商顺序逐电机执行：reset-all + 7/7 应答证明 → 清故障（Type 4 data[0]=1）→ 整数写 RUN_MODE=0（Type 18 0x7005）→ 使能（Type 3），间隔 ≥30 ms，随后软启动：前 10 个写周期纯阻尼帧（kp=0、kd=4）接住臂，再过渡到正常增益 80/2。
+
+```bash
+source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
+# 全自动验收（phase A domain 86/vcan1：boot→enable 零帧、帧序、软启动、quintic 回归、干净 disable；
+#             phase B domain 89/vcan3：暗电机→编排整体不执行、on_activate ERROR）
+F83_CAN_IF=vcan1 F83_CAN_IF_B=vcan3 \
+  python3 scripts/a3_test/f83_enable_choreography_acceptance.py
+#   通过标准：末尾「F83 acceptance: 9/9」
+```
+
+真机上电后 F83 随 can 栈自动生效，真机验收待上电。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

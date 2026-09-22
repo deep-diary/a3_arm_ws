@@ -21,7 +21,8 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory
-from controller_manager_msgs.srv import SwitchController
+from controller_manager_msgs.srv import SetHardwareComponentState, SwitchController
+from lifecycle_msgs.msg import State as LifecycleState
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -339,6 +340,13 @@ class ArmController(Node):
         self.declare_parameter("controller_manager_switch_srv",
                                "/controller_manager/switch_controller")
         self.declare_parameter("switch_controllers", ["arm_controller", "gripper_controller"])
+        # F83/LL-086: Humble switch_controller does NOT auto-activate hardware
+        # booted INACTIVE; arm/disarm must drive the component lifecycle
+        # explicitly via set_hardware_component_state (on_activate runs the
+        # vendor enable choreography, on_deactivate the reset/coast).
+        self.declare_parameter("hardware_component_name", "RsA3System")
+        self.declare_parameter("controller_manager_hw_state_srv",
+                               "/controller_manager/set_hardware_component_state")
         self.declare_parameter("status_hz", 10.0)
         self.declare_parameter("init_zero_tol_rad", 0.05)
         self.declare_parameter("init_timeout_s", 5.0)
@@ -571,6 +579,11 @@ class ArmController(Node):
         self._switch_cli = self.create_client(
             SwitchController,
             str(self.get_parameter("controller_manager_switch_srv").value),
+            callback_group=self._cb_group,
+        )
+        self._hw_state_cli = self.create_client(
+            SetHardwareComponentState,
+            str(self.get_parameter("controller_manager_hw_state_srv").value),
             callback_group=self._cb_group,
         )
 
@@ -842,31 +855,81 @@ class ArmController(Node):
         return str(self.get_parameter("motor_service_backend").value) == "controller_switch"
 
     def _cm_switch(self, command: int) -> Tuple[bool, str]:
-        """F75: 经标准 /controller_manager/switch_controller 使能/失能控制器。
+        """F75/F83: 标准 ros2_control 使能/失能编排。
 
         command: 1 enable(activate) / 2 reset(deactivate) / 3 set_zero（绝对编码
-        帧无此操作，跳过返回成功）。switch 幂等，硬件 on_activate 内 reset→enable，
-        on_deactivate 内零增益刷新 + MIT stop（F72）。
+        帧无此操作，跳过返回成功）。
+
+        Humble 下 switch_controller 不会自动激活 INACTIVE 启动的硬件（LL-086），
+        必须显式驱动组件生命周期：
+          enable  = set_hardware_component_state ACTIVE（on_activate 内执行
+                    reset→反馈校验→清故障/RUN_MODE/enable→软启动，阻塞约 1 s）
+                    → switch_controller activate（失败则把硬件退回 INACTIVE）
+          disable = switch_controller deactivate
+                    → set_hardware_component_state INACTIVE（on_deactivate 内
+                    零增益刷新 + reset-all 自由滑行）
         """
         if command == 3:
             return True, "ros2_control absolute frame: set_zero skipped"
         activate = command == 1
         names = list(self.get_parameter("switch_controllers").value)
-        if not self._wait_service(self._switch_cli, 3.0):
-            return False, "controller_manager switch service unavailable"
-        req = SwitchController.Request()
-        if activate:
-            req.activate_controllers = names
-        else:
-            req.deactivate_controllers = names
-        req.strictness = SwitchController.Request.STRICT
-        future = self._switch_cli.call_async(req)
-        if self._wait_future(future, 3.0):
+        hw_name = str(self.get_parameter("hardware_component_name").value)
+
+        def set_hw(target_id: int, timeout: float) -> Tuple[bool, str]:
+            if not self._wait_service(self._hw_state_cli, 3.0):
+                return False, "set_hardware_component_state unavailable"
+            self.get_logger().info(
+                f"set_hardware_component_state: {hw_name} -> {target_id}")
+            req = SetHardwareComponentState.Request()
+            req.name = hw_name
+            req.target_state = LifecycleState(id=target_id)
+            future = self._hw_state_cli.call_async(req)
+            if not self._wait_future(future, timeout):
+                return False, "set_hardware_component_state timeout"
+            res = future.result()
+            if not bool(res.ok):
+                return False, f"hardware {hw_name} -> state {target_id} rejected"
+            return True, ""
+
+        def do_switch(act: bool) -> Tuple[bool, str]:
+            if not self._wait_service(self._switch_cli, 3.0):
+                return False, "controller_manager switch service unavailable"
+            req = SwitchController.Request()
+            if act:
+                req.activate_controllers = names
+            else:
+                req.deactivate_controllers = names
+            req.strictness = SwitchController.Request.STRICT
+            self.get_logger().info(
+                f"switch_controller: {'activate' if act else 'deactivate'} {names}")
+            future = self._switch_cli.call_async(req)
+            if not self._wait_future(future, 5.0):
+                return False, "switch_controller timeout"
             res = future.result()
             if not bool(res.ok):
                 return False, "switch_controller rejected (STRICT)"
-            return True, "controllers " + ("activated" if activate else "deactivated")
-        return False, "switch_controller timeout"
+            return True, ""
+
+        if activate:
+            ok, msg = set_hw(LifecycleState.PRIMARY_STATE_ACTIVE, 10.0)
+            if not ok:
+                return False, msg
+            ok, msg = do_switch(True)
+            if not ok:
+                self.get_logger().error(
+                    f"controllers failed to activate after hardware enable ({msg}); "
+                    "returning hardware to INACTIVE")
+                set_hw(LifecycleState.PRIMARY_STATE_INACTIVE, 5.0)
+                return False, msg
+            return True, "hardware active, controllers activated"
+
+        ok, msg = do_switch(False)
+        if not ok:
+            return False, msg
+        ok, msg = set_hw(LifecycleState.PRIMARY_STATE_INACTIVE, 5.0)
+        if not ok:
+            return False, msg
+        return True, "controllers deactivated, hardware inactive"
 
     def _motor_command(self, client, command: int) -> Tuple[bool, str]:
         if self._using_controller_switch():
@@ -1463,6 +1526,7 @@ class ArmController(Node):
         return resp
 
     def _enable_cb(self, req: Trigger.Request, resp: Trigger.Response) -> Trigger.Response:
+        self.get_logger().info("enable service called")
         if self._state in (STATE_TRAJ, STATE_SERVO, STATE_TEACH, STATE_AI, STATE_SAFE_PARK):
             resp.success = False
             resp.message = f"busy in state={self._state}"

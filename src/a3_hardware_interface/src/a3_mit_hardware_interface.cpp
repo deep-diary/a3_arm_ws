@@ -35,6 +35,8 @@ constexpr double kDefaultKp = 80.0;
 constexpr double kDefaultKd = 2.0;
 constexpr double kDefaultEffortKd = 2.0;
 constexpr double kDefaultFeedbackTimeoutS = 0.2;
+constexpr double kDefaultStartupKd = 4.0;
+constexpr int kDefaultSoftStartCycles = 10;
 
 double ParseDouble(const std::string & value, double fallback)
 {
@@ -43,6 +45,18 @@ double ParseDouble(const std::string & value, double fallback)
   }
   try {
     return std::stod(value);
+  } catch (const std::exception &) {
+    return fallback;
+  }
+}
+
+int ParseInt(const std::string & value, int fallback)
+{
+  if (value.empty()) {
+    return fallback;
+  }
+  try {
+    return std::stoi(value);
   } catch (const std::exception &) {
     return fallback;
   }
@@ -96,6 +110,11 @@ public:
     feedback_timeout_s_ = ParseDouble(
       GetParam(hp, "feedback_timeout_s", ""), kDefaultFeedbackTimeoutS);
     feedback_timeout_s_ = std::clamp(feedback_timeout_s_, 0.02, 5.0);
+    startup_kd_ = ParseDouble(GetParam(hp, "startup_kd", ""), kDefaultStartupKd);
+    startup_kd_ = std::clamp(startup_kd_, 0.0, 5.0);
+    soft_start_cycles_ =
+      ParseInt(GetParam(hp, "soft_start_cycles", ""), kDefaultSoftStartCycles);
+    soft_start_cycles_ = std::clamp(soft_start_cycles_, 0, 200);
     bus_ = (can_interface_ == "can0") ? CanBus::CAN0 : CanBus::CAN1;
 
     joints_.clear();
@@ -250,9 +269,10 @@ public:
   {
     // F51/F81 power sequence: reset ALL first (MIT reset leaves the motor in
     // disabled/coast), then prove every motor answers before enabling ANY.
-    // ros2_control aborts controller_manager when on_activate returns ERROR,
-    // so a dark motor must be discovered while all motors are still safely
-    // reset — never after six have been enabled (LL-083).
+    // A dark motor must be discovered while all motors are still safely
+    // reset — never after six have been enabled (LL-083). Hardware starts
+    // INACTIVE (hardware_components_initial_state, LL-086), so this runs
+    // exactly when the operator enables, never at controller_manager boot.
     for (const auto & j : joints_) {
       transport_.Send(ProtocolCodec::BuildResetFrame(bus_, j.motor_id), nullptr);
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -286,7 +306,6 @@ public:
       }
     }
     if (responding != joints_.size()) {
-      active_.store(false);
       RCLCPP_ERROR(
         rclcpp::get_logger(kLoggerName),
         "activate aborted: only %zu/%zu motors answered after reset; "
@@ -295,11 +314,21 @@ public:
       return CallbackReturn::ERROR;
     }
 
+    // F83 vendor-standard choreography (EDULITE_A3 EnableArm), per motor:
+    // clear latched faults (Type 4, data[0]=1) → integer RUN_MODE write
+    // (Type 18, 0x7005=0 MOTION_CONTROL; float encoding corrupts the uint8)
+    // → enable (Type 3); 30 ms settling as in the vendor SDK.
     for (const auto & j : joints_) {
+      transport_.Send(ProtocolCodec::BuildClearFaultFrame(bus_, j.motor_id), nullptr);
+      std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      transport_.Send(
+        ProtocolCodec::BuildSetParamU8Frame(
+          bus_, j.motor_id, ProtocolCodec::kParamRunMode, 0),
+        nullptr);
+      std::this_thread::sleep_for(std::chrono::milliseconds(30));
       transport_.Send(ProtocolCodec::BuildEnableFrame(bus_, j.motor_id), nullptr);
-      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      std::this_thread::sleep_for(std::chrono::milliseconds(30));
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
     size_t anchored = 0;
     {
@@ -312,10 +341,38 @@ public:
       }
     }
 
+    // MIT firmware only emits feedback after a command frame; by now motor 1
+    // last answered ~0.6 s ago (its own enable step). Without fresh feedback
+    // the first read() would fire the stale freeze-hold instead of soft-start.
+    // Send the first soft-start damping round here and wait for the replies,
+    // so the RT write loop picks up with feedback proven on every motor.
+    if (soft_start_cycles_ > 0) {
+      std::vector<double> motor_positions(joints_.size());
+      {
+        std::lock_guard<std::mutex> lock(fb_mutex_);
+        for (size_t i = 0; i < joints_.size(); ++i) {
+          motor_positions[i] =
+            joints_[i].direction * joints_[i].hw_pos + joints_[i].position_offset;
+        }
+      }
+      for (size_t i = 0; i < joints_.size(); ++i) {
+        const auto & j = joints_[i];
+        transport_.Send(
+          ProtocolCodec::BuildMitControlFrame(
+            bus_, j.motor_id, motor_positions[i], 0.0, 0.0, startup_kd_, 0.0,
+            j.torque_max, j.speed_max),
+          nullptr);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      soft_start_remaining_ = soft_start_cycles_ - 1;
+    }
+
     active_.store(true);
     RCLCPP_INFO(
-      rclcpp::get_logger(kLoggerName), "activated, re-anchored %zu/%zu motors",
-      anchored, joints_.size());
+      rclcpp::get_logger(kLoggerName),
+      "vendor enable choreography complete, re-anchored %zu/%zu motors, "
+      "soft-start %d cycles (kp=0 kd=%.1f)",
+      anchored, joints_.size(), soft_start_cycles_, startup_kd_);
     return CallbackReturn::SUCCESS;
   }
 
@@ -323,6 +380,7 @@ public:
   {
     active_.store(false);
     fb_stale_.store(false);
+    soft_start_remaining_ = 0;
 
     // Zero-gain refresh at the last measured positions, then reset (MIT stop).
     for (int cycle = 0; cycle < 3; ++cycle) {
@@ -440,6 +498,33 @@ public:
       RCLCPP_INFO_THROTTLE(
         rclcpp::get_logger(kLoggerName), clock_, 1000,
         "protective freeze-hold active: feedback stale on >=1 motor");
+      return hardware_interface::return_type::OK;
+    }
+
+    if (soft_start_remaining_ > 0) {
+      // F83: pure-damping take-up at the measured pose — no position spring —
+      // then hand off to normal stiffness. Our hardening; vendor startup_kd
+      // is declared but never applied in EDULITE_A3.
+      --soft_start_remaining_;
+      std::vector<double> motor_positions(joints_.size());
+      {
+        std::lock_guard<std::mutex> lock(fb_mutex_);
+        for (size_t i = 0; i < joints_.size(); ++i) {
+          motor_positions[i] =
+            joints_[i].direction * joints_[i].hw_pos + joints_[i].position_offset;
+        }
+      }
+      for (size_t i = 0; i < joints_.size(); ++i) {
+        const auto & j = joints_[i];
+        const auto frame = ProtocolCodec::BuildMitControlFrame(
+          bus_, j.motor_id, motor_positions[i], 0.0, 0.0, startup_kd_, 0.0,
+          j.torque_max, j.speed_max);
+        std::string error;
+        if (!transport_.Send(frame, &error)) {
+          RCLCPP_WARN_THROTTLE(
+            rclcpp::get_logger(kLoggerName), clock_, 1000, "%s", error.c_str());
+        }
+      }
       return hardware_interface::return_type::OK;
     }
 
@@ -573,6 +658,9 @@ private:
   double kd_{kDefaultKd};
   double effort_kd_{kDefaultEffortKd};
   double feedback_timeout_s_{kDefaultFeedbackTimeoutS};
+  double startup_kd_{kDefaultStartupKd};
+  int soft_start_cycles_{kDefaultSoftStartCycles};
+  int soft_start_remaining_{0};
   std::atomic_bool effort_mode_{false};
   std::atomic_bool fb_stale_{false};
 
