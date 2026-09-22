@@ -352,7 +352,6 @@ class ArmController(Node):
         self.declare_parameter("init_timeout_s", 5.0)
         self.declare_parameter("require_gate", False)
         self.declare_parameter("goto_duration_s", 3.0)
-        self.declare_parameter("goto_waypoints", 21)
         # F67: goto/move_to/safe-park 默认走 move_group action（OMPL + TOTG adapter），
         # move_group 不可用/规划失败/超时 → WARN 并退回下面的本地线性插值。
         self.declare_parameter("goto_use_moveit", True)
@@ -395,10 +394,8 @@ class ArmController(Node):
         self.declare_parameter("teach_auto_save_min_samples", 10)
         self.declare_parameter("trajectories_dir", "~/.a3/trajectories")
         self.declare_parameter("named_poses_pkg", "a3_description")
-        # F41: move_to/goto/ramp 兜底——最短时长 + ≥50Hz 插值点
+        # F41/F88: move_to/goto 兜底——最短时长；两点轨迹由 JTC 样条插值
         self.declare_parameter("move_to_min_duration_s", 3.0)
-        self.declare_parameter("move_to_points_hz", 50.0)
-        self.declare_parameter("move_to_max_points", 5000)
         # F40: 失能保护（不在 home 容差内先平滑回 home 再失能）
         self.declare_parameter("disable_home_pose_name", "home")
         self.declare_parameter("disable_home_tol_rad", 0.15)
@@ -984,16 +981,31 @@ class ArmController(Node):
             return False, f"state={self._state}"
         return True, ""
 
-    def _traj_point_count(self, duration_s: float) -> int:
-        """F41: 插值点数 = max(goto_waypoints, duration×move_to_points_hz)，上限防爆。"""
-        n = max(
-            int(self.get_parameter("goto_waypoints").value),
-            min(
-                int(math.ceil(duration_s * float(self.get_parameter("move_to_points_hz").value))),
-                int(self.get_parameter("move_to_max_points").value),
-            ),
-        )
-        return max(2, n)
+    def _two_point_trajectory(
+        self,
+        q0: List[float],
+        q1: List[float],
+        duration: float,
+        joint_names: Optional[List[str]] = None,
+    ) -> JointTrajectory:
+        """F88: 起点(t=0)+终点(t=duration)两点轨迹；两端 velocity/acceleration=0，
+        JTC VARIABLE_DEGREE_SPLINE 据此生成 quintic S 曲线（位置-only 两点会退化为
+        匀速线性、端点速度跳变）。motor_protocol topic 后端忽略 v/a、按位置线性插值。"""
+        n = len(q0)
+        traj = JointTrajectory()
+        traj.joint_names = list(joint_names or self._joint_names)
+        p0 = JointTrajectoryPoint()
+        p0.positions = [float(v) for v in q0]
+        p0.velocities = [0.0] * n
+        p0.accelerations = [0.0] * n
+        traj.points.append(p0)
+        p1 = JointTrajectoryPoint()
+        p1.positions = [float(v) for v in q1]
+        p1.velocities = [0.0] * n
+        p1.accelerations = [0.0] * n
+        p1.time_from_start = _duration(duration)
+        traj.points.append(p1)
+        return traj
 
     def _dispatch_trajectory(self, traj: JointTrajectory) -> None:
         """按 control_backend 下发轨迹：旧栈话题直发 / 标准栈 action。
@@ -1003,7 +1015,12 @@ class ArmController(Node):
         时作为 max_effort，否则用 gripper_default_effort）。新 goal 抢占
         旧 goal，与旧栈话题替换语义一致；异步发送，不阻塞服务回调。
         """
-        if str(self.get_parameter("control_backend").value) != "fjt_action":
+        backend = str(self.get_parameter("control_backend").value)
+        self.get_logger().info(
+            f"[F88] dispatch trajectory backend={backend} points={len(traj.points)} "
+            f"joints={list(traj.joint_names)}"
+        )
+        if backend != "fjt_action":
             self._traj_pub.publish(traj)
             return
 
@@ -1107,21 +1124,15 @@ class ArmController(Node):
         """LL-077: move_group 只规划 arm 组（L1–L6），L7 单独补下发。
 
         fjt_action 后端走 GripperCommand action（末点位置）；topic 后端
-        走线性插值轨迹。返回调度用估计时长；|Δ|≤1e-3 不下发返回 0.0。
+        走两点轨迹（F88，motor_protocol 200 Hz 插值）。返回调度用估计
+        时长；|Δ|≤1e-3 不下发返回 0.0。
         """
         delta = target - self._positions[6]
         if abs(delta) <= 1e-3:
             return 0.0
         g_dur = min(max(abs(delta) / speed, 1.0), 3.0)
-        n = self._traj_point_count(g_dur)
-        gtraj = JointTrajectory()
-        gtraj.joint_names = [JOINTS[6]]
-        for i in range(n):
-            alpha = i / (n - 1)
-            pt = JointTrajectoryPoint()
-            pt.positions = [self._positions[6] + alpha * delta]
-            pt.time_from_start = _duration(g_dur * alpha)
-            gtraj.points.append(pt)
+        gtraj = self._two_point_trajectory(
+            [self._positions[6]], [target], g_dur, joint_names=[JOINTS[6]])
         self._dispatch_trajectory(gtraj)
         return g_dur
 
@@ -1156,11 +1167,10 @@ class ArmController(Node):
                 float(self.get_parameter("move_to_min_duration_s").value),
             )
             q0 = list(self._positions)
-            traj = self._linear_trajectory(q0, home, duration)
+            traj = self._two_point_trajectory(q0, home, duration)
             self._publish_mode("TRAJ_RUNNING")
             self._dispatch_trajectory(traj)
-            n = len(traj.points)
-            self._set_state(STATE_SAFE_PARK, f"safe park -> home ({duration:.1f}s, {n} pts)")
+            self._set_state(STATE_SAFE_PARK, f"safe park -> home ({duration:.1f}s, 2 pts)")
 
         self._traj_done_at = 0.0  # 防旧 TRAJ 时间戳在 SAFE_PARK 中误触发回 READY
         if planned:
@@ -1187,13 +1197,13 @@ class ArmController(Node):
                 self._set_state(STATE_DISABLED, f"safe park aborted：{why}")
                 self.get_logger().error(f"[arm_controller] safe park aborted: {why}")
                 return False, f"safe park aborted: {why}"
-            # move_group 轨迹执行异常未落定时，补一条 7 关节本地插值纠偏（仅一次）
+            # move_group 轨迹执行异常未落定时，补一条两点纠偏轨迹（仅一次）
             if not corrective_sent and time.monotonic() - t0 > duration + 1.0 \
                     and not settled():
                 gap = max(abs(p - h) for p, h in zip(self._positions, home))
                 c_dur = min(max(gap / 0.3, 2.0), 6.0)
                 self._dispatch_trajectory(
-                    self._linear_trajectory(list(self._positions), home, c_dur)
+                    self._two_point_trajectory(list(self._positions), home, c_dur)
                 )
                 duration = (time.monotonic() - t0) + c_dur
                 corrective_sent = True
@@ -1803,21 +1813,6 @@ class ArmController(Node):
         duration = max(duration, 0.1)
         return True, duration, f"{label}: move_group {len(pts)} pts, {duration:.1f}s"
 
-    def _linear_trajectory(
-        self, q0: List[float], q1: List[float], duration: float
-    ) -> JointTrajectory:
-        """本地兜底：等时线性插值（≥50Hz 点）。"""
-        n = self._traj_point_count(duration)
-        traj = JointTrajectory()
-        traj.joint_names = list(self._joint_names)
-        for i in range(n):
-            alpha = i / (n - 1)
-            pt = JointTrajectoryPoint()
-            pt.positions = [a + alpha * (b - a) for a, b in zip(q0, q1)]
-            pt.time_from_start = _duration(duration * alpha)
-            traj.points.append(pt)
-        return traj
-
     def _goto_cb(
         self, req: GotoNamedPose.Request, resp: GotoNamedPose.Response
     ) -> GotoNamedPose.Response:
@@ -1854,21 +1849,20 @@ class ArmController(Node):
             self.get_logger().warn(f"goto {name}: {msg} -- local linear fallback")
 
         q0 = list(self._positions)
-        # F41: 时长下限 + ≥50Hz 插值点
+        # F41/F88: 时长下限；两点轨迹由 JTC splines 插值
         duration = min(max(
             float(self.get_parameter("goto_duration_s").value),
             float(self.get_parameter("move_to_min_duration_s").value),
         ), 60.0)
-        traj = self._linear_trajectory(q0, q1, duration)
+        traj = self._two_point_trajectory(q0, q1, duration)
 
         self._publish_mode("TRAJ_RUNNING")
         self._dispatch_trajectory(traj)
         self._set_state(STATE_TRAJ, f"goto {name}")
         self._schedule_back_to_ready(duration + 0.3)
 
-        n = len(traj.points)
         resp.success = True
-        resp.message = f"goto {name} (linear fallback, {duration:.1f}s, {n} pts)"
+        resp.message = f"goto {name} (two-point fallback, {duration:.1f}s, 2 pts)"
         return resp
 
     def _move_to_cb(
@@ -1903,19 +1897,18 @@ class ArmController(Node):
             self.get_logger().warn(f"move_to: {msg} -- local linear fallback")
 
         q0 = list(self._positions)
-        # F41: 最短时长兜底（可配置，默认 3s）+ ≥50Hz 插值点（3s→150 点）
+        # F41/F88: 最短时长兜底（可配置，默认 3s）；两点轨迹由 JTC splines 插值
         duration = float(req.duration_s) if req.duration_s and req.duration_s > 0 else 1.0
         duration = min(max(duration, float(self.get_parameter("move_to_min_duration_s").value)), 60.0)
-        traj = self._linear_trajectory(q0, q1, duration)
+        traj = self._two_point_trajectory(q0, q1, duration)
 
         self._publish_mode("TRAJ_RUNNING")
         self._dispatch_trajectory(traj)
         self._set_state(STATE_TRAJ, f"move_to ({duration:.1f}s)")
         self._schedule_back_to_ready(duration + 0.3)
 
-        n = len(traj.points)
         resp.success = True
-        resp.message = f"move_to (linear fallback, {duration:.1f}s, {n} pts)"
+        resp.message = f"move_to (two-point fallback, {duration:.1f}s, 2 pts)"
         return resp
 
     def _save_named_pose_cb(
@@ -2019,15 +2012,8 @@ class ArmController(Node):
         duration = max(0.05, min(duration, 5.0))
 
         q0 = list(self._positions)
-        n = 11
-        traj = JointTrajectory()
-        traj.joint_names = list(self._joint_names)
-        for i in range(n):
-            alpha = i / (n - 1)
-            pt = JointTrajectoryPoint()
-            pt.positions = [a + alpha * (b - a) for a, b in zip(q0, target)]
-            pt.time_from_start = _duration(duration * alpha)
-            traj.points.append(pt)
+        # F88: 两点轨迹，JTC splines 控制器侧插值
+        traj = self._two_point_trajectory(q0, target, duration)
 
         self._publish_mode("TRAJ_RUNNING")
         self._dispatch_trajectory(traj)
@@ -2267,10 +2253,10 @@ class ArmController(Node):
 
         recorded_std = [_to_std(p) for p in recorded_positions]
 
-        # F38: 回放前从当前位姿到首记录点建一条稠密几何 ramp（时间由 retime 重算），
-        # 避免回放起始位 ≠ 记录起始位时突然跳变。
+        # F38/F88: 回放前从当前位姿到首记录点建一条两点几何 ramp（时间由 retime
+        # 重算，保几何），避免回放起始位 ≠ 记录起始位时突然跳变。
         ramp_s = float(self.get_parameter("playback_ramp_duration_s").value)
-        # 当前位姿 ≈ 首记录点时跳过 ramp：大量重复点会使 Ruckig 求解失败
+        # 当前位姿 ≈ 首记录点时跳过 ramp
         ramp_dist = (
             max(abs(a - b) for a, b in zip(self._positions, recorded_std[0]))
             if self._have_js else 0.0
@@ -2281,11 +2267,8 @@ class ArmController(Node):
         if use_ramp:
             q0 = list(self._positions)
             q1 = recorded_std[0]
-            n = self._traj_point_count(ramp_s)
-            for i in range(n):
-                alpha = i / (n - 1)
-                geo.append([a + alpha * (b - a) for a, b in zip(q0, q1)])
-                geo_times.append(ramp_s * alpha)
+            geo = [q0, q1]
+            geo_times = [0.0, ramp_s]
             t_base = recorded_times[0]
             geo.extend(recorded_std[1:])
             geo_times.extend(ramp_s + (recorded_times[i] - t_base)
@@ -2341,14 +2324,14 @@ class ArmController(Node):
                     else:
                         q0.append(0.0)
                 q0 = q0[: len(q1)] + q1[len(q0):]
-                n = self._traj_point_count(ramp_s)
                 ramp_pts: List[JointTrajectoryPoint] = []
-                for i in range(n):
-                    alpha = i / (n - 1)
-                    pt = JointTrajectoryPoint()
-                    pt.positions = [a + alpha * (b - a) for a, b in zip(q0, q1)]
-                    pt.time_from_start = _duration(ramp_s * alpha)
-                    ramp_pts.append(pt)
+                p_r0 = JointTrajectoryPoint()
+                p_r0.positions = list(q0)
+                ramp_pts.append(p_r0)
+                p_r1 = JointTrajectoryPoint()
+                p_r1.positions = list(q1)
+                p_r1.time_from_start = _duration(ramp_s)
+                ramp_pts.append(p_r1)
                 for pt in traj.points:
                     t = pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
                     pt.time_from_start = _duration(t + ramp_s)

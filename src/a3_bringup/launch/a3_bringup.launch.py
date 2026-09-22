@@ -41,7 +41,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.parameter_descriptions import ParameterFile, ParameterValue
 
 
 def load_yaml(package_name, file_path):
@@ -66,6 +66,7 @@ def generate_launch_description():
     teleop_mapping = LaunchConfiguration("teleop_mapping")
     use_monitor = LaunchConfiguration("use_monitor")
     use_diagnostics = LaunchConfiguration("use_diagnostics")
+    fsm_backend = LaunchConfiguration("fsm_backend")
 
     bringup_share = get_package_share_directory("a3_bringup")
     desc_share = get_package_share_directory("a3_description")
@@ -98,12 +99,24 @@ def generate_launch_description():
         parameters=[{"robot_description": robot_description}],
     )
 
+    # F88: Humble GenericSystem prepare_command_mode_switch 不接受 effort 接口，
+    # mock 栈 L7 用 position 版 GAC；真机保持 effort 版（力夹持 + stall 语义）。
+    # 用独立 ParameterFile 覆盖（dotted-key dict 会被 launch 写成扁平参数名）。
+    gripper_plugin_file = ParameterFile(
+        PythonExpression([
+            "'", desc_share, "/config/gripper_position_plugin.yaml' if '", hardware,
+            "' == 'mock' else '", desc_share, "/config/gripper_effort_plugin.yaml'",
+        ]),
+        allow_substs=True,
+    )
+
     controller_manager = Node(
         package="controller_manager",
         executable="ros2_control_node",
         parameters=[
             {"robot_description": robot_description},
             controllers_yaml,
+            gripper_plugin_file,
         ],
         output="screen",
     )
@@ -271,7 +284,7 @@ def generate_launch_description():
             os.path.join(arm_share, "config", "arm_controller.yaml"),
             {
                 "require_gate": False,
-                "control_backend": "fjt_action",
+                "control_backend": fsm_backend,
                 "motor_service_backend": "controller_switch",
             },
         ],
@@ -395,6 +408,12 @@ def generate_launch_description():
             "use_diagnostics",
             default_value="true",
             description="diagnostic_aggregator 诊断聚合（F82；/diagnostics_agg + toplevel state）",
+        ),
+        DeclareLaunchArgument(
+            "fsm_backend",
+            default_value="fjt_action",
+            choices=["fjt_action", "topic"],
+            description="编排层轨迹后端：fjt_action=JTC 标准 action（产品栈默认）；topic=旧 motor_protocol 话题（legacy）",
         ),
         rsp,
         diagnostic_aggregator,

@@ -18,7 +18,6 @@
     require_gate: false
 
     goto_duration_s: 3.0
-    goto_waypoints: 21
     # 回放前从当前位姿插值到首记录点的时长（s）；≤0.05 关闭插值（F38）
     # LL-046: 2.5s→5s——ramp 把末位→首位差（如 L4 深垂 1.18 rad 段）压缩进 2.5s 会
     # 形成 ~0.47 rad/s 的突兀下砸，肉眼即"回放开局快/不平滑"；5s 拉平该过渡。
@@ -27,10 +26,8 @@
     # 加速度尖峰，伺服忠实复现即"抖动"；7 点平滑把尖峰砍 ~93%，路径几何扰动 ≤20 mrad。
     # 0/1 关闭，热设置生效。
     playback_smooth_samples: 7
-    # F41: move_to/goto/ramp 兜底——最短时长 + ≥50Hz 插值点
+    # F41/F88: move_to/goto 兜底——最短时长；两点轨迹由 JTC splines 插值
     move_to_min_duration_s: 3.0
-    move_to_points_hz: 50.0
-    move_to_max_points: 5000
     # F40: 失能保护（不在 home 容差内先平滑回 home 再失能，防掉臂）
     disable_home_pose_name: home
     disable_home_tol_rad: 0.15

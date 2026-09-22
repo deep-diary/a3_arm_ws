@@ -775,6 +775,25 @@ python3 scripts/a3_test/f87b_gripper_action_acceptance.py 87
 
 真机验收待上电。
 
+### 两点标准轨迹替代手搓密集线性插值验收（F88）
+
+F88 把 goto/move_to/set_joint_positions/safe-park/回放 ramp 的自研 ≥50 Hz 密集点线性插值全部退役，改为工业标准做法：**只下发两个轨迹点（t=0 当前位姿 + t=duration 目标位姿），两点都显式带零速度 + 零加速度**，由 JTC（`interpolation_method: splines`，VARIABLE_DEGREE_SPLINE）在控制器侧插值出五次 S 曲线。位置-only 两点会退化成恒速直线（LL-091），故速度/加速度必须显式写零。moveit 优先路径不变，move_group 不可用时走两点 FJT fallback；参数 `goto_waypoints` / `move_to_points_hz` / `move_to_max_points` 及 `_linear_trajectory` 全部删除。L7 线性段、回放 ramp 同步稀疏化为两点。验收两阶段：phase 1 mock-hardware + fjt_action 后端，phase 2 vcan + legacy topic 后端（goto_use_moveit 强制 false）。
+
+```bash
+source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
+python3 scripts/a3_test/f88_two_point_trajectory_acceptance.py 88
+#   通过标准：末尾「F88 acceptance: 22/22」，退出码 0
+#   1 两点 FJT error_code=0，末端收敛；controller_state 采样稠密（段内 n≈300+）
+#   2 五次剖面：α=0.1 速度比≈0.243、中点峰值≈1.875、两端速度=0（五次零边界 S 曲线）
+#   3 set_joint_positions jog 连续 3 次抢占全部成功并收敛、FSM 回 READY；
+#     goto/move_to 两点 fallback 成功，dispatch 日志 backend=fjt_action points=2 ≥5
+#   4 离开 home 后 safe-park → 失能 → DISABLED；src/scripts 无旧稠密参数残留
+#   phase 2（vcan topic 后端）：goto_use_moveit=false 读回确认；7 关节 jog 1.0 s
+#     成功收敛、goto home fallback、dispatch backend=topic points=2 ≥2
+```
+
+期望到位目标按已安装 URDF 限位逐关节 clamp 后再比对（L2 仅正、L3 上限为 0；LL-096）；使能遇到「no /joint_states yet」按启动竞态等反馈重试（LL-095）。真机验收待上电。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

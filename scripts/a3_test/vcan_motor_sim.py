@@ -68,6 +68,9 @@ class MotorState:
         }
         self.tripped = False
         self.trip_delay = None
+        # Enabled latches on a Type-3 enable and clears on reset / watchdog
+        # trip; feedback reports RUN mode (2) in CAN-id bits 22-23 while set.
+        self.enabled = False
 
     @property
     def timeout_counts(self):
@@ -82,6 +85,7 @@ def write_state_file(path, motors):
                 "counts": m.timeout_counts,
                 "tripped": m.tripped,
                 "trip_delay": m.trip_delay,
+                "enabled": m.enabled,
             }
             for mid, m in sorted(motors.items())
         }
@@ -111,6 +115,8 @@ def send_feedback(sock, m, health):
     if health.motor == m.motor_id:
         can_id |= (int(health.fault) & 0x3F) << 16
         can_id |= (int(health.mode) & 0x3) << 22
+    elif m.enabled:
+        can_id |= 0x2 << 22
     tmax = TORQUE_MAX[m.motor_id]
     vmax = SPEED_MAX[m.motor_id]
     data = [0] * 8
@@ -328,6 +334,7 @@ def main():
                 window = mt.timeout_counts / TIMEOUT_COUNTS_PER_SEC
                 if now - bus_last_t > window:
                     mt.tripped = True
+                    mt.enabled = False
                     mt.speed = 0.0
                     mt.torque = 0.0
                     mt.trip_delay = now - bus_last_t
@@ -366,8 +373,10 @@ def main():
             m.torque = 0.0
             m.tripped = False
             m.trip_delay = None
+            m.enabled = False
             reply()
         elif cmd_type == CMD_ENABLE:
+            m.enabled = True
             reply()
         elif cmd_type == CMD_SET_PARAM:
             param_id = data[0] | (data[1] << 8)
