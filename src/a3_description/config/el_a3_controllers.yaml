@@ -19,7 +19,7 @@ controller_manager:
       type: joint_trajectory_controller/JointTrajectoryController
 
     gripper_controller:
-      type: joint_trajectory_controller/JointTrajectoryController
+      type: effort_controllers/GripperActionController
 
     zero_torque_controller:
       type: a3_hardware_interface/GravityCompensationController
@@ -72,28 +72,19 @@ arm_controller:
 
 gripper_controller:
   ros__parameters:
-    joints:
-      - L7_joint
-
-    command_interfaces:
-      - position
-
-    state_interfaces:
-      - position
-      - velocity
-
-    open_loop_control: true
-    allow_nonzero_velocity_at_trajectory_end: true
-    interpolation_method: splines
-
-    state_publish_rate: 50.0
+    joint: L7_joint
     action_monitor_rate: 20.0
-
-    constraints:
-      stopped_velocity_tolerance: 0.2
-      goal_time: 0.0
-      L7_joint:
-        goal: 0.05
+    # L7 标定：开=0.0、闭≈1.79 rad
+    goal_tolerance: 0.02
+    # Default clamp used when a goal does not specify max_effort.
+    max_effort: 1.0
+    # Contact = stall; report success (stalled=true) instead of aborting.
+    allow_stalling: true
+    stall_velocity_threshold: 0.01
+    stall_timeout: 0.5
+    # Effort adapter PID: error -> joint effort, clamped to goal max_effort.
+    gains:
+      L7_joint: {p: 8.0, i: 0.0, d: 0.2, i_clamp: 0.0}
 
 zero_torque_controller:
   ros__parameters:

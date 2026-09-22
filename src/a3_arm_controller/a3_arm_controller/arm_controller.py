@@ -20,7 +20,7 @@ import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from builtin_interfaces.msg import Duration
-from control_msgs.action import FollowJointTrajectory
+from control_msgs.action import FollowJointTrajectory, GripperCommand
 from controller_manager_msgs.srv import SetHardwareComponentState, SwitchController
 from lifecycle_msgs.msg import State as LifecycleState
 from rclpy.action import ActionClient
@@ -327,12 +327,12 @@ class ArmController(Node):
         self.declare_parameter("power_state_topic", "/power_sequence/state")
         self.declare_parameter("traj_topic", "/joint_group_effort_controller/joint_trajectory")
         # F74: 轨迹执行后端。topic = 旧栈（话题直发 motor_protocol_node）；
-        # fjt_action = 标准栈（control_msgs FollowJointTrajectory action →
-        # joint_trajectory_controller，ros2_control），7 关节轨迹自动拆
-        # L1–L6 → arm_controller、L7 → gripper_controller。
+        # fjt_action = 标准栈（ros2_control）：L1–L6 → arm_controller FJT，
+        # L7 → gripper_controller GripperCommand action（F87）。
         self.declare_parameter("control_backend", "topic")
         self.declare_parameter("arm_fjt_action", "/arm_controller/follow_joint_trajectory")
-        self.declare_parameter("gripper_fjt_action", "/gripper_controller/follow_joint_trajectory")
+        self.declare_parameter("gripper_action", "/gripper_controller/gripper_cmd")
+        self.declare_parameter("gripper_default_effort", 1.0)
         # F75: 使能后端。can_service（默认，真机/旧栈，零行为变化）走 /a3/motor/*
         # 服务；controller_switch（标准 ros2_control 栈）走 /controller_manager/
         # switch_controller，硬件插件 on_activate/deactivate 内完成 reset→enable。
@@ -605,10 +605,10 @@ class ArmController(Node):
             str(self.get_parameter("arm_fjt_action").value),
             callback_group=self._cb_group,
         )
-        self._fjt_gripper_cli = ActionClient(
+        self._gripper_cli = ActionClient(
             self,
-            FollowJointTrajectory,
-            str(self.get_parameter("gripper_fjt_action").value),
+            GripperCommand,
+            str(self.get_parameter("gripper_action").value),
             callback_group=self._cb_group,
         )
 
@@ -996,12 +996,12 @@ class ArmController(Node):
         return max(2, n)
 
     def _dispatch_trajectory(self, traj: JointTrajectory) -> None:
-        """按 control_backend 下发轨迹：旧栈话题直发 / 标准栈 FJT action。
+        """按 control_backend 下发轨迹：旧栈话题直发 / 标准栈 action。
 
-        fjt_action 后端把 7 关节轨迹拆给两个 JTC：L1–L6 → arm_controller、
-        L7 → gripper_controller（各自 claim 的关节集不同，不能合成一个 goal）。
-        新 goal 抢占同 action 的旧 goal，与旧栈话题替换语义一致；异步发送，
-        不阻塞服务回调，完成与否仍由时长调度 + 状态轮询处理。
+        fjt_action 后端拆分：L1–L6 → arm_controller FJT；L7 →
+        gripper_controller GripperCommand（取末点位置；末点 effort 非 0
+        时作为 max_effort，否则用 gripper_default_effort）。新 goal 抢占
+        旧 goal，与旧栈话题替换语义一致；异步发送，不阻塞服务回调。
         """
         if str(self.get_parameter("control_backend").value) != "fjt_action":
             self._traj_pub.publish(traj)
@@ -1032,9 +1032,43 @@ class ArmController(Node):
         arm_traj = project(JOINTS[:6])
         if arm_traj is not None:
             self._send_fjt_goal(self._fjt_arm_cli, arm_traj, "arm")
-        gripper_traj = project(["L7_joint"])
-        if gripper_traj is not None:
-            self._send_fjt_goal(self._fjt_gripper_cli, gripper_traj, "gripper")
+        if "L7_joint" in names:
+            li = names.index("L7_joint")
+            last = traj.points[-1]
+            effort = last.effort[li] if last.effort else 0.0
+            self._send_gripper_goal(last.positions[li], effort)
+
+    def _send_gripper_goal(self, position: float, max_effort: float = 0.0) -> None:
+        """Send a GripperCommand goal; newer goals preempt (GAC default)."""
+        if max_effort <= 0.0:
+            max_effort = float(self.get_parameter("gripper_default_effort").value)
+        if not self._gripper_cli.server_is_ready() and \
+                not self._gripper_cli.wait_for_server(timeout_sec=1.0):
+            self.get_logger().error(
+                f"GripperCommand action 不可用，目标 {position:.3f} 未执行"
+            )
+            return
+        goal = GripperCommand.Goal()
+        goal.command.position = float(position)
+        goal.command.max_effort = float(max_effort)
+        future = self._gripper_cli.send_goal_async(goal)
+        future.add_done_callback(self._on_gripper_goal_response)
+
+    def _on_gripper_goal_response(self, future) -> None:
+        handle = future.result()
+        if not handle.accepted:
+            self.get_logger().error("GripperCommand goal 被拒绝")
+            return
+        result_future = handle.get_result_async()
+        result_future.add_done_callback(self._on_gripper_result)
+
+    def _on_gripper_result(self, future) -> None:
+        result = future.result().result
+        if not result.reached_goal:
+            self.get_logger().warn(
+                f"GripperCommand 未到位: stalled={result.stalled} "
+                f"position={result.position:.3f} effort={result.effort:.3f}"
+            )
 
     def _send_fjt_goal(
         self, client: ActionClient, traj: JointTrajectory, label: str
@@ -1070,9 +1104,10 @@ class ArmController(Node):
             )
 
     def _dispatch_l7_linear(self, target: float, speed: float = 0.5) -> float:
-        """LL-077: move_group 只规划 arm 组（L1–L6），L7 单独线性轨迹补下发。
+        """LL-077: move_group 只规划 arm 组（L1–L6），L7 单独补下发。
 
-        返回轨迹时长；|Δ|≤1e-3 不下发返回 0.0。
+        fjt_action 后端走 GripperCommand action（末点位置）；topic 后端
+        走线性插值轨迹。返回调度用估计时长；|Δ|≤1e-3 不下发返回 0.0。
         """
         delta = target - self._positions[6]
         if abs(delta) <= 1e-3:
@@ -1111,7 +1146,7 @@ class ArmController(Node):
             if not planned:
                 self.get_logger().warn(f"safe park: {msg} -- local linear fallback")
 
-        # move_group 只规划 arm 组（L1–L6）；L7（夹爪）单独发 gripper FJT 回 home
+        # move_group 只规划 arm 组（L1–L6）；L7（夹爪）单独走 GripperCommand 回 home
         if planned:
             duration = max(duration, self._dispatch_l7_linear(home[6]))
 

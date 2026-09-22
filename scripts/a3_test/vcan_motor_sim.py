@@ -161,6 +161,49 @@ class ExternalForce:
             self.torque = 0.0
 
 
+class DynamicsCtl:
+    """Per-motor dynamics overrides, read from a JSON file (F87b).
+
+    Format: {"7": {"gravity_nm": 0.0, "stop_at": 0.8}}; {} clears all.
+    Motors absent from the file keep the legacy equation (implicit -t_ff
+    supporting load, used by F73/F85 free-drive tests). Overridden motors
+    use net = torque + gravity_nm + push - viscous*speed; when stop_at is
+    set, the positive-motion side is pinned (speed forced to 0).
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.mtime = 0.0
+        self.last_check = 0.0
+        self.entries = {}
+
+    def poll(self):
+        now = time.monotonic()
+        if now - self.last_check < 0.05:
+            return
+        self.last_check = now
+        try:
+            mtime = os.path.getmtime(self.path)
+        except OSError:
+            return
+        if mtime == self.mtime:
+            return
+        self.mtime = mtime
+        entries = {}
+        try:
+            with open(self.path) as f:
+                data = json.load(f)
+            for key, cfg in (data or {}).items():
+                entries[int(key)] = {
+                    "gravity_nm": float(cfg.get("gravity_nm", 0.0)),
+                    "stop_at": (float(cfg["stop_at"])
+                                if cfg.get("stop_at") is not None else None),
+                }
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        self.entries = entries
+
+
 class SilenceCtl:
     """Per-motor feedback TX kill switch, read from a JSON file.
 
@@ -256,6 +299,9 @@ def main():
                              "{\"motor\": 3, \"temp_c\": 92, \"fault\": 4}, {} clears")
     parser.add_argument("--state-file", default="/tmp/f86_timeout_state.json",
                         help="F86 watchdog state (armed/tripped per motor)")
+    parser.add_argument("--dynamics-file", default="/tmp/f87_dynamics.json",
+                        help="per-motor dynamics overrides: "
+                             "{\"7\": {\"gravity_nm\": 0.0, \"stop_at\": 0.8}}")
     args = parser.parse_args()
 
     sock = socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
@@ -265,6 +311,7 @@ def main():
 
     motors = {i: MotorState(i) for i in range(1, 8)}
     ext = ExternalForce(args.ext_file)
+    dyn = DynamicsCtl(args.dynamics_file)
     silence = SilenceCtl(args.silence_file)
     health = HealthCtl(args.health_file)
     # CAN is a shared bus: every motor observes every frame. The firmware
@@ -307,6 +354,8 @@ def main():
 
         silence.poll()
         health.poll()
+        dyn.poll()
+        dyncfg = dyn.entries.get(motor_id)
 
         def reply():
             if silence.motor != motor_id:
@@ -343,14 +392,18 @@ def main():
             dt = max(1e-3, now - m.last_t)
             m.last_t = now
             if kp < 1.0:
-                # Effort mode: t_ff cancels gravity; the environment adds
-                # -t_ff plus any operator push from the ext file.
+                # Effort mode. Legacy model: t_ff cancels a static gravity
+                # load and only operator push moves the rotor; F87b override
+                # motors instead take applied torque at face value.
                 ext.poll()
                 push = ext.torque if ext.motor == motor_id else 0.0
                 m.torque = max(-fw_limit,
                                min(fw_limit,
                                    t_ff + kp * (target - m.angle) + kd * (target_v - m.speed)))
-                net = m.torque - t_ff + push
+                if dyncfg is not None:
+                    net = m.torque + dyncfg["gravity_nm"] + push
+                else:
+                    net = m.torque - t_ff + push
                 accel = (net - args.viscous * m.speed) / args.inertia
                 m.speed = max(-vmax, min(vmax, m.speed + accel * dt))
                 m.angle += m.speed * dt
@@ -361,6 +414,10 @@ def main():
                 m.torque = max(-fw_limit,
                                min(fw_limit,
                                    t_ff + kp * (target - m.angle) + kd * (target_v - m.speed)))
+            stop_at = dyncfg["stop_at"] if dyncfg else None
+            if stop_at is not None and m.angle >= stop_at and m.speed > 0.0:
+                m.angle = stop_at
+                m.speed = 0.0
             reply()
         tick(now)
 

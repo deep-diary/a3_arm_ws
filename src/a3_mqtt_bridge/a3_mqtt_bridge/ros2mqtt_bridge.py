@@ -25,6 +25,8 @@ import uuid
 from datetime import datetime, timezone
 
 import rclpy
+from action_msgs.msg import GoalStatus
+from rclpy.action import ActionClient
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 
@@ -33,27 +35,17 @@ try:  # Humble: RCLError 只在私有编译模块暴露（SIGINT 竞态兜底，
 except ImportError:  # pragma: no cover - 其他发行版可能没有该符号
     RCLError = None
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
+
+from control_msgs.action import GripperCommand as GripperCommandAction
 
 from a3_msgs.srv import (
     GotoNamedPose,
-    GripperCommand,
-    GripperSetConfig,
     PlaybackTrajectory,
     SaveTrajectory,
     SetJointPositions,
 )
-
-# 电机调试（F32）：a3_can_bridge 服务
-from a3_can_bridge.srv import (
-    MotorCommand,
-    MotorMitCommand,
-    MotorScanCollect,
-    MotorSetMode,
-    MotorStop,
-    SetMotorParam,
-)
-
 
 def _load_msg_class(type_str: str):
     """'sensor_msgs/msg/JointState' -> the message class."""
@@ -100,6 +92,20 @@ def _motor_hex_arg(args: dict, key: str):
         return val if 0 <= val <= 0xFFFF else None
     except (TypeError, ValueError):
         return None
+
+
+# F87：L7 标定（开=0、闭≈1.79，与 gripper_config.yaml / 手柄一致）
+GRIPPER_OPEN = 0.0
+GRIPPER_CLOSE = 1.79
+# 会话力上限：固件 0x700B 对 EL05 钳 6 Nm；产品默认会话天花板 1 Nm
+GRIPPER_FW_CLAMP_NM = 6.0
+GRIPPER_OPS = {
+    "gripper_grasp",
+    "gripper_release",
+    "gripper_stop",
+    "gripper_set_position",
+    "gripper_set_max_torque",
+}
 
 
 def _now_iso() -> str:
@@ -233,6 +239,17 @@ class Ros2MqttBridge(Node):
         self._telemetry_dirty = False
         self._last_telemetry_pub = 0.0
         self._catalog = self._build_catalog()
+
+        # F87：L7 下行统一走标准 GripperCommand action
+        self._gripper_ac = ActionClient(
+            self, GripperCommandAction, "/gripper_controller/gripper_cmd"
+        )
+        self._gripper_default_effort = 1.0
+        self._gripper_torque_ceiling = 1.0
+        self._l7_pos = 0.0
+        # 缓存 L7 当前位置（gripper_stop = 在当前位置停下、停止继续施力）
+        js_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.create_subscription(JointState, "/joint_states", self._on_joint_states, js_qos)
 
         self._cmd_queue: "queue.Queue[dict]" = queue.Queue()
         self._cmd_clients = self._setup_cmd_clients()
@@ -407,64 +424,16 @@ class Ros2MqttBridge(Node):
             ),
             "enter_ai": (self.create_client(Trigger, "/a3/arm/enter_ai"), Trigger.Request),
             "exit_ai": (self.create_client(Trigger, "/a3/arm/exit_ai"), Trigger.Request),
-            # 夹爪（F26/F31）：command 服务被 grasp/release/stop/set_position 四个 op 共用
-            "gripper_grasp": (
-                self.create_client(GripperCommand, "/a3/gripper/command"),
-                GripperCommand.Request,
-            ),
-            "gripper_release": (
-                self.create_client(GripperCommand, "/a3/gripper/command"),
-                GripperCommand.Request,
-            ),
-            "gripper_stop": (
-                self.create_client(GripperCommand, "/a3/gripper/command"),
-                GripperCommand.Request,
-            ),
-            "gripper_set_position": (
-                self.create_client(GripperCommand, "/a3/gripper/command"),
-                GripperCommand.Request,
-            ),
-            "gripper_set_max_torque": (
-                self.create_client(GripperSetConfig, "/a3/gripper/set_config"),
-                GripperSetConfig.Request,
-            ),
-            # 电机调试（F32）：扫描/使能/复位/设零/MIT/保持/停止/模式/参数
-            "motor_scan": (
-                self.create_client(MotorScanCollect, "/a3/motor/scan_and_collect"),
-                MotorScanCollect.Request,
-            ),
-            "motor_enable": (
-                self.create_client(MotorCommand, "/a3/motor/enable"),
-                MotorCommand.Request,
-            ),
-            "motor_reset": (
-                self.create_client(MotorCommand, "/a3/motor/reset"),
-                MotorCommand.Request,
-            ),
-            "motor_set_zero": (
-                self.create_client(MotorCommand, "/a3/motor/set_zero"),
-                MotorCommand.Request,
-            ),
-            "motor_mit": (
-                self.create_client(MotorMitCommand, "/a3/motor/mit_command"),
-                MotorMitCommand.Request,
-            ),
-            "motor_hold": (
-                self.create_client(MotorMitCommand, "/a3/motor/mit_command"),
-                MotorMitCommand.Request,
-            ),
-            "motor_stop": (
-                self.create_client(MotorStop, "/a3/motor/stop"),
-                MotorStop.Request,
-            ),
-            "motor_set_mode": (
-                self.create_client(MotorSetMode, "/a3/motor/set_mode"),
-                MotorSetMode.Request,
-            ),
-            "motor_set_param": (
-                self.create_client(SetMotorParam, "/a3/motor/set_param"),
-                SetMotorParam.Request,
-            ),
+            # F87：夹爪 op 走 GripperCommand action（_dispatch_gripper 处理）；
+            # 保留键以维持下行白名单
+            "gripper_grasp": (None, None),
+            "gripper_release": (None, None),
+            "gripper_stop": (None, None),
+            "gripper_set_position": (None, None),
+            "gripper_set_max_torque": (None, None),
+            # F87：F32 电机调试 op（/a3/motor/*）只存在于已退役的
+            # a3_can_bridge 旧栈；统一栈下不再注册 → 下行显式 unknown op，
+            # 不再静默挂死。
         }
 
     def _enqueue_cmd(self, payload) -> None:
@@ -491,50 +460,20 @@ class Ros2MqttBridge(Node):
                 return
             self._dispatch_cmd(cmd["op"], cmd["args"])
 
+    def _on_joint_states(self, msg: JointState) -> None:
+        if "L7_joint" in msg.name:
+            self._l7_pos = float(msg.position[msg.name.index("L7_joint")])
+
     def _dispatch_cmd(self, op: str, args: dict) -> None:
+        if op in GRIPPER_OPS:
+            self._dispatch_gripper(op, args)
+            return
         client, req_factory = self._cmd_clients[op]
         req = req_factory()
         if op == "goto":
             req.pose_name = str(args.get("pose") or args.get("pose_name") or "")
         elif op in ("save", "playback"):
             req.name = str(args.get("name") or "")
-        elif op == "gripper_grasp":
-            req.mode = "force"
-            if "torque" in args:
-                try:
-                    req.torque_nm = float(args.get("torque"))
-                except (TypeError, ValueError):
-                    self._publish_cmd_result(op, False, "invalid torque value")
-                    return
-            req.preset = str(args.get("preset") or "")
-            if "timeout" in args:
-                try:
-                    req.timeout_s = float(args.get("timeout"))
-                except (TypeError, ValueError):
-                    pass
-        elif op == "gripper_release":
-            req.mode = "release"
-        elif op == "gripper_stop":
-            req.mode = "stop"
-        elif op == "gripper_set_position":
-            # 位置模式直驱（F31）：0..1 归一化开合，越界/非有限明确拒绝而非 clamp（可测）
-            try:
-                p = float(args.get("position"))
-            except (TypeError, ValueError):
-                self._publish_cmd_result(op, False, "position must be in [0, 1]")
-                return
-            if not math.isfinite(p) or not 0.0 <= p <= 1.0:
-                self._publish_cmd_result(op, False, "position must be in [0, 1]")
-                return
-            req.mode = "position"
-            req.position = p
-        elif op == "gripper_set_max_torque":
-            req.key = "max_torque_nm"
-            try:
-                req.value = float(args.get("value"))
-            except (TypeError, ValueError):
-                self._publish_cmd_result(op, False, "invalid torque value")
-                return
         elif op == "set_joints":
             positions = args.get("positions")
             if not isinstance(positions, (list, tuple)) or len(positions) != 7:
@@ -614,6 +553,81 @@ class Ros2MqttBridge(Node):
             self._publish_cmd_result(op, False, f"{op} rejected")
             return
         future.add_done_callback(lambda f, o=op: self._on_cmd_done(f, o))
+
+    def _dispatch_gripper(self, op: str, args: dict) -> None:
+        """F87：夹爪 op → 标准 GripperCommand action（per-goal max_effort）。"""
+        if op == "gripper_set_max_torque":
+            value = _motor_float_arg(args, "value", float("nan"))
+            if not math.isfinite(value) or not 0.0 < value <= GRIPPER_FW_CLAMP_NM:
+                self._publish_cmd_result(
+                    op, False, f"value must be in (0, {GRIPPER_FW_CLAMP_NM:.0f}] Nm"
+                )
+                return
+            self._gripper_torque_ceiling = value
+            self._publish_cmd_result(
+                op,
+                True,
+                f"session torque ceiling -> {value:.2f} Nm (per-goal clamp; "
+                f"firmware 0x700B={GRIPPER_FW_CLAMP_NM:.0f} Nm)",
+            )
+            return
+
+        if op == "gripper_grasp":
+            position = GRIPPER_CLOSE
+            tau = _motor_float_arg(args, "torque", self._gripper_default_effort)
+        elif op == "gripper_release":
+            position = GRIPPER_OPEN
+            tau = self._gripper_default_effort
+        elif op == "gripper_stop":
+            # 在当前位置停下：误差≈0 → PID 不再输出闭合力
+            position = self._l7_pos
+            tau = self._gripper_default_effort
+        else:  # gripper_set_position：0..1 归一化（1=开，0=闭，沿用 F31 契约）
+            try:
+                p = float(args.get("position"))
+            except (TypeError, ValueError):
+                self._publish_cmd_result(op, False, "position must be in [0, 1]")
+                return
+            if not math.isfinite(p) or not 0.0 <= p <= 1.0:
+                self._publish_cmd_result(op, False, "position must be in [0, 1]")
+                return
+            position = GRIPPER_CLOSE + p * (GRIPPER_OPEN - GRIPPER_CLOSE)
+            tau = self._gripper_default_effort
+        tau = max(0.0, min(tau, self._gripper_torque_ceiling))
+
+        if not self._gripper_ac.server_is_ready():
+            self._publish_cmd_result(op, False, "gripper_cmd action unavailable")
+            return
+        goal = GripperCommandAction.Goal()
+        goal.command.position = float(position)
+        goal.command.max_effort = float(tau)
+        future = self._gripper_ac.send_goal_async(goal)
+        future.add_done_callback(
+            lambda f, o=op: self._on_gripper_goal_response_bridge(f, o)
+        )
+
+    def _on_gripper_goal_response_bridge(self, future, op: str) -> None:
+        handle = future.result()
+        if handle is None or not handle.accepted:
+            self._publish_cmd_result(op, False, "gripper_cmd goal rejected")
+            return
+        result_future = handle.get_result_async()
+        result_future.add_done_callback(
+            lambda f, o=op: self._on_gripper_result_bridge(f, o)
+        )
+
+    def _on_gripper_result_bridge(self, future, op: str) -> None:
+        # GAC stall-succeeded（接触顶持）的 goal 状态仍是 SUCCEEDED，但
+        # reached_goal=false（LL-090）；成功判据用 goal status 而非 reached_goal。
+        response = future.result()
+        result = response.result
+        ok = response.status == GoalStatus.STATUS_SUCCEEDED
+        self._publish_cmd_result(
+            op,
+            ok,
+            f"position={result.position:.3f} effort={result.effort:.3f} "
+            f"stalled={result.stalled}",
+        )
 
     def _on_cmd_done(self, future, op: str) -> None:
         ok = False

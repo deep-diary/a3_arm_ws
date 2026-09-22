@@ -140,6 +140,9 @@ struct JointMapping
   double cmd_pos{0.0};
   double cmd_vel{0.0};
   double cmd_eff{0.0};
+  // Per-joint command mode: true when an effort-interface controller claims
+  // this joint (e.g. GripperActionController on L7), false for position JTC.
+  bool effort_mode{false};
 
   bool has_feedback{false};
   bool stale{false};
@@ -295,45 +298,68 @@ public:
     const std::vector<std::string> & start_interfaces,
     const std::vector<std::string> & stop_interfaces) override
   {
-    const auto contains_effort = [](const std::vector<std::string> & ifaces) {
-      for (const auto & i : ifaces) {
-        if (i.find("/effort") != std::string::npos) {
-          return true;
+    const auto split = [](const std::string & iface) {
+      const auto slash = iface.find('/');
+      return std::make_pair(
+        iface.substr(0, slash),
+        slash != std::string::npos ? iface.substr(slash + 1) : std::string());
+    };
+    const auto find_joint = [this](const std::string & name) -> JointMapping * {
+      for (auto & j : joints_) {
+        if (j.name == name) {
+          return &j;
         }
       }
-      return false;
+      return nullptr;
     };
 
-    if (contains_effort(start_interfaces) && !effort_mode_.load()) {
-      effort_mode_.store(true);
+    // Modes are per-joint: zero_torque claims effort on all 7, but
+    // GripperActionController claims effort only on L7 while the arm JTC
+    // keeps position on L1-L6.
+    std::vector<std::string> started;
+    for (const auto & iface : start_interfaces) {
+      const auto [joint_name, iface_name] = split(iface);
+      JointMapping * j = find_joint(joint_name);
+      if (j == nullptr || iface_name != "effort" || j->effort_mode) {
+        continue;
+      }
+      j->effort_mode = true;
       // Seed EMA state at the per-joint max so damping cannot collapse on
       // entry (matches el_a3_hardware adaptive_kd_values_ init).
       std::lock_guard<std::mutex> lock(fb_mutex_);
-      for (auto & j : joints_) {
-        j.adaptive_kd = (j.kd_max_override > 0.0)
-          ? j.kd_max_override : kd_max_;
-      }
+      j->adaptive_kd = (j->kd_max_override > 0.0) ? j->kd_max_override : kd_max_;
+      started.push_back(joint_name);
+    }
+    if (!started.empty()) {
       RCLCPP_WARN(
         rclcpp::get_logger(kLoggerName),
-        "command mode -> EFFORT (gravity-comp free drive): kp=0 %s",
+        "command mode -> EFFORT on %zu joint(s): kp=0 %s", started.size(),
         adaptive_kd_enabled_
           ? "velocity-adaptive Kd (Lorentzian + EMA)"
           : ("fixed kd=" + std::to_string(effort_kd_)).c_str());
     }
-    if (contains_effort(stop_interfaces) && effort_mode_.load()) {
-      effort_mode_.store(false);
-      // Re-anchor position commands at measured pose so activating a
-      // position controller after free-drive cannot snap the arm back.
-      std::lock_guard<std::mutex> lock(fb_mutex_);
-      for (auto & j : joints_) {
-        j.cmd_pos = j.hw_pos;
-        j.cmd_vel = 0.0;
-        j.cmd_eff = 0.0;
+
+    std::vector<std::string> stopped;
+    for (const auto & iface : stop_interfaces) {
+      const auto [joint_name, iface_name] = split(iface);
+      JointMapping * j = find_joint(joint_name);
+      if (j == nullptr || iface_name != "effort" || !j->effort_mode) {
+        continue;
       }
+      j->effort_mode = false;
+      // Re-anchor position commands at measured pose so activating a
+      // position controller after free-drive cannot snap the joint back.
+      std::lock_guard<std::mutex> lock(fb_mutex_);
+      j->cmd_pos = j->hw_pos;
+      j->cmd_vel = 0.0;
+      j->cmd_eff = 0.0;
+      stopped.push_back(joint_name);
+    }
+    if (!stopped.empty()) {
       RCLCPP_INFO(
         rclcpp::get_logger(kLoggerName),
-        "command mode -> POSITION: kp=%.1f kd=%.2f, commands re-anchored",
-        kp_, kd_);
+        "command mode -> POSITION on %zu joint(s): kp=%.1f kd=%.2f, commands re-anchored",
+        stopped.size(), kp_, kd_);
     }
     return hardware_interface::return_type::OK;
   }
@@ -678,57 +704,51 @@ public:
       return hardware_interface::return_type::OK;
     }
 
-    if (effort_mode_.load()) {
-      // MIT torque mode: kp=0 removes the position spring; kd keeps joint
-      // damping; torque_ff is the joint-space command mapped to the motor
-      // axis (motor τ = joint τ / direction; directions are ±1). Position
-      // field is the current measured motor angle (no position target).
-      std::vector<double> motor_positions(joints_.size());
-      {
-        std::lock_guard<std::mutex> lock(fb_mutex_);
-        for (size_t i = 0; i < joints_.size(); ++i) {
-          motor_positions[i] =
-            joints_[i].direction * joints_[i].hw_pos + joints_[i].position_offset;
-          if (adaptive_kd_enabled_) {
-            const double kd_min = (joints_[i].kd_min_override > 0.0)
-              ? joints_[i].kd_min_override : kd_min_;
-            const double kd_max = (joints_[i].kd_max_override > 0.0)
-              ? joints_[i].kd_max_override : kd_max_;
-            const double ratio =
-              std::abs(joints_[i].hw_vel) / kd_velocity_ref_;
-            const double kd_raw =
-              kd_min + (kd_max - kd_min) / (1.0 + ratio * ratio);
-            joints_[i].adaptive_kd =
-              std::clamp(kd_smoothing_alpha_ * kd_raw +
-                (1.0 - kd_smoothing_alpha_) * joints_[i].adaptive_kd,
-                0.0, 5.0);
-          }
+    // Per-joint modes: effort-claimed joints (zero_torque, or GripperAction
+    // on L7) get kp=0 + torque_ff; the rest get position frames.
+    std::vector<double> motor_positions(joints_.size());
+    {
+      std::lock_guard<std::mutex> lock(fb_mutex_);
+      for (size_t i = 0; i < joints_.size(); ++i) {
+        motor_positions[i] =
+          joints_[i].direction * joints_[i].hw_pos + joints_[i].position_offset;
+        if (joints_[i].effort_mode && adaptive_kd_enabled_) {
+          // F85 adaptive damping (Lorentzian + EMA).
+          const double kd_min = (joints_[i].kd_min_override > 0.0)
+            ? joints_[i].kd_min_override : kd_min_;
+          const double kd_max = (joints_[i].kd_max_override > 0.0)
+            ? joints_[i].kd_max_override : kd_max_;
+          const double ratio = std::abs(joints_[i].hw_vel) / kd_velocity_ref_;
+          const double kd_raw = kd_min + (kd_max - kd_min) / (1.0 + ratio * ratio);
+          joints_[i].adaptive_kd =
+            std::clamp(kd_smoothing_alpha_ * kd_raw +
+              (1.0 - kd_smoothing_alpha_) * joints_[i].adaptive_kd,
+              0.0, 5.0);
         }
       }
-      for (size_t i = 0; i < joints_.size(); ++i) {
-        const auto & j = joints_[i];
+    }
+
+    for (size_t i = 0; i < joints_.size(); ++i) {
+      const auto & j = joints_[i];
+      CanFrameMessage frame;
+      if (j.effort_mode) {
+        // MIT torque mode: kp=0 removes the position spring; kd keeps joint
+        // damping; torque_ff is the joint-space command mapped to the motor
+        // axis (motor τ = joint τ / direction; directions are ±1). Position
+        // field is the current measured motor angle (no position target).
         const double kd = adaptive_kd_enabled_ ? j.adaptive_kd : effort_kd_;
         const double motor_torque =
           std::clamp(j.cmd_eff, -j.torque_max, j.torque_max) * j.direction;
-        const auto frame = ProtocolCodec::BuildMitControlFrame(
+        frame = ProtocolCodec::BuildMitControlFrame(
           bus_, j.motor_id, motor_positions[i], 0.0, 0.0, kd,
           motor_torque, j.torque_max, j.speed_max);
-        std::string error;
-        if (!transport_.Send(frame, &error)) {
-          RCLCPP_WARN_THROTTLE(
-            rclcpp::get_logger(kLoggerName), clock_, 1000, "%s", error.c_str());
-        }
+      } else {
+        // MIT position mode: velocity/torque FF stay 0 — JTC position commands
+        // already carry a smooth spline; kp/kd close the loop on the motor.
+        frame = ProtocolCodec::BuildMitControlFrame(
+          bus_, j.motor_id, j.direction * j.cmd_pos + j.position_offset,
+          0.0, kp_, kd_, 0.0, j.torque_max, j.speed_max);
       }
-      return hardware_interface::return_type::OK;
-    }
-
-    for (const auto & j : joints_) {
-      // MIT position mode: velocity/torque FF stay 0 — JTC position commands
-      // already carry a smooth spline; kp/kd close the loop on the motor.
-      const double motor_pos = j.direction * j.cmd_pos + j.position_offset;
-      const auto frame = ProtocolCodec::BuildMitControlFrame(
-        bus_, j.motor_id, motor_pos, 0.0, kp_, kd_, 0.0,
-        j.torque_max, j.speed_max);
       std::string error;
       if (!transport_.Send(frame, &error)) {
         RCLCPP_WARN_THROTTLE(
@@ -926,7 +946,6 @@ private:
   double motor_states_rate_hz_{kDefaultMotorStatesRateHz};
   int soft_start_cycles_{kDefaultSoftStartCycles};
   int soft_start_remaining_{0};
-  std::atomic_bool effort_mode_{false};
   std::atomic_bool fb_stale_{false};
 
   std::vector<JointMapping> joints_;

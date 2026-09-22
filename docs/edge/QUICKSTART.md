@@ -756,6 +756,25 @@ python3 scripts/a3_test/f87_torque_limit_acceptance.py 87
 
 真机上电后 F87 随 can 栈默认布防（每次 activate 重写，写入易失），真机验收待上电。
 
+### L7 标准 GripperActionController 验收（F87 第二步）
+
+F87 第二步把 L7 从自研 Python 夹爪节点（F24–F26，死服务依赖 `/a3/motor/set_param`、`/mit_gains_cmd` 均无服务端）迁到官方 `ros-humble-gripper-controllers` 的 `effort_controllers/GripperActionController`：标准 `control_msgs/GripperCommand` action（`/gripper_controller/gripper_cmd`），内置 PID + per-goal `max_effort` 控制器内钳位，固件 `0x700B` 仍是最终硬件钳位（双层限力）。FSM/PS4/MQTT 的 L7 段全部走该 action；产品 launch 不再启动 Python 夹爪节点（代码保留）。F32 `/a3/motor/*` 九个旧 can_bridge 调试 op 同步从 MQTT 下行白名单摘除（显式 unknown op）。GAC stall 契约见 LL-090。
+
+```bash
+source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
+python3 scripts/a3_test/f87b_gripper_action_acceptance.py 87
+#   通过标准：末尾「F87b acceptance: 23/23」（vcan7，栈+sim 自动起停）
+#   1 控制器类型 effort_controllers/GripperActionController；gripper_cmd 可连；
+#     /gripper_controller/follow_joint_trajectory 不存在
+#   2 自由空间开/合 reached_goal=true（≈1.79 / 0.0 rad）
+#   3 接触注入后 0.5/1.0 Nm 两档 raw Type-1 稳态 effort ±5%；
+#     stall：stalled=true、reached_goal=false（allow_stalling → succeeded）并保持
+#   4 0x700B 读回 6.0 Nm；max_effort=20 钳在 6.0 Nm
+#   5 Python 夹爪节点/死服务端点缺席；混合 FJT+gripper、FSM goto/park/disable 回归
+```
+
+真机验收待上电。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

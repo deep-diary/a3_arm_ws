@@ -15,6 +15,8 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>trajectory_msgs</exec_depend>
+  <exec_depend>action_msgs</exec_depend>
+  <exec_depend>control_msgs</exec_depend>
   <exec_depend>a3_msgs</exec_depend>
   <exec_depend>a3_can_bridge</exec_depend>
   <exec_depend>ament_index_python</exec_depend>

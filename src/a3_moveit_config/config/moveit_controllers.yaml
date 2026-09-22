@@ -20,9 +20,10 @@ moveit_simple_controller_manager:
       - L6_joint
 
   gripper_controller:
-    type: FollowJointTrajectory
-    action_ns: follow_joint_trajectory
+    type: GripperCommand
+    action_ns: gripper_cmd
     default: true
+    max_effort: 1.0
     joints:
       - L7_joint
 

@@ -6,7 +6,7 @@
   ros2_control controller_manager @200 Hz（el_a3_controllers.yaml）
     ├ joint_state_broadcaster（active，标准 /joint_states）
     ├ arm_controller JTC L1–L6（**inactive 启动，编排层 enable 才激活**）
-    ├ gripper_controller JTC L7（**inactive 启动**）
+    ├ gripper_controller effort GAC L7（**inactive 启动**，标准 /gripper_cmd，F87）
     └ zero_torque_controller（inactive 常驻，F73 示教自由拖动时互斥切换）
   move_group（OMPL + Pilz PTP/LIN/CIRC 双规划管线 + Sequence，直连 JTC FJT action）
   a3_trajectory_processing/retime_trajectory_node（保几何重定时，arm_with_gripper）
@@ -14,7 +14,6 @@
     + servo_mode_bridge
   a3_arm_controller 编排层（control_backend=fjt_action，
     motor_service_backend=controller_switch，require_gate:=false）
-  a3_gripper_controller 产品节点（traj_topic=/gripper_controller/joint_trajectory）
   a3_mqtt_bridge（默认包含；broker 不可达自行重连，节点不退出）
   diagnostic_aggregator（F82，默认包含；/diagnostics_agg + /diagnostics_toplevel_state）
   PS4 遥操作（默认包含）
@@ -72,7 +71,6 @@ def generate_launch_description():
     desc_share = get_package_share_directory("a3_description")
     moveit_share = get_package_share_directory("a3_moveit_config")
     arm_share = get_package_share_directory("a3_arm_controller")
-    gripper_share = get_package_share_directory("a3_gripper_controller")
     bridge_share = get_package_share_directory("a3_mqtt_bridge")
     teleop_share = get_package_share_directory("a3_teleop_ps4")
 
@@ -288,18 +286,6 @@ def generate_launch_description():
         condition=IfCondition(use_monitor),
     )
 
-    # ---- 夹爪产品节点：轨迹出口指 JTC 原生话题 ----
-    gripper = Node(
-        package="a3_gripper_controller",
-        executable="gripper_controller",
-        name="a3_gripper_controller",
-        output="screen",
-        parameters=[
-            os.path.join(gripper_share, "config", "gripper_config.yaml"),
-            {"traj_topic": "/gripper_controller/joint_trajectory"},
-        ],
-    )
-
     mqtt_bridge = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(bridge_share, "launch", "bridge.launch.py")
@@ -353,7 +339,6 @@ def generate_launch_description():
         actions=[
             fsm,
             monitor,
-            gripper,
             retime_node,
             mqtt_bridge,
             servo_node,

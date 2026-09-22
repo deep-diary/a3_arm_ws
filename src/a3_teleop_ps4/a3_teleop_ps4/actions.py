@@ -6,8 +6,10 @@ import math
 from typing import List, Optional
 
 from builtin_interfaces.msg import Duration
+from control_msgs.action import GripperCommand
 from control_msgs.msg import JointJog
 from geometry_msgs.msg import TwistStamped
+from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
@@ -15,7 +17,7 @@ from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-from a3_msgs.srv import GotoNamedPose, GripperCommand, PlaybackTrajectory
+from a3_msgs.srv import GotoNamedPose, PlaybackTrajectory
 
 
 JOINTS = [
@@ -33,15 +35,13 @@ GRIPPER_CLOSE = 1.79
 L6_MIN = -1.5708
 L6_MAX = 1.5708
 
-# F36：R2 扳机力控。v 为 trigger_01 归一化值（0=松开，1=按满）
+# F36/F87：R2 扳机力控。v 为 trigger_01 归一化值（0=松开，1=按满）
 FORCE_TRIG_ON = 0.22      # 迟滞上沿：超过才进入力控
 FORCE_TRIG_OFF = 0.15     # 迟滞下沿：低于才松开（全开）
 FORCE_TRIG_MIN = 0.2      # 映射起点：0.2..1 → 0.1..1.0 Nm
-FORCE_TORQUE_MIN = 0.1    # 映射下限（目标 ≤0 触发「直接全开」硬逻辑；接触判定下限 0.1 Nm）
-FORCE_TORQUE_MAX = 1.0    # 与 max_grasp_torque_nm 硬上限对齐（2026-09-07）
-FORCE_TORQUE_STEP = 0.1   # 持按期间目标变化 ≥ 该值才重发（频繁重发会把积分清零退化成纯 P）
-FORCE_TIMEOUT_S = 15.0    # 与节点默认 grasp_timeout_s 一致
-FORCE_RETRY_S = 0.5       # 服务未就绪 / 互锁拒绝的重发间隔
+FORCE_TORQUE_MIN = 0.1    # 映射下限
+FORCE_TORQUE_MAX = 1.0    # 与固件 0x700B 6 Nm 之间的会话力上限
+FORCE_TORQUE_STEP = 0.1   # 持按期间目标变化 ≥ 该值才重发
 
 
 def _duration(sec: float) -> Duration:
@@ -74,10 +74,14 @@ class ActionExecutor:
                 "arm_jtc_topic", "/arm_controller/joint_trajectory"
             ).value
         )
-        self.gripper_jtc_topic = str(
+        # F87：L7 全部走标准 GripperCommand action（effort GAC，per-goal max_effort）
+        self.gripper_action = str(
             node.declare_parameter(
-                "gripper_jtc_topic", "/gripper_controller/joint_trajectory"
+                "gripper_action", "/gripper_controller/gripper_cmd"
             ).value
+        )
+        self.gripper_default_effort = float(
+            node.declare_parameter("gripper_default_effort", 1.0).value
         )
         self.command_topic = str(
             node.declare_parameter("command_topic", "/power_sequence/command").value
@@ -97,9 +101,6 @@ class ActionExecutor:
         self._arm_jtc_pub = node.create_publisher(
             JointTrajectory, self.arm_jtc_topic, 10
         )
-        self._gripper_jtc_pub = node.create_publisher(
-            JointTrajectory, self.gripper_jtc_topic, 10
-        )
         # servo 输入订阅是 SensorDataQoS/BEST_EFFORT；RELIABLE 发布与之不匹配，
         # 消息静默丢弃（LL-079）。
         servo_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -113,7 +114,8 @@ class ActionExecutor:
         self._servo_unpause_cli = node.create_client(Trigger, "/servo_node/unpause_servo")
         self._zt_start = node.create_client(Trigger, self.zt_start_srv)
         self._zt_stop = node.create_client(Trigger, self.zt_stop_srv)
-        self._grip_cli = node.create_client(GripperCommand, "/a3/gripper/command")
+        self._gripper_ac = ActionClient(node, GripperCommand, self.gripper_action)
+        self._pending_gripper: Optional[tuple] = None
         # F55：编排层服务（arm_controller）全量接入手柄
         self._arm_init = node.create_client(Trigger, "/a3/arm/init")
         self._arm_enable = node.create_client(Trigger, "/a3/arm/enable")
@@ -154,13 +156,10 @@ class ActionExecutor:
             node.declare_parameter("power_enable_timeout_s", 5.0).value
         )
 
-        # F36：R2 扳机力控状态机
+        # F36/F87：R2 扳机力控状态机（GripperCommand action；server 暂不可用时
+        # 由 _pending_gripper 在 poll() 重试，无需自研重试表）
         self._force_engaged = False
         self._force_last_torque: Optional[float] = None
-        self._force_wants_retry = False
-        self._force_next_retry_at = 0.0
-        self._release_wants_retry = False
-        self._release_next_retry_at = 0.0
 
         # LL-059：真机 /joint_states 是 SensorDataQoS/BEST_EFFORT；RELIABLE 订阅静默
         # 收不到。BEST_EFFORT 订阅同时兼容仿真（RELIABLE 发布）。
@@ -200,7 +199,9 @@ class ActionExecutor:
         return now < self._pose_busy_until
 
     def poll(self, now: float) -> None:
-        """每 tick 调用一次：推进 L3 上电+使能挂起态（不得阻塞 50Hz tick）。"""
+        """每 tick 调用一次：重试挂起的夹爪目标、推进 L3 上电+使能挂起态。"""
+        if self._pending_gripper is not None:
+            self._gripper_goal(*self._pending_gripper)
         if not self._enable_pending or self._enable_called:
             return
         if self._gate_open and self._power_state == "Running":
@@ -486,7 +487,18 @@ class ActionExecutor:
     # --- analog_01 ---
 
     def set_gripper(self, v: float) -> None:
-        self.set_joint_L7(v)
+        # F87：按键开/合/切换的离散入口，绕过摇杆死区（v=0=闭合必须可达）
+        v = max(0.0, min(1.0, float(v)))
+        q = GRIPPER_CLOSE + v * (GRIPPER_OPEN - GRIPPER_CLOSE)
+        self._gripper = q
+        dbg = Float32()
+        dbg.data = v
+        self._grip_dbg.publish(dbg)
+        if self._last_l7_sent is not None and abs(q - self._last_l7_sent) < 0.008:
+            return
+        self._last_l7_sent = q
+        self._servo_pause()
+        self._gripper_goal(q, self.gripper_default_effort)
 
     def set_joint_L6(self, v: float) -> None:
         v = max(0.0, min(1.0, float(v)))
@@ -506,43 +518,43 @@ class ActionExecutor:
         dbg = Float32()
         dbg.data = v
         self._grip_dbg.publish(dbg)
-        self._publish_single_joint(
-            "L7_joint", q, "_last_l7_sent", self._gripper_jtc_pub
-        )
+        if self._last_l7_sent is not None and abs(q - self._last_l7_sent) < 0.008:
+            return
+        self._last_l7_sent = q
+        self._servo_pause()
+        self._gripper_goal(q, self.gripper_default_effort)
 
     def gripper_force(self, v: float) -> None:
-        """F36：R2 扳机 → 夹爪力控（analog_01，50 Hz 每 tick 调用，内部迟滞状态机）。
+        """F36/F87：R2 扳机 → GripperCommand action（50 Hz 每 tick 调用，迟滞状态机）。
 
-        松开（v<0.15）→ 下降沿发一次 release（全开）；
-        按过 0.22 → 发 force，目标力矩 0.2..1 → 0.1..1.0 Nm（按得越深抓得越紧）；
-        持按期间目标变化 ≥0.1 Nm 才重发；服务未就绪 / 互锁拒绝 → 0.5 s 间隔重试，
-        松手即停。与 /a3/gripper/command 力控语义一致（F33/F34）。
+        松开（v<0.15）→ 下降沿发一次全开位置目标；
+        按过 0.22 → 闭合位置目标（1.79）+ per-goal max_effort（扳机行程映射
+        0.1..1.0 Nm，按得越深抓得越紧）；接触后 GAC 检测 stall，
+        allow_stalling=true 报 succeeded（stalled=true、reached_goal=false），
+        PID 输出钳在 max_effort 持续施力；
+        持按期间目标变化 ≥0.1 Nm 才重发（新目标抢占，GAC 默认语义）。
         """
         v = max(0.0, min(1.0, float(v)))
-        now = self._n.get_clock().now().nanoseconds * 1e-9
         if self._force_engaged:
             if v < FORCE_TRIG_OFF:
                 self._force_engaged = False
                 self._force_last_torque = None
-                self._release_wants_retry = False
-                self._send_gripper("release")
+                self._gripper = GRIPPER_OPEN
+                self._last_l7_sent = None
+                self._gripper_goal(GRIPPER_OPEN, self.gripper_default_effort)
                 return
             tau = self._map_trigger_torque(v)
-            retry_due = self._force_wants_retry and now >= self._force_next_retry_at
             if (
                 self._force_last_torque is None
                 or abs(tau - self._force_last_torque) >= FORCE_TORQUE_STEP
-                or retry_due
             ):
-                self._send_gripper("force", tau)
-        else:
-            if self._release_wants_retry and now >= self._release_next_retry_at:
-                self._send_gripper("release")
-            if v >= FORCE_TRIG_ON:
-                self._force_engaged = True
-                self._release_wants_retry = False
-                self._force_last_torque = None
-                self._send_gripper("force", self._map_trigger_torque(v))
+                if self._gripper_goal(GRIPPER_CLOSE, tau):
+                    self._force_last_torque = tau
+        elif v >= FORCE_TRIG_ON:
+            self._force_engaged = True
+            tau = self._map_trigger_torque(v)
+            if self._gripper_goal(GRIPPER_CLOSE, tau):
+                self._force_last_torque = tau
 
     @staticmethod
     def _map_trigger_torque(v: float) -> float:
@@ -552,59 +564,34 @@ class ActionExecutor:
         )
         return max(FORCE_TORQUE_MIN, min(FORCE_TORQUE_MAX, tau))
 
-    def _send_gripper(self, mode: str, torque: float = 0.0) -> None:
-        now = self._n.get_clock().now().nanoseconds * 1e-9
-        if not self._grip_cli.service_is_ready():
-            if mode == "force":
-                self._force_wants_retry = True
-                self._force_next_retry_at = now + FORCE_RETRY_S
-            else:
-                self._release_wants_retry = True
-                self._release_next_retry_at = now + FORCE_RETRY_S
+    def _gripper_goal(self, position: float, max_effort: float) -> bool:
+        """发送 GripperCommand 目标；server 暂不可用时挂起，poll() 每 tick 重试。"""
+        if not self._gripper_ac.server_is_ready():
+            self._pending_gripper = (float(position), float(max_effort))
             self._n.get_logger().warn(
-                "gripper command service unavailable; will retry",
+                "GripperCommand action unavailable; will retry",
                 throttle_duration_sec=2.0,
             )
-            return
-        req = GripperCommand.Request()
-        req.mode = mode
-        req.torque_nm = float(torque)
-        req.timeout_s = FORCE_TIMEOUT_S
-        future = self._grip_cli.call_async(req)
-        if future is None:
-            self._force_wants_retry = True
-            self._force_next_retry_at = now + FORCE_RETRY_S
-            return
-        if mode == "force":
-            self._force_last_torque = float(torque)
-            self._force_wants_retry = False
-        else:
-            self._release_wants_retry = False
+            return False
+        goal = GripperCommand.Goal()
+        goal.command.position = float(position)
+        goal.command.max_effort = float(max_effort)
+        future = self._gripper_ac.send_goal_async(goal)
         future.add_done_callback(
-            lambda f, m=mode: self._on_gripper_cmd_done(f, m)
+            lambda f, p=position, e=max_effort: self._on_gripper_goal_response(f, p, e)
         )
+        self._pending_gripper = None
+        return True
 
-    def _on_gripper_cmd_done(self, future, mode: str) -> None:
-        try:
-            resp = future.result()
-        except Exception as exc:  # noqa: BLE001
-            self._n.get_logger().warn(f"gripper {mode} call failed: {exc}")
-            resp = None
-        if resp is not None and resp.success:
-            return
-        # 互锁拒绝（臂运动中等）：持按 / 到期后重试，松手停止
-        message = getattr(resp, "message", "no response")
-        now = self._n.get_clock().now().nanoseconds * 1e-9
-        if mode == "force" and self._force_engaged:
-            self._force_wants_retry = True
-            self._force_next_retry_at = now + FORCE_RETRY_S
-        elif mode == "release":
-            self._release_wants_retry = True
-            self._release_next_retry_at = now + FORCE_RETRY_S
-        self._n.get_logger().warn(
-            f"gripper {mode} rejected: {message}",
-            throttle_duration_sec=2.0,
-        )
+    def _on_gripper_goal_response(self, future, position: float, max_effort: float) -> None:
+        handle = future.result()
+        if handle is None or not handle.accepted:
+            # 控制器切换等短暂窗口被拒：挂起重试（持按期间也会由扳机变化重发）
+            self._pending_gripper = (float(position), float(max_effort))
+            self._n.get_logger().warn(
+                "GripperCommand goal rejected; will retry",
+                throttle_duration_sec=2.0,
+            )
 
     # F64：D-pad 边沿步进（步长 0.15，clamp 0.1..1.0），不连发
     def step_linear_scale(self, delta: float) -> None:
