@@ -2,7 +2,7 @@
 <!-- EL-A3 ros2_control configuration -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-  <xacro:macro name="el_a3_ros2_control" params="use_mock_hardware use_real_hardware can_interface host_can_id wrist_motor_type adaptive_kd_enabled">
+  <xacro:macro name="el_a3_ros2_control" params="use_mock_hardware use_real_hardware can_interface host_can_id wrist_motor_type adaptive_kd_enabled motor_can_timeout_enabled motor_can_timeout_s">
 
     <!-- Wrist motor effort limits based on motor type -->
     <xacro:property name="wrist_effort_max" value="${5.5 if wrist_motor_type == 'RS05' else 6.0}"/>
@@ -34,6 +34,11 @@
             <param name="zero_torque_kd_max">0.15</param>
             <param name="kd_velocity_ref">1.0</param>
             <param name="kd_smoothing_alpha">0.15</param>
+            <!-- F86: arm motor-side CAN timeout (0x7028, uint32 counts ~50us, 20000≈1s).
+                 Independent of the F81 host watchdog: trips even if the host dies.
+                 0 / false disarms; firmware write is volatile, re-armed every on_activate. -->
+            <param name="motor_can_timeout_enabled">${motor_can_timeout_enabled}</param>
+            <param name="motor_can_timeout_s">${motor_can_timeout_s}</param>
           </xacro:if>
           <xacro:unless value="${use_real_hardware}">
           <!-- Board runtime uses a3_can_bridge topic stack (not this plugin).

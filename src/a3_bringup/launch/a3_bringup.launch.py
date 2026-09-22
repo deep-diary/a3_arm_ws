@@ -59,6 +59,7 @@ def generate_launch_description():
     hardware = LaunchConfiguration("hardware")
     can_interface = LaunchConfiguration("can_interface")
     adaptive_kd_enabled = LaunchConfiguration("adaptive_kd_enabled")
+    motor_can_timeout_enabled = LaunchConfiguration("motor_can_timeout_enabled")
     use_rviz = LaunchConfiguration("use_rviz")
     use_sw_render = LaunchConfiguration("use_sw_render")
     use_mqtt = LaunchConfiguration("use_mqtt")
@@ -81,7 +82,8 @@ def generate_launch_description():
         "' use_mock_hardware:=true' if '", hardware, "' == 'mock'",
         " else ' use_mock_hardware:=false use_real_hardware:=true",
         " can_interface:=", can_interface,
-        " adaptive_kd_enabled:=", adaptive_kd_enabled, "'",
+        " adaptive_kd_enabled:=", adaptive_kd_enabled,
+        " motor_can_timeout_enabled:=", motor_can_timeout_enabled, "'",
     ])
     robot_description = ParameterValue(
         Command(["xacro ", xacro_file, hw_args]),
@@ -376,6 +378,11 @@ def generate_launch_description():
             "adaptive_kd_enabled",
             default_value="true",
             description="F85 自由拖动速度自适应 Kd（false=固定 zero_torque_kd=0.3 兜底）",
+        ),
+        DeclareLaunchArgument(
+            "motor_can_timeout_enabled",
+            default_value="true",
+            description="F86 电机侧 CAN 超时 0x7028 布防（false=显式写 0 撤防；与 F81 主机看门狗独立）",
         ),
         DeclareLaunchArgument("use_rviz", default_value="false"),
         DeclareLaunchArgument(

@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -47,6 +48,10 @@ constexpr int kDefaultSoftStartCycles = 10;
 constexpr double kDefaultTempWarnC = 90.0;
 constexpr double kDefaultTempProtectC = 95.0;
 constexpr double kDefaultMotorStatesRateHz = 50.0;
+constexpr bool kDefaultMotorCanTimeoutEnabled = true;
+constexpr double kDefaultMotorCanTimeoutS = 0.2;
+// 0x7028 is uint32 with ~50 us per count (20000 ≈ 1 s)
+constexpr double kCanTimeoutCountsPerSec = 20000.0;
 
 double ParseDouble(const std::string & value, double fallback)
 {
@@ -96,6 +101,15 @@ std::string GetParam(
 {
   const auto it = params.find(key);
   return it == params.end() ? fallback : it->second;
+}
+
+std::array<uint8_t, 4> TimeoutCountsRaw(uint32_t counts)
+{
+  return {
+    static_cast<uint8_t>(counts & 0xFF),
+    static_cast<uint8_t>((counts >> 8) & 0xFF),
+    static_cast<uint8_t>((counts >> 16) & 0xFF),
+    static_cast<uint8_t>((counts >> 24) & 0xFF)};
 }
 }  // namespace
 
@@ -165,6 +179,11 @@ public:
     kd_smoothing_alpha_ = ParseDouble(
       GetParam(hp, "kd_smoothing_alpha", ""), kDefaultKdSmoothingAlpha);
     kd_smoothing_alpha_ = std::clamp(kd_smoothing_alpha_, 1e-3, 1.0);
+    motor_can_timeout_enabled_ =
+      ParseBool(GetParam(hp, "motor_can_timeout_enabled", ""), kDefaultMotorCanTimeoutEnabled);
+    motor_can_timeout_s_ = ParseDouble(
+      GetParam(hp, "motor_can_timeout_s", ""), kDefaultMotorCanTimeoutS);
+    motor_can_timeout_s_ = std::clamp(motor_can_timeout_s_, 0.05, 10.0);
     feedback_timeout_s_ = ParseDouble(
       GetParam(hp, "feedback_timeout_s", ""), kDefaultFeedbackTimeoutS);
     feedback_timeout_s_ = std::clamp(feedback_timeout_s_, 0.02, 5.0);
@@ -416,13 +435,24 @@ public:
     // F83 vendor-standard choreography (EDULITE_A3 EnableArm), per motor:
     // clear latched faults (Type 4, data[0]=1) → integer RUN_MODE write
     // (Type 18, 0x7005=0 MOTION_CONTROL; float encoding corrupts the uint8)
+    // → F86 arm the motor-side CAN timeout (0x7028 uint32 counts; 0 disarms)
     // → enable (Type 3); 30 ms settling as in the vendor SDK.
+    const uint32_t can_timeout_counts = motor_can_timeout_enabled_
+      ? static_cast<uint32_t>(
+          std::llround(motor_can_timeout_s_ * kCanTimeoutCountsPerSec))
+      : 0u;
     for (const auto & j : joints_) {
       transport_.Send(ProtocolCodec::BuildClearFaultFrame(bus_, j.motor_id), nullptr);
       std::this_thread::sleep_for(std::chrono::milliseconds(30));
       transport_.Send(
         ProtocolCodec::BuildSetParamU8Frame(
           bus_, j.motor_id, ProtocolCodec::kParamRunMode, 0),
+        nullptr);
+      std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      transport_.Send(
+        ProtocolCodec::BuildSetParamRawFrame(
+          bus_, j.motor_id, ProtocolCodec::kParamCanTimeout,
+          TimeoutCountsRaw(can_timeout_counts)),
         nullptr);
       std::this_thread::sleep_for(std::chrono::milliseconds(30));
       transport_.Send(ProtocolCodec::BuildEnableFrame(bus_, j.motor_id), nullptr);
@@ -480,6 +510,17 @@ public:
     active_.store(false);
     fb_stale_.store(false);
     soft_start_remaining_ = 0;
+
+    // F86: disarm the motor-side timeout before anything else, so no motor
+    // can self-reset mid-shutdown while frames briefly pause.
+    for (const auto & j : joints_) {
+      transport_.Send(
+        ProtocolCodec::BuildSetParamRawFrame(
+          bus_, j.motor_id, ProtocolCodec::kParamCanTimeout,
+          TimeoutCountsRaw(0u)),
+        nullptr);
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
 
     // Zero-gain refresh at the last measured positions, then reset (MIT stop).
     for (int cycle = 0; cycle < 3; ++cycle) {
@@ -867,6 +908,8 @@ private:
   double kd_max_{kDefaultKdMax};
   double kd_velocity_ref_{kDefaultKdVelocityRef};
   double kd_smoothing_alpha_{kDefaultKdSmoothingAlpha};
+  bool motor_can_timeout_enabled_{kDefaultMotorCanTimeoutEnabled};
+  double motor_can_timeout_s_{kDefaultMotorCanTimeoutS};
   double feedback_timeout_s_{kDefaultFeedbackTimeoutS};
   double startup_kd_{kDefaultStartupKd};
   double temp_warn_c_{kDefaultTempWarnC};

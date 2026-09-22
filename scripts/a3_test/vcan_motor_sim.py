@@ -25,7 +25,13 @@ CMD_CONTROL = 0x01
 CMD_FEEDBACK = 0x02
 CMD_ENABLE = 0x03
 CMD_RESET = 0x04
+CMD_GET_PARAM = 0x11
+CMD_SET_PARAM = 0x12
 MASTER_ID = 0xFD
+
+PARAM_CAN_TIMEOUT = 0x7028
+# 0x7028 is uint32 with ~50 us per count (20000 ≈ 1 s)
+TIMEOUT_COUNTS_PER_SEC = 20000.0
 
 P_RANGE = 12.57
 # motor_id -> (torque_max, speed_max); RS00 1-3, EL05 4-7
@@ -51,6 +57,38 @@ class MotorState:
         self.speed = 0.0
         self.torque = 0.0
         self.last_t = time.monotonic()
+        # F86: last Type-18 0x7028 value (uint32 counts; 0 = disarmed)
+        self.timeout_counts = 0
+        self.tripped = False
+        self.trip_delay = None
+
+
+def write_state_file(path, motors):
+    payload = {
+        "motors": {
+            str(mid): {
+                "armed": m.timeout_counts > 0,
+                "counts": m.timeout_counts,
+                "tripped": m.tripped,
+                "trip_delay": m.trip_delay,
+            }
+            for mid, m in sorted(motors.items())
+        }
+    }
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f)
+    os.replace(tmp, path)
+
+
+def send_param_reply(sock, m, param_id, value):
+    can_id = (CMD_GET_PARAM << 24) | (m.motor_id << 8) | MASTER_ID
+    data = [
+        param_id & 0xFF, (param_id >> 8) & 0xFF, 0x00, 0x00,
+        value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF,
+        (value >> 24) & 0xFF,
+    ]
+    sock.send(pack_frame(can_id, data))
 
 
 def pack_frame(can_id, data):
@@ -205,24 +243,54 @@ def main():
     parser.add_argument("--health-file", default="/tmp/f84_health.json",
                         help="temp/mode/fault injection: "
                              "{\"motor\": 3, \"temp_c\": 92, \"fault\": 4}, {} clears")
+    parser.add_argument("--state-file", default="/tmp/f86_timeout_state.json",
+                        help="F86 watchdog state (armed/tripped per motor)")
     args = parser.parse_args()
 
     sock = socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
     sock.bind((args.interface,))
+    # Tick the F86 watchdog even when no frames arrive (e.g. after host death).
+    sock.settimeout(0.02)
 
     motors = {i: MotorState(i) for i in range(1, 8)}
     ext = ExternalForce(args.ext_file)
     silence = SilenceCtl(args.silence_file)
     health = HealthCtl(args.health_file)
+    # CAN is a shared bus: every motor observes every frame. The firmware
+    # watchdog counts bus activity, not frames addressed to one motor.
+    bus_last_t = time.monotonic()
+    last_state_write = 0.0
     print(f"vcan motor sim on {args.interface}, alpha={args.alpha}", flush=True)
 
+    def tick(now):
+        nonlocal last_state_write
+        changed = False
+        for mt in motors.values():
+            if mt.timeout_counts > 0 and not mt.tripped:
+                window = mt.timeout_counts / TIMEOUT_COUNTS_PER_SEC
+                if now - bus_last_t > window:
+                    mt.tripped = True
+                    mt.speed = 0.0
+                    mt.torque = 0.0
+                    mt.trip_delay = now - bus_last_t
+                    changed = True
+        if changed or now - last_state_write > 0.1:
+            write_state_file(args.state_file, motors)
+            last_state_write = now
+
     while True:
-        frame = sock.recv(72)
+        try:
+            frame = sock.recv(72)
+        except socket.timeout:
+            tick(time.monotonic())
+            continue
         can_id, _dlc, data = struct.unpack(CAN_FORMAT, frame)
         can_id &= 0x1FFFFFFF
         cmd_type = (can_id >> 24) & 0x1F
         motor_id = can_id & 0xFF
         m = motors.get(motor_id)
+        now = time.monotonic()
+        bus_last_t = now
         if m is None:
             continue
 
@@ -236,10 +304,21 @@ def main():
         if cmd_type == CMD_RESET:
             m.speed = 0.0
             m.torque = 0.0
+            m.tripped = False
+            m.trip_delay = None
             reply()
         elif cmd_type == CMD_ENABLE:
             reply()
-        elif cmd_type == CMD_CONTROL:
+        elif cmd_type == CMD_SET_PARAM:
+            param_id = data[0] | (data[1] << 8)
+            if param_id == PARAM_CAN_TIMEOUT:
+                m.timeout_counts = (
+                    data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24))
+        elif cmd_type == CMD_GET_PARAM:
+            param_id = data[0] | (data[1] << 8)
+            value = m.timeout_counts if param_id == PARAM_CAN_TIMEOUT else 0
+            send_param_reply(sock, m, param_id, value)
+        elif cmd_type == CMD_CONTROL and not m.tripped:
             vmax = SPEED_MAX[motor_id]
             target = u16_to_float((data[0] << 8) | data[1], -P_RANGE, P_RANGE)
             target_v = u16_to_float((data[2] << 8) | data[3], -vmax, vmax)
@@ -248,7 +327,6 @@ def main():
             t_ff_raw = (can_id >> 8) & 0xFFFF
             t_ff = u16_to_float(t_ff_raw, -TORQUE_MAX[motor_id], TORQUE_MAX[motor_id])
 
-            now = time.monotonic()
             dt = max(1e-3, now - m.last_t)
             m.last_t = now
             if kp < 1.0:
@@ -271,6 +349,7 @@ def main():
                                min(TORQUE_MAX[motor_id],
                                    t_ff + kp * (target - m.angle) + kd * (target_v - m.speed)))
             reply()
+        tick(now)
 
 
 if __name__ == "__main__":

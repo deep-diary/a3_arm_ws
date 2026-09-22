@@ -719,6 +719,24 @@ python3 scripts/a3_test/f85_adaptive_kd_acceptance.py 85
 
 真机上电后 F85 随 can 栈默认开启（`adaptive_kd_enabled:=false` 可关），真机验收待上电。
 
+### 电机侧 CAN 超时布防验收（F86）
+
+F86 在 F81 主机看门狗之外增加独立的电机侧防线：`on_activate` 使能编排中给每个电机写 `0x7028`（uint32 计数，~50 µs/count，20000≈1 s；详见 LL-089——不是早期注释误标的「float 秒」），默认 0.2 s = 4000 counts，约为 5 ms 正常帧间隔的 40 倍。总线静默超过窗口后电机自行进入 RESET（去使能），因此主机崩溃/掉电/线缆脱落时即使 F81 随主机失效，电机仍会自动断力。官方 EDULITE_A3 每次使能写 0（只信主机看门狗），F86 有意做纵深防御。写入易失，故每次 `on_activate` 重新布防、`on_deactivate` 先写 0 撤防再 reset。`motor_can_timeout_enabled:=false` 显式撤防。
+
+```bash
+source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
+python3 scripts/a3_test/f86_can_timeout_acceptance.py 86
+#   通过标准：末尾「F86 acceptance: 29/29」（脚本 SIGKILL 栈模拟主机死亡，并重启一次撤防对照）
+#   1 7 个 Type-18 帧：data[0..1]=28 70、data[2..3]=00 00、data[4..8] LE uint32=4000±10%；
+#     顺序 per motor：0x7005 RUN_MODE 写 < 0x7028 写 < Type-3 使能
+#   2 Type-17 读回 0x7028 = 4000
+#   3 健康运行零误跳；SIGKILL 后 7/7 电机跳闸，trip_delay∈[0.18,0.7] s（实测≈0.20）
+#   4 五次 FJT error_code=0
+#   5 motor_can_timeout_enabled:=false 重启：0x7028 写 0，SIGKILL 后 1.2 s 内无跳闸
+```
+
+真机上电后 F86 随 can 栈默认布防（`motor_can_timeout_enabled:=false` 可关；`motor_can_timeout_s` 走 xacro/launch 参数），真机验收待上电。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

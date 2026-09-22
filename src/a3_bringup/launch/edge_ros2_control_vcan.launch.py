@@ -38,6 +38,7 @@ def load_yaml(package_name, file_path):
 def generate_launch_description():
     use_rviz = LaunchConfiguration("use_rviz")
     adaptive_kd_enabled = LaunchConfiguration("adaptive_kd_enabled")
+    motor_can_timeout_enabled = LaunchConfiguration("motor_can_timeout_enabled")
 
     desc_share = get_package_share_directory("a3_description")
     moveit_share = get_package_share_directory("a3_moveit_config")
@@ -50,6 +51,7 @@ def generate_launch_description():
             " use_real_hardware:=true",
             " can_interface:=vcan0",
             " adaptive_kd_enabled:=", adaptive_kd_enabled,
+            " motor_can_timeout_enabled:=", motor_can_timeout_enabled,
         ]),
         value_type=str,
     )
@@ -163,6 +165,11 @@ def generate_launch_description():
             "adaptive_kd_enabled",
             default_value="true",
             description="F85 自由拖动速度自适应 Kd（false=固定 zero_torque_kd 兜底）",
+        ),
+        DeclareLaunchArgument(
+            "motor_can_timeout_enabled",
+            default_value="true",
+            description="F86 电机侧 CAN 超时 0x7028 布防（false=写 0 撤防）",
         ),
         rsp,
         controller_manager,
