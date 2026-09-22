@@ -568,6 +568,23 @@ ROS_DOMAIN_ID=61 python3 scripts/a3_test/f75_full_mock_acceptance.py
 - goto/move_to 走 move_group 同样漏 L7（统一补发）；失能落定必须位置 AND 速度双条件；重启栈先按 PID 清全部子进程——详见 [LL-077](../lessons_learned/LL-077-goto-l7-dispatch-settle-pos-vel-double-stack.md)。
 - 真机上电后：`edge_full_mock.launch.py` 的 mock 拓扑即真机 bringup 的改造模板（xacro 切 `use_real_hardware:=true`、F72 SystemInterface 已提供使能语义），真机验收待上电。
 
+### Pilz 工业运动规划器验收（F76，PTP / LIN / CIRC + Sequence）
+
+F75 栈的 move_group 改为双规划管线：OMPL（默认）+ Pilz 工业运动规划器。PTP 点到点、LIN 末端直线、CIRC 圆弧、带 `blend_radius` 的 Sequence 混合程序一次下发，执行仍经标准 JTC，替代手写 `move_to_pose_ik_node` / `draw_rectangle_demo`。管线按请求内 `pipeline_id`/`planner_id` 选择（统一服务 `/plan_kinematic_path`，序列 `/plan_sequence_path` + `/sequence_move_group` action）。
+
+```bash
+source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
+# 1) 起栈（F75 全产品 mock 栈，自动加载双管线；关掉 MQTT 验收更快）
+ROS_DOMAIN_ID=62 ros2 launch a3_bringup edge_full_mock.launch.py use_mqtt:=false
+# 2) 验收（另一终端）
+ROS_DOMAIN_ID=62 python3 scripts/a3_test/f76_pilz_acceptance.py
+#   通过标准：末尾「F76 acceptance: 12/12」（端点齐、JTC 生命周期、OMPL/PTP 落点、
+#   LIN 直线度 ≤2 mm、CIRC 半径偏差 ≤2 mm、三角形 blend 连续通过、零自研笛卡尔节点）
+```
+
+- CIRC center 约束的 region 必须覆盖整弧（小盒必报 Position constraint violated）；升级 MoveIt 后 pick-ik 等第三方插件要同步换同版本构建——详见 [LL-078](../lessons_learned/LL-078-pilz-pipeline-version-coupling-circ-center-region.md)。
+- 真机上电后 Pilz 管线随 F72 真机栈同构复用，真机验收待上电。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

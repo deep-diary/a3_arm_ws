@@ -1,0 +1,8 @@
+# F76 Pilz industrial motion planner — second planning pipeline
+# (PTP joint motion / LIN straight Cartesian / CIRC circular arcs).
+# Selected per request via MotionPlanRequest.planner_id ("PTP", "LIN", "CIRC").
+# Cartesian speed/accel limits come from robot_description_planning.cartesian_limits
+# (see pilz_cartesian_limits.yaml).
+planning_plugin: pilz_industrial_motion_planner/CommandPlanner
+request_adapters: ""
+start_state_max_bounds_error: 0.1

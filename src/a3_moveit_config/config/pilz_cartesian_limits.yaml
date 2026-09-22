@@ -1,0 +1,8 @@
+# F76 Cartesian limits consumed by the Pilz planner (robot_description_planning.cartesian_limits).
+# Conservative industrial teach-speed values for an ~0.5 m reach arm; scale up after
+# real-machine acceptance. max_trans_dec is signed.
+cartesian_limits:
+  max_trans_vel: 0.5
+  max_trans_acc: 1.0
+  max_trans_dec: -1.0
+  max_rot_vel: 1.57

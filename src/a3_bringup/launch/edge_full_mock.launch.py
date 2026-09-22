@@ -121,7 +121,25 @@ def generate_launch_description():
     kinematics_yaml = load_yaml("a3_moveit_config", "config/kinematics.yaml")
     joint_limits_yaml = load_yaml("a3_moveit_config", "config/joint_limits.yaml")
     ompl_planning_yaml = load_yaml("a3_moveit_config", "config/ompl_planning.yaml")
+    pilz_planning_yaml = load_yaml(
+        "a3_moveit_config", "config/pilz_industrial_motion_planner.yaml"
+    )
+    pilz_cartesian_limits_yaml = load_yaml(
+        "a3_moveit_config", "config/pilz_cartesian_limits.yaml"
+    )
     moveit_controllers_yaml = load_yaml("a3_moveit_config", "config/moveit_controllers.yaml")
+
+    # F76: OMPL（默认）+ Pilz（PTP/LIN/CIRC）双规划管线；Pilz 笛卡尔限位并入
+    # robot_description_planning（与关节限位同级）。
+    planning_pipelines_parameters = {
+        "planning_pipelines": ["ompl", "pilz"],
+        "default_planning_pipeline": "ompl",
+        "ompl": ompl_planning_yaml,
+        "pilz": pilz_planning_yaml,
+    }
+    robot_description_planning = dict(joint_limits_yaml or {})
+    if pilz_cartesian_limits_yaml:
+        robot_description_planning.update(pilz_cartesian_limits_yaml)
     trajectory_execution = {
         "moveit_manage_controllers": True,
         "trajectory_execution.allowed_execution_duration_scaling": 1.2,
@@ -143,9 +161,15 @@ def generate_launch_description():
         parameters=[
             {"robot_description": robot_description},
             {"robot_description_semantic": robot_description_semantic},
-            {"robot_description_planning": joint_limits_yaml},
+            {"robot_description_planning": robot_description_planning},
             {"robot_description_kinematics": kinematics_yaml},
-            {"move_group": ompl_planning_yaml},
+            planning_pipelines_parameters,
+            {
+                "capabilities": (
+                    "pilz_industrial_motion_planner/MoveGroupSequenceAction "
+                    "pilz_industrial_motion_planner/MoveGroupSequenceService"
+                )
+            },
             trajectory_execution,
             moveit_controllers_yaml,
             planning_scene_monitor_parameters,

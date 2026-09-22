@@ -895,6 +895,23 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F70（标准栈）、F72（硬件 on_activate/deactivate 使能语义）、F74（FJT action 后端）；LL-072（JTC/JSB 启动顺序与单点语义）、LL-076、LL-077（goto L7 补发 + 位置/速度双落定）；审计任务 #10
 - **状态：** `completed`（2026-09-22 仿真验收，ROS_DOMAIN_ID=61，`scripts/a3_test/f75_full_mock_acceptance.py` 15/15：boot 两 JTC inactive、FSM IDLE、零自研 sim 节点、产品节点齐；enable→controllers activated→READY、两 JTC active；jog ×3（含 L7）落点 err ≤0.0199、速度字段有效 max_vel=0.429；goto move_group ready/home err ≤0.0094（L7 同步补发）；playback 61 点正弦经 retime+双 JTC 落 home err=0.0118；夹爪位置命令经标准 JTC 话题驱动 L7（0→1.780→0）；disable safe-park 位置/速度双落定后两 JTC inactive、FSM DISABLED；MQTT 桥全程存活）
 
+## F76 Pilz 工业运动规划器（PTP / LIN / CIRC + Sequence 混合，替代手写笛卡尔节点）
+
+- **说明：** 审计任务 #10 发现：笛卡尔直线/圆弧运动一直靠自研节点（`move_to_pose_ik_node.py` 手写 IK + 直线插值、`draw_rectangle_demo.py` 四点拼矩形），与工业现场的标准指令语义（PTP 点到点、LIN 空间直线、CIRC 圆弧、带 blend_radius 的顺序程序）不一致，且没有速度规划。MoveIt 官方的 Pilz 工业运动规划器（`ros-humble-pilz-industrial-motion-planner`，`pilz_industrial_motion_planner/CommandPlanner`）提供这四类标准能力，move_group 以第二条规划管线（`planning_pipelines: [ompl, pilz]`）并存加载：
+  - PTP：关节/位姿点到点；LIN：末端空间直线（在线求解保持直线几何 + 速度规划）；CIRC：以 center 或 interim 辅助点定义的圆弧（经 MotionPlanRequest.path_constraints，约束名 `center`/`interim`）。
+  - Sequence：`pilz_industrial_motion_planner/MoveGroupSequenceAction`（+ `MoveGroupSequenceService`）能力，`moveit_msgs/action/MoveGroupSequence`，多条指令 + blend_radius 平滑混合（矩形/多边形程序一次下发）。
+  - move_group 暴露统一服务 `/plan_kinematic_path`（GetMotionPlan，按请求内 `pipeline_id`/`planner_id` 选管线与 PTP/LIN/CIRC）、`/plan_sequence_path`（GetMotionSequence）与 `/sequence_move_group` action；执行仍经标准 JTC FJT。
+- **接线：** `a3_moveit_config/config/pilz_industrial_motion_planner.yaml`（CommandPlanner + 笛卡尔速度上限；关节速度/加速度复用 joint_limits.yaml）；`edge_full_mock.launch.py` 的 move_group 改为双管线并加载 sequence 能力。OMPL 管线与现有 goto 默认路径不受影响。
+- **验收标准：**
+  1. move_group 启动后同时存在 ompl / pilz 两管线（`/plan_kinematic_path` + `/plan_sequence_path` 服务）与 `/sequence_move_group` action
+  2. PTP：关节目标（ready）规划+执行落点 ≤0.02 rad
+  3. LIN：两点位姿目标规划成功，执行中末端实际轨迹对直线的最大偏离 ≤ 2 mm
+  4. CIRC：带 center 约束规划成功，轨迹点到圆心距离恒定（偏差 ≤ 2 mm）
+  5. Sequence：3 段 LIN + blend_radius 的三角形程序经 action 一次执行成功，运动连续无停顿
+  6. 全程经标准栈（mock GenericSystem + JTC），零自研笛卡尔节点参与
+- **关联：** F67（move_group）、F75（全产品 mock 栈）；任务 #10、#12（reBot 手写 IK/demo 退役由本需求提供标准替代）
+- **状态：** `completed`（2026-09-22 仿真验收，ROS_DOMAIN_ID=62，`scripts/a3_test/f76_pilz_acceptance.py` 12/12：规划/序列端点齐（`/plan_kinematic_path`、`/plan_sequence_path`、`/sequence_move_group`），boot 两 JTC inactive；enable→READY 两 JTC active；OMPL zero→ready 落点 err=0.0009；Pilz PTP ready→home→ready err ≤0.0002；LIN 末端直线 max_dev=0.97 mm、end_err=1.32 mm；CIRC 半径恒定 max_rdev=0.60 mm、end_err=0.93 mm；3 段 LIN + blend_radius 三角形一次执行连续通过，dev=1.46 mm、拐角通过速度 179.9 mm/s；全程零自研笛卡尔节点）
+
 ### F40 — 失能保护（disable → 自动回 home → 失能）
 
 - **说明：** `/a3/arm/disable` 不再是「无条件直接失能」——不在 home 容差内时先平滑回 home 再失能，防止 ready 位直接掉臂。新增参数：`disable_home_pose_name: "home"`、`disable_home_tol_rad: 0.15`、`disable_home_duration_s: 3.0`、`disable_home_confirm_s: 0.5`、`disable_park_timeout_s: 8.0`。新辅助 `_at_home()`（全关节 |q−home| ≤ tol）与 `_safe_park_then_disable()`（同步阻塞：发布 home 轨迹抢占活跃轨迹——执行层 OnTrajectory 天然支持替换，无需排队 → `SAFE_PARK`（期间拒绝新运动指令）→ 轮询连续 `confirm_s` 收敛 → reset → `DISABLED`）。服务语义（同步阻塞返回，`success=true ⟺ 已失能`）：READY/TRAJ 容差内 → 直达 reset → DISABLED；容差外 → safe park → reset → DISABLED（message 含耗时）；IDLE → 直达 reset；DISABLED/COOLING → 幂等不动电机；FAULT → 紧急直达 reset；INIT/TEACH/SERVO/AI → 拒绝 busy；SAFE_PARK → 拒绝「already safe parking」。park 超时 → **FAULT 不 reset**（保持使能、停在半途，人工介入）；reset 被 gate 拒 → park 前 `success=false` + 原文 + "(stop power sequence first)"，park 完成后被拒 → 回 READY（已在 home 位，安全）；`_have_js==False` → 直达 reset + WARN（保持旧行为）。`/a3/motor/reset` 直达保留作紧急失能。
