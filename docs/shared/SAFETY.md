@@ -160,6 +160,17 @@ Web 端单电机调试（CAN 扫描 / MIT 直驱 / 保持）的安全边界：
 - 期望位置用自建轨迹插值器（time_from_start 线性插值），不依赖 ArmStatus.positions（目标快照语义）。
 - 实现要点：服务客户端必须挂独立 ReentrantCallbackGroup + MultiThreadedExecutor + 纯轮询等 future，回调内 `spin_until_future_complete` 会死锁自身（LL-034）；过期判据用接收时刻 monotonic 时间戳，不可与消息墙钟 stamp 混减（LL-034）。
 
+## 单电机反馈断线保护（F81，LL-083）
+
+任一电机反馈 TX 通道死掉、其余 6 路照常上报时，JSB 持续发布、STALE_JS 不触发；防护必须下沉到硬件插件，这是唯一能在 200 Hz 写循环里即时阻断的层。
+
+1. **检测**：插件按电机记录 last-rx，`read()` 中年龄 > `feedback_timeout_s`（默认 0.2 s，约 40 帧）即锁存 stale 并节流 ERROR（含 motor_id/关节名/年龄）。
+2. **read() 永远返回 OK**：ros2_control 2.54.0 中 read() 返回 ERROR 会触发 `System::read()→error()`，默认 on_error 把组件强制转 **unconfigured**；`System::write()` 在该态早退、插件安全写不执行，CAN TX 全灭——报错反而杀死了唯一能保位的层（LL-083）。
+3. **整臂 freeze-hold**：stale 后 `write()` 丢弃控制器新指令，全部 7 路按最后已知位置发位置保持帧（kp/kd 维持，对标 ISO 10218 protective stop）。仿真实测 895+ 保持帧窗口零位移。
+4. **标准上报**：`/diagnostics`（`a3_hardware:feedback_watchdog`，每电机年龄 KeyValue）+ 锁存 `/a3/hardware/feedback_stale`（Bool，TRANSIENT_LOCAL）。FSM 据此在 stale 期间拒绝一切新运动（goto/playback/slider jog）；disable 走 stale 快路径——home 位直接 reset，非 home 位拒绝（safe-park 在 freeze-hold 下硬件丢轨迹必超时），提示恢复反馈或人工紧急 reset。
+5. **启动门 fail-fast**：`on_activate` 先 reset-all（电机进 coast），500 ms 内验证 7/7 应答才发 enable；任一暗电机 → ERROR 且零 enable 帧。框架对激活失败的处理是 abort controller_manager 进程（整机停机），因此顺序不可颠倒。
+6. **恢复**：反馈恢复后 latch 自动清除、freeze-hold 解除，无须重启即可继续（disable/enable 与运动均已仿真验证）。
+
 ## 使能安全（F51，LL-039 事故条款）
 
 **使能 = 保当前位置，绝不执行历史目标。** 2026-09-14 真机事故：示教退出后目标被重锚到拖动位姿（1.98 rad），看门狗假触发 stop→reset（臂卸力、人工搬回 home 0.03 rad），使能时**无人校验「目标 vs 实际」**，kp=80 对 1.956 rad 误差满增益输出 → L2 3.1 s 冲 1.97 rad → 甩断 L6 打印关节（F42 是防撞设计，拦不住满速甩动）。

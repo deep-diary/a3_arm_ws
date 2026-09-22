@@ -617,6 +617,31 @@ ROS_DOMAIN_ID=63 python3 scripts/a3_test/f77_joint_jog_acceptance.py
 - servo 输出话题参数是嵌套的 `moveit_servo.command_out_topic`，顶层同名键被静默忽略；「servo 不动」先查输出话题端点——详见 [LL-079](../lessons_learned/LL-079-servo-nested-command-out-topic-param-and-input-qos.md)。
 - 真机上电后点动随 servo 真机栈同构复用，真机验收待上电。
 
+### 单电机反馈断线看门狗验收（F81）
+
+真机插件按电机记录最近反馈时刻：active 后任一电机反馈年龄超 `feedback_timeout_s`（默认 0.2 s）即内部锁存 staleness，整臂进入 freeze-hold（7 路全发最后已知位置保持帧，丢弃控制器新指令），并经标准通道上报。注意 `read()` 永远返回 OK——返回 ERROR 会被 ros2_control 2.54.0 强制转 unconfigured，`write()` 早退、CAN TX 全灭（LL-083）。
+
+```bash
+source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
+# 全自动验收（phase A domain 72/vcan1：断线→freeze-hold→恢复；
+#             phase B domain 75/vcan3：启动即缺电机→激活失败、无一使能）
+ROS_DOMAIN_ID=72 F81_CAN_IF=vcan1 F81_CAN_IF_B=vcan3 \
+  python3 scripts/a3_test/f81_feedback_stale_acceptance.py 72
+#   通过标准：末尾「F81 acceptance: 9/9」（检测 ≤0.7 s、freeze 零位移且 FJT
+#   pending 不报成功、恢复后运动正常、缺电机启动门 fail-fast）
+```
+
+手动观测（真机栈运行中）：
+
+```bash
+ros2 topic echo /a3/hardware/feedback_stale     # latched Bool：true=freeze-hold 中
+ros2 topic echo /diagnostics                    # a3_hardware:feedback_watchdog + 每电机年龄
+# 仿真触发单电机反馈断线（motor 4 停发反馈但仍执行控制）：
+echo '{"motor": 4}' > /tmp/f81_silence.json     # 恢复：echo '{}' > /tmp/f81_silence.json
+```
+
+真机上电后 F81 随 can 栈自动生效，真机验收待上电。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

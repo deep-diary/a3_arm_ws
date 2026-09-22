@@ -91,6 +91,13 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 
 配置见 [power_sequence.yaml](../../src/a3_can_bridge/config/power_sequence.yaml)。
 
+### 硬件反馈看门狗（F81，ros2_control 真机栈）
+
+| 话题 | 类型 / QoS | 方向 | 说明 |
+|------|-----------|------|------|
+| `/a3/hardware/feedback_stale` | `std_msgs/Bool`，**TRANSIENT_LOCAL**（latched） | 发布 | `true` = 至少一个电机 last-rx 超 `feedback_timeout_s`（默认 0.2 s），插件已进入整臂 freeze-hold；编排 FSM 订阅后拒绝一切运动指令，晚加入订阅者立即收当前值 |
+| `/diagnostics` | `diagnostic_msgs/DiagnosticArray`，**TRANSIENT_LOCAL**（latched） | 发布 | `a3_hardware:feedback_watchdog` 条目：每电机 `motorN_age_s` 键值 + WARN/ERROR 级；供标准诊断工具链（`rqt_robot_monitor`）消费 |
+
 ## 机械臂编排（a3_arm_controller）
 
 统一对外交互门面（需求 [F21](../edge/REQUIREMENTS.md)），底层复用 `/a3/motor/*`、`/power_sequence/*`、`/arm_controller/follow_joint_trajectory`、`/servo_node/*`、`/a3/zero_torque/*`、`/a3/gravity_compensation/*`，自身只做状态机、生命周期、示教与模式仲裁。

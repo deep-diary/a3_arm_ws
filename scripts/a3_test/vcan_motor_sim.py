@@ -108,6 +108,40 @@ class ExternalForce:
             self.torque = 0.0
 
 
+class SilenceCtl:
+    """Per-motor feedback TX kill switch, read from a JSON file.
+
+    Format: {"motor": 4}; {} clears. The motor still receives and executes
+    control frames, only type-2 feedback TX is suppressed — emulating a dead
+    feedback channel (F81).
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.mtime = 0.0
+        self.last_check = 0.0
+        self.motor = None
+
+    def poll(self):
+        now = time.monotonic()
+        if now - self.last_check < 0.05:
+            return
+        self.last_check = now
+        try:
+            mtime = os.path.getmtime(self.path)
+        except OSError:
+            return
+        if mtime == self.mtime:
+            return
+        self.mtime = mtime
+        try:
+            with open(self.path) as f:
+                data = json.load(f)
+            self.motor = int(data["motor"]) if data else None
+        except (OSError, ValueError, KeyError, TypeError):
+            self.motor = None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--interface", default="vcan0")
@@ -119,6 +153,8 @@ def main():
                         help="assumed rotor-side inertia for effort dynamics")
     parser.add_argument("--viscous", type=float, default=0.1,
                         help="assumed rotor-side viscous damping")
+    parser.add_argument("--silence-file", default="/tmp/f81_silence.json",
+                        help="per-motor feedback kill file: {\"motor\": 4}, {} clears")
     args = parser.parse_args()
 
     sock = socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
@@ -126,6 +162,7 @@ def main():
 
     motors = {i: MotorState(i) for i in range(1, 8)}
     ext = ExternalForce(args.ext_file)
+    silence = SilenceCtl(args.silence_file)
     print(f"vcan motor sim on {args.interface}, alpha={args.alpha}", flush=True)
 
     while True:
@@ -138,12 +175,18 @@ def main():
         if m is None:
             continue
 
+        silence.poll()
+
+        def reply():
+            if silence.motor != motor_id:
+                send_feedback(sock, m)
+
         if cmd_type == CMD_RESET:
             m.speed = 0.0
             m.torque = 0.0
-            send_feedback(sock, m)
+            reply()
         elif cmd_type == CMD_ENABLE:
-            send_feedback(sock, m)
+            reply()
         elif cmd_type == CMD_CONTROL:
             vmax = SPEED_MAX[motor_id]
             target = u16_to_float((data[0] << 8) | data[1], -P_RANGE, P_RANGE)
@@ -175,7 +218,7 @@ def main():
                 m.torque = max(-TORQUE_MAX[motor_id],
                                min(TORQUE_MAX[motor_id],
                                    t_ff + kp * (target - m.angle) + kd * (target_v - m.speed)))
-            send_feedback(sock, m)
+            reply()
 
 
 if __name__ == "__main__":

@@ -419,6 +419,8 @@ class ArmController(Node):
         # /joint_states 最大陈旧时长：桥异常（refresh 停发）时 js 会冻结在旧值
         # （LL-020），旧值校验形同虚设——超过此时长视为不新鲜，拒绝使能
         self.declare_parameter("js_max_stale_s", 1.0)
+        # F81: 硬件插件单电机反馈看门狗锁存话题（freeze-hold 期间为 true）
+        self.declare_parameter("feedback_stale_topic", "/a3/hardware/feedback_stale")
 
         self._joint_names: List[str] = list(
             self.get_parameter("joint_names").get_parameter_value().string_array_value
@@ -447,6 +449,8 @@ class ArmController(Node):
         self._efforts: List[float] = [0.0] * self._n_joints
         self._have_js = False
         self._last_js_stamp = None  # F48: /joint_states 新鲜度检查（LL-020）
+        # F81: 硬件反馈看门狗锁存（任一电机反馈超时即 true，插件侧整臂 freeze-hold）
+        self._feedback_stale = False
         # jog（滑动条直驱）进行中标志：区分 TRAJ 是 jog 还是 goto/playback
         self._jogging = False
 
@@ -515,6 +519,11 @@ class ArmController(Node):
         self.create_subscription(
             MonitorStatus, str(self.get_parameter("monitor_status_topic").value),
             self._on_monitor_status, 10, callback_group=self._cb_group,
+        )
+        # F81: 硬件插件反馈看门狗（latched；无插件的旧栈下话题不存在，不影响）
+        self.create_subscription(
+            Bool, str(self.get_parameter("feedback_stale_topic").value),
+            self._on_feedback_stale, latched_qos, callback_group=self._cb_group,
         )
 
         # 发布
@@ -900,6 +909,9 @@ class ArmController(Node):
             return False, "gate closed"
         if self._mode in BLOCKED_MODES:
             return False, f"mode={self._mode}"
+        if self._feedback_stale:
+            # F81: 插件已 freeze-hold，所有轨迹会被硬件丢弃，拒绝运动命令
+            return False, "feedback stale: protective freeze-hold active"
         # F45/F53: DISABLED/COOLING/FAULT 下运动命令被拒（原 IDLE 允许 move_to 语义混乱；
         # FAULT 电机已复位关断，发轨迹只被静默接受、臂不动）
         if self._state in (
@@ -1311,6 +1323,16 @@ class ArmController(Node):
         elif msg.status == "OK" and self._state == STATE_DISABLED:
             self._pending_unexpected_disable = ""
 
+    def _on_feedback_stale(self, msg: Bool) -> None:
+        # F81: 硬件插件整臂 freeze-hold 锁存；边沿日志即可，运动门禁在 _can_move
+        was = self._feedback_stale
+        self._feedback_stale = bool(msg.data)
+        if self._feedback_stale and not was:
+            self.get_logger().error(
+                "[arm_controller] feedback stale -> hardware freeze-hold, blocking new moves")
+        elif was and not self._feedback_stale:
+            self.get_logger().info("[arm_controller] feedback recovered, freeze-hold cleared")
+
     # ------------------------------------------------------------------ status
 
     def _publish_status(self) -> None:
@@ -1533,6 +1555,28 @@ class ArmController(Node):
             resp.message = (
                 f"mode={self._mode}: 先 /a3/zero_torque/stop 恢复闭环再 disable；"
                 f"紧急失能 /a3/motor/reset（此后需 zero_torque/stop 才能正常重使能）"
+            )
+            return resp
+
+        # F81: 反馈丢失时插件在冻结位整臂 freeze-hold。safe park 无法收敛
+        # （硬件丢弃一切轨迹），只会等超时进 FAULT。已在 home 位时直接 reset
+        # 安全；否则拒绝并给出可执行下一步，由操作员决定恢复反馈或紧急失能。
+        if self._feedback_stale:
+            tol = float(self.get_parameter("disable_home_tol_rad").value)
+            at_home, _ = self._at_home(tol)
+            if at_home:
+                ok, msg = self._motor_command(self._reset_cli, 2)
+                if ok:
+                    self._set_state(STATE_DISABLED, "disabled while stale at home")
+                    self._publish_mode("IDLE")
+                resp.success = ok
+                resp.message = msg
+                return resp
+            resp.success = False
+            resp.message = (
+                "feedback stale: arm is in protective freeze-hold away from home; "
+                "restore feedback then disable, or use /a3/motor/reset for emergency "
+                "(arm may drop under gravity)"
             )
             return resp
 
@@ -1842,6 +1886,10 @@ class ArmController(Node):
         if self._mode in BLOCKED_MODES:
             resp.success = False
             resp.message = f"mode={self._mode}"
+            return resp
+        if self._feedback_stale:
+            resp.success = False
+            resp.message = "feedback stale: protective freeze-hold active"
             return resp
         if self._state == STATE_TRAJ and not self._jogging:
             resp.success = False
