@@ -533,6 +533,23 @@ ros2 control switch_controllers --deactivate zero_torque_controller --activate a
 
 - Humble `get_name()` 全名语义、旧 shell AMENT_PREFIX_PATH 致 pluginlib 只认 mock 等六个坑详见 [LL-075](../lessons_learned/LL-075-gravity-comp-controller-fullname-stale-ament-pitfalls.md)。
 
+### 编排层标准执行后端验收（F74，control_backend=fjt_action）
+
+编排层全部兜底轨迹（jog / goto 线性兜底 / playback / safe-park）改经标准 `control_msgs/FollowJointTrajectory` action 下发，arm（L1–L6）、gripper（L7）双 JTC 拆分投影、异步抢占；参数 `control_backend`（默认 `topic` 零回归，`fjt_action` 走标准栈）。
+
+```bash
+# 1) F70 mock 标准栈（无 CAN）
+ROS_DOMAIN_ID=60 ros2 launch a3_bringup edge_ros2_control_sim.launch.py
+# 2) 编排 FSM（fjt_action）+ retime 节点
+ROS_DOMAIN_ID=60 ros2 launch scripts/a3_test/f74_extra.launch.py
+# 3) 验收
+ROS_DOMAIN_ID=60 python3 scripts/a3_test/f74_fjt_backend_mock_acceptance.py
+#   通过标准：末尾「F74 acceptance: 12/12」（enable/jog×3/goto 兜底 ready+home/
+#   playback retime 拆分执行/抢占语义/旧话题零消息/safe-park 含 L7 归位）
+```
+
+- move_group 只规划 arm 组、safe-park 须补发 L7 gripper 轨迹；L2/L3 单向限位越限会被 JTC 静默夹紧——详见 [LL-076](../lessons_learned/LL-076-moveit-arm-group-leaves-l7-jtc-clamps-one-sided-limits.md)。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

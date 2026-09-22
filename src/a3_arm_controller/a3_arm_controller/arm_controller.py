@@ -20,6 +20,7 @@ import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from builtin_interfaces.msg import Duration
+from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -323,6 +324,13 @@ class ArmController(Node):
         self.declare_parameter("gate_topic", "/power_sequence/gate_open")
         self.declare_parameter("power_state_topic", "/power_sequence/state")
         self.declare_parameter("traj_topic", "/joint_group_effort_controller/joint_trajectory")
+        # F74: 轨迹执行后端。topic = 旧栈（话题直发 motor_protocol_node）；
+        # fjt_action = 标准栈（control_msgs FollowJointTrajectory action →
+        # joint_trajectory_controller，ros2_control），7 关节轨迹自动拆
+        # L1–L6 → arm_controller、L7 → gripper_controller。
+        self.declare_parameter("control_backend", "topic")
+        self.declare_parameter("arm_fjt_action", "/arm_controller/follow_joint_trajectory")
+        self.declare_parameter("gripper_fjt_action", "/gripper_controller/follow_joint_trajectory")
         self.declare_parameter("status_hz", 10.0)
         self.declare_parameter("init_zero_tol_rad", 0.05)
         self.declare_parameter("init_timeout_s", 5.0)
@@ -550,6 +558,19 @@ class ArmController(Node):
         # F68: 保几何重定时服务
         self._retime_cli = self.create_client(
             RetimeTrajectory, "/a3/arm/retime_trajectory", callback_group=self._cb_group
+        )
+        # F74: 标准 FJT action 客户端（control_backend=fjt_action 时用）
+        self._fjt_arm_cli = ActionClient(
+            self,
+            FollowJointTrajectory,
+            str(self.get_parameter("arm_fjt_action").value),
+            callback_group=self._cb_group,
+        )
+        self._fjt_gripper_cli = ActionClient(
+            self,
+            FollowJointTrajectory,
+            str(self.get_parameter("gripper_fjt_action").value),
+            callback_group=self._cb_group,
         )
 
         # 状态发布定时器
@@ -850,6 +871,80 @@ class ArmController(Node):
         )
         return max(2, n)
 
+    def _dispatch_trajectory(self, traj: JointTrajectory) -> None:
+        """按 control_backend 下发轨迹：旧栈话题直发 / 标准栈 FJT action。
+
+        fjt_action 后端把 7 关节轨迹拆给两个 JTC：L1–L6 → arm_controller、
+        L7 → gripper_controller（各自 claim 的关节集不同，不能合成一个 goal）。
+        新 goal 抢占同 action 的旧 goal，与旧栈话题替换语义一致；异步发送，
+        不阻塞服务回调，完成与否仍由时长调度 + 状态轮询处理。
+        """
+        if str(self.get_parameter("control_backend").value) != "fjt_action":
+            self._traj_pub.publish(traj)
+            return
+
+        names = list(traj.joint_names)
+
+        def project(joint_subset: List[str]) -> Optional[JointTrajectory]:
+            idx = [names.index(n) for n in joint_subset if n in names]
+            used = [n for n in joint_subset if n in names]
+            if not idx:
+                return None
+            out = JointTrajectory()
+            out.joint_names = used
+            for p in traj.points:
+                np = JointTrajectoryPoint()
+                np.positions = [p.positions[i] for i in idx]
+                if p.velocities:
+                    np.velocities = [p.velocities[i] for i in idx]
+                if p.accelerations:
+                    np.accelerations = [p.accelerations[i] for i in idx]
+                if p.effort:
+                    np.effort = [p.effort[i] for i in idx]
+                np.time_from_start = p.time_from_start
+                out.points.append(np)
+            return out
+
+        arm_traj = project(JOINTS[:6])
+        if arm_traj is not None:
+            self._send_fjt_goal(self._fjt_arm_cli, arm_traj, "arm")
+        gripper_traj = project(["L7_joint"])
+        if gripper_traj is not None:
+            self._send_fjt_goal(self._fjt_gripper_cli, gripper_traj, "gripper")
+
+    def _send_fjt_goal(
+        self, client: ActionClient, traj: JointTrajectory, label: str
+    ) -> None:
+        if not client.server_is_ready() and not client.wait_for_server(timeout_sec=1.0):
+            self.get_logger().error(
+                f"FJT backend: {label} action 不可用，{len(traj.points)} 点轨迹未执行"
+            )
+            return
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory = traj
+        future = client.send_goal_async(goal)
+        future.add_done_callback(lambda f: self._on_fjt_goal_response(f, label))
+
+    def _on_fjt_goal_response(self, future, label: str) -> None:
+        handle = future.result()
+        if not handle.accepted:
+            self.get_logger().error(f"FJT backend: {label} goal 被拒绝")
+            return
+        result_future = handle.get_result_async()
+        result_future.add_done_callback(lambda f: self._on_fjt_result(f, label))
+
+    def _on_fjt_result(self, future, label: str) -> None:
+        result = future.result().result
+        code = result.error_code
+        if code != FollowJointTrajectory.Result.SUCCESSFUL:
+            names = {
+                v: k for k, v in vars(FollowJointTrajectory.Result).items()
+                if k.isupper() and isinstance(v, int)
+            }
+            self.get_logger().warn(
+                f"FJT backend: {label} 结束码 {names.get(code, code)}"
+            )
+
     def _safe_park_then_disable(self) -> Tuple[bool, str]:
         """F40: 平滑回 home → 连续确认收敛 → 失能（同步阻塞，仿 _init_cb 轮询先例）。
 
@@ -872,6 +967,22 @@ class ArmController(Node):
             if not planned:
                 self.get_logger().warn(f"safe park: {msg} -- local linear fallback")
 
+        # move_group 只规划 arm 组（L1–L6）；L7（夹爪）单独发 gripper FJT 回 home
+        if planned and abs(self._positions[6] - home[6]) > 1e-3:
+            g_dur = min(max(abs(self._positions[6] - home[6]) / 0.5, 1.0), 3.0)
+            gtraj = JointTrajectory()
+            gtraj.joint_names = [JOINTS[6]]
+            n = self._traj_point_count(g_dur)
+            for i in range(n):
+                alpha = i / (n - 1)
+                pt = JointTrajectoryPoint()
+                pt.positions = [
+                    self._positions[6] + alpha * (home[6] - self._positions[6])
+                ]
+                pt.time_from_start = _duration(g_dur * alpha)
+                gtraj.points.append(pt)
+            self._dispatch_trajectory(gtraj)
+
         if not planned:
             duration = max(
                 float(self.get_parameter("disable_home_duration_s").value),
@@ -880,7 +991,7 @@ class ArmController(Node):
             q0 = list(self._positions)
             traj = self._linear_trajectory(q0, home, duration)
             self._publish_mode("TRAJ_RUNNING")
-            self._traj_pub.publish(traj)
+            self._dispatch_trajectory(traj)
             n = len(traj.points)
             self._set_state(STATE_SAFE_PARK, f"safe park -> home ({duration:.1f}s, {n} pts)")
 
@@ -1518,7 +1629,7 @@ class ArmController(Node):
         traj = self._linear_trajectory(q0, q1, duration)
 
         self._publish_mode("TRAJ_RUNNING")
-        self._traj_pub.publish(traj)
+        self._dispatch_trajectory(traj)
         self._set_state(STATE_TRAJ, f"goto {name}")
         self._schedule_back_to_ready(duration + 0.3)
 
@@ -1564,7 +1675,7 @@ class ArmController(Node):
         traj = self._linear_trajectory(q0, q1, duration)
 
         self._publish_mode("TRAJ_RUNNING")
-        self._traj_pub.publish(traj)
+        self._dispatch_trajectory(traj)
         self._set_state(STATE_TRAJ, f"move_to ({duration:.1f}s)")
         self._schedule_back_to_ready(duration + 0.3)
 
@@ -1681,7 +1792,7 @@ class ArmController(Node):
             traj.points.append(pt)
 
         self._publish_mode("TRAJ_RUNNING")
-        self._traj_pub.publish(traj)
+        self._dispatch_trajectory(traj)
         self._jogging = True
         self._set_state(STATE_TRAJ, "jog")
         self._schedule_back_to_ready(duration + 0.5)
@@ -2016,7 +2127,7 @@ class ArmController(Node):
 
         duration = self._traj_duration(traj)
         self._publish_mode("TRAJ_RUNNING")
-        self._traj_pub.publish(traj)
+        self._dispatch_trajectory(traj)
         self._set_state(STATE_TRAJ, f"playback {label}")
         self._schedule_back_to_ready(duration + 0.3)
 
