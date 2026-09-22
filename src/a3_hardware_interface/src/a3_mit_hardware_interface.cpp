@@ -435,6 +435,7 @@ public:
     // F83 vendor-standard choreography (EDULITE_A3 EnableArm), per motor:
     // clear latched faults (Type 4, data[0]=1) → integer RUN_MODE write
     // (Type 18, 0x7005=0 MOTION_CONTROL; float encoding corrupts the uint8)
+    // → F87 arm the firmware torque limit (0x700B float Nm per joint)
     // → F86 arm the motor-side CAN timeout (0x7028 uint32 counts; 0 disarms)
     // → enable (Type 3); 30 ms settling as in the vendor SDK.
     const uint32_t can_timeout_counts = motor_can_timeout_enabled_
@@ -447,6 +448,13 @@ public:
       transport_.Send(
         ProtocolCodec::BuildSetParamU8Frame(
           bus_, j.motor_id, ProtocolCodec::kParamRunMode, 0),
+        nullptr);
+      std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      // F87: 0x700B is float32 Nm (protocol manual); re-armed every activate
+      // because the write is volatile.
+      transport_.Send(
+        ProtocolCodec::BuildSetParamFrame(
+          bus_, j.motor_id, ProtocolCodec::kParamLimitTorque, j.torque_max),
         nullptr);
       std::this_thread::sleep_for(std::chrono::milliseconds(30));
       transport_.Send(

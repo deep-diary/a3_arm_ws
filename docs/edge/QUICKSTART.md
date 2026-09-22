@@ -737,6 +737,25 @@ python3 scripts/a3_test/f86_can_timeout_acceptance.py 86
 
 真机上电后 F86 随 can 栈默认布防（`motor_can_timeout_enabled:=false` 可关；`motor_can_timeout_s` 走 xacro/launch 参数），真机验收待上电。
 
+### 电机侧力矩上限布防验收（F87）
+
+F87 把固件力矩钳位（`0x700B`，float32 Nm）的布防收进使能编排：统一栈（F78）下原 `a3_can_bridge` 的 `/a3/motor/set_param` 服务无人启动，F24 夹爪节点对该服务的写入静默失败，全臂固件力矩上限此前没有任何节点显式布防（出厂值虽为型号峰值，状态不可读验证；URDF 逐关节 `torque_max` 下调也无固件落地路径）。F87 起 `on_activate` 每电机在 RUN_MODE 之后、0x7028 之前用 Type-18 IEEE754 float 写 `0x700B`：motor 1–3（RS00）= 14 Nm、motor 4–7（EL05）= 6 Nm，可用 URDF 关节参数 `torque_max` 逐关节下调。寄存器五件事（float32 / Nm / 范围 0~型号峰值 / 写入易失 / 运控模式立即钳位）已对照协议手册核实，与 0x7028 的 uint32 编码形成对照（LL-089）。官方参考从不写该寄存器，F87 与 F86 同属有意纵深加固。第二步（L7 原生力控、退役夹爪节点死服务依赖）另做。
+
+```bash
+source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
+python3 scripts/a3_test/f87_torque_limit_acceptance.py 87
+#   通过标准：末尾「F87 acceptance: 47/47」
+#   1 7 个 Type-18 帧：data[0..1]=0b 70、data[2..3]=00 00、data[4..8] LE IEEE754 float：
+#     motor 1-3=14.0 Nm、motor 4-7=6.0 Nm（±1%）；每路恰一帧
+#   2 帧序 per motor：0x7005 < 0x700B < 0x7028 < enable
+#   3 Type-17 读回与写入 float 位模式逐位一致
+#   4 编排回归：每路 discovery reset（data[1]=C0）→ clear-fault（data[0]=1）→
+#     RUN_MODE → 0x7028=4000 → enable，计数/顺序满足 F83/F86
+#   5 五次 FJT error_code=0
+```
+
+真机上电后 F87 随 can 栈默认布防（每次 activate 重写，写入易失），真机验收待上电。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

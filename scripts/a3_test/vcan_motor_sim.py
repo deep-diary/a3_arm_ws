@@ -31,6 +31,8 @@ MASTER_ID = 0xFD
 
 PARAM_CAN_TIMEOUT = 0x7028
 # 0x7028 is uint32 with ~50 us per count (20000 ≈ 1 s)
+PARAM_TORQUE_LIMIT = 0x700B
+# 0x700B is float32 Nm; factory default is the model peak
 TIMEOUT_COUNTS_PER_SEC = 20000.0
 
 P_RANGE = 12.57
@@ -57,10 +59,19 @@ class MotorState:
         self.speed = 0.0
         self.torque = 0.0
         self.last_t = time.monotonic()
-        # F86: last Type-18 0x7028 value (uint32 counts; 0 = disarmed)
-        self.timeout_counts = 0
+        # Last Type-18 raw values per param; 0x7028 starts disarmed,
+        # 0x700B starts at the factory default (model peak float).
+        self.params = {
+            PARAM_CAN_TIMEOUT: 0,
+            PARAM_TORQUE_LIMIT: struct.unpack(
+                "<I", struct.pack("<f", TORQUE_MAX[motor_id]))[0],
+        }
         self.tripped = False
         self.trip_delay = None
+
+    @property
+    def timeout_counts(self):
+        return self.params[PARAM_CAN_TIMEOUT]
 
 
 def write_state_file(path, motors):
@@ -311,13 +322,11 @@ def main():
             reply()
         elif cmd_type == CMD_SET_PARAM:
             param_id = data[0] | (data[1] << 8)
-            if param_id == PARAM_CAN_TIMEOUT:
-                m.timeout_counts = (
-                    data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24))
+            m.params[param_id] = (
+                data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24))
         elif cmd_type == CMD_GET_PARAM:
             param_id = data[0] | (data[1] << 8)
-            value = m.timeout_counts if param_id == PARAM_CAN_TIMEOUT else 0
-            send_param_reply(sock, m, param_id, value)
+            send_param_reply(sock, m, param_id, m.params.get(param_id, 0))
         elif cmd_type == CMD_CONTROL and not m.tripped:
             vmax = SPEED_MAX[motor_id]
             target = u16_to_float((data[0] << 8) | data[1], -P_RANGE, P_RANGE)
@@ -326,6 +335,10 @@ def main():
             kd = u16_to_float((data[6] << 8) | data[7], 0.0, 5.0)
             t_ff_raw = (can_id >> 8) & 0xFFFF
             t_ff = u16_to_float(t_ff_raw, -TORQUE_MAX[motor_id], TORQUE_MAX[motor_id])
+            # Firmware clamps output torque to the 0x700B float limit.
+            fw_limit = max(0.0, min(
+                struct.unpack("<f", struct.pack("<I", m.params[PARAM_TORQUE_LIMIT]))[0],
+                TORQUE_MAX[motor_id]))
 
             dt = max(1e-3, now - m.last_t)
             m.last_t = now
@@ -334,8 +347,8 @@ def main():
                 # -t_ff plus any operator push from the ext file.
                 ext.poll()
                 push = ext.torque if ext.motor == motor_id else 0.0
-                m.torque = max(-TORQUE_MAX[motor_id],
-                               min(TORQUE_MAX[motor_id],
+                m.torque = max(-fw_limit,
+                               min(fw_limit,
                                    t_ff + kp * (target - m.angle) + kd * (target_v - m.speed)))
                 net = m.torque - t_ff + push
                 accel = (net - args.viscous * m.speed) / args.inertia
@@ -345,8 +358,8 @@ def main():
                 prev = m.angle
                 m.angle += args.alpha * (target - m.angle)
                 m.speed = max(-vmax, min(vmax, (m.angle - prev) / dt))
-                m.torque = max(-TORQUE_MAX[motor_id],
-                               min(TORQUE_MAX[motor_id],
+                m.torque = max(-fw_limit,
+                               min(fw_limit,
                                    t_ff + kp * (target - m.angle) + kd * (target_v - m.speed)))
             reply()
         tick(now)
