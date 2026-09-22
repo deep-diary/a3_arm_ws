@@ -456,6 +456,22 @@ python3 scripts/a3_test/f67_f68_sim_acceptance.py
 - 录制 yaml 仍只存 positions + time_from_start_sec，**不需要保存速度**；重定时全部重算 v/a/jerk。
 - 真机上电后复跑同一脚本（需 can-up + 主 launch）做真机验收。
 
+### ros2_control 标准栈仿真验收（F70，mock 硬件）
+
+工业标准执行底座：`controller_manager`（200 Hz）+ `joint_state_broadcaster` + 官方 `joint_trajectory_controller`（arm L1–L6 / gripper L7，样条插值 + 容差监控 + FJT action 原生），MoveIt move_group 经 `moveit_simple_controller_manager` 直连 JTC，无自研 FJT/插值节点；硬件用 `mock_components/GenericSystem`（`calculate_dynamics:=true`）。与旧栈并存，不影响现有 launch。
+
+```bash
+source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
+export ROS_DOMAIN_ID=58
+ros2 launch a3_bringup edge_ros2_control_sim.launch.py use_rviz:=false &
+sleep 12
+python3 scripts/a3_test/f70_ros2_control_sim_acceptance.py
+#   通过标准：末尾「总体: ALL PASS」（11 项：JTC home→ready→home、夹爪开合的
+#   多点五次 S 曲线平滑到位 + move_group plan+execute 端到端 + 栈内无自研 FJT 节点）
+```
+
+- 控制器配置 `src/a3_description/config/el_a3_controllers.yaml`；spawn 顺序必须 JTC 先、JSB 后，否则速度字段恒 0；直连 JTC 测试要发完整多点轨迹，单点只做匀速线性插值——三个坑详见 [LL-072](../lessons_learned/LL-072-ros2-control-mock-jsb-order-jtc-single-point.md)。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

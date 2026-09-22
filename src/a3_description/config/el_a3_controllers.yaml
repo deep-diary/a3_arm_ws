@@ -30,9 +30,10 @@ arm_controller:
       - L5_joint
       - L6_joint
 
+    # calculate_dynamics mock 不支持同一关节同时声明位置+速度起始指令接口，
+    # 且 MIT 电机执行层以位置指令为准：工业标准 position-only
     command_interfaces:
       - position
-      - velocity
 
     state_interfaces:
       - position
