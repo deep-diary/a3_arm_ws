@@ -215,9 +215,10 @@ class ArmMonitorNode(Node):
     def _init_diagnostics(self, period_s):
         self._updater = diagnostic_updater.Updater(self, period=period_s)
         self._updater.setHardwareID("a3-arm")
-        # F71/F82：名称带 a3_arm_monitor: 前缀（F71 验收与 GenericAnalyzer 分组依赖）
-        self._updater.add("a3_arm_monitor: Monitor", self._diag_monitor)
-        self._updater.add("a3_arm_monitor: Tracking", self._diag_tracking)
+        # diagnostic_updater 发布时强制前置「节点名: 」，故此处用裸名，
+        # 实际发布即 a3_arm_monitor: Monitor / Tracking（F71 验收与 F82 分组依赖）。
+        self._updater.add("Monitor", self._diag_monitor)
+        self._updater.add("Tracking", self._diag_tracking)
 
     def _diag_monitor(self, stat):
         snap = self._diag
@@ -548,6 +549,18 @@ class ArmMonitorNode(Node):
 
         # LL-039：先处理意图边界（示教退出/使能沿）——重基准参照并开宽限窗
         self._maybe_rebaseline(now)
+
+        # LL-085：启动时臂已在 READY（监控节点重启 / 无使能沿、无轨迹可继承）——
+        # 用当前实际位姿播种保持参照并开宽限窗，否则 Tracking 永远 STALE、
+        # HOLD_DRIFT 也无基准。收到过轨迹后 _last_goal 必非 None，不会走到这里。
+        if self._last_goal is None:
+            self._last_goal = dict(self._js)
+            self._hold_grace_until = max(
+                self._hold_grace_until,
+                now + float(self.get_parameter("hold_rebaseline_grace_s").value))
+            self.get_logger().info(
+                f"[monitor] 启动播种保持参照（当前实际位姿），宽限 "
+                f"{float(self.get_parameter('hold_rebaseline_grace_s').value):.1f}s")
 
         checks, errs, _win = self._check(now)
         # 模式锁存守卫须在 _check 之后（_desired 已把窗口关闭的 _traj 置 None）

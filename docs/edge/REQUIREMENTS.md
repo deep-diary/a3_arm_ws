@@ -842,7 +842,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   3. pending（条件成立未达 sustain）期间 level=WARN
   4. 数值验收脚本：上述 1–3 全自动，结论 ALL PASS
 - **关联：** F50（看门狗本体）、审计任务（自研→标准工具）；F70（同标准栈体系）
-- **状态：** `completed（仿真）`（2026-09-22 全自动验收 9/9 ALL PASS，ROS_DOMAIN_ID=59：健康态两组件 level=OK + MonitorStatus OK；js 停发 → pending WARN → STALE_JS TRIGGERED，Monitor level=ERROR fault=STALE_JS（319 条）；js 恢复 clear_hold 后两组件回 OK、MonitorStatus OK。看门狗判定/处置逻辑零改动。踩坑见 [LL-073](../../lessons_learned/LL-073-diagnostic-updater-name-prefix-byte-level.md)。真机随栈上电另验）
+- **状态：** `completed（仿真）`（2026-09-22 全自动验收 9/9 ALL PASS，ROS_DOMAIN_ID=59：健康态两组件 level=OK + MonitorStatus OK；js 停发 → pending WARN → STALE_JS TRIGGERED，Monitor level=ERROR fault=STALE_JS（319 条）；js 恢复 clear_hold 后两组件回 OK、MonitorStatus OK。看门狗判定/处置逻辑零改动。踩坑见 [LL-073](../../lessons_learned/LL-073-diagnostic-updater-name-prefix-byte-level.md)。真机随栈上电另验。F82 联验回归修复后复验 9/9 ALL PASS：修掉 b671ff9 的组件名双前缀回归（恢复裸名 add），并补「监控节点冷启动无参照 → Tracking 恒 STALE」缺口（启动播种保持参照），见 [LL-085](../../lessons_learned/LL-085-monitor-startup-baseline-seed-volatile-discovery-race.md)）
 
 ## F72 真机 SystemInterface 插件（MIT/SocketCAN 直驱，ros2_control 标准栈真机化）
 

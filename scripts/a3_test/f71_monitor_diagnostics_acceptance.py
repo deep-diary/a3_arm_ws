@@ -115,10 +115,24 @@ def main():
     try:
         # ---- 阶段 A：健康态（5 s，跨过 startup_grace 3 s）----
         t_start = time.monotonic()
+        # 冷启动 monitor 仅 import rclpy 就要数秒，VOLATILE 轨迹过早发送必丢。
+        # 一边喂 js/status 一边等 monitor 真正入图，再发轨迹（LL-085）。
+        seen_monitor = False
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline:
+            node.send_js()
+            node.send_status()
+            spin_s(node, 0.1)
+            names = {n for n, _ in node.get_node_names_and_namespaces()}
+            if "a3_arm_monitor" in names:
+                seen_monitor = True
+                break
+        spin_s(node, 0.5)  # 等 DDS 订阅匹配完成
         node.send_home_traj()
         spin_s(node, 0.6)
         node.send_home_traj()  # 重发一次，跨过 monitor 数据未齐期
-        while time.monotonic() - t_start < 5.0:
+        t_healthy = time.monotonic()
+        while time.monotonic() - t_healthy < 5.0:
             node.send_js()
             node.send_status()
             spin_s(node, 0.05)
