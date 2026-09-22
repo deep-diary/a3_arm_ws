@@ -816,6 +816,24 @@ python3 scripts/gravity_scale_calibration.py            # 完整 ~24 位姿
 
 产出文件是直接喂给 ros2_control_node 的 `--params-file`：顶层只能是「节点名 + ros__parameters」、数组同质、不得有 null（LL-097）；launch 参数空值不能写 `name:=`，省略即走默认（LL-098）。真机验收待上电。
 
+### FSM 自由拖动服务走标准控制器切换验收（F89b）
+
+F73 的 `zero_torque_controller`（C++ pinocchio RNEA 重力补偿）常驻 inactive，F89b 把 FSM 的 `start_teach/stop_teach` 服务在标准栈（`motor_service_backend=controller_switch`，即产品 `a3_bringup.launch.py`）上接通：进入 = **一次原子 STRICT `switch_controller`**（deactivate arm_controller + activate zero_torque_controller），退出反之；任一名无效则整请求被拒、控制器保持原状，不存在「既无位置闭环也无重力补偿」的窗口。进入后 FSM 发布 `/a3/control_mode=ZERO_TORQUE`（回环 echo 置内部 mode，`BLOCKED_MODES` 门禁与 legacy 一致）；退出切换在自动保存**之前**，失败则保持 TEACH、success=false，由操作员重试，绝不报成功后臂仍在自由态。PS4 Share（开始）/Options（结束）本就调这两个 FSM 服务，映射零改动。legacy can_service 后端行为完全不变。
+
+```bash
+source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
+# 一键验收（vcan89b，单栈单 sim 自动起停；ROS_DOMAIN_ID 默认 92）
+python3 scripts/a3_test/f89b_freedrive_switch_acceptance.py
+#   通过标准：末尾「F89b acceptance: 20/20」，退出码 0
+#   未使能 start_teach / 非 TEACH stop_teach / TEACH 中重复 start 均拒绝
+#   start_teach 后 zero_torque active、arm inactive，gravity_torque 持续发布
+#   settle 1 s 后稳态 1 s 漂移实测最差 0.0023 rad（阈值 0.02）
+#   退出切换被 STRICT 拒绝（运行时注入坏控制器名）→ 保持 TEACH、补偿仍在
+#   stop_teach 后状态/控制器/模式全部复原，F54 latest.yaml + 时间戳备份照常
+```
+
+真机用法不变：使能后 PS4 Share 进入拖动示教、Options 结束（或 `ros2 service call /a3/arm/start_teach std_srvs/srv/Trigger`）。真机验收待上电。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

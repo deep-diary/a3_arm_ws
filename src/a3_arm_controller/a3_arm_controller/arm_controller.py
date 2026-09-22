@@ -340,6 +340,11 @@ class ArmController(Node):
         self.declare_parameter("controller_manager_switch_srv",
                                "/controller_manager/switch_controller")
         self.declare_parameter("switch_controllers", ["arm_controller", "gripper_controller"])
+        # F89b: 自由拖动（示教）在标准栈上是 arm_controller ↔ zero_torque_controller
+        # 的原子 STRICT 切换；gripper_controller 不动，拖动中夹爪仍可用。
+        self.declare_parameter("freedrive_arm_controller", "arm_controller")
+        self.declare_parameter("freedrive_controller", "zero_torque_controller")
+        self.declare_parameter("freedrive_switch_timeout_s", 5.0)
         # F83/LL-086: Humble switch_controller does NOT auto-activate hardware
         # booted INACTIVE; arm/disarm must drive the component lifecycle
         # explicitly via set_hardware_component_state (on_activate runs the
@@ -927,6 +932,38 @@ class ArmController(Node):
         if not ok:
             return False, msg
         return True, "controllers deactivated, hardware inactive"
+
+    def _cm_freedrive_switch(self, enter: bool) -> Tuple[bool, str]:
+        """F89b: 标准栈自由拖动 = 一次原子 STRICT switch_controller 请求。
+
+        enter: deactivate arm_controller + activate zero_torque_controller;
+        exit:  反之。switch_controller 在同一请求内完成互换，任一名无效即整体
+        拒绝、控制器保持原状，不会出现「臂既无位置闭环也无重力补偿」的窗口。
+        """
+        if not self._wait_service(self._switch_cli, 3.0):
+            return False, "controller_manager switch service unavailable"
+        arm = str(self.get_parameter("freedrive_arm_controller").value)
+        free = str(self.get_parameter("freedrive_controller").value)
+        req = SwitchController.Request()
+        if enter:
+            req.activate_controllers = [free]
+            req.deactivate_controllers = [arm]
+        else:
+            req.activate_controllers = [arm]
+            req.deactivate_controllers = [free]
+        req.strictness = SwitchController.Request.STRICT
+        self.get_logger().info(
+            f"switch_controller freedrive {'enter' if enter else 'exit'}: "
+            f"deactivate={list(req.deactivate_controllers)} "
+            f"activate={list(req.activate_controllers)}")
+        future = self._switch_cli.call_async(req)
+        timeout = float(self.get_parameter("freedrive_switch_timeout_s").value)
+        if not self._wait_future(future, timeout):
+            return False, "switch_controller timeout"
+        res = future.result()
+        if not bool(res.ok):
+            return False, "switch_controller rejected (STRICT)"
+        return True, ""
 
     def _motor_command(self, client, command: int) -> Tuple[bool, str]:
         if self._using_controller_switch():
@@ -2040,7 +2077,10 @@ class ArmController(Node):
             resp.message = f"mode={self._mode}"
             return resp
 
-        ok, msg = self._call_trigger(self._zt_start_cli, "zero_torque/start")
+        if self._using_controller_switch():
+            ok, msg = self._cm_freedrive_switch(True)
+        else:
+            ok, msg = self._call_trigger(self._zt_start_cli, "zero_torque/start")
         if not ok:
             resp.success = False
             resp.message = msg
@@ -2049,6 +2089,9 @@ class ArmController(Node):
         self._record = []
         self._record_start = time.monotonic()
         self._recording = True
+        if self._using_controller_switch():
+            # 回环 echo 置 _mode=ZERO_TORQUE，BLOCKED_MODES 门禁与 legacy 对齐
+            self._publish_mode("ZERO_TORQUE")
         self._set_state(STATE_TEACH, "teaching (drag)")
         resp.success = True
         resp.message = "teach started"
@@ -2062,7 +2105,20 @@ class ArmController(Node):
             resp.message = f"not teaching (state={self._state})"
             return resp
         self._recording = False
-        ok, msg = self._call_trigger(self._zt_stop_cli, "zero_torque/stop")
+        if self._using_controller_switch():
+            # 先恢复位置闭环：失败则保持 TEACH（重力补偿仍在），由操作员重试，
+            # 不许报成功后臂还在自由态。
+            ok, msg = self._cm_freedrive_switch(False)
+            if not ok:
+                self._recording = True
+                resp.success = False
+                resp.message = (
+                    f"free-drive exit failed: {msg}; arm still in TEACH, "
+                    "retry stop_teach")
+                return resp
+            self._publish_mode("READY")
+        else:
+            ok, msg = self._call_trigger(self._zt_stop_cli, "zero_torque/stop")
         n = len(self._record)
         # F54: 停止即自动保存 —— latest.yaml（滚动最新槽）+ 时间戳备份（防覆盖丢失）。
         # 样本 < teach_auto_save_min_samples 时认为是误触发（start 后立刻 stop），
