@@ -15,6 +15,17 @@ EL-A3 Robot Arm SRDF (Semantic Robot Description Format)
         <joint name="L7_joint"/>
     </group>
 
+    <!-- F68: 7-DOF joint group for geometric re-timing (Ruckig/TOTG) of recorded paths -->
+    <group name="arm_with_gripper">
+        <joint name="L1_joint"/>
+        <joint name="L2_joint"/>
+        <joint name="L3_joint"/>
+        <joint name="L4_joint"/>
+        <joint name="L5_joint"/>
+        <joint name="L6_joint"/>
+        <joint name="L7_joint"/>
+    </group>
+
     <!-- Group states (predefined poses) -->
     <group_state name="home" group="arm">
         <joint name="L1_joint" value="0"/>

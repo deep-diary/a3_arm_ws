@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>a3_trajectory_processing</name>
+  <version>0.1.0</version>
+  <description>F68: trajectory_msgs/JointTrajectory re-timing service backed by moveit_core trajectory_processing (Ruckig jerk-limited default, TOTG fallback).</description>
+  <maintainer email="cat@example.com">cat</maintainer>
+  <license>MIT</license>
+
+  <depend>rclcpp</depend>
+  <depend>a3_msgs</depend>
+  <depend>trajectory_msgs</depend>
+  <depend>moveit_core</depend>
+  <depend>moveit_ros_planning</depend>
+  <depend>ruckig</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

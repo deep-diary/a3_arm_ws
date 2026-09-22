@@ -14,7 +14,7 @@
 
 可选（默认关）:
   gravity_torque_node（重力 MIT 前馈）         use_gravity_compensation:=false
-  MoveIt Servo 笛卡尔 jog（与 move_group Execute 互斥）use_servo:=false
+  MoveIt Servo 笛卡尔 jog（F67 起与 move_group 可共存，模式由编排层互锁）use_servo:=false
   RViz                                         use_rviz:=false
 
 注意：MoveIt 不能 include a3_moveit_config/demo.launch.py（自带 RSP + ros2_control +
@@ -240,6 +240,34 @@ def generate_launch_description():
         condition=IfCondition(use_moveit),
     )
 
+    # F68: Ruckig/TOTG 重新定时服务（示教回放）。限值取 joint_limits.yaml；
+    # jerk 未在 yaml 给出时节点默认 5×a。
+    jl_map = (joint_limits_yaml or {}).get("joint_limits", {})
+    velocity_limits = {
+        name: float(d["max_velocity"])
+        for name, d in jl_map.items()
+        if d.get("has_velocity_limits") and d.get("max_velocity") is not None
+    }
+    acceleration_limits = {
+        name: float(d["max_acceleration"])
+        for name, d in jl_map.items()
+        if d.get("has_acceleration_limits") and d.get("max_acceleration") is not None
+    }
+    retime_node = Node(
+        package="a3_trajectory_processing",
+        executable="retime_trajectory_node",
+        name="a3_trajectory_processing",
+        output="screen",
+        parameters=[
+            {"robot_description": robot_description},
+            {"robot_description_semantic": robot_description_semantic},
+            {"group_name": "arm_with_gripper"},
+            {"velocity_limits": velocity_limits},
+            {"acceleration_limits": acceleration_limits},
+        ],
+        condition=IfCondition(use_moveit),
+    )
+
     # ---- 夹爪力控（5J 档缺 L7 时置 use_gripper:=false）----
     gripper = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -392,6 +420,7 @@ def generate_launch_description():
         mqtt_bridge,
         move_group,
         fjt_action,
+        retime_node,
         gripper,
         servo_mode_bridge,
         servo_node,

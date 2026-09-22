@@ -24,6 +24,8 @@
 
 import os
 
+import yaml
+
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -33,15 +35,28 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
+def load_yaml(package_name, file_path):
+    package_path = get_package_share_directory(package_name)
+    absolute_file_path = os.path.join(package_path, file_path)
+    try:
+        with open(absolute_file_path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f)
+    except (OSError, IOError):
+        return None
+
+
 def generate_launch_description():
     use_gripper = LaunchConfiguration("use_gripper")
     use_rviz = LaunchConfiguration("use_rviz")
     use_target_ghost = LaunchConfiguration("use_target_ghost")
+    use_moveit = LaunchConfiguration("use_moveit")
+    use_servo = LaunchConfiguration("use_servo")
 
     desc_share = get_package_share_directory("a3_description")
     arm_share = get_package_share_directory("a3_arm_controller")
     bridge_share = get_package_share_directory("a3_mqtt_bridge")
     gripper_share = get_package_share_directory("a3_gripper_controller")
+    moveit_share = get_package_share_directory("a3_moveit_config")
 
     urdf = os.path.join(desc_share, "urdf", "el_a3.urdf")
     with open(urdf, "r", encoding="utf-8") as f:
@@ -143,6 +158,107 @@ def generate_launch_description():
         condition=IfCondition(use_gripper),
     )
 
+    # ---- MoveIt：move_group + FJT action + retime（F67/F68 仿真验收，与 a3_bringup
+    #      launch 同款接法；sim /joint_states 为 RELIABLE，move_group 可直接用）----
+    with open(os.path.join(moveit_share, "config", "el_a3.srdf"), "r", encoding="utf-8") as f:
+        robot_description_semantic = f.read()
+    kinematics_yaml = load_yaml("a3_moveit_config", "config/kinematics.yaml")
+    joint_limits_yaml = load_yaml("a3_moveit_config", "config/joint_limits.yaml")
+    ompl_planning_yaml = load_yaml("a3_moveit_config", "config/ompl_planning.yaml")
+    moveit_controllers_yaml = load_yaml("a3_moveit_config", "config/moveit_controllers.yaml")
+    trajectory_execution = {
+        "moveit_manage_controllers": True,
+        "trajectory_execution.allowed_execution_duration_scaling": 1.2,
+        "trajectory_execution.allowed_goal_duration_margin": 0.5,
+        "trajectory_execution.allowed_start_tolerance": 0.01,
+    }
+    planning_scene_monitor_parameters = {
+        "publish_planning_scene": True,
+        "publish_geometry_updates": True,
+        "publish_state_updates": True,
+        "publish_transforms_updates": True,
+        "publish_planning_scene_hz": 4.0,
+    }
+
+    move_group = Node(
+        package="moveit_ros_move_group",
+        executable="move_group",
+        output="screen",
+        parameters=[
+            {"robot_description": robot_description},
+            {"robot_description_semantic": robot_description_semantic},
+            {"robot_description_planning": joint_limits_yaml},
+            {"robot_description_kinematics": kinematics_yaml},
+            {"move_group": ompl_planning_yaml},
+            trajectory_execution,
+            moveit_controllers_yaml,
+            planning_scene_monitor_parameters,
+        ],
+        condition=IfCondition(use_moveit),
+    )
+    fjt_action = Node(
+        package="a3_bringup",
+        executable="follow_joint_trajectory_action",
+        name="a3_fjt_action",
+        parameters=[{"require_gate": False}],
+        condition=IfCondition(use_moveit),
+    )
+
+    jl_map = (joint_limits_yaml or {}).get("joint_limits", {})
+    velocity_limits = {
+        name: float(d["max_velocity"])
+        for name, d in jl_map.items()
+        if d.get("has_velocity_limits") and d.get("max_velocity") is not None
+    }
+    acceleration_limits = {
+        name: float(d["max_acceleration"])
+        for name, d in jl_map.items()
+        if d.get("has_acceleration_limits") and d.get("max_acceleration") is not None
+    }
+    retime_node = Node(
+        package="a3_trajectory_processing",
+        executable="retime_trajectory_node",
+        name="a3_trajectory_processing",
+        output="screen",
+        parameters=[
+            {"robot_description": robot_description},
+            {"robot_description_semantic": robot_description_semantic},
+            {"group_name": "arm_with_gripper"},
+            {"velocity_limits": velocity_limits},
+            {"acceleration_limits": acceleration_limits},
+        ],
+        condition=IfCondition(use_moveit),
+    )
+
+    # ---- MoveIt Servo（默认关；F67 起可与 move_group 同时起，编排层模式互锁）----
+    servo_yaml = load_yaml("a3_moveit_config", "config/servo_config.yaml")
+    servo_params = {"moveit_servo": servo_yaml}
+    servo_params.update(servo_yaml)
+    servo_mode_bridge = Node(
+        package="a3_bringup",
+        executable="servo_mode_bridge",
+        name="a3_servo_mode_bridge",
+        parameters=[{"twist_topic": "/servo_node/delta_twist_cmds"}, {"timeout_s": 0.5}],
+        condition=IfCondition(use_servo),
+    )
+    servo_node = Node(
+        package="moveit_servo",
+        executable="servo_node_main",
+        name="servo_node",
+        parameters=[
+            {"robot_description": robot_description},
+            {"robot_description_semantic": robot_description_semantic},
+            {"robot_description_kinematics": kinematics_yaml},
+            servo_params,
+        ],
+        remappings=[
+            ("~/delta_twist_cmds", "/servo_node/delta_twist_cmds"),
+            ("~/command_out", "/a3/servo/joint_trajectory"),
+        ],
+        output="screen",
+        condition=IfCondition(use_servo),
+    )
+
     rviz = Node(
         package="rviz2",
         executable="rviz2",
@@ -166,6 +282,16 @@ def generate_launch_description():
                 description="目标 ghost 三件套（target rsp + 恒等静态 TF + home 注入）；"
                 "单模型 el_a3_view.rviz 下不可见，开 el_a3_dual_view.rviz 时需要",
             ),
+            DeclareLaunchArgument(
+                "use_moveit",
+                default_value="true",
+                description="move_group + FJT action + retime 服务（F67 goto / F68 回放）",
+            ),
+            DeclareLaunchArgument(
+                "use_servo",
+                default_value="false",
+                description="MoveIt Servo 笛卡尔 jog（可与 use_moveit 共存）",
+            ),
             rsp,
             rsp_target,
             static_tf,
@@ -176,6 +302,11 @@ def generate_launch_description():
             arm_controller,
             mqtt_bridge,
             gripper,
+            move_group,
+            fjt_action,
+            retime_node,
+            servo_mode_bridge,
+            servo_node,
             rviz,
         ]
     )

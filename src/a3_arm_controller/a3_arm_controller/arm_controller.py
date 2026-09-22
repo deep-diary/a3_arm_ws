@@ -20,6 +20,7 @@ import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from builtin_interfaces.msg import Duration
+from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -29,6 +30,15 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
+from moveit_msgs.action import MoveGroup
+from moveit_msgs.msg import (
+    Constraints,
+    JointConstraint,
+    MotionPlanRequest,
+    MoveItErrorCodes,
+    PlanningOptions,
+)
+
 from a3_can_bridge.msg import MotorStates
 from a3_can_bridge.srv import MotorCommand
 from a3_msgs.msg import ArmStatus, MonitorStatus
@@ -36,6 +46,7 @@ from a3_msgs.srv import (
     GotoNamedPose,
     MoveToJointPositions,
     PlaybackTrajectory,
+    RetimeTrajectory,
     SaveNamedPose,
     SaveTrajectory,
     SetJointPositions,
@@ -318,7 +329,29 @@ class ArmController(Node):
         self.declare_parameter("require_gate", False)
         self.declare_parameter("goto_duration_s", 3.0)
         self.declare_parameter("goto_waypoints", 21)
+        # F67: goto/move_to/safe-park 默认走 move_group action（OMPL + TOTG adapter），
+        # move_group 不可用/规划失败/超时 → WARN 并退回下面的本地线性插值。
+        self.declare_parameter("goto_use_moveit", True)
+        self.declare_parameter("moveit_goto_timeout_s", 15.0)
+        self.declare_parameter("moveit_action_name", "move_action")
+        self.declare_parameter("moveit_planning_group", "arm")
+        self.declare_parameter("moveit_allowed_planning_time_s", 3.0)
+        self.declare_parameter("moveit_num_planning_attempts", 5)
+        self.declare_parameter("moveit_velocity_scaling", 0.3)
+        self.declare_parameter("moveit_acceleration_scaling", 0.3)
+        self.declare_parameter("moveit_goal_tolerance_rad", 0.01)
         self.declare_parameter("playback_ramp_duration_s", 2.5)
+        # F68: 回放（ramp + 录制点）默认调 /a3/arm/retime_trajectory 做保几何重定时
+        # （Ruckig jerk-limited，失败退化 TOTG）；服务不可用/失败才走旧的
+        # smooth + time_warp 链。
+        self.declare_parameter("playback_retime", True)
+        self.declare_parameter("playback_retime_backend", "ruckig")
+        # 默认把重定时后的总时长拉到录制时长（手拖的自然节奏），而不是按关节极限
+        # 「越快越好」；关闭则用下面的固定缩放。
+        self.declare_parameter("playback_match_recorded_duration", True)
+        self.declare_parameter("playback_velocity_scaling", 0.2)
+        self.declare_parameter("playback_acceleration_scaling", 0.2)
+        self.declare_parameter("playback_retime_min_duration_s", 1.0)
         # LL-047: 回放低通平滑窗口（中心滑动平均，@50Hz 采样数）。7 点把录制 L2/L3 最大
         # 加速度 119/86 → ~8 rad/s²（-93%），几何扰动 ≤20 mrad；0/1 关闭。手拖录制天然带
         # 加速度尖峰，伺服忠实复现即"抖"——平滑压尖峰而非改路径。热设置回放前读取。
@@ -506,6 +539,18 @@ class ArmController(Node):
         self._reset_cli = self.create_client(MotorCommand, "/a3/motor/reset", callback_group=self._cb_group)
         self._zt_start_cli = self.create_client(Trigger, "/a3/zero_torque/start", callback_group=self._cb_group)
         self._zt_stop_cli = self.create_client(Trigger, "/a3/zero_torque/stop", callback_group=self._cb_group)
+
+        # F67: MoveGroup action client（节点启动时不阻塞等待；用前查 server_is_ready）
+        self._moveit_cli = ActionClient(
+            self,
+            MoveGroup,
+            str(self.get_parameter("moveit_action_name").value),
+            callback_group=self._cb_group,
+        )
+        # F68: 保几何重定时服务
+        self._retime_cli = self.create_client(
+            RetimeTrajectory, "/a3/arm/retime_trajectory", callback_group=self._cb_group
+        )
 
         # 状态发布定时器
         rate = max(1.0, float(self.get_parameter("status_hz").value))
@@ -816,26 +861,32 @@ class ArmController(Node):
         tol = float(self.get_parameter("disable_home_tol_rad").value)
         confirm_s = float(self.get_parameter("disable_home_confirm_s").value)
         timeout_s = float(self.get_parameter("disable_park_timeout_s").value)
-        duration = max(
-            float(self.get_parameter("disable_home_duration_s").value),
-            float(self.get_parameter("move_to_min_duration_s").value),
-        )
-        n = self._traj_point_count(duration)
 
-        traj = JointTrajectory()
-        traj.joint_names = list(self._joint_names)
-        q0 = list(self._positions)
-        for i in range(n):
-            alpha = i / (n - 1)
-            pt = JointTrajectoryPoint()
-            pt.positions = [a + alpha * (b - a) for a, b in zip(q0, home)]
-            pt.time_from_start = _duration(duration * alpha)
-            traj.points.append(pt)
+        # F67: 优先 move_group（L1–L6 回 home；L7 保持）
+        duration = 0.0
+        planned = False
+        if bool(self.get_parameter("goto_use_moveit").value):
+            planned, duration, msg = self._moveit_move(
+                home[:6], JOINTS[:6], "safe park -> home", state=STATE_SAFE_PARK
+            )
+            if not planned:
+                self.get_logger().warn(f"safe park: {msg} -- local linear fallback")
 
-        self._publish_mode("TRAJ_RUNNING")
-        self._traj_pub.publish(traj)
+        if not planned:
+            duration = max(
+                float(self.get_parameter("disable_home_duration_s").value),
+                float(self.get_parameter("move_to_min_duration_s").value),
+            )
+            q0 = list(self._positions)
+            traj = self._linear_trajectory(q0, home, duration)
+            self._publish_mode("TRAJ_RUNNING")
+            self._traj_pub.publish(traj)
+            n = len(traj.points)
+            self._set_state(STATE_SAFE_PARK, f"safe park -> home ({duration:.1f}s, {n} pts)")
+
         self._traj_done_at = 0.0  # 防旧 TRAJ 时间戳在 SAFE_PARK 中误触发回 READY
-        self._set_state(STATE_SAFE_PARK, f"safe park -> home ({duration:.1f}s, {n} pts)")
+        if planned:
+            self._set_state(STATE_SAFE_PARK, f"safe park -> home (move_group, {duration:.1f}s)")
         t0 = time.monotonic()
 
         converge_start = 0.0
@@ -1059,12 +1110,21 @@ class ArmController(Node):
             self._all_disabled_since = 0.0
 
     def _on_monitor_status(self, msg: MonitorStatus) -> None:
-        """F51/LL-039：消费看门狗「已确认」故障——只认 TRIGGERED（瞬时 PENDING 不动作）。"""
+        """F51/LL-039：消费看门狗「已确认」故障——只认 TRIGGERED（瞬时 PENDING 不动作）。
+
+        仅在使能期望态挂起待处置标志：DISABLED 等非使能态下收到的 TRIGGERED 是
+        上一故障窗口的余流（控制器进 DISABLED 后看门狗仍会补发约 clear_hold 的
+        TRIGGERED），挂起会变成跨周期陈旧标志，在下次 enable→READY 的首个状态
+        发布 tick 被误消费（LL-072）。
+        """
         if not self.get_parameter("unexpected_disable_guard").value:
             return
         if msg.status == "TRIGGERED" and msg.fault == "UNEXPECTED_DISABLE":
-            if not self._pending_unexpected_disable:
-                self._pending_unexpected_disable = "看门狗确认 UNEXPECTED_DISABLE"
+            if self._state in (STATE_READY, STATE_TRAJ, STATE_SAFE_PARK):
+                if not self._pending_unexpected_disable:
+                    self._pending_unexpected_disable = "看门狗确认 UNEXPECTED_DISABLE"
+        elif msg.status == "OK" and self._state == STATE_DISABLED:
+            self._pending_unexpected_disable = ""
 
     # ------------------------------------------------------------------ status
 
@@ -1079,7 +1139,8 @@ class ArmController(Node):
             self._back_to_ready()
 
         # F51/LL-039: 电机被带外失能 → 立刻离开 READY/TRAJ（不再保留保持目标与后续指令）
-        if self._pending_unexpected_disable and self._state in (STATE_READY, STATE_TRAJ):
+        if self._pending_unexpected_disable and self._state in (
+                STATE_READY, STATE_TRAJ, STATE_SAFE_PARK):
             why = self._pending_unexpected_disable
             self._pending_unexpected_disable = ""
             self._all_disabled_since = 0.0
@@ -1199,6 +1260,10 @@ class ArmController(Node):
                 resp.success = False
                 resp.message = why
                 return resp
+        # LL-072：显式 enable 必然代表操作员确认当前无故障——丢弃上一故障窗口
+        # 残留的待处置标志，防止陈旧 pending 在 READY 首个 tick 把臂打回 DISABLED。
+        self._pending_unexpected_disable = ""
+        self._all_disabled_since = 0.0
         # F48: 使能前读数限位门禁——环绕读数（断电多圈 +2π 推算，LL-019）超
         # URDF 限位时 kp×误差会瞬间猛拉，拒绝使能；恢复零位走 /a3/arm/init。
         if self.get_parameter("enable_position_check").value:
@@ -1313,6 +1378,103 @@ class ArmController(Node):
         resp.message = msg
         return resp
 
+    def _moveit_move(
+        self,
+        target: List[float],
+        joint_names: List[str],
+        label: str,
+        state: str = STATE_TRAJ,
+    ) -> Tuple[bool, float, str]:
+        """F67: move_group action 规划 + TOTG 定时 + Execute（经 FJT → 执行层）。
+
+        返回 (成功, 执行时长 s, 说明)。任何不可用/失败均返回 False，调用方走本地兜底。
+        """
+        if not self._moveit_cli.server_is_ready():
+            ready_deadline = time.monotonic() + 0.5
+            while time.monotonic() < ready_deadline and not self._moveit_cli.server_is_ready():
+                time.sleep(0.02)
+        if not self._moveit_cli.server_is_ready():
+            return False, 0.0, "move_group action unavailable"
+
+        goal = MoveGroup.Goal()
+        mpr = MotionPlanRequest()
+        mpr.group_name = str(self.get_parameter("moveit_planning_group").value)
+        mpr.num_planning_attempts = int(self.get_parameter("moveit_num_planning_attempts").value)
+        mpr.allowed_planning_time = float(
+            self.get_parameter("moveit_allowed_planning_time_s").value
+        )
+        mpr.max_velocity_scaling_factor = float(
+            self.get_parameter("moveit_velocity_scaling").value
+        )
+        mpr.max_acceleration_scaling_factor = float(
+            self.get_parameter("moveit_acceleration_scaling").value
+        )
+        tol = float(self.get_parameter("moveit_goal_tolerance_rad").value)
+        constraints = Constraints()
+        for name, value in zip(joint_names, target):
+            jc = JointConstraint()
+            jc.joint_name = name
+            jc.position = float(value)
+            jc.tolerance_above = tol
+            jc.tolerance_below = tol
+            jc.weight = 1.0
+            constraints.joint_constraints.append(jc)
+        mpr.goal_constraints = [constraints]
+        goal.request = mpr
+        goal.planning_options = PlanningOptions()
+
+        timeout_s = float(self.get_parameter("moveit_goto_timeout_s").value)
+        t0 = time.monotonic()
+        send_future = self._moveit_cli.send_goal_async(goal)
+        if not self._wait_future(send_future, timeout_s):
+            return False, 0.0, "move_group send timeout"
+        goal_handle = send_future.result()
+        if not goal_handle.accepted:
+            return False, 0.0, "move_group goal rejected"
+
+        self._publish_mode("TRAJ_RUNNING")
+        self._set_state(state, f"{label} (planning)")
+
+        result_future = goal_handle.get_result_async()
+        remaining = max(0.1, timeout_s - (time.monotonic() - t0))
+        if not self._wait_future(result_future, remaining):
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"{label}: result timeout")
+            return False, 0.0, "move_group result timeout"
+        result = result_future.result().result
+        if result.error_code.val != MoveItErrorCodes.SUCCESS:
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"{label}: error {result.error_code.val}")
+            return False, 0.0, f"move_group error_code={result.error_code.val}"
+
+        rt = result.executed_trajectory
+        if not rt.joint_trajectory.points:
+            rt = result.planned_trajectory
+        pts = rt.joint_trajectory.points
+        if not pts:
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"{label}: empty trajectory")
+            return False, 0.0, "move_group returned empty trajectory"
+        last = pts[-1]
+        duration = float(last.time_from_start.sec) + float(last.time_from_start.nanosec) * 1e-9
+        duration = max(duration, 0.1)
+        return True, duration, f"{label}: move_group {len(pts)} pts, {duration:.1f}s"
+
+    def _linear_trajectory(
+        self, q0: List[float], q1: List[float], duration: float
+    ) -> JointTrajectory:
+        """本地兜底：等时线性插值（≥50Hz 点）。"""
+        n = self._traj_point_count(duration)
+        traj = JointTrajectory()
+        traj.joint_names = list(self._joint_names)
+        for i in range(n):
+            alpha = i / (n - 1)
+            pt = JointTrajectoryPoint()
+            pt.positions = [a + alpha * (b - a) for a, b in zip(q0, q1)]
+            pt.time_from_start = _duration(duration * alpha)
+            traj.points.append(pt)
+        return traj
+
     def _goto_cb(
         self, req: GotoNamedPose.Request, resp: GotoNamedPose.Response
     ) -> GotoNamedPose.Response:
@@ -1336,30 +1498,33 @@ class ArmController(Node):
             q1 = q1 + [0.0] * (self._n_joints - len(q1))
         elif len(q1) > self._n_joints:
             q1 = q1[: self._n_joints]
+
+        # F67: 优先 move_group（OMPL + TOTG），L7 不参与 goto
+        if bool(self.get_parameter("goto_use_moveit").value):
+            ok, duration, msg = self._moveit_move(q1[:6], JOINTS[:6], f"goto {name}")
+            if ok:
+                self._schedule_back_to_ready(duration + 0.3)
+                resp.success = True
+                resp.message = msg
+                return resp
+            self.get_logger().warn(f"goto {name}: {msg} -- local linear fallback")
+
         q0 = list(self._positions)
         # F41: 时长下限 + ≥50Hz 插值点
         duration = min(max(
             float(self.get_parameter("goto_duration_s").value),
             float(self.get_parameter("move_to_min_duration_s").value),
         ), 60.0)
-        n = self._traj_point_count(duration)
-
-        traj = JointTrajectory()
-        traj.joint_names = list(self._joint_names)
-        for i in range(n):
-            alpha = i / (n - 1)
-            pt = JointTrajectoryPoint()
-            pt.positions = [a + alpha * (b - a) for a, b in zip(q0, q1)]
-            pt.time_from_start = _duration(duration * alpha)
-            traj.points.append(pt)
+        traj = self._linear_trajectory(q0, q1, duration)
 
         self._publish_mode("TRAJ_RUNNING")
         self._traj_pub.publish(traj)
         self._set_state(STATE_TRAJ, f"goto {name}")
         self._schedule_back_to_ready(duration + 0.3)
 
+        n = len(traj.points)
         resp.success = True
-        resp.message = f"goto {name} ({duration:.1f}s, {n} pts)"
+        resp.message = f"goto {name} (linear fallback, {duration:.1f}s, {n} pts)"
         return resp
 
     def _move_to_cb(
@@ -1381,28 +1546,31 @@ class ArmController(Node):
             return resp
 
         q1 = [float(v) for v in req.positions]
+
+        # F67: 优先 move_group（L1–L6；L7 保持）
+        if bool(self.get_parameter("goto_use_moveit").value):
+            ok, duration, msg = self._moveit_move(q1[:6], JOINTS[:6], "move_to")
+            if ok:
+                self._schedule_back_to_ready(duration + 0.3)
+                resp.success = True
+                resp.message = msg
+                return resp
+            self.get_logger().warn(f"move_to: {msg} -- local linear fallback")
+
         q0 = list(self._positions)
         # F41: 最短时长兜底（可配置，默认 3s）+ ≥50Hz 插值点（3s→150 点）
         duration = float(req.duration_s) if req.duration_s and req.duration_s > 0 else 1.0
         duration = min(max(duration, float(self.get_parameter("move_to_min_duration_s").value)), 60.0)
-        n = self._traj_point_count(duration)
-
-        traj = JointTrajectory()
-        traj.joint_names = list(self._joint_names)
-        for i in range(n):
-            alpha = i / (n - 1)
-            pt = JointTrajectoryPoint()
-            pt.positions = [a + alpha * (b - a) for a, b in zip(q0, q1)]
-            pt.time_from_start = _duration(duration * alpha)
-            traj.points.append(pt)
+        traj = self._linear_trajectory(q0, q1, duration)
 
         self._publish_mode("TRAJ_RUNNING")
         self._traj_pub.publish(traj)
         self._set_state(STATE_TRAJ, f"move_to ({duration:.1f}s)")
         self._schedule_back_to_ready(duration + 0.3)
 
+        n = len(traj.points)
         resp.success = True
-        resp.message = f"move_to ({duration:.1f}s, {n} pts)"
+        resp.message = f"move_to (linear fallback, {duration:.1f}s, {n} pts)"
         return resp
 
     def _save_named_pose_cb(
@@ -1650,6 +1818,47 @@ class ArmController(Node):
         resp.path = path
         return resp
 
+    def _call_retime(
+        self,
+        geo_points: List[List[float]],
+        joint_names: List[str],
+        backend: str,
+        v_scaling: float,
+        a_scaling: float,
+        geo_times: Optional[List[float]] = None,
+        target_duration: float = 0.0,
+    ) -> Tuple[bool, Optional[JointTrajectory], str]:
+        """F68: 同步（轮询）调 /a3/arm/retime_trajectory。geo_times 给出各点
+        time_from_start（录制时刻 + ramp 偏移），用于 Ruckig 播种。"""
+        if not self._wait_service(self._retime_cli, 1.0):
+            return False, None, "retime service unavailable"
+        req = RetimeTrajectory.Request()
+        req.trajectory.joint_names = list(joint_names)
+        for i, pos in enumerate(geo_points):
+            pt = JointTrajectoryPoint()
+            pt.positions = [float(v) for v in pos]
+            if geo_times is not None:
+                pt.time_from_start = _duration(geo_times[i])
+            req.trajectory.points.append(pt)
+        req.backend = backend
+        req.velocity_scaling = v_scaling
+        req.acceleration_scaling = a_scaling
+        req.target_duration = target_duration
+        future = self._retime_cli.call_async(req)
+        if not self._wait_future(future, 5.0):
+            return False, None, "retime call timeout"
+        result = future.result()
+        if result.success:
+            return True, result.trajectory, result.message
+        return False, None, result.message
+
+    @staticmethod
+    def _traj_duration(traj: JointTrajectory) -> float:
+        if not traj.points:
+            return 0.0
+        last = traj.points[-1].time_from_start
+        return float(last.sec) + float(last.nanosec) * 1e-9
+
     def _playback_cb(
         self, req: PlaybackTrajectory.Request, resp: PlaybackTrajectory.Response
     ) -> PlaybackTrajectory.Response:
@@ -1682,85 +1891,138 @@ class ArmController(Node):
             resp.message = f"load failed: {exc}"
             return resp
 
-        traj = JointTrajectory()
-        traj.joint_names = list(data.get("joint_names") or self._joint_names)
+        file_joint_names = list(data.get("joint_names") or self._joint_names)
+        recorded_positions: List[List[float]] = []
+        recorded_times: List[float] = []
         for p in data.get("points") or []:
-            pt = JointTrajectoryPoint()
-            pt.positions = [float(v) for v in p["positions"]]
-            pt.time_from_start = _duration(float(p["time_from_start_sec"]))
-            traj.points.append(pt)
+            recorded_positions.append([float(v) for v in p["positions"]])
+            recorded_times.append(float(p["time_from_start_sec"]))
 
-        if not traj.points:
+        if not recorded_positions:
             resp.success = False
             resp.message = "empty trajectory"
             return resp
+        recorded_duration = max(recorded_times) if recorded_times else 0.0
 
-        # F38: 回放前先从当前位姿插值到首记录点（playback_ramp_duration_s），
-        # 避免回放起始位 ≠ 记录起始位时机械臂突然跳变；随后原样回放记录轨迹。
-        ramp_s = float(self.get_parameter("playback_ramp_duration_s").value)
-        if ramp_s > 0.05 and self._have_js:
-            q1 = [float(v) for v in traj.points[0].positions]
-            q0: List[float] = []
-            for jn in traj.joint_names:
-                if jn in self._joint_names:
-                    q0.append(float(self._positions[self._joint_names.index(jn)]))
-                elif len(q0) < len(q1):
-                    q0.append(q1[len(q0)])  # 轨迹含未知关节名：该关节不插值，取首点值
+        # 统一到标准关节序（L1..L7）；文件缺关节时补 0（retime 组要求 7 关节齐备）
+        def _to_std(positions: List[float]) -> List[float]:
+            if file_joint_names == self._joint_names:
+                return list(positions)
+            out = []
+            for jn in self._joint_names:
+                if jn in file_joint_names:
+                    out.append(positions[file_joint_names.index(jn)])
                 else:
-                    q0.append(0.0)
-            q0 = q0[: len(q1)] + q1[len(q0):]
-            # F41: ramp 段同步 ≥50Hz（2.5s→125 点）
+                    out.append(0.0)
+            return out
+
+        recorded_std = [_to_std(p) for p in recorded_positions]
+
+        # F38: 回放前从当前位姿到首记录点建一条稠密几何 ramp（时间由 retime 重算），
+        # 避免回放起始位 ≠ 记录起始位时突然跳变。
+        ramp_s = float(self.get_parameter("playback_ramp_duration_s").value)
+        # 当前位姿 ≈ 首记录点时跳过 ramp：大量重复点会使 Ruckig 求解失败
+        ramp_dist = (
+            max(abs(a - b) for a, b in zip(self._positions, recorded_std[0]))
+            if self._have_js else 0.0
+        )
+        use_ramp = ramp_s > 0.05 and self._have_js and ramp_dist > 0.02
+        geo: List[List[float]] = []
+        geo_times: List[float] = []
+        if use_ramp:
+            q0 = list(self._positions)
+            q1 = recorded_std[0]
             n = self._traj_point_count(ramp_s)
-            ramp_pts: List[JointTrajectoryPoint] = []
             for i in range(n):
                 alpha = i / (n - 1)
+                geo.append([a + alpha * (b - a) for a, b in zip(q0, q1)])
+                geo_times.append(ramp_s * alpha)
+            t_base = recorded_times[0]
+            geo.extend(recorded_std[1:])
+            geo_times.extend(ramp_s + (recorded_times[i] - t_base)
+                             for i in range(1, len(recorded_std)))
+        else:
+            geo = list(recorded_std)
+            t_base = recorded_times[0]
+            geo_times = [t - t_base for t in recorded_times]
+
+        # F68: Ruckig（加加速度受限）/ TOTG 重新定时 —— 保几何路径，速度加速度由
+        # 关节限值算出。失败（节点未起/求解失败）再退回旧的 smooth + time-warp 链。
+        traj: Optional[JointTrajectory] = None
+        retime_msg = ""
+        if bool(self.get_parameter("playback_retime").value):
+            backend = str(self.get_parameter("playback_retime_backend").value)
+            min_dur = float(self.get_parameter("playback_retime_min_duration_s").value)
+            v_scale = float(self.get_parameter("playback_velocity_scaling").value)
+            a_scale = float(self.get_parameter("playback_acceleration_scaling").value)
+            target = 0.0
+            if bool(self.get_parameter("playback_match_recorded_duration").value):
+                # Ruckig 用录制时刻播种（结果时长天然逼近录制）；TOTG 兜底时
+                # target_duration 驱动服务端迭代缩放限值。
+                target = max(recorded_duration, ramp_s if use_ramp else 0.0, min_dur)
+            ok, rtraj, msg = self._call_retime(
+                geo, self._joint_names, backend, v_scale, a_scale,
+                geo_times=geo_times, target_duration=target,
+            )
+            if ok:
+                traj = rtraj
+                retime_msg = msg
+            else:
+                self.get_logger().warn(
+                    f"playback retime failed ({msg}) -- legacy smooth/time-warp fallback"
+                )
+
+        if traj is None:
+            # 旧链路（F54 默认关闭，仅 playback_retime=false 或服务失败时使用）
+            traj = JointTrajectory()
+            traj.joint_names = list(file_joint_names)
+            for pos, t in zip(recorded_positions, recorded_times):
                 pt = JointTrajectoryPoint()
-                pt.positions = [a + alpha * (b - a) for a, b in zip(q0, q1)]
-                pt.time_from_start = _duration(ramp_s * alpha)
-                ramp_pts.append(pt)
-            for pt in traj.points:
-                t = pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
-                pt.time_from_start = _duration(t + ramp_s)
-            traj.points = ramp_pts + traj.points
-            self.get_logger().info(
-                f"playback ramp: {ramp_s:.2f}s from current pose to first recorded "
-                f"point ({n} pts)"
-            )
+                pt.positions = list(pos)
+                pt.time_from_start = _duration(t)
+                traj.points.append(pt)
+            if use_ramp:
+                q1 = [float(v) for v in traj.points[0].positions]
+                q0: List[float] = []
+                for jn in traj.joint_names:
+                    if jn in self._joint_names:
+                        q0.append(float(self._positions[self._joint_names.index(jn)]))
+                    elif len(q0) < len(q1):
+                        q0.append(q1[len(q0)])
+                    else:
+                        q0.append(0.0)
+                q0 = q0[: len(q1)] + q1[len(q0):]
+                n = self._traj_point_count(ramp_s)
+                ramp_pts: List[JointTrajectoryPoint] = []
+                for i in range(n):
+                    alpha = i / (n - 1)
+                    pt = JointTrajectoryPoint()
+                    pt.positions = [a + alpha * (b - a) for a, b in zip(q0, q1)]
+                    pt.time_from_start = _duration(ramp_s * alpha)
+                    ramp_pts.append(pt)
+                for pt in traj.points:
+                    t = pt.time_from_start.sec + pt.time_from_start.nanosec * 1e-9
+                    pt.time_from_start = _duration(t + ramp_s)
+                traj.points = ramp_pts + traj.points
 
-        smooth_s = int(self.get_parameter("playback_smooth_samples").value)
-        if smooth_s >= 3 and len(traj.points) >= 4:
-            traj.points = _smooth_points(traj.points, smooth_s)
-            self.get_logger().info(
-                f"playback smooth: {smooth_s}-pt moving avg applied "
-                f"({len(traj.points)} pts)"
-            )
+            smooth_s = int(self.get_parameter("playback_smooth_samples").value)
+            if smooth_s >= 3 and len(traj.points) >= 4:
+                traj.points = _smooth_points(traj.points, smooth_s)
+            if bool(self.get_parameter("playback_time_warp").value):
+                vmax = float(self.get_parameter("playback_warp_vmax_rad_s").value)
+                dt_min = float(self.get_parameter("playback_warp_dt_min_s").value)
+                amax = float(self.get_parameter("playback_warp_accel_max_rad_s2").value)
+                traj.points = _time_warp_points(traj.points, vmax, dt_min, amax)
 
-        # F57/F59/LL-053: 最后做时间轴匀速重排（位置已平滑，弧长均匀重采样压停顿
-        # + 加速度限幅膨胀消速度跳变，保几何路径）。停顿折叠 → 输出时长 ≤ 原时长。
-        if bool(self.get_parameter("playback_time_warp").value):
-            vmax = float(self.get_parameter("playback_warp_vmax_rad_s").value)
-            dt_min = float(self.get_parameter("playback_warp_dt_min_s").value)
-            amax = float(self.get_parameter("playback_warp_accel_max_rad_s2").value)
-            traj.points = _time_warp_points(traj.points, vmax, dt_min, amax)
-            warp_dur = (
-                traj.points[-1].time_from_start.sec
-                + traj.points[-1].time_from_start.nanosec * 1e-9
-            )
-            self.get_logger().info(
-                f"playback time-warp: v_eff<={vmax} rad/s, amax<={amax} rad/s2, "
-                f"duration {warp_dur:.1f}s ({len(traj.points)} pts)"
-            )
-
-        duration = (
-            traj.points[-1].time_from_start.sec + traj.points[-1].time_from_start.nanosec * 1e-9
-        )
+        duration = self._traj_duration(traj)
         self._publish_mode("TRAJ_RUNNING")
         self._traj_pub.publish(traj)
         self._set_state(STATE_TRAJ, f"playback {label}")
         self._schedule_back_to_ready(duration + 0.3)
 
+        suffix = f"retime [{retime_msg}]" if retime_msg else "legacy chain"
         resp.success = True
-        resp.message = f"playback {label} ({len(traj.points)} pts, {duration:.1f}s)"
+        resp.message = f"playback {label} ({len(traj.points)} pts, {duration:.1f}s, {suffix})"
         return resp
 
     def _enter_ai_cb(self, req: Trigger.Request, resp: Trigger.Response) -> Trigger.Response:

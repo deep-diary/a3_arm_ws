@@ -1,0 +1,14 @@
+# F68: geometric-preserving re-timing of a dense (e.g. 50 Hz recorded) joint path.
+# points[].positions are mandatory. When points[].time_from_start is populated
+# the recorded timing is used to seed Ruckig (per-waypoint finite-difference
+# velocities are derived from it); recorded velocity need not be stored.
+trajectory_msgs/JointTrajectory trajectory
+string backend             # "ruckig" (jerk-limited, default when empty) or "totg"
+float64 velocity_scaling        # <= 1.0; non-positive -> 1.0
+float64 acceleration_scaling    # <= 1.0; non-positive -> 1.0
+float64 sample_dt               # output point spacing hint; non-positive -> 0.01 s
+float64 target_duration         # >0: TOTG fallback iteratively scales limits to hit this duration (s)
+---
+bool success
+string message
+trajectory_msgs/JointTrajectory trajectory

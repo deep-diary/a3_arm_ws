@@ -789,6 +789,38 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F51（使能安全三要素，本需求把覆盖范围从服务路径扩到全部使能路径）、F32（gate 互锁恢复语义）、F60/F65（L3 幂等）、F58（stop 重力保持语义，回归判据同步更新）；[shared/SAFETY.md](../shared/SAFETY.md)；LL-039（首起甩臂事故）、LL-040（回退表缓存）、LL-042（电机锁存最后命令）、LL-043（启动禁满增益）、LL-070（本次事故，真机复测后补录）
 - **状态：** `implemented-pending-hw`（2026-09-22 代码 + 编译 + mock-CAN 真桥回归 + 46/0 仿真；待 L6/L7 机械修复后真机复测）
 
+## F67 goto/move_to 走 move_group + TOTG（工业轨迹，起止零速）
+
+- **说明：** 现状 `_goto_cb`/`_move_to_cb` 用 `alpha=i/(n-1)` 线性插值：速度方波（起止瞬间加速度无限大）、点上无速度/加速度，电机跟随表现为起步/停止顿挫，即用户反馈的"不丝滑"。改为工业标准路径：编排层作 MoveGroup action 客户端（`move_action`，goal `MoveGroup.Goal`），`MotionPlanRequest` 给关节空间目标（`JointConstraint` 逐关节 = 目标位），group=`arm`（L1–L6）；规划管线 `default_planner_request_adapters/AddTimeOptimalParameterization`（TOTG）已在 `ompl_planning.yaml` 配置——几何路径 + `joint_limits.yaml` 的 v/a 限位自动算出时间参数化轨迹（梯形速度、起止速度为 0、连续加速度），执行经 MoveIt 控制器管理 → FJT action → `/joint_group_effort_controller/joint_trajectory`（执行层 200 Hz 插值不变）。L7（夹爪）不在 arm group：目标含 L7 时由编排层另行夹爪命令/直通保持（回放见 F68），goto 不改变 L7。新参数：`goto_use_moveit: true`（false = 旧线性插值兜底）、`moveit_goto_timeout_s: 15.0`、`moveit_action_name: move_action`。move_group 不可用/规划被拒/超时 → 自动回退本地线性插值并打 WARN（服务不报错，语义保持"尽力到位"）。
+- **验收标准：**
+  1. 全栈（`use_moveit:=true`）Triangle→ready：move_group 规划成功，执行轨迹首末点速度 ≈ 0（|v_end| ≤ 0.02 rad/s），`/joint_states` 数值微分的速度曲线无方波跳变、峰值受 max_velocity 限幅
+  2. Circle→home 同标准；最终关节误差 ≤ 0.02 rad
+  3. `use_moveit:=false`（move_group 不在）时自动走本地插值，服务仍 success、WARN 日志记录回退
+  4. `use_servo:=true` 与 move_group 进程共存：goto 期间 Servo 输出不被消费（状态机仲裁），goto 结束后 servo jog 正常
+- **关联：** F68（回放重定时）、F65（servo 独立话题/模式仲裁）、F38（goto 服务门面）；[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)；LL-071
+- **状态：** `done（仿真）`（2026-09-22，scripts/a3_test/f67_f68_sim_acceptance.py，14/14 ALL PASS：goto ready/home 走 move_group、首末速度≈0、限位内；线性兜底验证后恢复；真机验收待上电）
+
+## F68 示教回放走 Ruckig/TOTG 在线重定时（保几何、退役手搓平滑）
+
+- **说明：** 现状回放对点列做中心滑动平均（`_smooth_points`）+ 弧长重采样/加速度限时长（`_time_warp_points`）——手搓链路复杂、仍非连续加加速度，用户评价"各种折腾，效果反而不好"。改为工业标准：**几何保持的重定时（re-timing）**。50 Hz 稠密录制点不得交 OMPL 重规划（几何路径会变），只重算时间/速度/加速度：新增 C++ 包 `a3_trajectory_processing`（moveit_core `trajectory_processing` Python 不可绑定，无 moveit_py），服务 `/a3/arm/retime_trajectory`（`a3_msgs/srv/RetimeTrajectory`：输入 `trajectory_msgs/JointTrajectory`（仅位置）+ backend `ruckig|totg` + v/a 缩放；输出重定时 JointTrajectory，含 velocities/accelerations/稠密 time_from_start）。默认 backend=**Ruckig**（jerk-limited，起止零速、加加速度有界，最丝滑；系统已装 ros-humble-ruckig），TOTG 备选。限位取自 `joint_limits.yaml`（launch 注入 v/a map，jerk 默认 5×accel）。**关于录制速度：不需要保存**——Ruckig/TOTG 只吃位置点 + 关节限位，速度/加速度/加加速度全部由算法重算；已存 yaml 的 `time_from_start_sec` 时间戳在重定时中丢弃。回放流程：载入点列 → 末端拼接「当前位→首点」短 ramp（同样送重定时，保证整段连续）→ retime 服务 → 下发；L7 随 7 关节点列一同重定时（限位同源）。新参数：`playback_retime: true`（false 时保留旧 smooth/time_warp 作兜底，默认走新链路；旧参数保留不删）。
+- **验收标准：**
+  1. 示教一段任意轨迹（含变速/停顿）→ Square 回放：逐关节几何路径与录制点一致（重采样后位置偏差 ≤ 0.01 rad），但时间曲线重排：起止速度 ≈ 0、|a| ≤ joint_limits×缩放、jerk 有界
+  2. retime 服务单测（ros2 service call）：输入线性/折线点列 → 返回带 velocities/accelerations 的轨迹，总时长随 v_scaling 单调变化
+  3. ruckig 失败自动降级 totg；retime 节点/服务不可用 → 回退旧链路（WARN），回放不中断
+  4. 录制 yaml 仍只存 positions + time_from_start_sec（格式不变，旧文件可直接回放）
+- **关联：** F67（goto 同体系）、F22（示教/回放门面）、F38b（ramp 段）；[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)；LL-071
+- **状态：** `done（仿真）`（2026-09-22，14/14 ALL PASS：Ruckig 回放 4.41s vs 录制 4.0s，101/101 几何点匹配、最大偏差 0.0034 rad、端点误差 0.0001 rad，无超速/超加速；旧链路几何 0.0045 rad 作回归对照；Ruckig 单步 jerk 绑定致 29.6s 拉伸的根因与修复见 LL-071 坑 5；真机验收待上电）
+
+## F69 ready 点位改为非腕奇异形（修复伺服 L1 驱动整臂变软下坠）
+
+- **说明：** 真机 READY 下按住 L1 推摇杆，臂无视指令方向在重力下缓慢下坠、且可被外力自由拖动。bag 证据（2026-09-22）：伺服全程 kp=80/kd=2 未变（common SendMitFrame），根因是当前运行时 ready 来自用户覆盖 `~/.a3/poses.yaml`（2026-09-13 手动抬臂按反馈保存 `[0.07,1.0839,-0.5649,-0.4617,0.0831,-0.0497,0]`），L5≈0.083/L6≈−0.05 腕关节近共线 → MoveIt Servo 奇异速度缩放（threshold 17/30）全程触发 status 1/6，twist 被缩放近零 → 每 20 ms 目标≈反馈（|Δ|≈0.003 rad）→ kp 回复力 ≈0.24 Nm ≪ 该位形抗重力所需 ~3.4 Nm，重力获胜（L3 每集下坠 +0.36~0.42 rad，与指令方向无关）。修复：把 ready 覆盖为包内/SRDF 既有 ready `[0,0.785,-1.57,0,0.785,0,L7 保持]`——L5=0.785 将腕折出共线，且 L3=−1.57 前臂近竖直、重力力臂小。home（L5=L6=0）仍腕奇异不可用。改动仅 `~/.a3/poses.yaml` 数据，不改代码/契约。
+- **验收标准：**
+  1. 仿真闭环：goto ready 到位后按住 L1 推各方向摇杆 ≥3 s，/servo_node/status 全程 0（无 1/6），关节反馈无下坠（|Δ| ≤ 0.03 rad/松杆后回位）
+  2. 真机：named pose ready 到位（各关节与目标 ≤0.03 rad），L1+摇杆各方向无重力下坠、外力不可自由拖动；bag 复核 status=0、|target−fb| 正常
+  3. F40 失能保护回 home 不受影响（home 数据不改）
+- **关联：** F65（servo 入环）、F64（L1 平移死人开关）、F42（力矩钳，本次无 trip）；[shared/SAFETY.md](../shared/SAFETY.md)；LL-069（实现验收后补录）
+- **状态：** `in-progress`（2026-09-22）
+
 ### F40 — 失能保护（disable → 自动回 home → 失能）
 
 - **说明：** `/a3/arm/disable` 不再是「无条件直接失能」——不在 home 容差内时先平滑回 home 再失能，防止 ready 位直接掉臂。新增参数：`disable_home_pose_name: "home"`、`disable_home_tol_rad: 0.15`、`disable_home_duration_s: 3.0`、`disable_home_confirm_s: 0.5`、`disable_park_timeout_s: 8.0`。新辅助 `_at_home()`（全关节 |q−home| ≤ tol）与 `_safe_park_then_disable()`（同步阻塞：发布 home 轨迹抢占活跃轨迹——执行层 OnTrajectory 天然支持替换，无需排队 → `SAFE_PARK`（期间拒绝新运动指令）→ 轮询连续 `confirm_s` 收敛 → reset → `DISABLED`）。服务语义（同步阻塞返回，`success=true ⟺ 已失能`）：READY/TRAJ 容差内 → 直达 reset → DISABLED；容差外 → safe park → reset → DISABLED（message 含耗时）；IDLE → 直达 reset；DISABLED/COOLING → 幂等不动电机；FAULT → 紧急直达 reset；INIT/TEACH/SERVO/AI → 拒绝 busy；SAFE_PARK → 拒绝「already safe parking」。park 超时 → **FAULT 不 reset**（保持使能、停在半途，人工介入）；reset 被 gate 拒 → park 前 `success=false` + 原文 + "(stop power sequence first)"，park 完成后被拒 → 回 READY（已在 home 位，安全）；`_have_js==False` → 直达 reset + WARN（保持旧行为）。`/a3/motor/reset` 直达保留作紧急失能。

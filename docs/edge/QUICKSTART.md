@@ -440,6 +440,22 @@ ros2 topic pub --rate 10 /a3/display_target_joint_states sensor_msgs/msg/JointSt
 - 主 launch / sim launch 自带的注入是 **ghost-only 模式**（`urdf_dir_check_pub publish_traj:=false`）：不创建轨迹发布器与电机状态订阅，纯话题不碰执行层，断电也安全。方向校验用的「轨迹 + 摆动」模式只在上一节 `urdf_dir_check.launch.py`（其护栏只认 mode_status=2）。
 - 手动注入让位机制：注入节点订阅自己的话题，凡内容与最近一次自发不同（`ros2 topic pub` 等外部来源）即停发让位 3 s 并滚动续期；同名话题多发布者是 last-writer-wins，rsp 只认最后一条。
 
+### goto/回放工业轨迹验收（F67/F68，仿真全闭环）
+
+goto（Triangle→ready、Circle/R3→home）走 MoveIt move_group + TOTG；示教回放走 `/a3/arm/retime_trajectory`（Ruckig 默认，TOTG 备选），只重定时不改几何。move_group/retime 不可用时分别自动回退本地线性插值 / 旧 smooth+time_warp 链路（参数 `goto_use_moveit`、`playback_retime`，默认 true）。
+
+```bash
+# 全自动验收（自建域 55 闭环栈，约 3~5 分钟；结束自动收栈）
+source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
+python3 scripts/a3_test/f67_f68_sim_acceptance.py
+#   通过标准：末尾「总体: ALL PASS」（14 项：goto/home move_group、首末零速、限位、
+#   线性兜底恢复、playback 时长带 ±25% 与 101/101 几何匹配、旧链路回归、安全 park）
+```
+
+- Ruckig 回放若出现时长被放大数倍（如 4s→29.6s），是 Humble 单步 update 的 jerk 绑定所致，已由节点内 jerk 需求代数松弛（`seed_jerk_margin=1.5`）修复，排查见 LL-071 坑 5。
+- 录制 yaml 仍只存 positions + time_from_start_sec，**不需要保存速度**；重定时全部重算 v/a/jerk。
+- 真机上电后复跑同一脚本（需 can-up + 主 launch）做真机验收。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
