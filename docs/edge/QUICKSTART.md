@@ -794,6 +794,28 @@ python3 scripts/a3_test/f88_two_point_trajectory_acceptance.py 88
 
 期望到位目标按已安装 URDF 限位逐关节 clamp 后再比对（L2 仅正、L3 上限为 0；LL-096）；使能遇到「no /joint_states yet」按启动竞态等反馈重试（LL-095）。真机验收待上电。
 
+### pinocchio 重力模型标定/核验验收（F89）
+
+F89 按参考仓库 `pinocchio_gravity_calibration.py` 的工业 commissioning 原理补齐「模型-实物一致性核验」：标定工具走 F88 两点 FJT 到各测试构型（home + L2/L3 扫掠/网格 + L4/L5/L6 扰动，`--quick` 约 12 个位姿），**arm_controller 全程抱位不切换**，settle 后采样 30 个 `/joint_states` 力矩；在同一实测位姿上用独立 pinocchio RNEA（套用 F49 惯量）预测，逐关节 LSQ 比例因子（clip [0.5,2.0]）+ RMSE/R²，重力幅度过小（<0.2 Nm）的关节标记 low-excitation、比例保持 1.0。产出 `~/.a3/gravity_scales.yaml`（CM ParameterFile 格式），bringup 存在时自动加载；C++ 自由拖动控制器 configure 时同样套用 F49 惯量并按 tau_scale 缩放，保证运行时模型与标定模型严格同构（LL-099）。
+
+```bash
+source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
+# 一键验收（vcan89，三段：注入比例→加载闭环→默认回退；栈+sim 自动起停）
+python3 scripts/a3_test/f89_gravity_scale_acceptance.py
+#   通过标准：末尾「F89 acceptance: 20/20」，退出码 0
+#   A 注入 [1.0,0.92,1.08,0.95,1.0,1.0]（噪声 0.01）：L2/L3/L4 恢复误差
+#     ≤0.001、R²≥0.9998；L1/L5/L6 low-excitation 比例钉住 1.0
+#   B 产出文件加载：gravity_torque 与 scale×独立 RNEA 残差 0.0000 Nm；
+#     切模式 settle 1 s 后稳态漂移最差 L3 0.0038 rad（阈值 0.02）
+#   C 无 scales 文件：日志确认「tau_scale not set, using 1.0」
+# 真机 commissioning（通电后，工具直跑，无需额外参数）：
+ros2 launch a3_bringup a3_bringup.launch.py  # 先起栈、使能
+python3 scripts/gravity_scale_calibration.py            # 完整 ~24 位姿
+#   加 --quick 快速核验；--out 指定其他路径；--no-calibrated-inertia 对照名义惯量
+```
+
+产出文件是直接喂给 ros2_control_node 的 `--params-file`：顶层只能是「节点名 + ros__parameters」、数组同质、不得有 null（LL-097）；launch 参数空值不能写 `name:=`，省略即走默认（LL-098）。真机验收待上电。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

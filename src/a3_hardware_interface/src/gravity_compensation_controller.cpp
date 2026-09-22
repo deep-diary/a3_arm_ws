@@ -3,8 +3,10 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <controller_interface/controller_interface.hpp>
 #include <hardware_interface/types/hardware_interface_type_values.hpp>
 #include <pluginlib/class_list_macros.hpp>
@@ -13,11 +15,23 @@
 
 #include <pinocchio/algorithm/rnea.hpp>
 #include <pinocchio/parsers/urdf.hpp>
+#include <yaml-cpp/yaml.h>
 
 #include "sensor_msgs/msg/joint_state.hpp"
 
 namespace a3_hardware_interface
 {
+
+// F49 key -> URDF link carrying the fitted mass/CoM. Must match
+// scripts/gravity_scale_calibration.py JOINT_TO_LINK: the RNEA model used at
+// runtime has to be the exact model the scales were regressed against.
+static const std::unordered_map<std::string, std::string> kJointToLink = {
+  {"L2", "l2_l3_urdf_asm"},
+  {"L3", "l3_lnik_urdf_asm"},
+  {"L4", "l4_l5_urdf_asm"},
+  {"L5", "part_9"},
+  {"L6", "l5_l6_urdf_asm"},
+};
 
 class GravityCompensationController : public controller_interface::ControllerInterface
 {
@@ -28,6 +42,9 @@ public:
     auto_declare<std::string>("robot_description", "");
     auto_declare<std::string>("urdf_path", "");
     auto_declare<std::string>("controller_manager_name", "controller_manager");
+    auto_declare<std::vector<double>>("tau_scale", std::vector<double>{});
+    auto_declare<std::string>("inertia_params_file", "");
+    auto_declare<bool>("use_calibrated_inertia", true);
     return controller_interface::CallbackReturn::SUCCESS;
   }
 
@@ -91,10 +108,26 @@ public:
       return controller_interface::CallbackReturn::ERROR;
     }
 
+    ApplyCalibratedInertia();
+
     q_.resize(model_.nq);
     q_.setZero();
     v_zero_ = Eigen::VectorXd::Zero(model_.nv);
     a_zero_ = Eigen::VectorXd::Zero(model_.nv);
+
+    tau_scale_.assign(joint_names_.size(), 1.0);
+    const std::vector<double> scale_param =
+      get_node()->get_parameter("tau_scale").as_double_array();
+    if (scale_param.empty()) {
+      RCLCPP_INFO(get_node()->get_logger(), "tau_scale not set, using 1.0");
+    } else if (scale_param.size() != joint_names_.size()) {
+      RCLCPP_WARN(
+        get_node()->get_logger(),
+        "tau_scale has %zu values but %zu joints; falling back to 1.0",
+        scale_param.size(), joint_names_.size());
+    } else {
+      tau_scale_ = scale_param;
+    }
 
     q_index_.resize(joint_names_.size());
     v_index_.resize(joint_names_.size());
@@ -153,7 +186,8 @@ public:
     // command_interfaces_ order is not guaranteed to match joint_names_
     // (ResourceManager returns handles in its own claim order): map by name.
     for (size_t i = 0; i < joint_names_.size(); ++i) {
-      LookupCommand(joint_names_[i]).set_value(tau[v_index_[i]]);
+      LookupCommand(joint_names_[i]).set_value(
+        tau_scale_[i] * tau[v_index_[i]]);
     }
 
     if (++pub_divider_ >= 10) {
@@ -167,7 +201,7 @@ public:
       }
       msg.effort.resize(joint_names_.size());
       for (size_t i = 0; i < joint_names_.size(); ++i) {
-        msg.effort[i] = tau[v_index_[i]];
+        msg.effort[i] = tau_scale_[i] * tau[v_index_[i]];
       }
       gravity_pub_->publish(msg);
     }
@@ -175,6 +209,88 @@ public:
   }
 
 private:
+  void ApplyCalibratedInertia()
+  {
+    if (!get_node()->get_parameter("use_calibrated_inertia").as_bool()) {
+      RCLCPP_INFO(
+        get_node()->get_logger(),
+        "use_calibrated_inertia=false; using nominal URDF inertia");
+      return;
+    }
+    std::string path =
+      get_node()->get_parameter("inertia_params_file").as_string();
+    if (path.empty()) {
+      try {
+        path = ament_index_cpp::get_package_share_directory("a3_description") +
+          "/config/inertia_params.yaml";
+      } catch (const std::exception & e) {
+        RCLCPP_WARN(
+          get_node()->get_logger(),
+          "cannot resolve a3_description share for F49 file: %s", e.what());
+        return;
+      }
+    }
+
+    YAML::Node root;
+    try {
+      root = YAML::LoadFile(path);
+    } catch (const std::exception & e) {
+      RCLCPP_WARN(
+        get_node()->get_logger(),
+        "cannot load inertia params %s: %s; using nominal URDF inertia",
+        path.c_str(), e.what());
+      return;
+    }
+    if (!root["use_calibrated_params"].as<bool>(false)) {
+      RCLCPP_INFO(
+        get_node()->get_logger(),
+        "inertia file %s: use_calibrated_params=false; nominal URDF inertia",
+        path.c_str());
+      return;
+    }
+    const YAML::Node params = root["inertia_params"];
+    if (!params) {
+      RCLCPP_WARN(
+        get_node()->get_logger(),
+        "inertia file %s has no inertia_params map", path.c_str());
+      return;
+    }
+
+    size_t applied = 0;
+    for (auto it = params.begin(); it != params.end(); ++it) {
+      const std::string key = it->first.as<std::string>();
+      const auto link_it = kJointToLink.find(key);
+      if (link_it == kJointToLink.end()) {
+        continue;
+      }
+      const std::string & link = link_it->second;
+      if (!model_.existBodyName(link)) {
+        RCLCPP_WARN(
+          get_node()->get_logger(), "F49: model has no link '%s'",
+          link.c_str());
+        continue;
+      }
+      const pinocchio::FrameIndex fid = model_.getBodyId(link);
+      const pinocchio::JointIndex jid = model_.frames[fid].parentJoint;
+      if (jid <= 0 || jid >= static_cast<pinocchio::JointIndex>(
+        model_.inertias.size()))
+      {
+        continue;
+      }
+      const YAML::Node entry = it->second;
+      const double mass = entry["mass"].as<double>();
+      const YAML::Node c = entry["com"];
+      const Eigen::Vector3d com(
+        c[0].as<double>(), c[1].as<double>(), c[2].as<double>());
+      const auto & Y = model_.inertias[jid];
+      model_.inertias[jid] = pinocchio::Inertia(mass, com, Y.inertia());
+      ++applied;
+    }
+    RCLCPP_INFO(
+      get_node()->get_logger(),
+      "applied F49 calibrated inertia to %zu links", applied);
+  }
+
   static std::string ReadFile(const std::string & path)
   {
     std::ifstream f(path);
@@ -249,6 +365,7 @@ private:
   Eigen::VectorXd a_zero_;
   std::vector<Eigen::Index> q_index_;
   std::vector<Eigen::Index> v_index_;
+  std::vector<double> tau_scale_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr gravity_pub_;
   int pub_divider_{0};
 };

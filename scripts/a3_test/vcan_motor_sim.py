@@ -14,6 +14,7 @@ the joint direction mapping (motor 2=+0.785, motor 3=+0.785).
 import argparse
 import json
 import os
+import random
 import socket
 import struct
 import time
@@ -58,6 +59,9 @@ class MotorState:
         self.angle = INIT_ANGLE[motor_id]
         self.speed = 0.0
         self.torque = 0.0
+        # When set, type-2 feedback reports this instead of self.torque
+        # (F89: torque-sensor measurement noise injection).
+        self.report_torque = None
         self.last_t = time.monotonic()
         # Last Type-18 raw values per param; 0x7028 starts disarmed,
         # 0x700B starts at the factory default (model peak float).
@@ -122,7 +126,8 @@ def send_feedback(sock, m, health):
     data = [0] * 8
     p = float_to_u16(m.angle, -P_RANGE, P_RANGE)
     v = float_to_u16(m.speed, -vmax, vmax)
-    t = float_to_u16(m.torque, -tmax, tmax)
+    tval = m.report_torque if m.report_torque is not None else m.torque
+    t = float_to_u16(tval, -tmax, tmax)
     temp_c = health.temp if health.motor == m.motor_id else 30.0
     temp = max(0, min(65535, int(temp_c * 10)))
     raw = ((p & 0xFFFF).to_bytes(2, "big") + (v & 0xFFFF).to_bytes(2, "big") +
@@ -208,6 +213,94 @@ class DynamicsCtl:
         except (OSError, ValueError, KeyError, TypeError):
             pass
         self.entries = entries
+
+
+class UrdfGravityModel:
+    """RNEA gravity loads in motor coordinates (F89 physical sim).
+
+    q_urdf_i = direction_i * motor_angle_i (zero position offset); the
+    motor-domain gravity load of motor i is
+        direction_i * scale_i * g_urdf_i.
+    L7 has no scale (gripper mass still loads L1-L6 through the chain).
+    """
+
+    JOINT_SIGNS = [-1, 1, -1, 1, -1, 1, 1]
+    # Same F49 mapping as scripts/gravity_scale_calibration.py: the sim truth
+    # model and the calibration prediction model must share the same link
+    # inertias, otherwise per-pose varying ratio errors masquerade as scale
+    # errors.
+    JOINT_TO_LINK = {
+        "L2": "l2_l3_urdf_asm",
+        "L3": "l3_lnik_urdf_asm",
+        "L4": "l4_l5_urdf_asm",
+        "L5": "part_9",
+        "L6": "l5_l6_urdf_asm",
+    }
+
+    def __init__(self, urdf_path, scales, inertia_params_path=""):
+        import yaml
+        import pinocchio as pin
+        self.pin = pin
+        self.model = pin.buildModelFromUrdf(urdf_path)
+        if inertia_params_path:
+            self._apply_calibrated_inertia(pin, yaml, inertia_params_path)
+        self.data = self.model.createData()
+        self.q = pin.neutral(self.model)
+        self.scales = list(scales) + [1.0]
+        self.q_idx = []
+        self.v_idx = []
+        for i in range(1, 8):
+            jid = self.model.getJointId(f"L{i}_joint")
+            self.q_idx.append(self.model.joints[jid].idx_q)
+            self.v_idx.append(self.model.joints[jid].idx_v)
+
+    def _apply_calibrated_inertia(self, pin, yaml, path):
+        import numpy as np
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except OSError:
+            print(f"gravity: cannot read {path}, nominal inertia kept",
+                  flush=True)
+            return
+        params = data.get("inertia_params", {})
+        if not params or not data.get("use_calibrated_params", False):
+            return
+        applied = 0
+        for key, link_name in self.JOINT_TO_LINK.items():
+            if key not in params:
+                continue
+            parent = None
+            for frame in self.model.frames:
+                if frame.name == link_name:
+                    parent = frame.parentJoint
+                    break
+            if parent is None or parent <= 0 or parent >= len(self.model.inertias):
+                continue
+            p = params[key]
+            mass = float(p.get("mass", self.model.inertias[parent].mass))
+            com = np.array(p.get("com", [0.0, 0.0, 0.0]), dtype=np.float64)
+            try:
+                Y = self.model.inertias[parent]
+                self.model.inertias[parent] = pin.Inertia(mass, com, Y.inertia)
+                applied += 1
+            except Exception as exc:  # noqa: BLE001
+                print(f"gravity: skip calibrated inertia {key}: {exc}",
+                      flush=True)
+        print(f"gravity: applied F49 calibrated inertia to {applied} links",
+              flush=True)
+
+    def loads(self, motors):
+        """motors: {motor_id: MotorState}. Returns {motor_id: load Nm}."""
+        for i in range(7):
+            self.q[self.q_idx[i]] = (
+                self.JOINT_SIGNS[i] * motors[i + 1].angle)
+        g = self.pin.computeGeneralizedGravity(
+            self.model, self.data, self.q)
+        return {
+            i + 1: self.JOINT_SIGNS[i] * self.scales[i] * float(g[self.v_idx[i]])
+            for i in range(7)
+        }
 
 
 class SilenceCtl:
@@ -308,6 +401,20 @@ def main():
     parser.add_argument("--dynamics-file", default="/tmp/f87_dynamics.json",
                         help="per-motor dynamics overrides: "
                              "{\"7\": {\"gravity_nm\": 0.0, \"stop_at\": 0.8}}")
+    parser.add_argument("--gravity-model", choices=["legacy", "urdf"],
+                        default="legacy",
+                        help="urdf: effort-mode rotor carries a live RNEA "
+                             "gravity load (F89 physical sim)")
+    parser.add_argument("--gravity-scales", type=float, nargs=6,
+                        default=None, metavar=("S1", "S2", "S3", "S4", "S5", "S6"),
+                        help="injected true per-joint gravity scales (L1-L6)")
+    parser.add_argument("--gravity-noise", type=float, default=0.0,
+                        help="stddev Nm of Gaussian torque-feedback noise")
+    parser.add_argument("--gravity-urdf", default="",
+                        help="URDF file for the RNEA gravity model")
+    parser.add_argument("--gravity-inertia-params", default="",
+                        help="F49 inertia_params.yaml applied to the truth "
+                             "model (default: sibling ../config of --gravity-urdf)")
     args = parser.parse_args()
 
     sock = socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
@@ -320,6 +427,21 @@ def main():
     dyn = DynamicsCtl(args.dynamics_file)
     silence = SilenceCtl(args.silence_file)
     health = HealthCtl(args.health_file)
+    gravity = None
+    if args.gravity_model == "urdf":
+        if not args.gravity_urdf:
+            parser.error("--gravity-model urdf requires --gravity-urdf")
+        scales = args.gravity_scales or [1.0] * 6
+        inertia_params = args.gravity_inertia_params
+        if not inertia_params:
+            candidate = os.path.join(
+                os.path.dirname(args.gravity_urdf), os.pardir,
+                "config", "inertia_params.yaml")
+            if os.path.exists(candidate):
+                inertia_params = candidate
+        gravity = UrdfGravityModel(args.gravity_urdf, scales, inertia_params)
+        print(f"URDF gravity model, scales={scales}, noise={args.gravity_noise}",
+              flush=True)
     # CAN is a shared bus: every motor observes every frame. The firmware
     # watchdog counts bus activity, not frames addressed to one motor.
     bus_last_t = time.monotonic()
@@ -367,6 +489,7 @@ def main():
         def reply():
             if silence.motor != motor_id:
                 send_feedback(sock, m, health)
+            m.report_torque = None
 
         if cmd_type == CMD_RESET:
             m.speed = 0.0
@@ -401,15 +524,23 @@ def main():
             dt = max(1e-3, now - m.last_t)
             m.last_t = now
             if kp < 1.0:
-                # Effort mode. Legacy model: t_ff cancels a static gravity
-                # load and only operator push moves the rotor; F87b override
-                # motors instead take applied torque at face value.
+                # Effort mode. Three physics options:
+                #  - URDF gravity model (F89): rotor carries a live RNEA load
+                #  - F87b per-motor override: applied torque taken at face value
+                #  - legacy: t_ff cancels an implicit static load, only push
+                # moves the rotor.
                 ext.poll()
                 push = ext.torque if ext.motor == motor_id else 0.0
                 m.torque = max(-fw_limit,
                                min(fw_limit,
                                    t_ff + kp * (target - m.angle) + kd * (target_v - m.speed)))
-                if dyncfg is not None:
+                if gravity is not None:
+                    gravity_load = gravity.loads(motors)[motor_id]
+                    net = m.torque - gravity_load + push
+                    if args.gravity_noise > 0.0:
+                        m.report_torque = (
+                            m.torque + random.gauss(0.0, args.gravity_noise))
+                elif dyncfg is not None:
                     net = m.torque + dyncfg["gravity_nm"] + push
                 else:
                     net = m.torque - t_ff + push
@@ -420,9 +551,19 @@ def main():
                 prev = m.angle
                 m.angle += args.alpha * (target - m.angle)
                 m.speed = max(-vmax, min(vmax, (m.angle - prev) / dt))
-                m.torque = max(-fw_limit,
-                               min(fw_limit,
-                                   t_ff + kp * (target - m.angle) + kd * (target_v - m.speed)))
+                if gravity is not None:
+                    # F89 static-hold calibration pairing: the stiff inner
+                    # position servo settles at the target; at equilibrium its
+                    # applied torque equals the motor-domain gravity load.
+                    gravity_load = gravity.loads(motors)[motor_id]
+                    m.torque = max(-fw_limit, min(fw_limit, gravity_load))
+                    if args.gravity_noise > 0.0:
+                        m.report_torque = (
+                            m.torque + random.gauss(0.0, args.gravity_noise))
+                else:
+                    m.torque = max(-fw_limit,
+                                   min(fw_limit,
+                                       t_ff + kp * (target - m.angle) + kd * (target_v - m.speed)))
             stop_at = dyncfg["stop_at"] if dyncfg else None
             if stop_at is not None and m.angle >= stop_at and m.speed > 0.0:
                 m.angle = stop_at

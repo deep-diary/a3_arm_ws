@@ -19,6 +19,8 @@ find_package(diagnostic_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(a3_can_bridge REQUIRED)
 find_package(pinocchio REQUIRED)
+find_package(yaml-cpp REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 
 add_library(
   a3_hardware_interface
@@ -44,8 +46,10 @@ ament_target_dependencies(
   diagnostic_msgs
   std_msgs
   a3_can_bridge
+  ament_index_cpp
 )
-target_link_libraries(a3_hardware_interface pinocchio::pinocchio)
+target_link_libraries(
+  a3_hardware_interface pinocchio::pinocchio yaml-cpp)
 
 pluginlib_export_plugin_description_file(
   hardware_interface a3_hardware_interface.xml)

@@ -91,6 +91,12 @@ def generate_launch_description():
 
     controllers_yaml = os.path.join(desc_share, "config", "el_a3_controllers.yaml")
 
+    # F89: gravity scales produced by scripts/gravity_scale_calibration.py.
+    # Auto-adopt semantics (same as ~/.a3/poses.yaml overrides): when the
+    # argument is left empty and ~/.a3/gravity_scales.yaml exists, use it.
+    auto_scales = os.path.expanduser("~/.a3/gravity_scales.yaml")
+    default_scales = auto_scales if os.path.exists(auto_scales) else ""
+
     rsp = Node(
         package="robot_state_publisher",
         executable="robot_state_publisher",
@@ -110,6 +116,17 @@ def generate_launch_description():
         allow_substs=True,
     )
 
+    gravity_scales_path = LaunchConfiguration("gravity_scales_file")
+    # Empty arg resolves to the base controllers yaml (identical values),
+    # keeping the parameter list static across runs.
+    gravity_scales_file_param = ParameterFile(
+        PythonExpression([
+            "'", gravity_scales_path, "' if '", gravity_scales_path,
+            "' != '' else '", controllers_yaml, "'",
+        ]),
+        allow_substs=True,
+    )
+
     controller_manager = Node(
         package="controller_manager",
         executable="ros2_control_node",
@@ -117,6 +134,7 @@ def generate_launch_description():
             {"robot_description": robot_description},
             controllers_yaml,
             gripper_plugin_file,
+            gravity_scales_file_param,
         ],
         output="screen",
     )
@@ -408,6 +426,12 @@ def generate_launch_description():
             "use_diagnostics",
             default_value="true",
             description="diagnostic_aggregator 诊断聚合（F82；/diagnostics_agg + toplevel state）",
+        ),
+        DeclareLaunchArgument(
+            "gravity_scales_file",
+            default_value=default_scales,
+            description="F89 重力比例 CM ParameterFile（zero_torque_controller.tau_scale）；"
+                        "留空且 ~/.a3/gravity_scales.yaml 存在时自动采用",
         ),
         DeclareLaunchArgument(
             "fsm_backend",

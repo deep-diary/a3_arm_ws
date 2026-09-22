@@ -22,6 +22,12 @@
   <depend>std_msgs</depend>
   <depend>a3_can_bridge</depend>
   <depend>pinocchio</depend>
+  <depend>yaml-cpp</depend>
+  <depend>ament_index_cpp</depend>
+  <!-- F49 inertia_params.yaml is resolved at runtime via ament_index; no
+       package depend here: a3_description already exec-depends on this
+       package, declaring the reverse would be a circular dependency. -->
+
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
