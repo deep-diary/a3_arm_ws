@@ -833,6 +833,28 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F67/F68（同 MoveIt 体系，本次替换执行底座）、审计任务（自研→标准工具）；[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)；真机 SystemInterface 插件（后续需求）
 - **状态：** `completed（仿真）`（2026-09-22 仿真验收 11/11 ALL PASS，ROS_DOMAIN_ID=58：JTC 直连 home→ready→home（31 点五次 S 曲线），vmax ≤0.52、amax ≤2.77、目标误差 0.0000；夹爪开合 vmax ≤0.78、amax ≤2.57；move_group plan+execute 经官方 JTC（9 点 TOTG 轨迹），vmax ≤2.09、amax ≤7.31、目标误差 ≤0.0093；栈内无自研 FJT 节点。踩坑见 [LL-072](../lessons_learned/LL-072-ros2-control-mock-jsb-order-jtc-single-point.md)。真机迁移 = SocketCAN/MIT SystemInterface 插件，另立需求）
 
+## F71 arm_monitor 标准诊断通道（diagnostic_updater → /diagnostics）
+
+- **说明：** 审计结论（用户：「自己折腾总会出错，尽量复用现有工具」）：`a3_arm_monitor` 只发布自定义 `MonitorStatus`，标准 ROS 诊断工具链（`diagnostic_aggregator`、`rqt_robot_monitor`、robot monitor 大屏）无法接入；故障分级（OK/PENDING/TRIGGERED）是工业诊断里现成的 `DiagnosticStatus.level`（OK/WARN/ERROR）。**增量改造，不动看门狗故障判定/处置阶梯逻辑**（LL-039/LL-053/LL-070 真机教训全部原位保留），仅新增官方包 `diagnostic_updater`（4.0.7）发布 `/diagnostics`，两个组件：`a3_arm_monitor: Monitor`（fault=ERROR / pending=WARN / OK，键值含 fault、pending_faults、action、last_event）、`a3_arm_monitor: Tracking`（各关节跟随误差 + max，超 follow 阈值 WARN，FOLLOW_STUCK/HOLD_DRIFT 触发时 ERROR）。组件名由 diagnostic_updater 自动加节点名前缀，add() 只给裸名。`MonitorStatus` 话题保留不变。参数 `publish_diagnostics`（默认 true）、`diagnostics_period_s`（默认 1.0）。
+- **验收标准：**
+  1. 健康态：`/diagnostics` 周期性出现两个组件且 level=OK，键值齐全；`/a3/monitor/status` 仍正常（OK）
+  2. 故障态（js 停发 → STALE_JS 确认）：Monitor 组件 level=ERROR 且 fault 键值为 STALE_JS；恢复（js 复发并持续 clear_hold）后回 OK
+  3. pending（条件成立未达 sustain）期间 level=WARN
+  4. 数值验收脚本：上述 1–3 全自动，结论 ALL PASS
+- **关联：** F50（看门狗本体）、审计任务（自研→标准工具）；F70（同标准栈体系）
+- **状态：** `completed（仿真）`（2026-09-22 全自动验收 9/9 ALL PASS，ROS_DOMAIN_ID=59：健康态两组件 level=OK + MonitorStatus OK；js 停发 → pending WARN → STALE_JS TRIGGERED，Monitor level=ERROR fault=STALE_JS（319 条）；js 恢复 clear_hold 后两组件回 OK、MonitorStatus OK。看门狗判定/处置逻辑零改动。踩坑见 [LL-073](../../lessons_learned/LL-073-diagnostic-updater-name-prefix-byte-level.md)。真机随栈上电另验）
+
+## F72 真机 SystemInterface 插件（MIT/SocketCAN 直驱，ros2_control 标准栈真机化）
+
+- **说明：** F70 的真机迁移：新建 ament_cmake 包 `a3_hardware_interface`，提供 `hardware_interface::SystemInterface` 插件 `a3_hardware_interface/A3MITHardwareInterface`——controller_manager 直接打开 SocketCAN（默认 `can1`）、收线程解 MIT 反馈帧（类型 2 / 0x18），`write()` 直接打 MIT 控制帧；F70 的 JTC/JSB/move_group 配置**原样复用**，真机路径上 `motor_protocol_node`（3361 行）+ 200 Hz 插值器 + `/can_tx_frames` 话题中转整体被旁路。MIT 编解码**复用本仓真机验证过的 ProtocolCodec**（motor_model.hpp + protocol_codec.hpp 两份头文件 vendored 进新包，仅换命名空间；不重写协议常量），SocketCAN 传输按官方 el_a3_hardware 结构写单总线实现（SOCK_RAW、SO_RCVTIMEO、send mutex + ENOBUFS 重试、CAN_RAW_FILTER 只收反馈帧）。关节→电机映射取 URDF 既有参数：每关节 `motor_id`、`direction`（L1..L7 = −1,+1,−1,+1,−1,+1,+1，与 control_gains.yaml joint_signs 一致）、`position_offset=0`；硬件参数 `can_interface`、`kp`（默认 80）/`kd`（默认 2）、`command_rate_hz`（默认 200）、力矩/速度量程按 motor_id（1–3 RS00 ±14 Nm/±33 rad/s，4–7 EL05 ±6 Nm/±50 rad/s，LL-024）。生命周期：`on_configure` 打开 CAN 并起收线程；`on_activate` 先发 reset（清故障）再发 enable、随后以反馈位重锚指令（F51 语义）；`on_deactivate` 发零增益续流帧后 reset 失能。xacro 新增 `use_real_hardware` 分支（mock 分支不动）。**增量并存：不删旧栈、不改 F70 仿真栈。**
+- **验收标准：**
+  1. `vcan0` + 电机反馈仿真器（收到 MIT 指令帧→一阶跟随→回类型 2 反馈）下，真机 launch 启动无致命错误：插件 loaded/active，JSB 发布 7 关节 /joint_states（position/velocity 非全零）
+  2. 直连 `/arm_controller/follow_joint_trajectory`（31 点五次 S 曲线 home→ready→home）与夹爪 JTC 开合：action 成功、到位（误差 ≤0.02 rad）
+  3. move_group plan+execute 端到端经插件完成（无 motor_protocol_node 进程）
+  4. 数值验收脚本：起止速度≈0、v/a 不超限（与 F70 同判据），结论 ALL PASS；CAN 线侧抓包确认指令帧位置=direction×joint+offset
+- **关联：** F70（仿真标准栈，本需求真机化）、F51（使能重锚语义）、LL-024（量程按型号）；[shared/SAFETY.md](../shared/SAFETY.md)；官方 el_a3_hardware（结构蓝本，协议常量以本仓为准）
+- **状态：** `in-progress`（2026-09-22，仿真验收；真机上电验收另约）
+
 ### F40 — 失能保护（disable → 自动回 home → 失能）
 
 - **说明：** `/a3/arm/disable` 不再是「无条件直接失能」——不在 home 容差内时先平滑回 home 再失能，防止 ready 位直接掉臂。新增参数：`disable_home_pose_name: "home"`、`disable_home_tol_rad: 0.15`、`disable_home_duration_s: 3.0`、`disable_home_confirm_s: 0.5`、`disable_park_timeout_s: 8.0`。新辅助 `_at_home()`（全关节 |q−home| ≤ tol）与 `_safe_park_then_disable()`（同步阻塞：发布 home 轨迹抢占活跃轨迹——执行层 OnTrajectory 天然支持替换，无需排队 → `SAFE_PARK`（期间拒绝新运动指令）→ 轮询连续 `confirm_s` 收敛 → reset → `DISABLED`）。服务语义（同步阻塞返回，`success=true ⟺ 已失能`）：READY/TRAJ 容差内 → 直达 reset → DISABLED；容差外 → safe park → reset → DISABLED（message 含耗时）；IDLE → 直达 reset；DISABLED/COOLING → 幂等不动电机；FAULT → 紧急直达 reset；INIT/TEACH/SERVO/AI → 拒绝 busy；SAFE_PARK → 拒绝「already safe parking」。park 超时 → **FAULT 不 reset**（保持使能、停在半途，人工介入）；reset 被 gate 拒 → park 前 `success=false` + 原文 + "(stop power sequence first)"，park 完成后被拒 → 回 READY（已在 home 位，安全）；`_have_js==False` → 直达 reset + WARN（保持旧行为）。`/a3/motor/reset` 直达保留作紧急失能。

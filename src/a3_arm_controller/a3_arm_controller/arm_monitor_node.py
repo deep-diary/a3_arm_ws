@@ -27,6 +27,9 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 
+import diagnostic_updater
+from diagnostic_msgs.msg import DiagnosticStatus
+
 from a3_msgs.msg import ArmStatus, MonitorStatus
 from a3_can_bridge.msg import MotorStates
 from a3_can_bridge.srv import MotorCommand, MotorStop
@@ -112,6 +115,12 @@ class ArmMonitorNode(Node):
         self._status_pub = self.create_publisher(
             MonitorStatus, p("monitor_status_topic"), 10)
 
+        # F71：标准诊断通道（诊断判定/处置逻辑不变，仅把现有 OK/PENDING/TRIGGERED
+        # 映射成 DiagnosticStatus level，供 diagnostic_aggregator/rqt_robot_monitor 接入）
+        self._diag = None
+        if p("publish_diagnostics"):
+            self._init_diagnostics(p("diagnostics_period_s"))
+
         # F58/LL-053: 重力前馈样本（reset 姿态门禁用）。BestEffort 按真机 QoS；
         # 无 gravity 节点发布时样本缺失 → 门禁放行（F51/F52 回归兼容）。
         self._grav_effort = None      # 最近 max|effort|（None=无样本）
@@ -195,8 +204,58 @@ class ArmMonitorNode(Node):
         # 持续多久判「轨迹结束未回收模式」（F29 类回归）；告警 cooldown
         d("mode_stuck_s", 3.0)
         d("mode_stuck_cooldown_s", 10.0)
+        # F71：标准 /diagnostics（diagnostic_updater）
+        d("publish_diagnostics", True)
+        d("diagnostics_period_s", 1.0)
         for f, act in FAULT_DEFAULTS.items():
             d(f"{f.lower()}_action", act)
+
+    # ------------------------------------------------------------ F71 标准诊断
+
+    def _init_diagnostics(self, period_s):
+        self._updater = diagnostic_updater.Updater(self, period=period_s)
+        self._updater.setHardwareID("a3-arm")
+        self._updater.add("Monitor", self._diag_monitor)
+        self._updater.add("Tracking", self._diag_tracking)
+
+    def _diag_monitor(self, stat):
+        snap = self._diag
+        if snap is None:
+            stat.summary(DiagnosticStatus.STALE, "no data yet")
+            return stat
+        fault = snap["fault"]
+        pending = snap["pending"]
+        if fault:
+            stat.summary(DiagnosticStatus.ERROR, f"TRIGGERED: {fault}")
+        elif pending:
+            stat.summary(DiagnosticStatus.WARN, f"PENDING: {', '.join(pending)}")
+        else:
+            stat.summary(DiagnosticStatus.OK, "OK")
+        stat.add("fault", fault)
+        stat.add("pending_faults", ", ".join(pending))
+        stat.add("action", snap["action"])
+        stat.add("last_event", snap["last_event"])
+        return stat
+
+    def _diag_tracking(self, stat):
+        snap = self._diag
+        if snap is None or not snap["errs"]:
+            stat.summary(DiagnosticStatus.STALE, "no data yet")
+            return stat
+        errs = snap["errs"]
+        max_err = max(errs)
+        if snap["fault"] in ("FOLLOW_STUCK", "HOLD_DRIFT"):
+            stat.summary(DiagnosticStatus.ERROR,
+                         f"tracking fault: {snap['fault']} max_err={max_err:.3f}")
+        elif max_err > float(self.get_parameter("follow_error_max_rad").value):
+            stat.summary(DiagnosticStatus.WARN,
+                         f"tracking error high: max_err={max_err:.3f}")
+        else:
+            stat.summary(DiagnosticStatus.OK,
+                         f"max_err={max_err:.3f}")
+        for j, e in enumerate(errs[:7]):
+            stat.add(f"L{j + 1}_err", f"{e:.4f}")
+        return stat
 
     # ------------------------------------------------------------------ 订阅回调
 
@@ -587,6 +646,13 @@ class ArmMonitorNode(Node):
         st.max_tracking_error = max(errs) if errs else 0.0
         st.last_event = self._last_event
         self._status_pub.publish(st)
+        self._diag = {
+            "fault": self._fault or "",
+            "pending": list(self._pending),
+            "action": st.action,
+            "last_event": self._last_event,
+            "errs": [float(e) for e in errs] if errs else [],
+        }
 
 
 def main(args=None):

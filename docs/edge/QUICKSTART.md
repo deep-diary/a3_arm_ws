@@ -472,6 +472,19 @@ python3 scripts/a3_test/f70_ros2_control_sim_acceptance.py
 
 - 控制器配置 `src/a3_description/config/el_a3_controllers.yaml`；spawn 顺序必须 JTC 先、JSB 后，否则速度字段恒 0；直连 JTC 测试要发完整多点轨迹，单点只做匀速线性插值——三个坑详见 [LL-072](../lessons_learned/LL-072-ros2-control-mock-jsb-order-jtc-single-point.md)。
 
+### 看门狗标准诊断验收（F71，/diagnostics）
+
+`a3_arm_monitor` 增量发布标准 `/diagnostics`（官方 `diagnostic_updater`），两组件可直接接 `diagnostic_aggregator` / `rqt_robot_monitor`：`a3_arm_monitor: Monitor`（fault=ERROR、pending=WARN、OK）、`a3_arm_monitor: Tracking`（各关节跟随误差 + max，超阈值 WARN，FOLLOW_STUCK/HOLD_DRIFT 触发时 ERROR）。看门狗判定/处置逻辑不变，`MonitorStatus` 话题保留；参数 `publish_diagnostics`（默认 true）、`diagnostics_period_s`（默认 1.0）。
+
+```bash
+source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
+# 全自动（脚本自行在独立 ROS_DOMAIN_ID=59 起 monitor 并喂数：健康→STALE_JS→恢复）
+python3 scripts/a3_test/f71_monitor_diagnostics_acceptance.py
+#   通过标准：末尾「总体: ALL PASS」（9 项）
+```
+
+- 组件名自动带节点名前缀（add() 只给裸名）、`level` 是 byte 字段 rclpy 收为 bytes、harness 自身进程也要设 ROS_DOMAIN_ID——详见 [LL-073](../lessons_learned/LL-073-diagnostic-updater-name-prefix-byte-level.md)。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
