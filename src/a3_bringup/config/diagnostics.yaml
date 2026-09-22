@@ -1,0 +1,20 @@
+# F82：diagnostic_aggregator GenericAnalyzer 分组配置。
+# 节点名 diagnostic_aggregator（见 a3_bringup.launch.py）。
+# 输入 /diagnostics（F71 arm_monitor diagnostic_updater + F81 硬件插件）；
+# 输出 /diagnostics_agg（分组树，路径形如 /A3/Hardware/...）
+# 与 /diagnostics_toplevel_state（0 OK / 1 WARN / 2 ERROR / 3 STALE）。
+diagnostic_aggregator:
+  ros__parameters:
+    pub_rate: 1.0
+    path: A3
+    analyzers:
+      hardware:
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: Hardware
+        timeout: 5.0
+        startswith: ["a3_hardware:"]
+      monitor:
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: Arm Monitor
+        timeout: 5.0
+        startswith: ["arm_monitor:", "a3_arm_monitor:"]

@@ -16,6 +16,7 @@
     motor_service_backend=controller_switch，require_gate:=false）
   a3_gripper_controller 产品节点（traj_topic=/gripper_controller/joint_trajectory）
   a3_mqtt_bridge（默认包含；broker 不可达自行重连，节点不退出）
+  diagnostic_aggregator（F82，默认包含；/diagnostics_agg + /diagnostics_toplevel_state）
   PS4 遥操作（默认包含）
 
 硬件模式：
@@ -63,7 +64,9 @@ def generate_launch_description():
     use_teleop = LaunchConfiguration("use_teleop")
     teleop_mapping = LaunchConfiguration("teleop_mapping")
     use_monitor = LaunchConfiguration("use_monitor")
+    use_diagnostics = LaunchConfiguration("use_diagnostics")
 
+    bringup_share = get_package_share_directory("a3_bringup")
     desc_share = get_package_share_directory("a3_description")
     moveit_share = get_package_share_directory("a3_moveit_config")
     arm_share = get_package_share_directory("a3_arm_controller")
@@ -325,6 +328,17 @@ def generate_launch_description():
         output="screen",
     )
 
+    # ---- F82：诊断聚合（/diagnostics → /diagnostics_agg + toplevel state）----
+    diagnostics_yaml = os.path.join(bringup_share, "config", "diagnostics.yaml")
+    diagnostic_aggregator = Node(
+        package="diagnostic_aggregator",
+        executable="aggregator_node",
+        name="diagnostic_aggregator",
+        output="screen",
+        parameters=[diagnostics_yaml],
+        condition=IfCondition(use_diagnostics),
+    )
+
     # LL-072：JTC 先 configure（3 s），zero_torque 5 s，JSB 7 s 激活；
     # 产品节点 4 s 后启动，避开 hardware 加载窗口。
     delay_jtc = TimerAction(period=3.0, actions=[jtc_spawner])
@@ -378,7 +392,13 @@ def generate_launch_description():
             default_value="false",
             description="arm_monitor 诊断节点（F71；故障处置依赖具体后端时再开）",
         ),
+        DeclareLaunchArgument(
+            "use_diagnostics",
+            default_value="true",
+            description="diagnostic_aggregator 诊断聚合（F82；/diagnostics_agg + toplevel state）",
+        ),
         rsp,
+        diagnostic_aggregator,
         controller_manager,
         move_group,
         delay_jtc,

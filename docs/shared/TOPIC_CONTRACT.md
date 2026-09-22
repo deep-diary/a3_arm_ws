@@ -98,6 +98,15 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/hardware/feedback_stale` | `std_msgs/Bool`，**TRANSIENT_LOCAL**（latched） | 发布 | `true` = 至少一个电机 last-rx 超 `feedback_timeout_s`（默认 0.2 s），插件已进入整臂 freeze-hold；编排 FSM 订阅后拒绝一切运动指令，晚加入订阅者立即收当前值 |
 | `/diagnostics` | `diagnostic_msgs/DiagnosticArray`，**TRANSIENT_LOCAL**（latched） | 发布 | `a3_hardware:feedback_watchdog` 条目：每电机 `motorN_age_s` 键值 + WARN/ERROR 级；供标准诊断工具链（`rqt_robot_monitor`）消费 |
 
+### 诊断聚合（F82，diagnostic_aggregator）
+
+`aggregator_node`（节点名 `/diagnostic_aggregator`，配置 `a3_bringup/config/diagnostics.yaml`）订阅 `/diagnostics`，GenericAnalyzer 分组：`/A3/Hardware`（startswith `a3_hardware:`）与 `/A3/Arm Monitor`（startswith `a3_arm_monitor:`/`arm_monitor:`），输入消失 5 s 转 STALE。mock/can 两栈均含（`use_diagnostics:=true` 默认）。
+
+| 话题 | 类型 / QoS | 方向 | 说明 |
+|------|-----------|------|------|
+| `/diagnostics_agg` | `diagnostic_msgs/DiagnosticArray` | 发布 | 聚合分组树，名称为路径，形如 `/A3/Hardware/a3_hardware:feedback_watchdog`；供 `rqt_robot_monitor` 消费 |
+| `/diagnostics_toplevel_state` | `diagnostic_msgs/DiagnosticStatus` | 发布 | 整机单一健康状态，取 `level` 字段：0 OK / 1 WARN / 2 ERROR / 3 STALE（`name=/A3`）；HMI/CI 一键判定 |
+
 ## 机械臂编排（a3_arm_controller）
 
 统一对外交互门面（需求 [F21](../edge/REQUIREMENTS.md)），底层复用 `/a3/motor/*`、`/power_sequence/*`、`/arm_controller/follow_joint_trajectory`、`/servo_node/*`、`/a3/zero_torque/*`、`/a3/gravity_compensation/*`，自身只做状态机、生命周期、示教与模式仲裁。

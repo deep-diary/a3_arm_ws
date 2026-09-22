@@ -215,8 +215,9 @@ class ArmMonitorNode(Node):
     def _init_diagnostics(self, period_s):
         self._updater = diagnostic_updater.Updater(self, period=period_s)
         self._updater.setHardwareID("a3-arm")
-        self._updater.add("Monitor", self._diag_monitor)
-        self._updater.add("Tracking", self._diag_tracking)
+        # F71/F82：名称带 a3_arm_monitor: 前缀（F71 验收与 GenericAnalyzer 分组依赖）
+        self._updater.add("a3_arm_monitor: Monitor", self._diag_monitor)
+        self._updater.add("a3_arm_monitor: Tracking", self._diag_tracking)
 
     def _diag_monitor(self, stat):
         snap = self._diag

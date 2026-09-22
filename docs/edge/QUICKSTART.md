@@ -642,6 +642,25 @@ echo '{"motor": 4}' > /tmp/f81_silence.json     # 恢复：echo '{}' > /tmp/f81_
 
 真机上电后 F81 随 can 栈自动生效，真机验收待上电。
 
+### 诊断聚合验收（F82，diagnostic_aggregator）
+
+`/diagnostic_aggregator` 节点（mock/can 栈默认均含，`use_diagnostics:=false` 可关）按 `a3_bringup/config/diagnostics.yaml` 聚合：`/A3/Hardware`（`a3_hardware:` 前缀，F81 看门狗）与 `/A3/Arm Monitor`（`a3_arm_monitor:` 前缀，F71 Monitor/Tracking），输入消失 5 s 转 STALE。
+
+```bash
+source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
+python3 scripts/a3_test/f82_diagnostic_aggregator_acceptance.py 82
+#   通过标准：末尾「4/4」（分组路径+toplevel OK / ERROR 升级与恢复 /
+#   停发 STALE 与恢复 / mock 全栈烟雾）
+```
+
+手动观测：
+
+```bash
+ros2 topic echo /diagnostics_toplevel_state        # DiagnosticStatus.level：0 OK / 1 WARN / 2 ERROR / 3 STALE
+ros2 topic echo /diagnostics_agg                   # 聚合分组树
+rqt_robot_monitor                                  # 图形化分组健康面板
+```
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
