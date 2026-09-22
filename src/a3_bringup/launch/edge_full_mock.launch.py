@@ -17,6 +17,8 @@
     reset→enable / stop）
   a3_gripper_controller 产品节点：traj_topic:=/gripper_controller/joint_trajectory
     （JTC 原生话题入口，位置命令直入标准控制器）
+  moveit_servo servo_node（F77：TwistStamped + JointJog 双输入，
+    command_out → /arm_controller/joint_trajectory）+ servo_mode_bridge
   a3_mqtt_bridge（默认包含；broker 不可达时自行重连，节点不退出）
 
 **全程不加载** sim_motor_node / sim_power_sequence_node / gravity_torque_node。
@@ -128,6 +130,10 @@ def generate_launch_description():
         "a3_moveit_config", "config/pilz_cartesian_limits.yaml"
     )
     moveit_controllers_yaml = load_yaml("a3_moveit_config", "config/moveit_controllers.yaml")
+    servo_yaml = load_yaml("a3_moveit_config", "config/servo_config.yaml")
+    # Flatten: moveit_servo accepts params both top-level and under moveit_servo.
+    servo_params = {"moveit_servo": servo_yaml}
+    servo_params.update(servo_yaml or {})
 
     # F76: OMPL（默认）+ Pilz（PTP/LIN/CIRC）双规划管线；Pilz 笛卡尔限位并入
     # robot_description_planning（与关节限位同级）。
@@ -202,6 +208,33 @@ def generate_launch_description():
         ],
     )
 
+    # ---- F77：servo_node 常驻标准栈（TwistStamped + JointJog 双输入），
+    # 轨迹出口指 arm JTC 原生话题；PS4 按需 start_servo。----
+    servo_node = Node(
+        package="moveit_servo",
+        executable="servo_node_main",
+        name="servo_node",
+        output="screen",
+        parameters=[
+            {"robot_description": robot_description},
+            {"robot_description_semantic": robot_description_semantic},
+            {"robot_description_kinematics": kinematics_yaml},
+            servo_params,
+            {"moveit_servo.command_out_topic": "/arm_controller/joint_trajectory"},
+        ],
+        remappings=[
+            ("~/delta_twist_cmds", "/servo_node/delta_twist_cmds"),
+            ("~/delta_joint_cmds", "/servo_node/delta_joint_cmds"),
+        ],
+    )
+
+    servo_bridge = Node(
+        package="a3_bringup",
+        executable="servo_mode_bridge",
+        name="a3_servo_mode_bridge",
+        output="screen",
+    )
+
     # ---- 编排层：F74 FJT 后端 + F75 controller_switch 使能后端 ----
     fsm = Node(
         package="a3_arm_controller",
@@ -262,7 +295,15 @@ def generate_launch_description():
     delay_jsb = TimerAction(period=7.0, actions=[jsb_spawner])
     delay_products = TimerAction(
         period=4.0,
-        actions=[fsm, monitor, gripper, retime_node, mqtt_bridge],
+        actions=[
+            fsm,
+            monitor,
+            gripper,
+            retime_node,
+            mqtt_bridge,
+            servo_node,
+            servo_bridge,
+        ],
     )
 
     return LaunchDescription([

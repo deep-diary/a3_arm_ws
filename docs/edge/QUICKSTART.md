@@ -585,6 +585,23 @@ ROS_DOMAIN_ID=62 python3 scripts/a3_test/f76_pilz_acceptance.py
 - CIRC center 约束的 region 必须覆盖整弧（小盒必报 Position constraint violated）；升级 MoveIt 后 pick-ik 等第三方插件要同步换同版本构建——详见 [LL-078](../lessons_learned/LL-078-pilz-pipeline-version-coupling-circ-center-region.md)。
 - 真机上电后 Pilz 管线随 F72 真机栈同构复用，真机验收待上电。
 
+### 单关节点动走 MoveIt Servo JointJog 验收（F77）
+
+PS4 D-pad 单关节点动不再发旁路 FSM 的手写单点轨迹（旧 `/joint_group_effort_controller/joint_trajectory` 在标准栈上是死话题），改走标准栈常驻的 MoveIt Servo：`control_msgs/JointJog`（速度单位）发到 `/servo_node/delta_joint_cmds`，限位/奇异点/碰撞由 servo 统一保护，输出轨迹直入标准 arm JTC；松开即停保位，FSM 状态保持 READY。L7 夹爪不进 servo，仍走夹爪指令路径。
+
+```bash
+source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
+# 1) 起栈（标准栈已常驻 servo_node + servo_mode_bridge）
+ROS_DOMAIN_ID=63 ros2 launch a3_bringup edge_full_mock.launch.py use_mqtt:=false
+# 2) 验收（另一终端）
+ROS_DOMAIN_ID=63 python3 scripts/a3_test/f77_joint_jog_acceptance.py
+#   通过标准：末尾「F77 acceptance: 8/8」（enable/JTC/servo 端点、JointJog 双向
+#   定向运动、停止保位且 control_mode IDLE、FSM 恒 READY、旧话题零消息、L7 不受影响）
+```
+
+- servo 输出话题参数是嵌套的 `moveit_servo.command_out_topic`，顶层同名键被静默忽略；「servo 不动」先查输出话题端点——详见 [LL-079](../lessons_learned/LL-079-servo-nested-command-out-topic-param-and-input-qos.md)。
+- 真机上电后点动随 servo 真机栈同构复用，真机验收待上电。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

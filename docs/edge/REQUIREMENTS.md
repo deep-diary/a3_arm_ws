@@ -912,6 +912,18 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F67（move_group）、F75（全产品 mock 栈）；任务 #10、#12（reBot 手写 IK/demo 退役由本需求提供标准替代）
 - **状态：** `completed`（2026-09-22 仿真验收，ROS_DOMAIN_ID=62，`scripts/a3_test/f76_pilz_acceptance.py` 12/12：规划/序列端点齐（`/plan_kinematic_path`、`/plan_sequence_path`、`/sequence_move_group`），boot 两 JTC inactive；enable→READY 两 JTC active；OMPL zero→ready 落点 err=0.0009；Pilz PTP ready→home→ready err ≤0.0002；LIN 末端直线 max_dev=0.97 mm、end_err=1.32 mm；CIRC 半径恒定 max_rdev=0.60 mm、end_err=0.93 mm；3 段 LIN + blend_radius 三角形一次执行连续通过，dev=1.46 mm、拐角通过速度 179.9 mm/s；全程零自研笛卡尔节点）
 
+## F77 PS4 D-pad 单关节点动改走 MoveIt Servo JointJog（替代手写单点轨迹）
+
+- **说明：** 审计任务 #10 发现：PS4 D-pad 的单关节点动（`joint_jog_L1..L6` → `tick_end` 直接把 `q + jog×speed×dt` 包成单点 JointTrajectory 发到旧式 `/joint_group_effort_controller/joint_trajectory`）是 F70 标准栈之前的遗留路径——① 单点轨迹绕过 FSM 模式门禁，无速度规划/限幅/奇异点与碰撞保护；② 该旧话题在 F75/F76 标准栈上没有任何消费者，点动实际是死指令。标准替代是 MoveIt Servo 已内置的 `control_msgs/JointJog` 输入（`~/delta_joint_cmds`，速度单位）：servo 内部统一做缩放、关节限位余量、奇异点保护与碰撞检查，输出标准 JointTrajectory 经 JTC 执行。PS4 侧改为持续发布 `velocities` 非零的 JointJog（松开 D-pad → 零速度，伺服自然停住保位），与现有 TwistStamped 笛卡尔遥操走同一伺服、同一 FSM `mode=SERVO` 语义。L7（夹爪）不属 move_group 臂组，继续走夹爪指令/标准 JTC 路径，不进 servo。
+- **接线：** `a3_teleop_ps4/actions.py`（删 tick_end 的单点轨迹点动块，改发 JointJog；按需 start_servo）；`a3_bringup/servo_mode_bridge.py`（新增 JointJog 订阅，关节点动同样断言 SERVO 模式）；`edge_full_mock.launch.py`（标准栈内常驻 servo_node，输出 → `/arm_controller/joint_trajectory`）。
+- **验收标准：**
+  1. D-pad 按住单关节：JointJog 持续发到 `/servo_node/delta_joint_cmds`，对应关节按速度方向实际运动；松开后停止且无越限
+  2. 旧式 `/joint_group_effort_controller/joint_trajectory` 在点动全程零消息
+  3. 点动期间 `/a3/control_mode` 为 SERVO，停止 0.25 s 后回到 IDLE；FSM 状态保持 READY
+  4. 点动轨迹经 servo → 标准 JTC（mock GenericSystem）闭环，零自研点动节点；L7 点动仍走夹爪路径不受影响
+- **关联：** F64（D-pad 双死人开关/单通道调速）、F75（标准 mock 栈）、F76；审计任务 #10；LL-079
+- **状态：** `completed`（2026-09-22 仿真验收 ROS_DOMAIN_ID=63，`scripts/a3_test/f77_joint_jog_acceptance.py` 8/8：JointJog +/−0.2 rad/s 各 1.5 s → L1 位移 ±0.121 rad、实测最大速度 0.34 rad/s，松开即停零漂移；点动全程 control_mode=SERVO→停止后 IDLE、FSM 恒 READY；旧 `/joint_group_effort_controller/joint_trajectory` 零消息；L7 位置服务仍正常驱动（0→1.780→0）。调试中修复 servo 输出话题嵌套参数 `moveit_servo.command_out_topic`（LL-079），并统一指令链路 SensorDataQoS）
+
 ### F40 — 失能保护（disable → 自动回 home → 失能）
 
 - **说明：** `/a3/arm/disable` 不再是「无条件直接失能」——不在 home 容差内时先平滑回 home 再失能，防止 ready 位直接掉臂。新增参数：`disable_home_pose_name: "home"`、`disable_home_tol_rad: 0.15`、`disable_home_duration_s: 3.0`、`disable_home_confirm_s: 0.5`、`disable_park_timeout_s: 8.0`。新辅助 `_at_home()`（全关节 |q−home| ≤ tol）与 `_safe_park_then_disable()`（同步阻塞：发布 home 轨迹抢占活跃轨迹——执行层 OnTrajectory 天然支持替换，无需排队 → `SAFE_PARK`（期间拒绝新运动指令）→ 轮询连续 `confirm_s` 收敛 → reset → `DISABLED`）。服务语义（同步阻塞返回，`success=true ⟺ 已失能`）：READY/TRAJ 容差内 → 直达 reset → DISABLED；容差外 → safe park → reset → DISABLED（message 含耗时）；IDLE → 直达 reset；DISABLED/COOLING → 幂等不动电机；FAULT → 紧急直达 reset；INIT/TEACH/SERVO/AI → 拒绝 busy；SAFE_PARK → 拒绝「already safe parking」。park 超时 → **FAULT 不 reset**（保持使能、停在半途，人工介入）；reset 被 gate 拒 → park 前 `success=false` + 原文 + "(stop power sequence first)"，park 完成后被拒 → 回 READY（已在 home 位，安全）；`_have_js==False` → 直达 reset + WARN（保持旧行为）。`/a3/motor/reset` 直达保留作紧急失能。

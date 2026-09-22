@@ -6,6 +6,7 @@ import math
 from typing import List, Optional
 
 from builtin_interfaces.msg import Duration
+from control_msgs.msg import JointJog
 from geometry_msgs.msg import TwistStamped
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -60,13 +61,23 @@ class ActionExecutor:
         self.goto_fallback_s = float(node.declare_parameter("named_pose_duration_s", 3.0).value)
         self.goto_busy_margin = float(node.declare_parameter("goto_busy_margin_s", 0.5).value)
         self.twist_frame = twist_frame
-        self.traj_topic = str(
-            node.declare_parameter(
-                "traj_topic", "/joint_group_effort_controller/joint_trajectory"
-            ).value
-        )
         self.twist_topic = str(
             node.declare_parameter("twist_topic", "/servo_node/delta_twist_cmds").value
+        )
+        self.joint_jog_topic = str(
+            node.declare_parameter(
+                "joint_jog_topic", "/servo_node/delta_joint_cmds"
+            ).value
+        )
+        self.arm_jtc_topic = str(
+            node.declare_parameter(
+                "arm_jtc_topic", "/arm_controller/joint_trajectory"
+            ).value
+        )
+        self.gripper_jtc_topic = str(
+            node.declare_parameter(
+                "gripper_jtc_topic", "/gripper_controller/joint_trajectory"
+            ).value
         )
         self.command_topic = str(
             node.declare_parameter("command_topic", "/power_sequence/command").value
@@ -83,8 +94,19 @@ class ActionExecutor:
         self.jog_speed = float(node.declare_parameter("base_jog_speed", 0.35).value)
 
         self._cmd_pub = node.create_publisher(String, self.command_topic, 10)
-        self._traj_pub = node.create_publisher(JointTrajectory, self.traj_topic, 10)
-        self._twist_pub = node.create_publisher(TwistStamped, self.twist_topic, 10)
+        self._arm_jtc_pub = node.create_publisher(
+            JointTrajectory, self.arm_jtc_topic, 10
+        )
+        self._gripper_jtc_pub = node.create_publisher(
+            JointTrajectory, self.gripper_jtc_topic, 10
+        )
+        # servo 输入订阅是 SensorDataQoS/BEST_EFFORT；RELIABLE 发布与之不匹配，
+        # 消息静默丢弃（LL-079）。
+        servo_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self._twist_pub = node.create_publisher(TwistStamped, self.twist_topic, servo_qos)
+        self._joint_jog_pub = node.create_publisher(
+            JointJog, self.joint_jog_topic, servo_qos
+        )
         self._grip_dbg = node.create_publisher(Float32, "/a3/gripper_cmd", 10)
         self._servo_cli = node.create_client(Trigger, self.servo_start_srv)
         self._servo_pause_cli = node.create_client(Trigger, "/servo_node/pause_servo")
@@ -247,7 +269,8 @@ class ActionExecutor:
         ay = self._ang[1] * self.max_angular * ascale
         az = self._ang[2] * self.max_angular * ascale
         moving = any(abs(v) > 1e-6 for v in (lx, ly, lz, ax, ay, az))
-        if self._servo_paused and moving:
+        jogging = any(abs(v) > 1e-9 for v in self._jog) and not moving
+        if self._servo_paused and (moving or jogging):
             self._servo_unpause()
         if moving:
             # 真机 launch 默认 auto_start_servo=false：首次死人开关+摇杆时按需
@@ -256,11 +279,14 @@ class ActionExecutor:
                 self.try_start_servo()
             self._publish_twist(lx, ly, lz, ax, ay, az)
 
-        if any(abs(v) > 1e-9 for v in self._jog) and not moving:
-            target = list(self._q)
-            for i in range(6):
-                target[i] += self._jog[i] * self.jog_speed * dt * lscale
-            self._publish_joints(JOINTS, target, dt)
+        # F77：单关节点动改走 servo 的 JointJog（速度单位），限位/奇异点/碰撞
+        # 由 servo 统一保护；不再发旁路 FSM 的单点 JointTrajectory。
+        if jogging:
+            if not self._servo_started:
+                self.try_start_servo()
+            self._publish_joint_jog(
+                [self._jog[i] * self.jog_speed * lscale for i in range(6)]
+            )
 
     def _publish_twist(
         self, lx: float, ly: float, lz: float, ax: float, ay: float, az: float
@@ -276,14 +302,12 @@ class ActionExecutor:
         msg.twist.angular.z = az
         self._twist_pub.publish(msg)
 
-    def _publish_joints(self, names: List[str], positions: List[float], duration: float) -> None:
-        traj = JointTrajectory()
-        traj.joint_names = list(names)
-        pt = JointTrajectoryPoint()
-        pt.positions = [float(p) for p in positions]
-        pt.time_from_start = _duration(max(duration, 0.02))
-        traj.points = [pt]
-        self._traj_pub.publish(traj)
+    def _publish_joint_jog(self, velocities: List[float]) -> None:
+        msg = JointJog()
+        msg.header.stamp = self._n.get_clock().now().to_msg()
+        msg.joint_names = JOINTS[:6]
+        msg.velocities = [float(v) for v in velocities]
+        self._joint_jog_pub.publish(msg)
 
     def _power(self, command: str) -> None:
         msg = String()
@@ -439,14 +463,25 @@ class ActionExecutor:
         self._call_trigger(self._zt_stop, "zero_torque/stop")
 
     def _publish_single_joint(
-        self, joint_name: str, q: float, last_key: str, min_delta: float = 0.008
+        self,
+        joint_name: str,
+        q: float,
+        last_key: str,
+        publisher,
+        min_delta: float = 0.008,
     ) -> None:
         last = getattr(self, last_key, None)
         if last is not None and abs(q - last) < min_delta:
             return
         setattr(self, last_key, q)
         self._servo_pause()
-        self._publish_joints([joint_name], [q], 0.05)
+        traj = JointTrajectory()
+        traj.joint_names = [joint_name]
+        pt = JointTrajectoryPoint()
+        pt.positions = [float(q)]
+        pt.time_from_start = _duration(0.05)
+        traj.points = [pt]
+        publisher.publish(traj)
 
     # --- analog_01 ---
 
@@ -458,7 +493,9 @@ class ActionExecutor:
         if v < 0.08:
             return
         q = L6_MIN + v * (L6_MAX - L6_MIN)
-        self._publish_single_joint("L6_joint", q, "_last_l6_sent")
+        self._publish_single_joint(
+            "L6_joint", q, "_last_l6_sent", self._arm_jtc_pub
+        )
 
     def set_joint_L7(self, v: float) -> None:
         v = max(0.0, min(1.0, float(v)))
@@ -469,7 +506,9 @@ class ActionExecutor:
         dbg = Float32()
         dbg.data = v
         self._grip_dbg.publish(dbg)
-        self._publish_single_joint("L7_joint", q, "_last_l7_sent")
+        self._publish_single_joint(
+            "L7_joint", q, "_last_l7_sent", self._gripper_jtc_pub
+        )
 
     def gripper_force(self, v: float) -> None:
         """F36：R2 扳机 → 夹爪力控（analog_01，50 Hz 每 tick 调用，内部迟滞状态机）。
