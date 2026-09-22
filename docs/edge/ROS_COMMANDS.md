@@ -29,14 +29,15 @@ colcon build --symlink-install --packages-select a3_bringup
 ## 3. 常用 launch
 
 ```bash
-# 真机
+# 真机（F78 唯一产品入口）
 sudo systemctl start can-up.service
-ros2 launch a3_bringup a3_bringup.launch.py
-# 组件开关：use_arm_controller/use_mqtt/use_moveit/use_gripper/use_teleop（默认开）
-#          use_servo/use_rviz/use_gravity_compensation（默认关）
-# 例：PS4 jog → use_servo:=true；5J 无夹爪 → use_gripper:=false
+ros2 launch a3_bringup a3_bringup.launch.py hardware:=can
+# 组件开关：use_mqtt/use_teleop（默认开）；use_rviz/use_monitor（默认关）；
+#           can_interface（默认 can1）；move_group / servo 常驻不可关
 
-# 全仿真（无 CAN）
+# 全仿真（无 CAN；与真机同构）
+ros2 launch a3_bringup a3_bringup.launch.py hardware:=mock
+# 旧自研仿真栈（历史保留）：
 ros2 launch a3_bringup edge_web_sim.launch.py use_gripper:=true
 ros2 launch a3_bringup edge_teleop_full_sim.launch.py   # 域 45：含 Servo/teleop/双模型 RViz
 

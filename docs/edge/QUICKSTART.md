@@ -7,14 +7,16 @@
    - 板载终端环境：`source ~/a3_arm_ws/scripts/a3_shell_env.sh`（`~/.bashrc` 已接入则新开终端自动生效）。看板载 HDMI 用 `DISPLAY=:0`，SSH **不要** `-X`/`-Y`。
 1. Platform CAN（RK3588 真机）：见 [PLATFORM_CAN.md](PLATFORM_CAN.md)
 2. Build packages listed in [../../README.md](../../README.md)
-3. `ros2 launch a3_bringup a3_bringup.launch.py`（统一入口，默认起编排层 + MQTT 桥 + MoveIt + 夹爪力控 + PS4；按需关组件见下方）
-   - 重力补偿 MIT 前馈（默认关）：`use_gravity_compensation:=true`
-   - 或运行时：`ros2 param set /motor_protocol_node enable_gravity_compensation true`
-   - 组件开关（默认值见 [ARCHITECTURE.md](ARCHITECTURE.md)「Launch 链」）：`use_arm_controller` / `use_mqtt` / `use_moveit` / `use_gripper` / `use_teleop` 默认开，`use_servo` / `use_rviz` / `use_gravity_compensation` 默认关。例：缺 L7 的 5J 档加 `use_gripper:=false`
-4. PS4 电源（F60）：L3 短按 = 一键开门禁 + 使能；R3 短按 = safe-park 后失能；Cross 长按 1 s = 硬急停（断电关闸，恢复需重新 L3）。完整键位/灯效见第 10 节与 [PS4_OPERATOR_GUIDE.md](PS4_OPERATOR_GUIDE.md)。
-5. Send test trajectory:
+3. **唯一产品入口 `ros2 launch a3_bringup a3_bringup.launch.py hardware:=mock|can ...`（F78）**：ros2_control 标准栈，mock/can 两种模式拓扑完全一致（编排层 + MQTT 桥 + MoveIt OMPL/Pilz + Servo + 夹爪 + PS4）
+   - `hardware:=mock`（默认）：`mock_components/GenericSystem`，无需 CAN/电机即可起栈（仿真/开发用）
+   - `hardware:=can can_interface:=can1`：`a3_hardware_interface/A3MITHardwareInterface` 直连 SocketCAN（真机先 `sudo systemctl start can-up.service`；vcan 验收 `can_interface:=vcan0`）。非法 hardware 值会被 launch 硬拒，mock 不触碰任何 CAN socket
+   - 组件开关：`use_mqtt` / `use_teleop` 默认 true，`use_rviz` / `use_monitor` 默认 false；`teleop_mapping:=default|simple`；`use_sw_render` 默认 true（LL-027）
+   - JTC 默认 **inactive 启动**，需经 `/a3/arm/enable`（或 PS4 L3）激活后才会运动
+4. PS4 电源（F60）：L3 短按 = 一键使能；R3 短按 = safe-park 后失能；Cross 长按 1 s = 硬急停（恢复需重新 L3）。完整键位/灯效见第 10 节与 [PS4_OPERATOR_GUIDE.md](PS4_OPERATOR_GUIDE.md)。
+5. 冒烟测试（mock 起栈后）：
    ```bash
-   ros2 topic pub --once /a3/joint_trajectory trajectory_msgs/msg/JointTrajectory "{joint_names: [L1_joint,L2_joint,L3_joint,L4_joint,L5_joint,L6_joint,L7_joint], points: [{positions: [0,0.5,-0.5,0,0,0,0], time_from_start: {sec: 2}}]}"
+   ros2 service call /a3/arm/enable std_srvs/srv/Trigger
+   ros2 service call /a3/arm/goto_named_pose a3_msgs/srv/GotoNamedPose "{pose_name: ready}"
    ```
 6. reBot shell: clone in `a3_arm_vendor`; remap via `ros2 run a3_bringup rebot_remap_info`
 7. **Wave A 无 CAN 仿真（zero→ready + Pinocchio 重力）：**
@@ -69,8 +71,8 @@
     ```bash
     ls /dev/input/js*                    # 确认手柄节点（USB 无节点见 LL-032）
     ros2 launch a3_teleop_ps4 ps4_teleop.launch.py dump:=true   # 轴索引校准
-    # 统一入口默认已含 mapper + ds4_feedback_node，默认 mapping:=default：
-    ros2 launch a3_bringup a3_bringup.launch.py use_servo:=true # jog 需 servo 一起起
+    # 统一入口默认已含 mapper + ds4_feedback_node + servo_node，默认 mapping:=default：
+    ros2 launch a3_bringup a3_bringup.launch.py hardware:=can   # 真机；servo 常驻无需另开
     ```
     - **default（真机生产映射，F60+F64）**：L3 一键开门禁+使能、R3 safe-park 失能、Cross 长按 1 s 硬急停；Triangle=ready、Circle=home；示教三步 **Share=开始 / Options=结束(自动保存) / Square=回放(latest)**；PS=init、Options 长按 3 s=set_zero；**L1=平移死人开关、R1=旋转死人开关（F64）、R2 夹爪力控不需要死人开关**；D-pad 上下调平移速度、左右调旋转速度（独立、步长 0.15、范围 0.10–1.0、按住不连发）；左摇杆平移 Y/Z，右摇杆 right_y 平移 X、right_x 偏航。touchpad/L2 预留不绑。
     - **灯带五色（F61）**：红闪=失电/硬急停、红双闪=FAULT、橙=已上电未使能、绿=READY/SERVO、蓝呼吸=TEACH、紫=TRAJ（goto/回放/safe-park）、白闪一次=init 完成。震动：使能/失能 120 ms 弱震，硬急停 600 ms 强震，FAULT 双震。无手柄时逻辑帧看 `/a3/ds4/feedback`（JSON）。
@@ -135,7 +137,7 @@
     浏览器经 MQTT 直连 EMQX 下发机械臂指令，无需 Django 经手；编排状态实时回显。
     ```bash
     # 设备侧：统一入口默认已含编排节点 + MQTT 桥接（bridge.yaml 已含 /a3/arm_status 展平）
-    ros2 launch a3_bringup a3_bringup.launch.py   # use_mqtt:=true 默认
+    ros2 launch a3_bringup a3_bringup.launch.py hardware:=can   # 真机；use_mqtt 默认 true
     ```
     - 前端（外部仓 `/home/cat/deep-trace`，分支 `rk3588`）：RK3588 详情页 → 「机械臂编排节点」(`a3_arm_controller`) 卡片 → 点击展开控制面板。
     - 面板含状态区（`arm_state`/`arm_mode`/`arm_message`，随 `/a3/arm_status` 刷新）、10 个动作按钮（初始化/使能/失能/示教起止/保存/回放/goto/进入退出 AI）、操作消息列表。
@@ -339,13 +341,13 @@ cat ~/.a3/stats/torque_stats.yaml
 can1 上只剩部分电机时（事故后只剩 L1–L5），用**档位**整套替换——`motor_map_file` 与 `gains_file` **必须配对**（逐关节数组长度 = `joint_names` 长度），否则执行层报「F52 档位配置非法」并退回 7J 默认档（不静默降级）：
 
 ```bash
-# 真机 5J 档（L6/L7 缺失）：停掉 7J 栈后；统一入口显式关夹爪（缺 L7）与 MoveIt（SRDF 7 关节，
-# FJT 若执行会把 7 关节轨迹打到 5 关节执行层），编排层换 5J 配置
+# 真机 5J 档（L6/L7 缺失）：档位/gains 是旧 can_bridge 栈机制——F78 起用保留的
+# 旧拓扑入口 edge_legacy_stack.launch.py（deprecated，仅历史回归）：
 source scripts/a3_shell_env.sh
-CFG=$HOME/a3_arm_ws/install/a3_can_bridge/share/a3_can_bridge/config
-ros2 launch a3_bringup a3_bringup.launch.py use_power_sequence:=false use_teleop:=false \
+ros2 launch a3_bringup edge_legacy_stack.launch.py use_power_sequence:=false use_teleop:=false \
     use_gripper:=false use_moveit:=false \
-    gains_file:=$CFG/control_gains_5j.yaml motor_map_file:=$CFG/motor_map_5j.yaml \
+    gains_file:=$HOME/a3_arm_ws/install/a3_can_bridge/share/a3_can_bridge/config/control_gains_5j.yaml \
+    motor_map_file:=$HOME/a3_arm_ws/install/a3_can_bridge/share/a3_can_bridge/config/motor_map_5j.yaml \
     arm_controller_config:=$HOME/a3_arm_ws/install/a3_arm_controller/share/a3_arm_controller/config/arm_controller_5j.yaml
 # 起栈自检：执行层日志 "F52 档位：5 关节 [...]"、/joint_states 恰好 5 个名字、MotorStates 5 条、
 #           控制器日志 "a3_arm_controller ready: joints=5"、看门狗 /a3/monitor/status = OK
@@ -367,9 +369,9 @@ ros2 launch a3_bringup a3_bringup.launch.py use_power_sequence:=false use_teleop
 
 ```bash
 # 0) 前置：硬件栈在跑、臂 enable 到 READY、周围清空、手边可断电；量夹爪全开
-#    统一入口默认已含编排层（READY 门禁 + 温度守护数据源）；重力采集不需要 MoveIt/Servo，
-#    可加 use_moveit:=false use_servo:=false 减负载
-ros2 launch a3_bringup a3_bringup.launch.py use_power_sequence:=false use_teleop:=false
+#    统一入口默认已含编排层（READY 门禁 + 温度守护数据源）；采集不需要遥操作/MQTT，
+#    关掉减负载（move_group / servo 常驻但不干扰采集）
+ros2 launch a3_bringup a3_bringup.launch.py hardware:=can use_teleop:=false use_mqtt:=false
 
 # 1) 先看要动的点位与时长（不动臂）
 python3 scripts/gravity_calibration.py --dry-run --no-rest-anchor \
@@ -416,17 +418,19 @@ DISPLAY=:0 ros2 launch a3_bringup urdf_dir_check.launch.py
 - 校验对象：URDF 关节轴方向/旋转正负与电机实际方向一致（手转关节看实际模型是否同向转动、幅度是否吻合）。
 - 测试后注意：读数偏离 home 属正常（手转过）；重新使能会先回 last_commanded，且 F48 门禁要求读数在 URDF 限位内——测试期间勿断电。
 
-### RViz 双模型（实际 vs 目标 ghost，真机主 launch 内置）
+### RViz 双模型（实际 vs 目标 ghost，旧栈/方向校验入口提供）
 
-真机主 launch（`a3_bringup.launch.py`）的 RViz 默认就是双模型：`ArmActual_实际反馈`（`/joint_states` 电机反馈驱动，**原色橙/深棕**）+ `ArmTarget_目标`（`/target_robot_description` 换色 URDF，TF Prefix `target`，**青蓝半透明 ghost**，由 `/a3/display_target_joint_states` 注入驱动）。**核心场景：臂断电后实际模型停住，仍可手动注入目标角离线调试「应该到哪」。** 目标 ghost 不依赖电机/电源，纯话题通道。
+F78 的统一产品入口（`a3_bringup.launch.py`）只加载单模型 `el_a3_view.rviz`，不再内置 ghost 三件套。双模型通道保留在：
 
-主 launch **默认自带 ghost 三件套**（target rsp + 恒等静态 TF + home 静止注入节点 `urdf_dir_check_pub`，`publish_traj:=false` 只发纯话题、不碰执行层轨迹）——没有注入源时 target rsp 整树不发 TF、ghost 全白（LL-055/LL-056），所以注入不能缺。`edge_web_sim.launch.py` 同样默认带三件套（其默认 RViz 是单模型 `el_a3_view.rviz`，ghost 不可见；换/另开 `el_a3_dual_view.rviz` 才显示）。不需要 ghost 时两 launch 均可 `use_target_ghost:=false` 整体关掉。
+- `edge_legacy_stack.launch.py use_rviz:=true`（旧 can_bridge 栈，ghost 三件套默认开，RViz 用 `el_a3_dual_view.rviz`，不需要时 `use_target_ghost:=false`）；
+- 上一节 `urdf_dir_check.launch.py`（URDF 方向校验专用）。
+
+模型构成：`ArmActual_实际反馈`（`/joint_states` 电机反馈驱动，**原色橙/深棕**）+ `ArmTarget_目标`（`/target_robot_description` 换色 URDF，TF Prefix `target`，**青蓝半透明 ghost**，由 `/a3/display_target_joint_states` 注入驱动）。**核心场景：臂断电后实际模型停住，仍可手动注入目标角离线调试「应该到哪」。** 目标 ghost 不依赖电机/电源，纯话题通道。
 
 ```bash
-# 1) 真机栈（断电调试只起下面任意一段拿到 rsp_target 即可，无需本段）
-sudo systemctl start can-up.service
+# 1) 起带 ghost 的栈（真机先 sudo systemctl start can-up.service；无屏 use_rviz:=false 也保留注入通道）
 source scripts/a3_shell_env.sh
-ros2 launch a3_bringup a3_bringup.launch.py use_rviz:=true   # HDMI :0；无屏 use_rviz:=false
+ros2 launch a3_bringup edge_legacy_stack.launch.py use_rviz:=true   # HDMI :0
 #    ↑ 启动后 ghost 自动停在 home；无需任何手动注入即正常着色
 # 2) 手动注入目标角（7J 档整臂）：注入节点检测到内容不同的外来消息会自动让位
 #    （backoff 3 s，--rate 持续发就持续让位）；停发后 3 s 自动恢复 home
@@ -437,7 +441,7 @@ ros2 topic pub --rate 10 /a3/display_target_joint_states sensor_msgs/msg/JointSt
 
 - **关节名必须放齐 7 个**（5J 档 `gains_file:=control_gains_5j.yaml motor_map_file:=motor_map_5j.yaml` 起栈也一样）：物理上 L6/L7 缺失，但 `target` ghost 用的 URDF 恒为 7 关节，`robot_state_publisher` **只对 message 里出现的关节名发布 TF**——名字缺失的关节不会按 URDF 默认位渲染，而是整个分支没有变换，RViz 显示 no transform：`target/l5_l6_urdf_asm`（`L6_joint` 子）、`target/end_effector`（`l5_l6_urdf_asm` 下固定关节的子）、`target/gripper_link`（`L7_joint` 子）消失。5J 档请把 L6/L7 用 0.0 占位（与上面命令同形式，7 名 7 值），ghost 手腕/夹爪停 URDF 零位。
 - 目标 ghost 由独立 `target_robot_state_publisher`（`frame_prefix="target/"`，LL-028）+ 恒等静态 TF `base_link→target/base_link` 接入 TF 树。
-- 主 launch / sim launch 自带的注入是 **ghost-only 模式**（`urdf_dir_check_pub publish_traj:=false`）：不创建轨迹发布器与电机状态订阅，纯话题不碰执行层，断电也安全。方向校验用的「轨迹 + 摆动」模式只在上一节 `urdf_dir_check.launch.py`（其护栏只认 mode_status=2）。
+- ghost 自带注入是 **ghost-only 模式**（`urdf_dir_check_pub publish_traj:=false`）：不创建轨迹发布器与电机状态订阅，纯话题不碰执行层，断电也安全。方向校验用的「轨迹 + 摆动」模式只在上一节 `urdf_dir_check.launch.py`（其护栏只认 mode_status=2）。
 - 手动注入让位机制：注入节点订阅自己的话题，凡内容与最近一次自发不同（`ros2 topic pub` 等外部来源）即停发让位 3 s 并滚动续期；同名话题多发布者是 last-writer-wins，rsp 只认最后一条。
 
 ### goto/回放工业轨迹验收（F67/F68，仿真全闭环）
@@ -471,6 +475,7 @@ python3 scripts/a3_test/f70_ros2_control_sim_acceptance.py
 ```
 
 - 控制器配置 `src/a3_description/config/el_a3_controllers.yaml`；spawn 顺序必须 JTC 先、JSB 后，否则速度字段恒 0；直连 JTC 测试要发完整多点轨迹，单点只做匀速线性插值——三个坑详见 [LL-072](../lessons_learned/LL-072-ros2-control-mock-jsb-order-jtc-single-point.md)。
+- F78 起该栈由统一入口 `a3_bringup.launch.py hardware:=mock` 承载；`edge_ros2_control_sim.launch.py` 保留为历史脚本。
 
 ### 看门狗标准诊断验收（F71，/diagnostics）
 
@@ -511,7 +516,8 @@ python3 scripts/a3_test/f72_ros2_control_vcan_acceptance.py
 #   kp=80/kd=2、速度与前馈为 0；栈内无 fjt/can_bridge/motor_protocol 节点）
 ```
 
-- 真机上电时：`sudo systemctl start can-up.service`，xacro 参数换 `can_interface:=can1`（或后续提供真机 launch），其余不动；先低压低速复测同一脚本。
+- 真机上电时：`sudo systemctl start can-up.service`，用统一入口 `a3_bringup.launch.py hardware:=can can_interface:=can1`（JTC inactive 启动，F72 脚本验收前需先编排层 enable 或手动 switch_controller 激活）；先低压低速复测同一脚本。F78 已用 `hardware:=can can_interface:=vcan0` 跑完 F72 16/16。
+- `edge_ros2_control_vcan.launch.py` 保留为历史脚本（JTC active 启动，与本脚本原始流程一致）。
 - Humble 无 xacro:elif、launch Command 的 `"xacro "` 前缀、install launch 是 build 副本等五个接线坑详见 [LL-074](../lessons_learned/LL-074-ros2-control-system-interface-vcan-xacro-humble-pitfalls.md)。
 
 ### 重力补偿自由拖动验收（F73，effort 模式 + ZeroTorque 对标控制器）
@@ -549,6 +555,7 @@ ROS_DOMAIN_ID=60 python3 scripts/a3_test/f74_fjt_backend_mock_acceptance.py
 ```
 
 - move_group 只规划 arm 组、safe-park 须补发 L7 gripper 轨迹；L2/L3 单向限位越限会被 JTC 静默夹紧——详见 [LL-076](../lessons_learned/LL-076-moveit-arm-group-leaves-l7-jtc-clamps-one-sided-limits.md)。
+- F78 起 `control_backend=fjt_action` 是统一入口的默认形态；`edge_ros2_control_sim.launch.py` + `f74_extra.launch.py` 保留为历史回归。
 
 ### 全产品 mock-hardware 标准栈验收（F75，零自研 sim 节点）
 
@@ -556,8 +563,8 @@ ROS_DOMAIN_ID=60 python3 scripts/a3_test/f74_fjt_backend_mock_acceptance.py
 
 ```bash
 source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
-# 1) 起栈（无 CAN / 无电机；use_rviz:=true 可加 RViz）
-ROS_DOMAIN_ID=61 ros2 launch a3_bringup edge_full_mock.launch.py
+# 1) 起栈（F78 起用统一入口 hardware:=mock；无 CAN / 无电机；use_rviz:=true 可加 RViz）
+ROS_DOMAIN_ID=61 ros2 launch a3_bringup a3_bringup.launch.py hardware:=mock
 # 2) 验收（另一终端）
 ROS_DOMAIN_ID=61 python3 scripts/a3_test/f75_full_mock_acceptance.py
 #   通过标准：末尾「F75 acceptance: 15/15」（boot 两 JTC inactive/零自研 sim 节点/
@@ -566,7 +573,7 @@ ROS_DOMAIN_ID=61 python3 scripts/a3_test/f75_full_mock_acceptance.py
 ```
 
 - goto/move_to 走 move_group 同样漏 L7（统一补发）；失能落定必须位置 AND 速度双条件；重启栈先按 PID 清全部子进程——详见 [LL-077](../lessons_learned/LL-077-goto-l7-dispatch-settle-pos-vel-double-stack.md)。
-- 真机上电后：`edge_full_mock.launch.py` 的 mock 拓扑即真机 bringup 的改造模板（xacro 切 `use_real_hardware:=true`、F72 SystemInterface 已提供使能语义），真机验收待上电。
+- 真机上电后直接用统一入口 `hardware:=can can_interface:=can1`（mock/can 同构，F78 已 vcan 验收）；真机验收待上电。
 
 ### Pilz 工业运动规划器验收（F76，PTP / LIN / CIRC + Sequence）
 
@@ -574,8 +581,8 @@ F75 栈的 move_group 改为双规划管线：OMPL（默认）+ Pilz 工业运�
 
 ```bash
 source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
-# 1) 起栈（F75 全产品 mock 栈，自动加载双管线；关掉 MQTT 验收更快）
-ROS_DOMAIN_ID=62 ros2 launch a3_bringup edge_full_mock.launch.py use_mqtt:=false
+# 1) 起栈（F78 统一入口 hardware:=mock，自动加载双管线；关掉 MQTT 验收更快）
+ROS_DOMAIN_ID=62 ros2 launch a3_bringup a3_bringup.launch.py hardware:=mock use_mqtt:=false
 # 2) 验收（另一终端）
 ROS_DOMAIN_ID=62 python3 scripts/a3_test/f76_pilz_acceptance.py
 #   通过标准：末尾「F76 acceptance: 12/12」（端点齐、JTC 生命周期、OMPL/PTP 落点、
@@ -591,8 +598,8 @@ PS4 D-pad 单关节点动不再发旁路 FSM 的手写单点轨迹（旧 `/joint
 
 ```bash
 source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
-# 1) 起栈（标准栈已常驻 servo_node + servo_mode_bridge）
-ROS_DOMAIN_ID=63 ros2 launch a3_bringup edge_full_mock.launch.py use_mqtt:=false
+# 1) 起栈（F78 统一入口 hardware:=mock；servo_node + servo_mode_bridge 默认常驻）
+ROS_DOMAIN_ID=63 ros2 launch a3_bringup a3_bringup.launch.py hardware:=mock use_mqtt:=false
 # 2) 验收（另一终端）
 ROS_DOMAIN_ID=63 python3 scripts/a3_test/f77_joint_jog_acceptance.py
 #   通过标准：末尾「F77 acceptance: 8/8」（enable/JTC/servo 端点、JointJog 双向

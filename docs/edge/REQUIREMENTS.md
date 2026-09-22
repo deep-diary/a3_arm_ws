@@ -924,6 +924,17 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F64（D-pad 双死人开关/单通道调速）、F75（标准 mock 栈）、F76；审计任务 #10；LL-079
 - **状态：** `completed`（2026-09-22 仿真验收 ROS_DOMAIN_ID=63，`scripts/a3_test/f77_joint_jog_acceptance.py` 8/8：JointJog +/−0.2 rad/s 各 1.5 s → L1 位移 ±0.121 rad、实测最大速度 0.34 rad/s，松开即停零漂移；点动全程 control_mode=SERVO→停止后 IDLE、FSM 恒 READY；旧 `/joint_group_effort_controller/joint_trajectory` 零消息；L7 位置服务仍正常驱动（0→1.780→0）。调试中修复 servo 输出话题嵌套参数 `moveit_servo.command_out_topic`（LL-079），并统一指令链路 SensorDataQoS）
 
+## F78 统一 bringup 单入口（hardware:=mock|can，mock/can 产品拓扑完全一致）
+
+- **说明：** 审计任务 #10 发现真机入口 `a3_bringup.launch.py`（旧 can_bridge C++ 栈：can_transport/motor_protocol/power_sequence + trajectory_bridge + 手搓 FJT action）与 F75 起的产品标准栈 `edge_full_mock.launch.py`（ros2_control 标准栈：controller_manager + JTC/JSB + move_group 双管线 + servo + 编排层标准后端）是两套互不相同的拓扑——真机/仿真行为分叉、节点与话题契约不一致，真机验收需另写脚本。F78 将 `a3_bringup.launch.py` 重写为唯一产品入口，以 `hardware:=mock|can` 切换硬件插件：mock 为 `mock_components/GenericSystem`（无 CAN/无电机可直接起），can 为 `a3_hardware_interface/A3MITHardwareInterface`（SocketCAN + MIT，接口名 `can_interface`，真机先起 can-up / vcan 验收用 vcan0）；两种模式下 controller_manager、JTC（inactive 启动）、JSB、move_group（OMPL+Pilz 双管线）、retime、servo_node（JointJog/TwistStamped 双输入）、servo_mode_bridge、编排层（fjt_action + controller_switch 后端）、夹爪产品节点拓扑完全一致。旧 can_bridge C++ 栈、trajectory_bridge、旧 FJT action 节点不再由该入口加载（文件保留，历史 launch/脚本可继续引用）。
+- **接线：** `a3_bringup/launch/a3_bringup.launch.py`（重写；`hardware`/`can_interface` 参数 + 条件 xacro 命令；组件开关 `use_mqtt/use_teleop/use_rviz/use_monitor`）。
+- **验收标准：**
+  1. `hardware:=mock`：无需 CAN 设备即可起栈，F75/F76/F77 三套既有验收脚本对该入口全部通过（拓扑与 edge_full_mock 一致）
+  2. `hardware:=can can_interface:=vcan0`：配合 `vcan_motor_sim.py`，F72 既有 vcan 验收通过（真机 MIT 插件闭环、CAN 帧映射正确、栈内无旧 can_bridge/旧 FJT 节点）
+  3. 非法 `hardware` 值不得静默走真机；mock 模式不触碰任何 CAN socket
+- **关联：** F72（MIT 真机插件 + vcan 验收）、F75–F77（标准栈拓扑）；审计任务 #10；AGENT.md §3
+- **状态：** 已完成（2026-09-22，仿真验收）。mock 路径：F75 15/15、F76 12/12、F77 8/8 全部对统一入口通过；can 路径：domain 59 + vcan0 + vcan_motor_sim，F72 16/16 ALL PASS（CAN 指令/反馈映射偏差 0、kp=80/kd=2、栈内无 legacy 节点）；非法 hardware 值被 launch 硬拒（exit 1）；/proc/net/can/rcvlist 审计确认 mock 栈在 can0/can1/vcan0 零 socket（模拟器接收计数不增长）。旧拓扑保留为 `edge_legacy_stack.launch.py`（deprecated，仅供历史回归）。
+
 ### F40 — 失能保护（disable → 自动回 home → 失能）
 
 - **说明：** `/a3/arm/disable` 不再是「无条件直接失能」——不在 home 容差内时先平滑回 home 再失能，防止 ready 位直接掉臂。新增参数：`disable_home_pose_name: "home"`、`disable_home_tol_rad: 0.15`、`disable_home_duration_s: 3.0`、`disable_home_confirm_s: 0.5`、`disable_park_timeout_s: 8.0`。新辅助 `_at_home()`（全关节 |q−home| ≤ tol）与 `_safe_park_then_disable()`（同步阻塞：发布 home 轨迹抢占活跃轨迹——执行层 OnTrajectory 天然支持替换，无需排队 → `SAFE_PARK`（期间拒绝新运动指令）→ 轮询连续 `confirm_s` 收敛 → reset → `DISABLED`）。服务语义（同步阻塞返回，`success=true ⟺ 已失能`）：READY/TRAJ 容差内 → 直达 reset → DISABLED；容差外 → safe park → reset → DISABLED（message 含耗时）；IDLE → 直达 reset；DISABLED/COOLING → 幂等不动电机；FAULT → 紧急直达 reset；INIT/TEACH/SERVO/AI → 拒绝 busy；SAFE_PARK → 拒绝「already safe parking」。park 超时 → **FAULT 不 reset**（保持使能、停在半途，人工介入）；reset 被 gate 拒 → park 前 `success=false` + 原文 + "(stop power sequence first)"，park 完成后被拒 → 回 READY（已在 home 位，安全）；`_have_js==False` → 直达 reset + WARN（保持旧行为）。`/a3/motor/reset` 直达保留作紧急失能。

@@ -287,7 +287,7 @@ export PYTHONNOUSERSITE=1
 ros2 launch a3_bringup edge_web_sim.launch.py use_gripper:=true
 ```
 
-`edge_web_sim.launch.py`（`src/a3_bringup/launch/`）组合了：`robot_state_publisher` + `sim_motor_node` + `sim_power_sequence_node` + `gravity_torque_node` + `arm_controller.launch.py` + `bridge.launch.py` + `gripper_controller.launch.py`（`use_gripper` 默认 `true`）。真机模式则用 `a3_bringup.launch.py`（硬件栈）+ 单独起 `arm_controller.launch.py` + `bridge.launch.py` + `gripper_controller.launch.py`。
+`edge_web_sim.launch.py`（`src/a3_bringup/launch/`）组合了：`robot_state_publisher` + `sim_motor_node` + `sim_power_sequence_node` + `gravity_torque_node` + `arm_controller.launch.py` + `bridge.launch.py` + `gripper_controller.launch.py`（`use_gripper` 默认 `true`）。F78 起真机与仿真同构，统一走 `a3_bringup.launch.py hardware:=can`（编排层 / MQTT / 夹爪 / servo 默认全含，无需再单独起）。
 
 **端到端验证命令（paho，无需 ros2 CLI）：**
 

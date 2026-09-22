@@ -201,8 +201,8 @@ ros2 launch a3_moveit_config demo.launch.py use_rviz:=true
 # 1) CAN up (see docs/edge/PLATFORM_CAN.md)
 sudo systemctl start can-up.service
 
-# 2) Hardware stack
-ros2 launch a3_bringup a3_bringup.launch.py can0_name:=can0 use_teleop:=true use_rviz:=true
+# 2) Hardware stack（F78 起唯一入口：hardware:=mock|can；真机用 can）
+ros2 launch a3_bringup a3_bringup.launch.py hardware:=can use_teleop:=true use_rviz:=true
 
 # 3) Optional: print reBot topic contract
 ros2 run a3_bringup rebot_remap_info

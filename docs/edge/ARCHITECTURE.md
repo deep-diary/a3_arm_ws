@@ -66,40 +66,41 @@ flowchart TB
 |----|------|
 | `a3_description` | URDF、robot_state_publisher、mock hardware launch |
 | `a3_moveit_config` | MoveIt 规划、demo launch |
-| `a3_can_bridge` | CAN 传输、MIT 编解码、电源序列 |
-| `a3_bringup` | 全栈 launch、`trajectory_bridge` |
+| `a3_can_bridge` | 旧栈 CAN 传输、MIT 编解码、电源序列（F78 起 deprecated） |
+| `a3_hardware_interface` | ros2_control 硬件插件：SystemInterface（SocketCAN + MIT）、重力补偿控制器 |
+| `a3_trajectory_processing` | Ruckig/TOTG 保几何重定时服务节点 |
+| `a3_bringup` | 全栈统一 launch（hardware:=mock\|can） |
 | `a3_teleop_ps4` | PS4 遥操作（电源 F3、YAML 映射 F16） |
 | `a3_arm_controller` | 机械臂编排层（生命周期/示教/状态聚合/仲裁，F21） |
 | `a3_lerobot_config` | LeRobot 集成脚手架 |
 
 ### Launch 链
 
-主入口：`ros2 launch a3_bringup a3_bringup.launch.py`
-
-统一入口（全栈单 launch，各组件参数开关，默认全开）：
+主入口：`ros2 launch a3_bringup a3_bringup.launch.py hardware:=mock|can`（F78 起唯一产品入口，mock/can 拓扑完全一致）
 
 ```
 a3_bringup.launch.py
 ├── robot_state_publisher（常开）
-├── can_bridge.launch.py（常开）
-│   ├── can_transport_node
-│   ├── motor_protocol_node
-│   └── power_sequence_node（use_power_sequence，默认开）
-├── trajectory_bridge（常开，reBot 话题桥接）
-├── a3_arm_controller + a3_arm_monitor（use_arm_controller，默认开；arm_controller_config 可换 5J 档）
+├── ros2_control controller_manager（常开；200 Hz）
+│   ├── joint_state_broadcaster（active；标准 /joint_states）
+│   ├── arm_controller JTC L1–L6（inactive 启动，编排层 enable 才激活）
+│   ├── gripper_controller JTC L7（inactive 启动）
+│   └── zero_torque_controller（inactive 常驻，自由拖动时互斥切换）
+├── move_group（OMPL + Pilz PTP/LIN/CIRC 双管线 + Sequence，直连 JTC FJT action）
+├── retime_trajectory_node（保几何重定时，Ruckig/TOTG）
+├── servo_node + servo_mode_bridge（常驻；TwistStamped + JointJog 双输入 → arm JTC 话题）
+├── a3_arm_controller（编排层；fjt_action + controller_switch 后端）
+├── a3_gripper_controller（产品节点；出口指 gripper JTC 话题）
 ├── a3_mqtt_bridge（use_mqtt，默认开；web 遥测/指令 F18/F23）
-├── move_group + follow_joint_trajectory_action（use_moveit，默认开；规划 + Execute 到执行层）
-├── a3_gripper_controller（use_gripper，默认开；5J 档缺 L7 时置 false）
-├── servo_mode_bridge + servo_node（use_servo，遥操作 profile 开；MoveIt Servo 笛卡尔 jog，与 move_group Execute 互斥；F65 起输出走独立话题 `/a3/servo/joint_trajectory`，mapper 按需 start_servo）
 ├── ps4_teleop.launch.py（use_teleop，默认开）
-├── gravity_torque_node（use_gravity_compensation，默认关）
-└── rviz（use_rviz，默认关）
+└── rviz（use_rviz，默认关；单模型 el_a3_view.rviz）
 ```
 
-MoveIt 不 include `demo.launch.py`（自带 RSP + ros2_control + spawner，会与 can_bridge 双
-/joint_states / 双 RSP 冲突）：只起 move_group，Execute 经
-`follow_joint_trajectory_action` 的 `/arm_controller/follow_joint_trajectory` action 落到
-`/joint_group_effort_controller/joint_trajectory` → motor_protocol_node。
+硬件模式：`hardware:=mock`（mock_components/GenericSystem，无 CAN/电机可起栈）；
+`hardware:=can`（`a3_hardware_interface/A3MITHardwareInterface`，SocketCAN + MIT，
+接口 `can_interface`，真机 can1；vcan 验收 vcan0 + vcan_motor_sim）。旧 can_bridge C++ 栈
+（can_transport/motor_protocol/power_sequence + trajectory_bridge + 手搓 FJT action）由
+`edge_legacy_stack.launch.py` 保留，deprecated，仅历史回归。
 
 仿真/专项 launch 仍独立：
 

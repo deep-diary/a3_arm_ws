@@ -76,9 +76,9 @@ python3 scripts/a3_test/ps4_sim_test.py          # 12 场景 46 项，逐项 PAS
 # 仿真接真手柄实操（合成全绿后）：
 ros2 launch a3_bringup edge_teleop_full_sim.launch.py use_joy_node:=true
 
-# 真机：统一入口默认已含 mapper + ds4_feedback_node（mapping:=default）
+# 真机：统一入口默认已含 mapper + ds4_feedback_node（mapping:=default），servo 常驻
 sudo systemctl start can-up.service
-ros2 launch a3_bringup a3_bringup.launch.py use_servo:=true
+ros2 launch a3_bringup a3_bringup.launch.py hardware:=can
 
 # 只起 teleop（底栈已在跑）：
 ros2 launch a3_teleop_ps4 ps4_teleop.launch.py mapping:=default
