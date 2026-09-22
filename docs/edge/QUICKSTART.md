@@ -485,6 +485,35 @@ python3 scripts/a3_test/f71_monitor_diagnostics_acceptance.py
 
 - 组件名自动带节点名前缀（add() 只给裸名）、`level` 是 byte 字段 rclpy 收为 bytes、harness 自身进程也要设 ROS_DOMAIN_ID——详见 [LL-073](../lessons_learned/LL-073-diagnostic-updater-name-prefix-byte-level.md)。
 
+### 真机插件 vcan 闭环验收（F72，SystemInterface + SocketCAN/MIT）
+
+F70 的真机化：`a3_hardware_interface/A3MITHardwareInterface` 插件让 controller_manager 直接打开 SocketCAN、收发 MIT 协议，真机路径上 `motor_protocol_node` + 200 Hz 插值 + CAN 话题中转整体被旁路；JTC/JSB/move_group 配置与 F70 完全相同。无真机时在 vcan0 上用 7 电机反馈模拟器闭环验收。
+
+```bash
+source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
+
+# 1) 一次性建 vcan0（已存在可跳过）
+echo temppwd | sudo -S modprobe vcan
+sudo ip link add dev vcan0 type vcan 2>/dev/null; sudo ip link set vcan0 up
+
+# 2) 起电机模拟器（独立终端/后台：收到 MIT 指令→一阶跟随→回 type-2 反馈）
+python3 scripts/a3_test/vcan_motor_sim.py --interface vcan0 &
+
+# 3) 起标准栈（xacro use_real_hardware:=true can_interface:=vcan0）
+export ROS_DOMAIN_ID=59
+ros2 launch a3_bringup edge_ros2_control_vcan.launch.py use_rviz:=false &
+sleep 12
+
+# 4) 验收：运动学指标 + 独立 CAN socket 抓包双侧核对
+python3 scripts/a3_test/f72_ros2_control_vcan_acceptance.py
+#   通过标准：末尾「总体: ALL PASS」（JTC home→ready→home、夹爪开合、move_group
+#   plan+execute 到位 ≤0.01；CAN：7 电机指令/反馈角=direction×joint+offset、
+#   kp=80/kd=2、速度与前馈为 0；栈内无 fjt/can_bridge/motor_protocol 节点）
+```
+
+- 真机上电时：`sudo systemctl start can-up.service`，xacro 参数换 `can_interface:=can1`（或后续提供真机 launch），其余不动；先低压低速复测同一脚本。
+- Humble 无 xacro:elif、launch Command 的 `"xacro "` 前缀、install launch 是 build 副本等五个接线坑详见 [LL-074](../lessons_learned/LL-074-ros2-control-system-interface-vcan-xacro-humble-pitfalls.md)。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

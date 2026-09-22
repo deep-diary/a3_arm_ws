@@ -1,0 +1,12 @@
+<library path="a3_hardware_interface">
+  <class
+    name="a3_hardware_interface/A3MITHardwareInterface"
+    type="a3_hardware_interface::A3MITHardwareInterface"
+    base_class_type="hardware_interface::SystemInterface">
+    <description>
+      Hardware interface for the A3 arm: communicates with RobStride MIT
+      motors (RS00 IDs 1-3, EL05 IDs 4-7) over SocketCAN using the MIT
+      position control protocol, with per-joint direction/offset mapping.
+    </description>
+  </class>
+</library>

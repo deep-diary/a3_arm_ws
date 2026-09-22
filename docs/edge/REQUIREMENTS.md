@@ -853,7 +853,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   3. move_group plan+execute 端到端经插件完成（无 motor_protocol_node 进程）
   4. 数值验收脚本：起止速度≈0、v/a 不超限（与 F70 同判据），结论 ALL PASS；CAN 线侧抓包确认指令帧位置=direction×joint+offset
 - **关联：** F70（仿真标准栈，本需求真机化）、F51（使能重锚语义）、LL-024（量程按型号）；[shared/SAFETY.md](../shared/SAFETY.md)；官方 el_a3_hardware（结构蓝本，协议常量以本仓为准）
-- **状态：** `in-progress`（2026-09-22，仿真验收；真机上电验收另约）
+- **状态：** `仿真验收通过`（2026-09-22，vcan0 + `f72_ros2_control_vcan_acceptance.py` ALL PASS：JTC/夹爪/move_group 到位 ≤0.01、CAN 指令与反馈映射偏差 0、kp=80/kd=2；真机上电验收另约，见 LL-074）
 
 ### F40 — 失能保护（disable → 自动回 home → 失能）
 

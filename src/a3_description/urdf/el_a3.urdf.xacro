@@ -5,6 +5,7 @@
 
   <!-- Arguments -->
   <xacro:arg name="use_mock_hardware" default="false"/>
+  <xacro:arg name="use_real_hardware" default="false"/>
   <xacro:arg name="can_interface" default="can0"/>
   <xacro:arg name="host_can_id" default="253"/>
   <xacro:arg name="wrist_motor_type" default="EL05"/>
@@ -298,8 +299,9 @@
   </link>
 
   <!-- ros2_control interface -->
-  <xacro:el_a3_ros2_control 
+  <xacro:el_a3_ros2_control
     use_mock_hardware="$(arg use_mock_hardware)"
+    use_real_hardware="$(arg use_real_hardware)"
     can_interface="$(arg can_interface)"
     host_can_id="$(arg host_can_id)"
     wrist_motor_type="$(arg wrist_motor_type)"/>

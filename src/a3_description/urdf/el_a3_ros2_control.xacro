@@ -2,7 +2,7 @@
 <!-- EL-A3 ros2_control configuration -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-  <xacro:macro name="el_a3_ros2_control" params="use_mock_hardware can_interface host_can_id wrist_motor_type">
+  <xacro:macro name="el_a3_ros2_control" params="use_mock_hardware use_real_hardware can_interface host_can_id wrist_motor_type">
 
     <!-- Wrist motor effort limits based on motor type -->
     <xacro:property name="wrist_effort_max" value="${5.5 if wrist_motor_type == 'RS05' else 6.0}"/>
@@ -17,6 +17,15 @@
           <param name="calculate_dynamics">true</param>
         </xacro:if>
         <xacro:unless value="${use_mock_hardware}">
+          <xacro:if value="${use_real_hardware}">
+            <!-- F72: real motors via ros2_control SystemInterface (SocketCAN + MIT).
+                 Per-joint motor_id/direction/position_offset read from joint params below. -->
+            <plugin>a3_hardware_interface/A3MITHardwareInterface</plugin>
+            <param name="can_interface">${can_interface}</param>
+            <param name="kp">80.0</param>
+            <param name="kd">2.0</param>
+          </xacro:if>
+          <xacro:unless value="${use_real_hardware}">
           <!-- Board runtime uses a3_can_bridge topic stack (not this plugin).
                Keep mock GenericSystem so MoveIt/demo can still load without el_a3_hardware. -->
           <plugin>mock_components/GenericSystem</plugin>
@@ -89,6 +98,7 @@
           <param name="gravity_comp_L6_sin">0.0</param>
           <param name="gravity_comp_L6_cos">0.0</param>
           <param name="gravity_comp_L6_offset">0.0</param>
+          </xacro:unless>
         </xacro:unless>
       </hardware>
 
