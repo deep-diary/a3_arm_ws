@@ -3,7 +3,8 @@
 
 前置：
   1. python3 scripts/a3_test/vcan_motor_sim.py --interface vcan0
-  2. ROS_DOMAIN_ID=59 ros2 launch a3_bringup edge_ros2_control_vcan.launch.py
+  2. ROS_DOMAIN_ID=59 ros2 launch a3_bringup edge_ros2_control_vcan.launch.py \
+       adaptive_kd_enabled:=false
 用法：ROS_DOMAIN_ID=59 python3 f73_gravity_comp_vcan_acceptance.py
 退出码 0 = 全部验收项通过。
 
@@ -11,7 +12,7 @@
   1. zero_torque_controller 以 inactive 状态常驻（list_controllers）
   2. 多姿态（home / ready / 中间姿态）标准 switch_controllers 互斥切换：
      arm_controller(deactivate) + zero_torque_controller(activate) 原子完成
-     CAN 抓包：kp≈0、kd≈effort_kd(2.0)、vel=0、位置字段=当前测量位、
+     CAN 抓包：kp≈0、kd≈zero_torque_kd(0.3 固定兜底，F85 adaptive 关闭)、vel=0、位置字段=当前测量位、
      torque_ff = 独立 Python-Pinocchio RNEA 重力矩 × direction（≤0.02 Nm）
   3. ready 姿态外力注入（sim ext 文件 motor3 +0.6 Nm）：关节单调跟随、
      全程 kp≈0、torque_ff 实时跟随 RNEA；撤力后在新位姿零力矩保持（漂移≤0.03）
@@ -48,7 +49,7 @@ from f72_ros2_control_vcan_acceptance import (  # noqa: E402
 FREE_DRIVE = "zero_torque_controller"
 ARM_CTRL = "arm_controller"
 TORQUE_TOL = 0.02
-KD_EFFORT = 2.0
+KD_EFFORT = 0.3
 KP_POSITION = 80.0
 KD_POSITION = 2.0
 

@@ -58,6 +58,7 @@ def load_yaml(package_name, file_path):
 def generate_launch_description():
     hardware = LaunchConfiguration("hardware")
     can_interface = LaunchConfiguration("can_interface")
+    adaptive_kd_enabled = LaunchConfiguration("adaptive_kd_enabled")
     use_rviz = LaunchConfiguration("use_rviz")
     use_sw_render = LaunchConfiguration("use_sw_render")
     use_mqtt = LaunchConfiguration("use_mqtt")
@@ -79,7 +80,8 @@ def generate_launch_description():
     hw_args = PythonExpression([
         "' use_mock_hardware:=true' if '", hardware, "' == 'mock'",
         " else ' use_mock_hardware:=false use_real_hardware:=true",
-        " can_interface:=", can_interface, "'",
+        " can_interface:=", can_interface,
+        " adaptive_kd_enabled:=", adaptive_kd_enabled, "'",
     ])
     robot_description = ParameterValue(
         Command(["xacro ", xacro_file, hw_args]),
@@ -369,6 +371,11 @@ def generate_launch_description():
             "can_interface",
             default_value="can1",
             description="hardware:=can 时的 SocketCAN 接口名（真机 can1；vcan 验收 vcan0）",
+        ),
+        DeclareLaunchArgument(
+            "adaptive_kd_enabled",
+            default_value="true",
+            description="F85 自由拖动速度自适应 Kd（false=固定 zero_torque_kd=0.3 兜底）",
         ),
         DeclareLaunchArgument("use_rviz", default_value="false"),
         DeclareLaunchArgument(

@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -36,6 +37,10 @@ namespace
 constexpr double kDefaultKp = 80.0;
 constexpr double kDefaultKd = 2.0;
 constexpr double kDefaultEffortKd = 2.0;
+constexpr double kDefaultKdMin = 0.001;
+constexpr double kDefaultKdMax = 0.15;
+constexpr double kDefaultKdVelocityRef = 1.0;
+constexpr double kDefaultKdSmoothingAlpha = 0.15;
 constexpr double kDefaultFeedbackTimeoutS = 0.2;
 constexpr double kDefaultStartupKd = 4.0;
 constexpr int kDefaultSoftStartCycles = 10;
@@ -53,6 +58,24 @@ double ParseDouble(const std::string & value, double fallback)
   } catch (const std::exception &) {
     return fallback;
   }
+}
+
+bool ParseBool(const std::string & value, bool fallback)
+{
+  if (value.empty()) {
+    return fallback;
+  }
+  std::string s;
+  for (char c : value) {
+    s.push_back(static_cast<char>(std::tolower(c)));
+  }
+  if (s == "true" || s == "1" || s == "yes" || s == "on") {
+    return true;
+  }
+  if (s == "false" || s == "0" || s == "no" || s == "off") {
+    return false;
+  }
+  return fallback;
 }
 
 int ParseInt(const std::string & value, int fallback)
@@ -96,6 +119,10 @@ struct JointMapping
   // firmware only emits feedback after command frames, e.g. after emergency
   // deactivate). Cleared by the clear-fault choreography in on_activate.
   bool fault_latched{false};
+  // F85 per-joint adaptive-Kd overrides (<0 = use global) and EMA state.
+  double kd_min_override{-1.0};
+  double kd_max_override{-1.0};
+  double adaptive_kd{kDefaultKdMax};
   double cmd_pos{0.0};
   double cmd_vel{0.0};
   double cmd_eff{0.0};
@@ -118,8 +145,26 @@ public:
     can_interface_ = GetParam(hp, "can_interface", "can1");
     kp_ = ParseDouble(GetParam(hp, "kp", ""), kDefaultKp);
     kd_ = ParseDouble(GetParam(hp, "kd", ""), kDefaultKd);
-    effort_kd_ = ParseDouble(GetParam(hp, "effort_kd", ""), kDefaultEffortKd);
+    // F85: fixed fallback is zero_torque_kd (xacro), with the legacy
+    // effort_kd name as a secondary key.
+    effort_kd_ = ParseDouble(
+      GetParam(hp, "zero_torque_kd", GetParam(hp, "effort_kd", "")),
+      kDefaultEffortKd);
     effort_kd_ = std::clamp(effort_kd_, 0.0, 5.0);
+    adaptive_kd_enabled_ = ParseBool(GetParam(hp, "adaptive_kd_enabled", ""), false);
+    kd_min_ = ParseDouble(GetParam(hp, "zero_torque_kd_min", ""), kDefaultKdMin);
+    kd_max_ = ParseDouble(GetParam(hp, "zero_torque_kd_max", ""), kDefaultKdMax);
+    kd_min_ = std::clamp(kd_min_, 0.0, 5.0);
+    kd_max_ = std::clamp(kd_max_, 0.0, 5.0);
+    if (kd_min_ > kd_max_) {
+      std::swap(kd_min_, kd_max_);
+    }
+    kd_velocity_ref_ = ParseDouble(
+      GetParam(hp, "kd_velocity_ref", ""), kDefaultKdVelocityRef);
+    kd_velocity_ref_ = std::max(kd_velocity_ref_, 1e-3);
+    kd_smoothing_alpha_ = ParseDouble(
+      GetParam(hp, "kd_smoothing_alpha", ""), kDefaultKdSmoothingAlpha);
+    kd_smoothing_alpha_ = std::clamp(kd_smoothing_alpha_, 1e-3, 1.0);
     feedback_timeout_s_ = ParseDouble(
       GetParam(hp, "feedback_timeout_s", ""), kDefaultFeedbackTimeoutS);
     feedback_timeout_s_ = std::clamp(feedback_timeout_s_, 0.02, 5.0);
@@ -158,6 +203,14 @@ public:
         GetParam(joint.parameters, "torque_max", ""), j.torque_max);
       j.speed_max = ParseDouble(
         GetParam(joint.parameters, "speed_max", ""), j.speed_max);
+
+      // F85 per-joint adaptive-Kd min/max overrides (declared on L4-L7).
+      j.kd_min_override = ParseDouble(
+        GetParam(joint.parameters, "zero_torque_kd_min", ""), -1.0);
+      j.kd_max_override = ParseDouble(
+        GetParam(joint.parameters, "zero_torque_kd_max", ""), -1.0);
+      j.adaptive_kd = (j.kd_max_override > 0.0)
+        ? j.kd_max_override : kd_max_;
 
       // Seed state from URDF initial_value (L2 0.785 / L3 -0.785 = home).
       for (const auto & si : joint.state_interfaces) {
@@ -234,10 +287,19 @@ public:
 
     if (contains_effort(start_interfaces) && !effort_mode_.load()) {
       effort_mode_.store(true);
+      // Seed EMA state at the per-joint max so damping cannot collapse on
+      // entry (matches el_a3_hardware adaptive_kd_values_ init).
+      std::lock_guard<std::mutex> lock(fb_mutex_);
+      for (auto & j : joints_) {
+        j.adaptive_kd = (j.kd_max_override > 0.0)
+          ? j.kd_max_override : kd_max_;
+      }
       RCLCPP_WARN(
         rclcpp::get_logger(kLoggerName),
-        "command mode -> EFFORT (gravity-comp free drive): kp=0 kd=%.2f",
-        effort_kd_);
+        "command mode -> EFFORT (gravity-comp free drive): kp=0 %s",
+        adaptive_kd_enabled_
+          ? "velocity-adaptive Kd (Lorentzian + EMA)"
+          : ("fixed kd=" + std::to_string(effort_kd_)).c_str());
     }
     if (contains_effort(stop_interfaces) && effort_mode_.load()) {
       effort_mode_.store(false);
@@ -578,14 +640,29 @@ public:
         for (size_t i = 0; i < joints_.size(); ++i) {
           motor_positions[i] =
             joints_[i].direction * joints_[i].hw_pos + joints_[i].position_offset;
+          if (adaptive_kd_enabled_) {
+            const double kd_min = (joints_[i].kd_min_override > 0.0)
+              ? joints_[i].kd_min_override : kd_min_;
+            const double kd_max = (joints_[i].kd_max_override > 0.0)
+              ? joints_[i].kd_max_override : kd_max_;
+            const double ratio =
+              std::abs(joints_[i].hw_vel) / kd_velocity_ref_;
+            const double kd_raw =
+              kd_min + (kd_max - kd_min) / (1.0 + ratio * ratio);
+            joints_[i].adaptive_kd =
+              std::clamp(kd_smoothing_alpha_ * kd_raw +
+                (1.0 - kd_smoothing_alpha_) * joints_[i].adaptive_kd,
+                0.0, 5.0);
+          }
         }
       }
       for (size_t i = 0; i < joints_.size(); ++i) {
         const auto & j = joints_[i];
+        const double kd = adaptive_kd_enabled_ ? j.adaptive_kd : effort_kd_;
         const double motor_torque =
           std::clamp(j.cmd_eff, -j.torque_max, j.torque_max) * j.direction;
         const auto frame = ProtocolCodec::BuildMitControlFrame(
-          bus_, j.motor_id, motor_positions[i], 0.0, 0.0, effort_kd_,
+          bus_, j.motor_id, motor_positions[i], 0.0, 0.0, kd,
           motor_torque, j.torque_max, j.speed_max);
         std::string error;
         if (!transport_.Send(frame, &error)) {
@@ -785,6 +862,11 @@ private:
   double kp_{kDefaultKp};
   double kd_{kDefaultKd};
   double effort_kd_{kDefaultEffortKd};
+  bool adaptive_kd_enabled_{false};
+  double kd_min_{kDefaultKdMin};
+  double kd_max_{kDefaultKdMax};
+  double kd_velocity_ref_{kDefaultKdVelocityRef};
+  double kd_smoothing_alpha_{kDefaultKdSmoothingAlpha};
   double feedback_timeout_s_{kDefaultFeedbackTimeoutS};
   double startup_kd_{kDefaultStartupKd};
   double temp_warn_c_{kDefaultTempWarnC};

@@ -37,6 +37,7 @@ def load_yaml(package_name, file_path):
 
 def generate_launch_description():
     use_rviz = LaunchConfiguration("use_rviz")
+    adaptive_kd_enabled = LaunchConfiguration("adaptive_kd_enabled")
 
     desc_share = get_package_share_directory("a3_description")
     moveit_share = get_package_share_directory("a3_moveit_config")
@@ -48,6 +49,7 @@ def generate_launch_description():
             xacro_file,
             " use_real_hardware:=true",
             " can_interface:=vcan0",
+            " adaptive_kd_enabled:=", adaptive_kd_enabled,
         ]),
         value_type=str,
     )
@@ -157,6 +159,11 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument("use_rviz", default_value="false"),
+        DeclareLaunchArgument(
+            "adaptive_kd_enabled",
+            default_value="true",
+            description="F85 自由拖动速度自适应 Kd（false=固定 zero_torque_kd 兜底）",
+        ),
         rsp,
         controller_manager,
         move_group,

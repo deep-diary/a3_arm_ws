@@ -9,6 +9,7 @@
   <xacro:arg name="can_interface" default="can0"/>
   <xacro:arg name="host_can_id" default="253"/>
   <xacro:arg name="wrist_motor_type" default="EL05"/>
+  <xacro:arg name="adaptive_kd_enabled" default="true"/>
 
   <!-- Wrist motor parameters (EL05: 6Nm, RS05: 5.5Nm) -->
   <xacro:property name="wrist_motor_type" value="$(arg wrist_motor_type)"/>
@@ -304,6 +305,7 @@
     use_real_hardware="$(arg use_real_hardware)"
     can_interface="$(arg can_interface)"
     host_can_id="$(arg host_can_id)"
-    wrist_motor_type="$(arg wrist_motor_type)"/>
+    wrist_motor_type="$(arg wrist_motor_type)"
+    adaptive_kd_enabled="$(arg adaptive_kd_enabled)"/>
 
 </robot>

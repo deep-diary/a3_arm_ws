@@ -701,6 +701,24 @@ ros2 topic echo /diagnostics --filter "m.name == 'a3_hardware:motor_health'"
 
 真机上电后 F84 随 can 栈自动生效，真机验收待上电。
 
+### 自适应阻尼自由拖动验收（F85）
+
+F85 前 xacro 声明的 6 个 MIT 参数从未被插件解析（LL-088：死配置静默失效），EFFORT CAN 路径恒用固定 kd。F85 起硬件插件 `write()` 的力矩模式路径按参考实现（EDULITE_A3 `computeAdaptiveKd`）下发速度自适应阻尼：`kd = kd_min + (kd_max-kd_min)/(1+(|v|/v_ref)^2)` 再经 EMA 平滑；L4–L7 有逐关节 kd_max 覆盖（0.10/0.05/0.05/0.10）。标准重力补偿控制器保持纯 RNEA，自适应 Kd 只在插件 EFFORT 写路径生效。`adaptive_kd_enabled:=false` 退回固定 `zero_torque_kd`=0.3。
+
+```bash
+source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
+python3 scripts/a3_test/f85_adaptive_kd_acceptance.py 85
+#   通过标准：末尾「F85 acceptance: 29/29」（脚本自动重启一次栈做固定阻尼对照）
+#   1 静止自由拖动：kp≈0/vel=0/位置字段=当前测量位；L1–L3 kd∈[.12,.16]，L4–L6=.10/.05/.05
+#   2 motor3 外力 0.6 Nm → |v|≥1.5 时 kd∈[.001,.05]；未推关节保持静止带
+#   3 EMA：200 Hz 相邻帧 Δkd≤0.03
+#   4 撤力后 3 s 内 kd 恢复 ≥0.10
+#   5 切回位置模式 kp≈80/kd≈2 + 五次 FJT error_code=0
+#   6 adaptive_kd_enabled:=false 重启：静止与外力推动中 kd 恒为 0.3±0.05
+```
+
+真机上电后 F85 随 can 栈默认开启（`adaptive_kd_enabled:=false` 可关），真机验收待上电。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
