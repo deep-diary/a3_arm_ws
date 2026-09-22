@@ -160,6 +160,18 @@ def main():
             print(f"FATAL: {label} unavailable", file=sys.stderr)
             return 2
 
+    # 等待 controller spawner 完成（JSB active 为标志），否则 enable 时控制器未加载，switch 必失败
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 60:
+        spin(0.5)
+        states = {c.name: c.state for c in call(
+            list_cli, ListControllers.Request(), timeout=5.0).controller}
+        if states.get("joint_state_broadcaster") == "active":
+            break
+    else:
+        print("FATAL: joint_state_broadcaster not active in 60s", file=sys.stderr)
+        return 2
+
     # ---- 1. enable -> controllers active, READY; servo + bridge in graph ----
     call(enable_cli, Trigger.Request())
     t0 = time.monotonic()

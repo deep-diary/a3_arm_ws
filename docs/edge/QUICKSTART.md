@@ -133,6 +133,14 @@
     - 所有真机运动经安全限幅（目标 ≤0.30 rad、时长 ≥2.5 s），结束自动失能；零力矩步骤需人工在旁。
     - 详见 [`scripts/a3_test/README.md`](../../scripts/a3_test/README.md)。
 
+    **标准 CI 测试门（F79，launch_testing，无需硬件）：** F75/F76/F77 产品验收已封装为 `colcon test` 用例，自动起 mock 产品栈、跑验收脚本、SIGINT 拆栈，结果出 JUnit XML：
+    ```bash
+    colcon build --packages-select a3_acceptance_tests
+    colcon test --packages-select a3_acceptance_tests          # ~85 s，固定 domain 61/62/63
+    colcon test-result --verbose                              # JUnit：F75 15 项 / F76 12 项 / F77 8 项
+    ```
+    F75 用例含 MQTT 检查，EMQX（192.168.3.73）不可达时按失败计。人工单跑脚本的老方式仍保留（scripts/a3_test/f7[567]_*_acceptance.py）。
+
 13. **Web 端机械臂控制面板（F23，跨仓 deep-trace）：**
     浏览器经 MQTT 直连 EMQX 下发机械臂指令，无需 Django 经手；编排状态实时回显。
     ```bash
