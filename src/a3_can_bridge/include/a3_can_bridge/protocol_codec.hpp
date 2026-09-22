@@ -115,6 +115,7 @@ public:
     fb.current_error = static_cast<bool>((frame.can_id >> 17) & 0x01);
     fb.voltage_error = static_cast<bool>((frame.can_id >> 16) & 0x01);
     fb.mode_status = static_cast<uint8_t>((frame.can_id >> 22) & 0x03);
+    fb.fault_code = static_cast<uint8_t>((frame.can_id >> 16) & 0x3F);
     fb.current_angle = UintToFloat(U16Be(frame.data[0], frame.data[1]), kPMin, kPMax, 16);
     fb.current_speed = UintToFloat(U16Be(frame.data[2], frame.data[3]), -speed_max, speed_max, 16);
     fb.current_torque = UintToFloat(U16Be(frame.data[4], frame.data[5]), -torque_max, torque_max, 16);

@@ -24,6 +24,8 @@
             <param name="can_interface">${can_interface}</param>
             <param name="kp">80.0</param>
             <param name="kd">2.0</param>
+            <param name="temp_warn_c">90.0</param>
+            <param name="temp_protect_c">95.0</param>
           </xacro:if>
           <xacro:unless value="${use_real_hardware}">
           <!-- Board runtime uses a3_can_bridge topic stack (not this plugin).
@@ -123,6 +125,9 @@
         <state_interface name="position"/>
         <state_interface name="velocity"/>
         <state_interface name="effort"/>
+        <xacro:if value="${use_real_hardware}">
+          <state_interface name="temperature"/>
+        </xacro:if>
       </joint>
 
       <!-- Joint L2 - RS00 Motor 2 -->
@@ -148,6 +153,9 @@
         </state_interface>
         <state_interface name="velocity"/>
         <state_interface name="effort"/>
+        <xacro:if value="${use_real_hardware}">
+          <state_interface name="temperature"/>
+        </xacro:if>
       </joint>
 
       <!-- Joint L3 - RS00 Motor 3 -->
@@ -173,6 +181,9 @@
         </state_interface>
         <state_interface name="velocity"/>
         <state_interface name="effort"/>
+        <xacro:if value="${use_real_hardware}">
+          <state_interface name="temperature"/>
+        </xacro:if>
       </joint>
 
       <!-- Joint L4 - ${wrist_motor_type} Motor 4 -->
@@ -200,6 +211,9 @@
         <state_interface name="position"/>
         <state_interface name="velocity"/>
         <state_interface name="effort"/>
+        <xacro:if value="${use_real_hardware}">
+          <state_interface name="temperature"/>
+        </xacro:if>
       </joint>
 
       <!-- Joint L5 - ${wrist_motor_type} Motor 5 -->
@@ -227,6 +241,9 @@
         <state_interface name="position"/>
         <state_interface name="velocity"/>
         <state_interface name="effort"/>
+        <xacro:if value="${use_real_hardware}">
+          <state_interface name="temperature"/>
+        </xacro:if>
       </joint>
 
       <!-- Joint L6 - ${wrist_motor_type} Motor 6 -->
@@ -254,6 +271,9 @@
         <state_interface name="position"/>
         <state_interface name="velocity"/>
         <state_interface name="effort"/>
+        <xacro:if value="${use_real_hardware}">
+          <state_interface name="temperature"/>
+        </xacro:if>
       </joint>
 
       <!-- Joint L7 - ${wrist_motor_type} Motor 7 (Gripper) -->
@@ -279,6 +299,9 @@
         <state_interface name="position"/>
         <state_interface name="velocity"/>
         <state_interface name="effort"/>
+        <xacro:if value="${use_real_hardware}">
+          <state_interface name="temperature"/>
+        </xacro:if>
       </joint>
 
     </ros2_control>

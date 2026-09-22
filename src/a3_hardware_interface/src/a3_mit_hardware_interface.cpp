@@ -18,6 +18,8 @@
 #include <thread>
 #include <vector>
 
+#include <a3_can_bridge/msg/motor_state.hpp>
+#include <a3_can_bridge/msg/motor_states.hpp>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
 #include <diagnostic_msgs/msg/key_value.hpp>
@@ -37,6 +39,9 @@ constexpr double kDefaultEffortKd = 2.0;
 constexpr double kDefaultFeedbackTimeoutS = 0.2;
 constexpr double kDefaultStartupKd = 4.0;
 constexpr int kDefaultSoftStartCycles = 10;
+constexpr double kDefaultTempWarnC = 90.0;
+constexpr double kDefaultTempProtectC = 95.0;
+constexpr double kDefaultMotorStatesRateHz = 50.0;
 
 double ParseDouble(const std::string & value, double fallback)
 {
@@ -83,6 +88,14 @@ struct JointMapping
   double hw_pos{0.0};
   double hw_vel{0.0};
   double hw_eff{0.0};
+  double hw_temp{0.0};
+  uint8_t hw_mode{0};
+  uint8_t hw_fault{0};
+  // Firmware fault words are latched conditions: once a fresh frame reports a
+  // nonzero word, keep health ERROR even after feedback traffic stops (MIT
+  // firmware only emits feedback after command frames, e.g. after emergency
+  // deactivate). Cleared by the clear-fault choreography in on_activate.
+  bool fault_latched{false};
   double cmd_pos{0.0};
   double cmd_vel{0.0};
   double cmd_eff{0.0};
@@ -115,6 +128,15 @@ public:
     soft_start_cycles_ =
       ParseInt(GetParam(hp, "soft_start_cycles", ""), kDefaultSoftStartCycles);
     soft_start_cycles_ = std::clamp(soft_start_cycles_, 0, 200);
+    temp_warn_c_ = ParseDouble(GetParam(hp, "temp_warn_c", ""), kDefaultTempWarnC);
+    temp_warn_c_ = std::clamp(temp_warn_c_, 40.0, 150.0);
+    temp_protect_c_ =
+      ParseDouble(GetParam(hp, "temp_protect_c", ""), kDefaultTempProtectC);
+    temp_protect_c_ = std::clamp(temp_protect_c_, temp_warn_c_, 150.0);
+    motor_states_topic_ = GetParam(hp, "motor_states_topic", "/a3/motor/states");
+    motor_states_rate_hz_ = ParseDouble(
+      GetParam(hp, "motor_states_rate_hz", ""), kDefaultMotorStatesRateHz);
+    motor_states_rate_hz_ = std::clamp(motor_states_rate_hz_, 1.0, 200.0);
     bus_ = (can_interface_ == "can0") ? CanBus::CAN0 : CanBus::CAN1;
 
     joints_.clear();
@@ -168,11 +190,12 @@ public:
   std::vector<hardware_interface::StateInterface> export_state_interfaces() override
   {
     std::vector<hardware_interface::StateInterface> interfaces;
-    interfaces.reserve(joints_.size() * 3);
+    interfaces.reserve(joints_.size() * 4);
     for (auto & j : joints_) {
       interfaces.emplace_back(j.name, "position", &j.hw_pos);
       interfaces.emplace_back(j.name, "velocity", &j.hw_vel);
       interfaces.emplace_back(j.name, "effort", &j.hw_eff);
+      interfaces.emplace_back(j.name, "temperature", &j.hw_temp);
     }
     return interfaces;
   }
@@ -253,8 +276,16 @@ public:
       diagnostic_msgs::msg::DiagnosticArray>("/diagnostics", latched_qos);
     stale_pub_ = health_node_->create_publisher<std_msgs::msg::Bool>(
       "/a3/hardware/feedback_stale", latched_qos);
+    rclcpp::QoS states_qos{rclcpp::KeepLast(10)};
+    states_qos.best_effort();
+    motor_states_pub_ = health_node_->create_publisher<
+      a3_can_bridge::msg::MotorStates>(motor_states_topic_, states_qos);
     health_exec_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
     health_exec_->add_node(health_node_);
+    motor_states_timer_ = health_node_->create_wall_timer(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::duration<double>(1.0 / motor_states_rate_hz_)),
+      [this] { PublishMotorStates(); });
 
     rx_run_.store(true);
     rx_thread_ = std::thread(&A3MITHardwareInterface::RxLoop, this);
@@ -273,6 +304,12 @@ public:
     // reset — never after six have been enabled (LL-083). Hardware starts
     // INACTIVE (hardware_components_initial_state, LL-086), so this runs
     // exactly when the operator enables, never at controller_manager boot.
+    {
+      std::lock_guard<std::mutex> lock(fb_mutex_);
+      for (auto & j : joints_) {
+        j.fault_latched = false;
+      }
+    }
     for (const auto & j : joints_) {
       transport_.Send(ProtocolCodec::BuildResetFrame(bus_, j.motor_id), nullptr);
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -419,6 +456,8 @@ public:
       rx_thread_.join();
     }
     transport_.Close();
+    motor_states_timer_.reset();
+    motor_states_pub_.reset();
     stale_pub_.reset();
     diag_pub_.reset();
     health_exec_.reset();
@@ -584,7 +623,13 @@ private:
     diagnostic_msgs::msg::DiagnosticStatus status;
     status.name = "a3_hardware:feedback_watchdog";
     status.hardware_id = "a3";
+    diagnostic_msgs::msg::DiagnosticStatus health;
+    health.name = "a3_hardware:motor_health";
+    health.hardware_id = "a3";
     bool stale = false;
+    bool has_fault = false;
+    bool overheat = false;
+    bool overwarn = false;
     {
       std::lock_guard<std::mutex> lock(fb_mutex_);
       for (const auto & j : joints_) {
@@ -598,6 +643,36 @@ private:
         if (j.stale) {
           stale = true;
         }
+
+        diagnostic_msgs::msg::KeyValue tkv;
+        tkv.key = "motor" + std::to_string(j.motor_id) + "_temp_c";
+        tkv.value = std::to_string(j.hw_temp);
+        health.values.push_back(tkv);
+        diagnostic_msgs::msg::KeyValue mkv;
+        mkv.key = "motor" + std::to_string(j.motor_id) + "_mode";
+        mkv.value = std::to_string(static_cast<unsigned>(j.hw_mode));
+        health.values.push_back(mkv);
+        diagnostic_msgs::msg::KeyValue fkv;
+        fkv.key = "motor" + std::to_string(j.motor_id) + "_fault";
+        fkv.value = std::to_string(static_cast<unsigned>(j.hw_fault));
+        health.values.push_back(fkv);
+
+        // Fault words are firmware-latched conditions; once seen they stay
+        // ERROR until on_activate's clear-fault, even after traffic stops.
+        if (j.fault_latched) {
+          has_fault = true;
+        }
+        // Temperature is a live measurement — only evaluate FRESH frames, a
+        // stale value from a silent motor must not read as cooled (LL-011).
+        const bool fresh = j.has_feedback && age >= 0.0 &&
+          age <= feedback_timeout_s_;
+        if (fresh) {
+          if (j.hw_temp >= temp_protect_c_) {
+            overheat = true;
+          } else if (j.hw_temp >= temp_warn_c_) {
+            overwarn = true;
+          }
+        }
       }
     }
     status.level = stale ? diagnostic_msgs::msg::DiagnosticStatus::ERROR
@@ -606,10 +681,57 @@ private:
       ? "feedback stale on >=1 motor; whole-arm freeze-hold engaged"
       : "all feedback channels healthy";
     arr.status.push_back(status);
+
+    if (has_fault || overheat) {
+      health.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
+      health.message = has_fault
+        ? "motor fault word nonzero on >=1 motor; emergency reset"
+        : "motor temperature >= protect threshold; safe park + cooling";
+    } else if (overwarn) {
+      health.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      health.message = "motor temperature >= warn threshold";
+    } else {
+      health.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+      health.message = "all motors within thermal/fault limits";
+    }
+    arr.status.push_back(health);
     diag_pub_->publish(arr);
     std_msgs::msg::Bool b;
     b.data = stale;
     stale_pub_->publish(b);
+  }
+
+  void PublishMotorStates()
+  {
+    // F84: under hardware:=can the a3_can_bridge stack does not run, so the
+    // F44/F43 thermal/fault FSM gating (subscription /a3/motor/states) would
+    // be silently dead. Republish decoded plugin state in the bridge message
+    // contract so the existing FSM logic works unchanged.
+    a3_can_bridge::msg::MotorStates msg;
+    msg.header.stamp = health_node_->now();
+    const auto now = std::chrono::steady_clock::now();
+    const bool enabled = active_.load();
+    {
+      std::lock_guard<std::mutex> lock(fb_mutex_);
+      msg.states.reserve(joints_.size());
+      for (const auto & j : joints_) {
+        a3_can_bridge::msg::MotorState s;
+        s.motor_id = j.motor_id;
+        s.position_rad = j.hw_pos;
+        s.speed_rad_s = j.hw_vel;
+        s.torque_nm = j.hw_eff;
+        s.temperature_c = static_cast<float>(j.hw_temp);
+        s.mode_status = j.hw_mode;
+        s.fault_mask = j.hw_fault;
+        s.has_feedback = j.has_feedback;
+        s.fresh = j.has_feedback &&
+          std::chrono::duration<double>(now - j.last_fb_time).count() <=
+            feedback_timeout_s_;
+        s.enabled = enabled;
+        msg.states.push_back(s);
+      }
+    }
+    motor_states_pub_->publish(msg);
   }
 
   void RxLoop()
@@ -635,6 +757,12 @@ private:
               j.hw_pos = (fb->current_angle - j.position_offset) / j.direction;
               j.hw_vel = fb->current_speed / j.direction;
               j.hw_eff = fb->current_torque;
+              j.hw_temp = fb->current_temp;
+              j.hw_mode = fb->mode_status;
+              j.hw_fault = fb->fault_code;
+              if (fb->fault_code != 0) {
+                j.fault_latched = true;
+              }
               j.has_feedback = true;
               j.last_fb_time = rx_now;
             }
@@ -659,6 +787,10 @@ private:
   double effort_kd_{kDefaultEffortKd};
   double feedback_timeout_s_{kDefaultFeedbackTimeoutS};
   double startup_kd_{kDefaultStartupKd};
+  double temp_warn_c_{kDefaultTempWarnC};
+  double temp_protect_c_{kDefaultTempProtectC};
+  std::string motor_states_topic_{"/a3/motor/states"};
+  double motor_states_rate_hz_{kDefaultMotorStatesRateHz};
   int soft_start_cycles_{kDefaultSoftStartCycles};
   int soft_start_remaining_{0};
   std::atomic_bool effort_mode_{false};
@@ -678,6 +810,8 @@ private:
   std::shared_ptr<rclcpp::executors::SingleThreadedExecutor> health_exec_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diag_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr stale_pub_;
+  rclcpp::Publisher<a3_can_bridge::msg::MotorStates>::SharedPtr motor_states_pub_;
+  rclcpp::TimerBase::SharedPtr motor_states_timer_;
 };
 
 }  // namespace a3_hardware_interface

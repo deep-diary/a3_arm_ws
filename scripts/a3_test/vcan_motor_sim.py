@@ -57,15 +57,19 @@ def pack_frame(can_id, data):
     return struct.pack(CAN_FORMAT, can_id | CAN_EFF_FLAG, 8, bytes(data))
 
 
-def send_feedback(sock, m):
+def send_feedback(sock, m, health):
     can_id = (CMD_FEEDBACK << 24) | (m.motor_id << 8) | MASTER_ID
+    if health.motor == m.motor_id:
+        can_id |= (int(health.fault) & 0x3F) << 16
+        can_id |= (int(health.mode) & 0x3) << 22
     tmax = TORQUE_MAX[m.motor_id]
     vmax = SPEED_MAX[m.motor_id]
     data = [0] * 8
     p = float_to_u16(m.angle, -P_RANGE, P_RANGE)
     v = float_to_u16(m.speed, -vmax, vmax)
     t = float_to_u16(m.torque, -tmax, tmax)
-    temp = max(0, min(65535, int(30.0 * 10)))
+    temp_c = health.temp if health.motor == m.motor_id else 30.0
+    temp = max(0, min(65535, int(temp_c * 10)))
     raw = ((p & 0xFFFF).to_bytes(2, "big") + (v & 0xFFFF).to_bytes(2, "big") +
            (t & 0xFFFF).to_bytes(2, "big") + (temp & 0xFFFF).to_bytes(2, "big"))
     sock.send(pack_frame(can_id, raw))
@@ -142,6 +146,49 @@ class SilenceCtl:
             self.motor = None
 
 
+class HealthCtl:
+    """Per-motor temperature/mode/fault-word injection, read from JSON file.
+
+    Format: {"motor": 3, "temp_c": 92.0, "fault": 4, "mode": 1}; {} clears.
+    Temp goes into feedback data[6:8] (x10), fault into CAN-id bits 16-21,
+    mode into bits 22-23 (F84).
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.mtime = 0.0
+        self.last_check = 0.0
+        self.motor = None
+        self.temp = 30.0
+        self.fault = 0
+        self.mode = 0
+
+    def poll(self):
+        now = time.monotonic()
+        if now - self.last_check < 0.05:
+            return
+        self.last_check = now
+        try:
+            mtime = os.path.getmtime(self.path)
+        except OSError:
+            return
+        if mtime == self.mtime:
+            return
+        self.mtime = mtime
+        try:
+            with open(self.path) as f:
+                data = json.load(f)
+            if not data:
+                self.motor = None
+                return
+            self.motor = int(data["motor"])
+            self.temp = float(data.get("temp_c", 30.0))
+            self.fault = int(data.get("fault", 0))
+            self.mode = int(data.get("mode", 0))
+        except (OSError, ValueError, KeyError, TypeError):
+            self.motor = None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--interface", default="vcan0")
@@ -155,6 +202,9 @@ def main():
                         help="assumed rotor-side viscous damping")
     parser.add_argument("--silence-file", default="/tmp/f81_silence.json",
                         help="per-motor feedback kill file: {\"motor\": 4}, {} clears")
+    parser.add_argument("--health-file", default="/tmp/f84_health.json",
+                        help="temp/mode/fault injection: "
+                             "{\"motor\": 3, \"temp_c\": 92, \"fault\": 4}, {} clears")
     args = parser.parse_args()
 
     sock = socket.socket(socket.PF_CAN, socket.SOCK_RAW, socket.CAN_RAW)
@@ -163,6 +213,7 @@ def main():
     motors = {i: MotorState(i) for i in range(1, 8)}
     ext = ExternalForce(args.ext_file)
     silence = SilenceCtl(args.silence_file)
+    health = HealthCtl(args.health_file)
     print(f"vcan motor sim on {args.interface}, alpha={args.alpha}", flush=True)
 
     while True:
@@ -176,10 +227,11 @@ def main():
             continue
 
         silence.poll()
+        health.poll()
 
         def reply():
             if silence.motor != motor_id:
-                send_feedback(sock, m)
+                send_feedback(sock, m, health)
 
         if cmd_type == CMD_RESET:
             m.speed = 0.0

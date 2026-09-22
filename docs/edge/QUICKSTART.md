@@ -676,6 +676,31 @@ F83_CAN_IF=vcan1 F83_CAN_IF_B=vcan3 \
 
 真机上电后 F83 随 can 栈自动生效，真机验收待上电。
 
+### 温度/故障码解码与热保护验收（F84）
+
+ros2_control 栈内没有 a3_can_bridge，FSM 的 F44 超温保护/F43 故障码联锁原先无人喂数据（LL-087）。F84 起硬件插件完整解码反馈帧：温度走每关节 `temperature` state interface（仅真机 URDF 声明），CAN-ID bits16–21 故障位、bits22–23 模式位保留在插件内；插件 50 Hz 重发布 `a3_can_bridge/MotorStates` 到 `/a3/motor/states`（best_effort，与 FSM 订阅 QoS 配对），F44/F43 门禁原样生效；同时发 `a3_hardware:motor_health` 诊断（故障位≠0 → ERROR，≥95 °C → ERROR，≥90 °C → WARN，经 F82 聚合到 `/A3/Hardware`）。
+
+```bash
+source scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1
+python3 scripts/a3_test/f84_thermal_fault_acceptance.py 84
+#   通过标准：末尾「F84 acceptance: 10/10」
+#   1a/1b/1c temperature 接口 + MotorStates 7 fresh（30 °C/无故障/已使能）+ motor_health OK
+#   2a/2b 92 °C → WARN + ArmStatus.temp_warn=true，但 quintic FJT 仍 error_code=0
+#   3a/3b/3c 96 °C → SAFE_PARK→失能→COOLING，热态 enable 被拒；80 °C 后 enable→READY
+#   4 motor5 故障位=4 → 紧急 reset→FAULT + motor_health ERROR（故障位锁存，失能后反馈停止也保持 ERROR，下次使能清故障才解除）
+#   5 mock 栈（无 temperature 接口）回归 enable→READY
+```
+
+手动注入（vcan sim 运行中）：
+
+```bash
+echo '{"motor": 3, "temp_c": 92.0}' > /tmp/f84_health.json   # echo {} 清除
+ros2 topic echo /a3/motor/states
+ros2 topic echo /diagnostics --filter "m.name == 'a3_hardware:motor_health'"
+```
+
+真机上电后 F84 随 can 栈自动生效，真机验收待上电。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

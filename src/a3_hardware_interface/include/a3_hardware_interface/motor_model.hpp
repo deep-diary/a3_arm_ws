@@ -31,6 +31,7 @@ struct MotorFeedback
   uint8_t motor_id{0};
   uint8_t cmd_type{0};
   uint8_t mode_status{0};
+  uint8_t fault_code{0};
   bool error_status{false};
   bool hall_error{false};
   bool magnet_error{false};

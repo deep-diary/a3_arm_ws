@@ -17,6 +17,7 @@ find_package(rclcpp_lifecycle REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(a3_can_bridge REQUIRED)
 find_package(pinocchio REQUIRED)
 
 add_library(
@@ -42,6 +43,7 @@ ament_target_dependencies(
   sensor_msgs
   diagnostic_msgs
   std_msgs
+  a3_can_bridge
 )
 target_link_libraries(a3_hardware_interface pinocchio::pinocchio)
 
@@ -72,6 +74,7 @@ ament_export_dependencies(
   sensor_msgs
   diagnostic_msgs
   std_msgs
+  a3_can_bridge
   pinocchio
 )
 
