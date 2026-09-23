@@ -28,6 +28,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from rosbag2_interfaces.srv import Snapshot
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
@@ -431,6 +432,10 @@ class ArmController(Node):
         self.declare_parameter("js_max_stale_s", 1.0)
         # F81: 硬件插件单电机反馈看门狗锁存话题（freeze-hold 期间为 true）
         self.declare_parameter("feedback_stale_topic", "/a3/hardware/feedback_stale")
+        # F90: 故障黑匣子——rosbag2 snapshot-mode 录制器就绪时，进入 FAULT 的边沿
+        # 异步触发一次落盘；录制器不在（use_rosbag:=false）则静默跳过，不阻塞故障处置
+        self.declare_parameter("blackbox_snapshot_enabled", True)
+        self.declare_parameter("blackbox_snapshot_service", "/rosbag2_recorder/snapshot")
 
         self._joint_names: List[str] = list(
             self.get_parameter("joint_names").get_parameter_value().string_array_value
@@ -586,6 +591,13 @@ class ArmController(Node):
         self._hw_state_cli = self.create_client(
             SetHardwareComponentState,
             str(self.get_parameter("controller_manager_hw_state_srv").value),
+            callback_group=self._cb_group,
+        )
+        # F90: rosbag2 snapshot-mode 黑匣子触发服务（注意类型是
+        # rosbag2_interfaces/srv/Snapshot，不是 std_srvs/Trigger，见 LL-101）
+        self._snapshot_cli = self.create_client(
+            Snapshot,
+            str(self.get_parameter("blackbox_snapshot_service").value),
             callback_group=self._cb_group,
         )
 
@@ -784,6 +796,7 @@ class ArmController(Node):
 
     def _set_state(self, state: str, message: str = "") -> None:
         with self._lock:
+            prev = self._state
             self._state = state
             if message:
                 self._message = message
@@ -792,6 +805,32 @@ class ArmController(Node):
         # status_hz 节拍间生灭，下游（DS4 白闪/ web / MQTT）永远收不到。LL-064。
         if hasattr(self, "_arm_status_pub"):
             self._arm_status_pub.publish(self._build_status_msg())
+        # F90: 所有 FAULT 入口（电机故障/过热/停车超时/使能失败）都汇聚于此，
+        # 只在进入 FAULT 的边沿触发一次黑匣子落盘
+        if state == STATE_FAULT and prev != STATE_FAULT:
+            self._fire_blackbox_snapshot()
+
+    def _fire_blackbox_snapshot(self) -> None:
+        # F90: rosbag2 snapshot-mode 黑匣子——把录制器内存循环缓冲写成分片 bag。
+        # fire-and-forget：未使能/录制器未发现时直接跳过，绝不阻塞故障处置路径。
+        if not self.get_parameter("blackbox_snapshot_enabled").value:
+            return
+        if not self._snapshot_cli.service_is_ready():
+            self.get_logger().info("blackbox recorder not available, skip snapshot")
+            return
+
+        def _done(fut) -> None:
+            try:
+                resp = fut.result()
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().warn(f"blackbox snapshot call failed: {exc}")
+                return
+            if resp is not None and not resp.success:
+                self.get_logger().warn("blackbox snapshot returned success=false")
+            else:
+                self.get_logger().info("blackbox snapshot flushed")
+
+        self._snapshot_cli.call_async(Snapshot.Request()).add_done_callback(_done)
 
     def _build_status_msg(self):
         st = ArmStatus()

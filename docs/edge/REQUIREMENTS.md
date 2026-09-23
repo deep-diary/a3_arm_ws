@@ -1124,6 +1124,20 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F89（同一 STRICT 切换与漂移判据）、F73/F85（zero_torque 控制器与阻尼）、F75（后端分流范式）、F54（停止自动保存）
 - **状态：** 已完成（2026-09-23，仿真 20/20：`scripts/a3_test/f89b_freedrive_switch_acceptance.py` 全绿，vcan89b 闭环，脚本退出码 0；稳态漂移实测最差 0.0023 rad；LL-100）。真机验收待通电。
 
+### F90 — 故障触发有界 rosbag2 黑匣子（snapshot-mode 循环缓冲，FAULT 边沿自动落盘）
+
+- **说明：** 工业控制器标配故障黑匣子（事件前后一段历史自动留存供复盘）。不手搓录制器：ROS 2 官方 `rosbag2_transport` 提供 snapshot mode——常驻进程只把消息留在固定大小的内存循环缓冲（不落盘、无磁盘增长），被调 `/rosbag2_recorder/snapshot`（**服务类型 `rosbag2_interfaces/srv/Snapshot`，不是 std_srvs/Trigger**）时把当前缓冲写成分片 bag（每次触发一个独立分片文件，天然有界）。产品 bringup 默认经 `ros2 bag record --snapshot-mode` 起该录制器（`use_rosbag` 可关），FSM 在**进入 FAULT 的边沿**（电机故障/安全停车超时/过热保护失败等所有 FAULT 入口都汇聚于 `_set_state`）异步触发一次 snapshot：fire-and-forget，不阻塞故障处置路径；录制器不在（use_rosbag:=false / 尚未发现）则静默跳过。录制话题最小集：`/joint_states`、`/a3/arm_status`、`/a3/control_mode`、`/diagnostics`、`/diagnostics_toplevel_state`、`/arm_controller/joint_trajectory`。
+- **改动：**
+  1. `a3_bringup.launch.py` 增参 `use_rosbag`（默认 true）、`bag_dir`（默认 `~/.a3/blackbox`）；`ExecuteProcess` 起 `ros2 bag record --snapshot-mode --max-cache-size 33554432 --max-bag-size 67108864 --storage mcap -o <bag_dir>/blackbox_<启动时间戳>`（时间戳在 launch 生成期取本地时间，每次启动唯一目录）。
+  2. `arm_controller.py` 新增 `rosbag2_interfaces/srv/Snapshot` 客户端 `/rosbag2_recorder/snapshot`；`_set_state` 检测到旧态≠FAULT、新态=FAULT 且 `service_is_ready()` 时 `call_async`（响应回调仅记日志），不满足就绪条件直接跳过。
+- **验收标准（仿真；断电；脚本 `scripts/a3_test/f90_blackbox_acceptance.py`，vcan90 标准栈，ROS_DOMAIN_ID=90）：**
+  1. 启动后 `~/.a3/blackbox` 下出现本次启动的 mcap 目录；故障前目录内无消息分片（snapshot 未触发，磁盘不增长）
+  2. enable→READY 后经 `/tmp/f84_health.json` 注入电机故障（motor 5 fault=4）：FSM 进入 FAULT；无需任何手工调用，新分片自动出现且包含 FAULT 前/后的 `/joint_states`、`/a3/arm_status` 等录制话题消息（`ros2 bag info` 可读，消息数 > 0，时长跨故障时刻）
+  3. 有界性：循环缓冲 32 MiB / 分片 64 MiB 参数生效（bag info / 文件大小验证）；重复故障每次只多一个分片
+  4. `use_rosbag:=false` 时无录制器进程，FSM 照常进 FAULT，不报错不阻塞
+- **关联：** F44/F84（电机故障→FAULT）、F81（冻结保持，事件源之一）、F82（诊断话题）；对标工业控制器事件黑匣子
+- **状态：** 已完成（2026-09-23，仿真 17/17：`scripts/a3_test/f90_blackbox_acceptance.py` 全绿，vcan90 闭环，脚本退出码 0；LL-101）。真机验收待通电。
+
 ### F40 — 失能保护（disable → 自动回 home → 失能）
 
 - **说明：** `/a3/arm/disable` 不再是「无条件直接失能」——不在 home 容差内时先平滑回 home 再失能，防止 ready 位直接掉臂。新增参数：`disable_home_pose_name: "home"`、`disable_home_tol_rad: 0.15`、`disable_home_duration_s: 3.0`、`disable_home_confirm_s: 0.5`、`disable_park_timeout_s: 8.0`。新辅助 `_at_home()`（全关节 |q−home| ≤ tol）与 `_safe_park_then_disable()`（同步阻塞：发布 home 轨迹抢占活跃轨迹——执行层 OnTrajectory 天然支持替换，无需排队 → `SAFE_PARK`（期间拒绝新运动指令）→ 轮询连续 `confirm_s` 收敛 → reset → `DISABLED`）。服务语义（同步阻塞返回，`success=true ⟺ 已失能`）：READY/TRAJ 容差内 → 直达 reset → DISABLED；容差外 → safe park → reset → DISABLED（message 含耗时）；IDLE → 直达 reset；DISABLED/COOLING → 幂等不动电机；FAULT → 紧急直达 reset；INIT/TEACH/SERVO/AI → 拒绝 busy；SAFE_PARK → 拒绝「already safe parking」。park 超时 → **FAULT 不 reset**（保持使能、停在半途，人工介入）；reset 被 gate 拒 → park 前 `success=false` + 原文 + "(stop power sequence first)"，park 完成后被拒 → 回 READY（已在 home 位，安全）；`_have_js==False` → 直达 reset + WARN（保持旧行为）。`/a3/motor/reset` 直达保留作紧急失能。

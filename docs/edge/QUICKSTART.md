@@ -834,6 +834,21 @@ python3 scripts/a3_test/f89b_freedrive_switch_acceptance.py
 
 真机用法不变：使能后 PS4 Share 进入拖动示教、Options 结束（或 `ros2 service call /a3/arm/start_teach std_srvs/srv/Trigger`）。真机验收待上电。
 
+### 故障黑匣子验收（F90，rosbag2 snapshot-mode，FAULT 边沿自动落盘）
+
+产品栈默认（`use_rosbag:=true`）由官方 `ros2 bag record --snapshot-mode` 常驻录制器承担黑匣子角色：32 MiB 内存循环缓冲（故障前磁盘零增长），FSM **进入 FAULT 的边沿**（所有 FAULT 入口汇聚于 `_set_state`）异步调用 `/rosbag2_recorder/snapshot`（服务类型 `rosbag2_interfaces/srv/Snapshot`），自动把故障前/后的 `/joint_states`、`/a3/arm_status`、`/a3/control_mode`、`/diagnostics(_agg)`、`/diagnostics_toplevel_state`、`/arm_controller/joint_trajectory` 写为 mcap 分片（64 MiB 上限自动切分）。录制器未运行时静默跳过，绝不阻塞故障路径；输出默认 `~/.a3/blackbox/blackbox_<启动时间戳>/`，可用 `bag_dir:=` 覆盖。
+
+```bash
+# 仿真验收（vcan；真机断电）
+python3 scripts/a3_test/f90_blackbox_acceptance.py
+#   通过标准：末尾「F90 acceptance: 17/17」，退出码 0
+#   故障前 0 字节消息数据；注入 {"motor": 5, "fault": 4} 后自动 flush
+#   实测分片 1129 条消息（/joint_states 876、/a3/arm_status 85）
+#   32/64 MiB 有界参数生效；FAULT 中重复注入不再 flush
+#   use_rosbag:=false 无录制器，故障照常进 FAULT 不阻塞
+# 读取：ros2 bag info ~/.a3/blackbox/blackbox_*/；播放 ros2 bag play ...
+```
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

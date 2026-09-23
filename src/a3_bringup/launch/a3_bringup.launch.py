@@ -16,6 +16,7 @@
     motor_service_backend=controller_switch，require_gate:=false）
   a3_mqtt_bridge（默认包含；broker 不可达自行重连，节点不退出）
   diagnostic_aggregator（F82，默认包含；/diagnostics_agg + /diagnostics_toplevel_state）
+  rosbag2 黑匣子（F90，默认包含；snapshot-mode 循环缓冲，FAULT 边沿自动落盘 mcap）
   PS4 遥操作（默认包含）
 
 硬件模式：
@@ -27,6 +28,7 @@
 """
 
 import os
+from datetime import datetime
 
 import yaml
 
@@ -34,6 +36,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     IncludeLaunchDescription,
     TimerAction,
 )
@@ -67,6 +70,8 @@ def generate_launch_description():
     use_monitor = LaunchConfiguration("use_monitor")
     use_diagnostics = LaunchConfiguration("use_diagnostics")
     fsm_backend = LaunchConfiguration("fsm_backend")
+    use_rosbag = LaunchConfiguration("use_rosbag")
+    bag_dir_cfg = LaunchConfiguration("bag_dir")
 
     bringup_share = get_package_share_directory("a3_bringup")
     desc_share = get_package_share_directory("a3_description")
@@ -360,6 +365,29 @@ def generate_launch_description():
         condition=IfCondition(use_diagnostics),
     )
 
+    # ---- F90：故障黑匣子（rosbag2 snapshot-mode；FAULT 边沿 FSM 触发落盘）----
+    # 常驻录制器只保留 32 MiB 内存循环缓冲（不落盘、无磁盘增长）；每次 snapshot
+    # 把缓冲写为一个 mcap 分片，单分片超 64 MiB 自动切，天然有界。
+    blackbox_recorder = ExecuteProcess(
+        cmd=[
+            "ros2", "bag", "record",
+            "--snapshot-mode",
+            "--max-cache-size", "33554432",
+            "--max-bag-size", "67108864",
+            "--storage", "mcap",
+            "-o", bag_dir_cfg,
+            "/joint_states",
+            "/a3/arm_status",
+            "/a3/control_mode",
+            "/diagnostics",
+            "/diagnostics_agg",
+            "/diagnostics_toplevel_state",
+            "/arm_controller/joint_trajectory",
+        ],
+        output="screen",
+        condition=IfCondition(use_rosbag),
+    )
+
     # LL-072：JTC 先 configure（3 s），zero_torque 5 s，JSB 7 s 激活；
     # 产品节点 4 s 后启动，避开 hardware 加载窗口。
     delay_jtc = TimerAction(period=3.0, actions=[jtc_spawner])
@@ -439,8 +467,21 @@ def generate_launch_description():
             choices=["fjt_action", "topic"],
             description="编排层轨迹后端：fjt_action=JTC 标准 action（产品栈默认）；topic=旧 motor_protocol 话题（legacy）",
         ),
+        DeclareLaunchArgument(
+            "use_rosbag",
+            default_value="true",
+            description="F90 故障黑匣子（rosbag2 snapshot-mode；FAULT 边沿自动落盘 mcap）",
+        ),
+        DeclareLaunchArgument(
+            "bag_dir",
+            default_value=os.path.expanduser(
+                "~/.a3/blackbox/blackbox_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+            ),
+            description="F90 黑匣子输出目录（默认每次启动生成带时间戳的新目录）",
+        ),
         rsp,
         diagnostic_aggregator,
+        blackbox_recorder,
         controller_manager,
         move_group,
         delay_jtc,
