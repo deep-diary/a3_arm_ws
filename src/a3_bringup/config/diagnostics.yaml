@@ -12,7 +12,8 @@ diagnostic_aggregator:
         type: diagnostic_aggregator/GenericAnalyzer
         path: Hardware
         timeout: 5.0
-        startswith: ["a3_hardware:"]
+        # F103：a3_can_bus 是 CAN 物理层诊断任务
+        startswith: ["a3_hardware:", "a3_can_bus:"]
       monitor:
         type: diagnostic_aggregator/GenericAnalyzer
         path: Arm Monitor

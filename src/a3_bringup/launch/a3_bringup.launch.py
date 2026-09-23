@@ -449,6 +449,20 @@ def generate_launch_description():
         condition=host_diag_condition,
     )
 
+    # ---- F103：CAN 物理层健康（bus-off/错误帧/链路 down → 标准诊断）----
+    can_bus_condition = IfCondition(PythonExpression([
+        "'", use_diagnostics, "' == 'true' and '",
+        hardware, "' == 'can'",
+    ]))
+    can_bus_monitor = Node(
+        package="a3_bringup",
+        executable="can_bus_monitor",
+        name="a3_can_bus",
+        output="screen",
+        parameters=[{"interface": can_interface}],
+        condition=can_bus_condition,
+    )
+
     # ---- F90：故障黑匣子（rosbag2 snapshot-mode；FAULT 边沿 FSM 触发落盘）----
     # 常驻录制器只保留 32 MiB 内存循环缓冲（不落盘、无磁盘增长）；每次 snapshot
     # 把缓冲写为一个 mcap 分片，单分片超 64 MiB 自动切，天然有界。
@@ -495,6 +509,7 @@ def generate_launch_description():
             servo_bridge,
             self_test_node,
             teleop,
+            can_bus_monitor,
         ])],
     )
 

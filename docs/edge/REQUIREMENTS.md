@@ -1219,6 +1219,26 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F81（freeze-hold 是本需求要兜底的故障形态）、F88/F94（产品轨迹均经同一 JTC）、F74（FSM 执行后端）
 - **状态：** `completed`（2026-09-23，vcan 验收 7/7：`scripts/a3_test/f97_jtc_tolerance_acceptance.py`。A 正常两点轨迹 SUCCESSFUL（2.98 s）；B 冻结电机 4 反馈后轨迹在运动 0.90 s 处即被逐关节跟踪容差中止，error_code=PATH_TOLERANCE_VIOLATED(-4)（远早于 2+1+1 s 上限，不再永久 pending）；C 清除 silence 后恢复 SUCCESSFUL（3.01 s）。验收脚本 in-process 驱动节点的 domain/RMW 环境坑见 LL-109）。真机验收待通电
 
+### F103 — CAN 总线物理层健康入标准诊断（bus-off/错误帧可观测；链路 down/丢失 → ERROR 进现场状态）
+
+- **说明：** 现有 CAN 安全机制全部在「应用/设备」层：F80 socket 硬化、F81 反馈 staleness、F86 电机侧超时。但 **CAN 物理层本身**（线缆脱落、终端电阻缺失、干扰导致错误计数增长 / ERROR-WARN / ERROR-PASSIVE / BUS-OFF）在系统中完全不可见：`can-up.service` 只配了 `restart-ms 100`（内核自动恢复 bus-off），外部无法知道发生过什么、恢复了几次；若接口被误置 down 或网卡硬件消失，也只能等 F81 在 10 s 后间接报「反馈陈旧」。工业现场要求总线作为独立设备状态上报：
+  1. 新增 `can_bus_monitor` 节点，每 2 s 解析 `ip -s -d link show <iface>`，经 diagnostic_updater 发布任务 `a3_can_bus: CAN link <iface>`：管理态 UP 且 `state ERROR-ACTIVE`（vcan 为 operstate UNKNOWN）= OK；`ERROR-WARN` / `ERROR-PASSIVE` = WARN；接口不存在 / 未 UP / `BUS-OFF` = ERROR。消息携带 CAN state、restart-ms、以及计数器行（RX/TX packets、`re-started`、`bus-errors`、`arbit-lost`、`error-warn`、`error-pass`、`bus-off`）。
+  2. 接入 aggregator Hardware 分组（startswith 增加 `a3_can_bus:`），总线 ERROR 进入 `/diagnostics_toplevel_state`。
+  3. 仅在 `hardware:=can` 且 `use_diagnostics:=true` 时随产品栈启动（mock 栈无 CAN 接口，不该产生误报）；接口名取 `can_interface` 参数。
+  - 与既有机制的关系：F81 管「反馈帧时间维健康」，F103 管「总线物理维健康」；restart-ms 100 保证 bus-off 后内核自动恢复，节点报出 state 翻转与累计计数，恢复后回 OK（历史 bus-off 次数保留在消息中可追溯）。
+- **改动：**
+  1. 新增 `src/a3_bringup/a3_bringup/can_bus_monitor_node.py`（参数 `interface`，默认 can1），setup.py entry
+  2. `src/a3_bringup/launch/a3_bringup.launch.py`：hardware=can + diagnostics 条件启动
+  3. `src/a3_bringup/config/diagnostics.yaml`：Hardware startswith 增加 `a3_can_bus:`
+  4. 新增 `scripts/a3_test/f103_can_bus_health_acceptance.py`（vcan103 接口，隔离域 103）
+- **验收标准（仿真；机械臂保持断电；脚本 `scripts/a3_test/f103_can_bus_health_acceptance.py`）：**
+  1. vcan103 存在且 UP：15 s 内诊断 OK，aggregator 输出 `/A3/Hardware/a3_can_bus: CAN link vcan103`
+  2. `ip link set vcan103 down`：10 s 内诊断与聚合项均变 ERROR
+  3. `ip link set vcan103 up`：10 s 内诊断与聚合项恢复 OK
+  4. 指向不存在的接口（`interface:=can99`）：10 s 内诊断 ERROR（不崩、不静默）
+- **关联：** F80（socket 硬化）、F81（反馈看门狗）、F82（aggregator）、F86（电机 CAN 超时）、can-up.service
+- **状态：** `completed`（2026-09-24，vcan103 验收 4/4：UP→诊断+聚合 OK 1.3 s；down→双 ERROR 1.0 s；up→双恢复 OK 1.0 s；can99 不存在→ERROR 1.6 s 且节点存活；见 LL-115）
+
 ### F102 — MQTT 通信链路健康入标准诊断（断链可观测、10 s 升级 ERROR；Comms 聚合分组；env 覆盖 broker）
 
 - **说明：** web 闭环是产品运行模式，但 MQTT 链路健康只存在于 bridge 节点内部（`_mqtt_connected`）与日志：EMQX 不可达 / 网线脱落 / broker 宕机时，外部系统（监控看板、`/diagnostics_agg` 现场状态、黑匣子）无从感知——上行遥测静默停更，节点不退出（设计为自动重连）。工业现场要求通信通道作为标准设备状态上报：

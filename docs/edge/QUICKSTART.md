@@ -1044,6 +1044,18 @@ python3 scripts/a3_test/f102_mqtt_link_health_acceptance.py
 export A3_MQTT_HOST=192.168.3.73 A3_MQTT_PORT=1883
 ```
 
+### CAN 总线物理层健康入标准诊断（F103：bus-off/错误帧可观测、链路 down/丢失 → ERROR）
+
+此前 CAN 的保护全部在应用/设备层（F80 socket 硬化、F81 反馈 staleness、F86 电机侧超时），总线物理层本身（线缆脱落、终端电阻缺失、干扰致错误计数增长 / ERROR-WARN / ERROR-PASSIVE / BUS-OFF）不可见，只能等 F81 在 10 s 后间接报「反馈陈旧」。现新增 `can_bus_monitor` 节点：每 2 s 解析 `ip -s -d link`，发布诊断任务 `a3_can_bus: CAN link <iface>`——UP + ERROR-ACTIVE = OK，ERROR-WARN/ERROR-PASSIVE = WARN，接口不存在/未 UP/BUS-OFF = ERROR，消息携带 CAN state、restart-ms、RX/TX packets 与 restarts/bus-error/arbit-lost/error-warn/error-pass/bus-off 累计计数。aggregator `Hardware` 分组收 `a3_can_bus:` 前缀，总线 ERROR 进入 `/diagnostics_toplevel_state`。节点仅在 `hardware:=can` + `use_diagnostics:=true` 时随栈启动，接口名取 `can_interface`。
+
+```bash
+# 仿真验收（vcan103，隔离域 103；机械臂断电；需 sudo 建 vcan）
+python3 scripts/a3_test/f103_can_bus_health_acceptance.py
+#   通过标准：末尾「F103 acceptance: 4/4」
+#   UP 15 s 内诊断 + 聚合项 OK；down 10 s 内双 ERROR
+#   up 10 s 内双恢复 OK；指向 can99（不存在）10 s 内 ERROR 且节点不崩
+```
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
