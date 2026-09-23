@@ -93,6 +93,7 @@ def generate_launch_description():
     use_mqtt = LaunchConfiguration("use_mqtt")
     use_teleop = LaunchConfiguration("use_teleop")
     use_self_test = LaunchConfiguration("use_self_test")
+    use_host_diagnostics = LaunchConfiguration("use_host_diagnostics")
     teleop_mapping = LaunchConfiguration("teleop_mapping")
     use_monitor = LaunchConfiguration("use_monitor")
     use_diagnostics = LaunchConfiguration("use_diagnostics")
@@ -412,6 +413,34 @@ def generate_launch_description():
         condition=IfCondition(use_diagnostics),
     )
 
+    # ---- F96：主机资源标准诊断（diagnostic_common_diagnostics → /diagnostics）----
+    host_diag_condition = IfCondition(PythonExpression([
+        "'", use_diagnostics, "' == 'true' and '",
+        use_host_diagnostics, "' == 'true'",
+    ]))
+    cpu_monitor = Node(
+        package="diagnostic_common_diagnostics",
+        executable="cpu_monitor.py",
+        name="cpu_monitor",
+        output="screen",
+        condition=host_diag_condition,
+    )
+    ram_monitor = Node(
+        package="diagnostic_common_diagnostics",
+        executable="ram_monitor.py",
+        name="ram_monitor",
+        output="screen",
+        condition=host_diag_condition,
+    )
+    hd_monitor = Node(
+        package="diagnostic_common_diagnostics",
+        executable="hd_monitor.py",
+        name="hd_monitor",
+        output="screen",
+        parameters=[{"path": "/"}],
+        condition=host_diag_condition,
+    )
+
     # ---- F90：故障黑匣子（rosbag2 snapshot-mode；FAULT 边沿 FSM 触发落盘）----
     # 常驻录制器只保留 32 MiB 内存循环缓冲（不落盘、无磁盘增长）；每次 snapshot
     # 把缓冲写为一个 mcap 分片，单分片超 64 MiB 自动切，天然有界。
@@ -502,6 +531,12 @@ def generate_launch_description():
                         "ros2 service call /a3_self_test/self_test）",
         ),
         DeclareLaunchArgument(
+            "use_host_diagnostics",
+            default_value="true",
+            description="F96 主机资源诊断（diagnostic_common_diagnostics："
+                        "CPU/RAM/磁盘；受 use_diagnostics 总门控）",
+        ),
+        DeclareLaunchArgument(
             "teleop_mapping",
             default_value="default",
             description="手柄映射：default（F60/F64）或 simple（legacy）",
@@ -543,6 +578,9 @@ def generate_launch_description():
         ),
         rsp,
         diagnostic_aggregator,
+        cpu_monitor,
+        ram_monitor,
+        hd_monitor,
         blackbox_recorder,
         controller_manager,
         move_group,

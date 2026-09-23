@@ -18,3 +18,9 @@ diagnostic_aggregator:
         path: Arm Monitor
         timeout: 5.0
         startswith: ["arm_monitor:", "a3_arm_monitor:"]
+      host:
+        # F96：板载主机资源（diagnostic_common_diagnostics）
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: Host
+        timeout: 10.0
+        contains: ["CPU Information", "RAM Information", "HD Usage"]

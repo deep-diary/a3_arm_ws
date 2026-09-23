@@ -935,6 +935,27 @@ python3 scripts/a3_test/f95_self_test_acceptance.py
 
 Python 客户端注意：板载 diagnostic_msgs 4.9.1 把 `level`/`passed` 定义为 octet，rclpy 拿到 `b'\x00'`/`b'\x01'`，须按 `x[0]` 归一化（LL-107）。
 
+### 主机资源标准诊断（F96，diagnostic_common_diagnostics：CPU/RAM/磁盘）
+
+板载主机（RK3588）的 CPU/内存/根分区占用走 ROS 标准包监控，直接上 `/diagnostics` 并由 F82 aggregator 归入 `/A3/Host/...` 分组。`a3_bringup.launch.py` 默认启动三个标准节点（受 `use_diagnostics` 总门控，`use_host_diagnostics:=false` 可关），只读零运动。阈值走包默认：CPU/RAM 占用 WARN 90%；根分区剩余 WARN 5% / ERROR 1%。
+
+```bash
+# 查看主机状态（实际名字带节点名前缀，LL-108）
+ros2 topic echo /diagnostics --filter "m.status and any('CPU' in s.name or 'RAM' in s.name or 'HD Usage' in s.name for s in m.status)"
+#   cpu_monitor: CPU Information / ram_monitor: RAM Information /
+#   hd_monitor: <hostname> HD Usage —— 正常 level=0
+
+# 聚合后（RViz/看板用）
+ros2 topic echo /diagnostics_agg        # /A3/Host/...
+ros2 topic echo /diagnostics_toplevel_state   # 裸 DiagnosticStatus；非 Array
+#   mock 栈因 mock_components/GenericSystem 不发硬件诊断，toplevel=3(STALE)、
+#   message 点 /A3/Hardware: Stale 是 F82 既有行为；真机硬件诊断上线后消除
+
+# 仿真验收（mock 全栈；机械臂断电）
+python3 scripts/a3_test/f96_host_diagnostics_acceptance.py
+#   通过标准：末尾「F96 验收通过」，8/8
+```
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
