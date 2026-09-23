@@ -39,6 +39,20 @@
                  0 / false disarms; firmware write is volatile, re-armed every on_activate. -->
             <param name="motor_can_timeout_enabled">${motor_can_timeout_enabled}</param>
             <param name="motor_can_timeout_s">${motor_can_timeout_s}</param>
+            <!-- F108: position-mode gravity feedforward (EDULITE
+                 gravity_feedforward_ratio): t_ff = ratio * tau_scale * RNEA(q)
+                 so the arm holds pose without sag. Model reuses the F49 fitted
+                 inertia and the F89 per-joint tau_scale file. Runtime-adjustable. -->
+            <param name="gravity_feedforward_ratio">1.0</param>
+            <param name="use_pinocchio_gravity">true</param>
+            <!-- on_configure runs on the CM executor thread, so the plugin cannot
+                 query /controller_manager for robot_description (the server is
+                 blocked inside configure). Read the same kinematics from the
+                 installed static URDF instead. -->
+            <param name="urdf_path">$(find a3_description)/urdf/el_a3.urdf</param>
+            <param name="use_calibrated_inertia">true</param>
+            <param name="inertia_config_path">$(find a3_description)/config/inertia_params.yaml</param>
+            <param name="gravity_scales_file">~/.a3/gravity_scales.yaml</param>
           </xacro:if>
           <xacro:unless value="${use_real_hardware}">
           <!-- Board runtime uses a3_can_bridge topic stack (not this plugin).

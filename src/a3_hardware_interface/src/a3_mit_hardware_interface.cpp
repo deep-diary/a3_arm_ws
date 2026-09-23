@@ -14,11 +14,19 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <pinocchio/algorithm/rnea.hpp>
+#include <pinocchio/parsers/urdf.hpp>
+#include <yaml-cpp/yaml.h>
 
 #include <a3_can_bridge/msg/motor_state.hpp>
 #include <a3_can_bridge/msg/motor_states.hpp>
@@ -102,6 +110,27 @@ std::string GetParam(
   const auto it = params.find(key);
   return it == params.end() ? fallback : it->second;
 }
+
+std::string ExpandHome(const std::string & path)
+{
+  if (path.empty() || path[0] != '~') {
+    return path;
+  }
+  if (const char * home = std::getenv("HOME"); home != nullptr) {
+    return std::string(home) + path.substr(1);
+  }
+  return path;
+}
+
+// F49 key -> URDF link carrying the fitted mass/CoM; must stay identical to
+// gravity_compensation_controller.cpp so FF uses the calibrated model.
+const std::unordered_map<std::string, std::string> kF49JointToLink = {
+  {"L2", "l2_l3_urdf_asm"},
+  {"L3", "l3_lnik_urdf_asm"},
+  {"L4", "l4_l5_urdf_asm"},
+  {"L5", "part_9"},
+  {"L6", "l5_l6_urdf_asm"},
+};
 
 std::array<uint8_t, 4> TimeoutCountsRaw(uint32_t counts)
 {
@@ -204,6 +233,20 @@ public:
     motor_states_rate_hz_ = ParseDouble(
       GetParam(hp, "motor_states_rate_hz", ""), kDefaultMotorStatesRateHz);
     motor_states_rate_hz_ = std::clamp(motor_states_rate_hz_, 1.0, 200.0);
+    // F108: position-mode gravity feedforward (EDULITE gravity_feedforward_ratio).
+    gravity_ff_ratio_ = ParseDouble(
+      GetParam(hp, "gravity_feedforward_ratio", ""), 1.0);
+    gravity_ff_ratio_ = std::clamp(gravity_ff_ratio_, 0.0, 1.0);
+    use_pinocchio_gravity_ =
+      ParseBool(GetParam(hp, "use_pinocchio_gravity", ""), true);
+    use_calibrated_inertia_ =
+      ParseBool(GetParam(hp, "use_calibrated_inertia", ""), true);
+    inertia_params_file_ = GetParam(hp, "inertia_config_path",
+      GetParam(hp, "inertia_params_file", ""));
+    gravity_scales_file_ =
+      GetParam(hp, "gravity_scales_file", ExpandHome("~/.a3/gravity_scales.yaml"));
+    robot_description_ = GetParam(hp, "robot_description", "");
+    urdf_path_ = GetParam(hp, "urdf_path", "");
     bus_ = (can_interface_ == "can0") ? CanBus::CAN0 : CanBus::CAN1;
 
     joints_.clear();
@@ -389,6 +432,34 @@ public:
       a3_can_bridge::msg::MotorStates>(motor_states_topic_, states_qos);
     health_exec_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
     health_exec_->add_node(health_node_);
+
+    // F108: ratio tunable online (EDULITE semantics) — ramp the feedforward
+    // up during commissioning without restarting controller_manager.
+    health_node_->declare_parameter(
+      "gravity_feedforward_ratio", gravity_ff_ratio_);
+    health_node_->declare_parameter(
+      "use_pinocchio_gravity", use_pinocchio_gravity_);
+    // Must retain the returned handle: rclcpp stores it as a weak_ptr, so a
+    // dropped handle makes the parameter service accept updates while the
+    // callback (and these member writes) never runs. LL-126.
+    on_set_parameters_handle_ = health_node_->add_on_set_parameters_callback(
+      [this](const std::vector<rclcpp::Parameter> & params) {
+        rcl_interfaces::msg::SetParametersResult result;
+        result.successful = true;
+        for (const auto & p : params) {
+          if (p.get_name() == "gravity_feedforward_ratio" &&
+            p.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE)
+          {
+            gravity_ff_ratio_ = std::clamp(p.as_double(), 0.0, 1.0);
+          } else if (p.get_name() == "use_pinocchio_gravity" &&
+            p.get_type() == rclcpp::ParameterType::PARAMETER_BOOL)
+          {
+            use_pinocchio_gravity_ = p.as_bool();
+          }
+        }
+        return result;
+      });
+
     motor_states_timer_ = health_node_->create_wall_timer(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::duration<double>(1.0 / motor_states_rate_hz_)),
@@ -396,6 +467,8 @@ public:
 
     rx_run_.store(true);
     rx_thread_ = std::thread(&A3MITHardwareInterface::RxLoop, this);
+
+    InitGravityModel();
 
     RCLCPP_INFO(
       rclcpp::get_logger(kLoggerName), "CAN %s open, RX thread running",
@@ -706,7 +779,10 @@ public:
 
     // Per-joint modes: effort-claimed joints (zero_torque, or GripperAction
     // on L7) get kp=0 + torque_ff; the rest get position frames.
+    const bool gravity_ff_active = gravity_ff_ready_ && use_pinocchio_gravity_ &&
+      gravity_ff_ratio_ > 0.0;
     std::vector<double> motor_positions(joints_.size());
+    Eigen::VectorXd gravity_tau;
     {
       std::lock_guard<std::mutex> lock(fb_mutex_);
       for (size_t i = 0; i < joints_.size(); ++i) {
@@ -726,6 +802,15 @@ public:
               0.0, 5.0);
         }
       }
+      if (gravity_ff_active) {
+        q_.setZero();
+        for (size_t i = 0; i < joints_.size(); ++i) {
+          if (q_index_[i] >= 0) {
+            q_[q_index_[i]] = joints_[i].hw_pos;
+          }
+        }
+        gravity_tau = pinocchio::rnea(model_, data_, q_, v_zero_, a_zero_);
+      }
     }
 
     for (size_t i = 0; i < joints_.size(); ++i) {
@@ -743,11 +828,18 @@ public:
           bus_, j.motor_id, motor_positions[i], 0.0, 0.0, kd,
           motor_torque, j.torque_max, j.speed_max);
       } else {
-        // MIT position mode: velocity/torque FF stay 0 — JTC position commands
-        // already carry a smooth spline; kp/kd close the loop on the motor.
+        // MIT position mode: kp/kd close the loop on the motor; F108 adds the
+        // static gravity torque as t_ff so joints do not sag under their own
+        // weight (EDULITE gravity_feedforward_ratio).
+        double t_ff = 0.0;
+        if (gravity_ff_active && v_index_[i] >= 0) {
+          t_ff = std::clamp(
+              gravity_ff_ratio_ * ff_scale_[i] * gravity_tau[v_index_[i]],
+              -j.torque_max, j.torque_max) * j.direction;
+        }
         frame = ProtocolCodec::BuildMitControlFrame(
           bus_, j.motor_id, j.direction * j.cmd_pos + j.position_offset,
-          0.0, kp_, kd_, 0.0, j.torque_max, j.speed_max);
+          0.0, kp_, kd_, t_ff, j.torque_max, j.speed_max);
       }
       std::string error;
       if (!transport_.Send(frame, &error)) {
@@ -760,6 +852,196 @@ public:
 
 private:
   static constexpr const char * kLoggerName = "a3_mit_hardware_interface";
+
+  // F108: builds the gravity model once at configure. Failure never aborts
+  // hardware bring-up — the arm simply runs without feedforward.
+  void InitGravityModel()
+  {
+    gravity_ff_ready_ = false;
+    if (!use_pinocchio_gravity_) {
+      RCLCPP_INFO(
+        rclcpp::get_logger(kLoggerName),
+        "F108 gravity feedforward disabled: use_pinocchio_gravity=false");
+      return;
+    }
+
+    std::string urdf = robot_description_;
+    if (urdf.empty() && !urdf_path_.empty()) {
+      urdf = ReadFile(urdf_path_);
+    }
+    if (urdf.empty()) {
+      RCLCPP_ERROR(
+        rclcpp::get_logger(kLoggerName),
+        "F108: no robot_description available (hardware param or urdf_path); "
+        "running without gravity feedforward");
+      return;
+    }
+
+    try {
+      pinocchio::urdf::buildModelFromXML(urdf, model_);
+      data_ = pinocchio::Data(model_);
+    } catch (const std::exception & e) {
+      RCLCPP_ERROR(
+        rclcpp::get_logger(kLoggerName),
+        "F108: pinocchio model build failed: %s; no gravity feedforward",
+        e.what());
+      return;
+    }
+
+    ApplyCalibratedInertia();
+
+    q_.resize(model_.nq);
+    q_.setZero();
+    v_zero_ = Eigen::VectorXd::Zero(model_.nv);
+    a_zero_ = Eigen::VectorXd::Zero(model_.nv);
+
+    q_index_.assign(joints_.size(), -1);
+    v_index_.assign(joints_.size(), -1);
+    size_t mapped = 0;
+    for (size_t i = 0; i < joints_.size(); ++i) {
+      if (!model_.existJointName(joints_[i].name)) {
+        RCLCPP_WARN(
+          rclcpp::get_logger(kLoggerName),
+          "F108: pinocchio model has no joint '%s'", joints_[i].name.c_str());
+        continue;
+      }
+      const pinocchio::JointIndex jid = model_.getJointId(joints_[i].name);
+      q_index_[i] = model_.joints[jid].idx_q();
+      v_index_[i] = model_.joints[jid].idx_v();
+      ++mapped;
+    }
+
+    ff_scale_ = LoadGravityScales();
+    gravity_ff_ready_ = mapped > 0;
+    RCLCPP_INFO(
+      rclcpp::get_logger(kLoggerName),
+      "F108 gravity feedforward ready: ratio=%.2f, %zu/%zu joints mapped, "
+      "F49 calibrated inertia %s",
+      gravity_ff_ratio_, mapped, joints_.size(),
+      use_calibrated_inertia_ ? "enabled" : "disabled");
+  }
+
+  void ApplyCalibratedInertia()
+  {
+    if (!use_calibrated_inertia_) {
+      return;
+    }
+    std::string path = ExpandHome(inertia_params_file_);
+    if (path.empty()) {
+      try {
+        path = ament_index_cpp::get_package_share_directory("a3_description") +
+          "/config/inertia_params.yaml";
+      } catch (const std::exception & e) {
+        RCLCPP_WARN(
+          rclcpp::get_logger(kLoggerName),
+          "F108: cannot resolve a3_description share for F49 file: %s",
+          e.what());
+        return;
+      }
+    }
+
+    YAML::Node root;
+    try {
+      root = YAML::LoadFile(path);
+    } catch (const std::exception & e) {
+      RCLCPP_WARN(
+        rclcpp::get_logger(kLoggerName),
+        "F108: cannot load inertia params %s: %s; nominal URDF inertia",
+        path.c_str(), e.what());
+      return;
+    }
+    if (!root["use_calibrated_params"].as<bool>(false)) {
+      return;
+    }
+    const YAML::Node params = root["inertia_params"];
+    if (!params) {
+      return;
+    }
+
+    size_t applied = 0;
+    for (auto it = params.begin(); it != params.end(); ++it) {
+      const std::string key = it->first.as<std::string>();
+      const auto link_it = kF49JointToLink.find(key);
+      if (link_it == kF49JointToLink.end()) {
+        continue;
+      }
+      const std::string & link = link_it->second;
+      if (!model_.existBodyName(link)) {
+        continue;
+      }
+      const pinocchio::FrameIndex fid = model_.getBodyId(link);
+      const pinocchio::JointIndex jid = model_.frames[fid].parentJoint;
+      if (jid <= 0 || jid >= static_cast<pinocchio::JointIndex>(
+        model_.inertias.size()))
+      {
+        continue;
+      }
+      const YAML::Node entry = it->second;
+      const double mass = entry["mass"].as<double>();
+      const YAML::Node c = entry["com"];
+      const Eigen::Vector3d com(
+        c[0].as<double>(), c[1].as<double>(), c[2].as<double>());
+      const auto & Y = model_.inertias[jid];
+      model_.inertias[jid] = pinocchio::Inertia(mass, com, Y.inertia());
+      ++applied;
+    }
+    RCLCPP_INFO(
+      rclcpp::get_logger(kLoggerName),
+      "F108: applied F49 calibrated inertia to %zu links", applied);
+  }
+
+  // Per-joint F89 tau_scale in joints_ order; L1-L6 default 1.0, L7 always 0
+  // (gripper gets no gravity FF, matching zero_torque's L1-L6 joint set).
+  std::vector<double> LoadGravityScales()
+  {
+    std::vector<double> scales(joints_.size(), 0.0);
+    for (size_t i = 0; i < joints_.size() && i < 6; ++i) {
+      scales[i] = 1.0;
+    }
+
+    const std::string path = ExpandHome(gravity_scales_file_);
+    YAML::Node root;
+    try {
+      root = YAML::LoadFile(path);
+    } catch (const std::exception &) {
+      RCLCPP_INFO(
+        rclcpp::get_logger(kLoggerName),
+        "F108: gravity scales file %s not readable; tau_scale=1.0 for L1-L6",
+        path.c_str());
+      return scales;
+    }
+    YAML::Node node =
+      root["zero_torque_controller"]["ros__parameters"]["tau_scale"];
+    if (!node) {
+      node = root["tau_scale"];
+    }
+    if (!node || !node.IsSequence()) {
+      RCLCPP_WARN(
+        rclcpp::get_logger(kLoggerName),
+        "F108: no tau_scale sequence in %s; using 1.0 for L1-L6",
+        path.c_str());
+      return scales;
+    }
+    const size_t n = std::min(node.size(), size_t(6));
+    for (size_t i = 0; i < n; ++i) {
+      scales[i] = node[i].as<double>();
+    }
+    RCLCPP_INFO(
+      rclcpp::get_logger(kLoggerName),
+      "F108: loaded F89 tau_scale for %zu arm joints from %s", n, path.c_str());
+    return scales;
+  }
+
+  static std::string ReadFile(const std::string & path)
+  {
+    std::ifstream f(path);
+    if (!f.is_open()) {
+      return "";
+    }
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+  }
 
   void PublishHealth()
   {
@@ -948,6 +1230,24 @@ private:
   int soft_start_remaining_{0};
   std::atomic_bool fb_stale_{false};
 
+  // F108 position-mode gravity feedforward state.
+  double gravity_ff_ratio_{1.0};
+  bool use_pinocchio_gravity_{true};
+  bool use_calibrated_inertia_{true};
+  std::string inertia_params_file_;
+  std::string gravity_scales_file_;
+  std::string robot_description_;
+  std::string urdf_path_;
+  bool gravity_ff_ready_{false};
+  pinocchio::Model model_;
+  pinocchio::Data data_;
+  Eigen::VectorXd q_;
+  Eigen::VectorXd v_zero_;
+  Eigen::VectorXd a_zero_;
+  std::vector<Eigen::Index> q_index_;
+  std::vector<Eigen::Index> v_index_;
+  std::vector<double> ff_scale_;
+
   std::vector<JointMapping> joints_;
   std::array<double, 8> torque_max_by_motor_{};
   std::array<double, 8> speed_max_by_motor_{};
@@ -964,6 +1264,8 @@ private:
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr stale_pub_;
   rclcpp::Publisher<a3_can_bridge::msg::MotorStates>::SharedPtr motor_states_pub_;
   rclcpp::TimerBase::SharedPtr motor_states_timer_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
+    on_set_parameters_handle_;
 };
 
 }  // namespace a3_hardware_interface

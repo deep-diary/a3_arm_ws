@@ -151,6 +151,14 @@ Web 端单电机调试（CAN 扫描 / MIT 直驱 / 保持）的安全边界：
 3. **占空比门（工作制）**：滚动窗口 `duty_window_s = 600 s`、`duty_max_ratio = 0.8`（均可运行时调，`duty_gate_enabled` 可关）。每次 dispatch 记录运动段时长（moveit 路径按实际执行结果记录），窗口内已用时长（含本次预估）超预算即拒绝，消息给出冷却秒数（等到最旧运动段末端滚出窗口左沿）。是 F44 真实温度硬门之外的**前馈热保护**，温度传感器未覆盖/仿真工况下兜底。
 4. **已知局限（工程近似）**：MoveIt 规划不含关节力矩，move_group 目标的静态校核是「当前位形→目标」**关节空间 ≥21 点线性采样**的静态重力矩近似：①只含静态重力矩，不含速度/加速度动力学力矩；②采样路径与规划器实际路径可能不同。该门只能保证沿途静态位形可行，**不能替代动力学限幅**；带载快速运动须主动降速或收紧 `static_torque_margin_ratio`。
 
+## 位置模式重力前馈（F108）
+
+真机插件 `A3MITHardwareInterface` 的 MIT 位置帧（JTC 臂轨迹 + 位置模式夹爪）每周期注入重力前馈，消除机械臂自重造成的稳态下垂（δ=τ_g/kp，大伸展位形曾达 ~0.06 rad）：
+
+1. **前馈口径**：`t_ff = ratio × tau_scale × RNEA(q,0,0) × direction`，经电机轴方向映射并 clamp 到各关节 `±torque_max` 后填入 MIT 帧。模型复用 F49 标定惯量（`inertia_params.yaml`）与 F89 逐关节 `tau_scale`（`~/.a3/gravity_scales.yaml`，缺失→1.0）；L7 无重力模型，位置帧 t_ff 恒为 0。
+2. **安全边界**：比例参数 `gravity_feedforward_ratio` 默认 1.0、clamp 到 [0,1]，`use_pinocchio_gravity` 默认 true，均可在 `/a3_hardware_health` 运行时调整（调试从 0 逐步加大）；模型构建失败不阻断插件加载，前馈按 0 处理。**effort 模式帧、soft-start 阻尼帧、feedback 陈旧 freeze-hold 帧、on_activate/on_deactivate 零增益帧一律不带前馈**——前馈只在位置闭环正常运行时存在，任何保护性帧都不会叠加可能错误的模型力矩。
+3. **验收**：vcan0 + vcan_motor_sim，`scripts/a3_test/f108_gravity_ff_vcan_acceptance.py` 23/23（ratio=0/0.5/1 逐档比对独立 RNEA、STRICT 控制器切换回归）。真机启用前须确认 F49/F89 标定仍有效，模型失配时前馈会产生稳态偏载，应立即把 ratio 调 0。
+
 ## TX 帧率监视（F46）
 
 `/a3/motor/tx_stats`（5 s 窗口，先发布再清零）：每电机 `tx_hz`、`tx_traj_total`/`tx_refresh_total`、跳过计数（`skip_max_rate`/`skip_bus_disabled`/`skip_power_gate`，定位帧丢失）、`tx_rate_ok`。

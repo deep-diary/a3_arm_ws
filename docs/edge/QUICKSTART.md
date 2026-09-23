@@ -1127,6 +1127,22 @@ ros2 service call /a3/arm/set_payload a3_msgs/srv/SetPayload \
 #     → 等冷却（或先去低负载工序），窗口/比例可参数调：duty_window_s / duty_max_ratio
 ```
 
+### 位置模式重力前馈（F108：对标 EDULITE gravity_feedforward_ratio）
+
+真机 ros2_control 栈位置帧每周期注入 `t_ff = ratio × tau_scale × RNEA(q)`，机械臂到位后不自重下垂；模型复用 F49 标定惯量 + F89 关节比例。安全边界见 [shared/SAFETY.md](../shared/SAFETY.md)。
+
+```bash
+# vcan 数值验收（机械臂断电；约 2 分钟）
+#   1) vcan0 起来后：python3 scripts/a3_test/vcan_motor_sim.py --interface vcan0
+#   2) ROS_DOMAIN_ID=59 ros2 launch a3_bringup edge_ros2_control_vcan.launch.py
+ROS_DOMAIN_ID=59 python3 scripts/a3_test/f108_gravity_ff_vcan_acceptance.py
+#   通过标准：末尾「总体: ALL PASS (23/23)」，退出码 0
+
+# 调试/日常：运行时在线调比例（0=关，1=全前馈，默认 1.0）
+ros2 param set /a3_hardware_health gravity_feedforward_ratio 0.5
+#   真机发现稳态偏载（模型失配）立即设 0；set/get 成功不代表插件已响应（LL-126）
+```
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
