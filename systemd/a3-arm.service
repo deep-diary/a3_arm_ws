@@ -7,7 +7,13 @@ StartLimitIntervalSec=60
 StartLimitBurst=3
 
 [Service]
-Type=simple
+# F101: Type=notify — systemd_watchdog_feed sends READY=1 after the first
+# /joint_states frame and WATCHDOG=1 while feedback is fresh. A control-loop
+# hang stops the feeding; systemd restarts the unit after WatchdogSec.
+Type=notify
+NotifyAccess=all
+TimeoutStartSec=90
+WatchdogSec=15
 User=cat
 Group=cat
 WorkingDirectory=/home/cat/a3_arm_ws

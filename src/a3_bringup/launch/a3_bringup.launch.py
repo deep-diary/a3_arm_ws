@@ -370,6 +370,14 @@ def generate_launch_description():
         condition=IfCondition(use_self_test),
     )
 
+    # ---- F101：systemd 服务看门狗喂狗（仅在 NOTIFY_SOCKET 存在时工作）----
+    watchdog_feed = Node(
+        package="a3_bringup",
+        executable="systemd_watchdog_feed",
+        name="systemd_watchdog_feed",
+        output="screen",
+    )
+
     mqtt_bridge = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(bridge_share, "launch", "bridge.launch.py")
@@ -481,6 +489,7 @@ def generate_launch_description():
             fsm,
             monitor,
             retime_node,
+            watchdog_feed,
             mqtt_bridge,
             servo_node,
             servo_bridge,

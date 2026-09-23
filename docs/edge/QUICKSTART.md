@@ -1011,6 +1011,23 @@ python3 scripts/a3_test/f100_realtime_scheduling_acceptance.py
 #   D enable → 两点 action 轨迹仍 SUCCESSFUL
 ```
 
+### 看门狗双层硬化（F101：整机死锁硬复位 + 控制栈挂死确定性重启）
+
+此前两类「挂死」都没有确定性恢复：`/dev/watchdog` 已随内核加载但 `RuntimeWatchdogSec=0`（没人喂狗）；`a3-arm.service` 也没有 `WatchdogSec`，200 Hz 控制环死循环时服务永远停在僵尸式 active。已按 systemd 标准机制补齐双层：①硬件层——`sudo scripts/setup/setup_watchdog.sh`（幂等）装 `/etc/systemd/system.conf.d/99-a3-watchdog.conf`（RuntimeWatchdogSec=10，须 daemon-reexec 才生效），systemd 约每 5 s 喂狗，内核/调度彻底死锁 10 s 硬复位；②服务层——`a3-arm.service` 改 `Type=notify` + `WatchdogSec=15`，栈内极简节点 `systemd_watchdog_feed` 经 sd_notify 直连 `$NOTIFY_SOCKET`：首帧 `/joint_states` 发 READY=1，之后**仅当反馈帧新鲜（≤3 s）且 `/a3/hardware/feedback_stale` 非 true** 才每 2 s 发 WATCHDOG=1。电机静默时 JSB 仍持续发布冻结末帧，故必须双条件。无 NOTIFY_SOCKET 的手动 launch 节点自动空转。
+
+```bash
+# 一次性部署硬件看门狗（需 sudo；会 daemon-reexec，不影响当前会话）
+sudo scripts/setup/setup_watchdog.sh
+systemctl show -p RuntimeWatchdogUSec --value      # 期望 10s；DesignWare 回报 11s 正常
+
+# 仿真验收（机械臂断电）
+python3 scripts/a3_test/f101_watchdog_acceptance.py
+#   通过标准：末尾「F101 acceptance: 8/8」
+#   2 临时单元 a3-f101test（Type=notify/WatchdogSec=10）30 s 内 active、NRestarts=0
+#   3 enable → 两点 action 轨迹仍 SUCCESSFUL
+#   4 杀 vcan_motor_sim → 25 s 内 NRestarts ≥ 1（实测 12.4 s ≈ 10+2）
+```
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
