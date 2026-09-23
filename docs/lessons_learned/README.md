@@ -132,3 +132,5 @@ LL-NNN-short-slug.md
 | [LL-116](LL-116-python-headerlesstopicdiagnostic-needs-manual-tick.md) | F104：Python 绑定 HeaderlessTopicDiagnostic 内部订阅不投递，恒报 No events recorded；须自建订阅并在回调手动 task.tick()；类型运行时发现、话题暂不存在重试 | Edge | 2026-09-24 |
 | [LL-117](LL-117-aggregator-strips-leading-slash-item-name.md) | F104：aggregator 生成聚合项名时剥掉条目名前导斜杠（/f104_probe→f104_probe，留下双空格），按 /diagnostics 原名匹配聚合项静默落空；匹配用 lstrip("/")、先 echo 实际聚合名 | Edge | 2026-09-24 |
 | [LL-118](LL-118-background-node-dds-participant-vanishes-detach-fully.md) | Bash 工具里 setsid ... & 拉起的后台 ROS 节点会进程存活但 DDS 参与者从发现消失（node list 无节点、Publisher count 0）；用 nohup setsid ... </dev/null >log 2>&1 & disown 完全脱离，启动后以图端点而非 PID 验证 | Edge | 2026-09-24 |
+| [LL-119](LL-119-cyclonedds-010-socket-buffer-internal-min-only.md) | F105：CycloneDDS 0.10 套接字缓冲只在 Domain/Internal 下、仅 min 属性（General 下未知元素=致命解析错误）；4MiB 申请值配合 sysctl rmem/wmem_max，strings libddsc.so 核对 schema | Edge | 2026-09-24 |
+| [LL-120](LL-120-ros-args-required-p-silently-ignored.md) | F105：裸 ros2 run / subprocess 不带 --ros-args 时 -p 被静默忽略、节点取默认值却零报错（伪装成 DDS 发现故障）；裸启动一律 --ros-args -p，排查先 ros2 param get 验证 | Edge | 2026-09-24 |

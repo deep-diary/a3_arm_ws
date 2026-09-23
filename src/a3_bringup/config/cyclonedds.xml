@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  F105 — A3 CycloneDDS 工业基线配置（CycloneDDS 0.10 / ROS 2 Humble）。
+  安装：scripts/setup/setup_dds_network.sh → /etc/a3/cyclonedds.xml，
+  经 CYCLONEDDS_URI 注入（/etc/default/a3-arm；手工 shell 可直接 export）。
+
+  接口钉选（多网卡 wlan0/eth0/usb0 环境避免选错）：
+    export A3_DDS_IFACE=wlan0   # 可选；不设/留空 = Cyclone 自动选择
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="any">
+    <General>
+      <!-- 未设置 A3_DDS_IFACE 时 name 为空，Cyclone 回退到自动选网卡（已验证） -->
+      <Interfaces>
+        <NetworkInterface name="${A3_DDS_IFACE}"/>
+      </Interfaces>
+
+      <!-- UDP 消息上限与分片大小（标准以太网 MTU 安全值） -->
+      <MaxMessageSize>65500B</MaxMessageSize>
+      <FragmentSize>4000B</FragmentSize>
+    </General>
+
+    <!-- CycloneDDS 0.10：套接字缓冲申请值在 Internal 下，仅 min（实际 SO_RCVBUF/SO_SNDBUF）。
+         4 MiB/套接字，配合 sysctl rmem_max/wmem_max 24 MiB 上限。 -->
+    <Internal>
+      <SocketReceiveBufferSize min="4MiB"/>
+      <SocketSendBufferSize min="4MiB"/>
+    </Internal>
+
+    <Discovery>
+      <!-- 单板全栈节点数多（20+ 进程），放宽自动 participant index 上限 -->
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>30</MaxAutoParticipantIndex>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

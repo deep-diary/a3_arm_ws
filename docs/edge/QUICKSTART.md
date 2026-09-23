@@ -1068,6 +1068,23 @@ python3 scripts/a3_test/f104_topic_rate_acceptance.py
 #   停发 15 s 内双 ERROR；恢复 50 Hz 15 s 内双恢复 OK
 ```
 
+### DDS 网络栈硬化（F105：内核 UDP 缓冲 + CycloneDDS 标准配置）
+
+DDS 层此前零硬化：`net.core.rmem_max/wmem_max` 为内核默认 208 KB，无 CycloneDDS XML。单板全栈（50 Hz JSB、200 Hz 控制、MQTT 桥同板）在突发大消息或高负载时 UDP 缓冲被打满，内核直接丢包，表现为「偶尔抽风」且无从定位。现按 CycloneDDS 官方部署基线：sysctl drop-in 将 UDP 缓冲上限提至 24 MiB（默认 2 MiB、`netdev_max_backlog=2000`）；CycloneDDS XML 显式声明 4 MiB/套接字缓冲申请（0.10 schema 为 `Internal/SocketReceiveBufferSize[@min]`，见 LL-119）、65500B 消息上限与 4000B 分片，接口可经 `A3_DDS_IFACE` 钉选。配置经 `CYCLONEDDS_URI` 注入 `/etc/default/a3-arm`，systemd 产品栈自动加载。
+
+```bash
+# 安装（幂等：sysctl 立即生效 + XML 到 /etc/a3 + EnvironmentFile 注入）
+sudo scripts/setup/setup_dds_network.sh wlan0   # 接口参数可选
+
+# 仿真验收（隔离域 105，三流压测 + 4 核 CPU/内存压力；机械臂断电）
+python3 scripts/a3_test/f105_dds_network_acceptance.py
+#   通过标准：末尾「F105 acceptance: 5/5」
+#   20 s 压力窗口零丢失零乱序；F104 monitor 旁路观察 50 Hz 全程 OK
+
+# 手工 shell 使用 XML
+export CYCLONEDDS_URI=file:///etc/a3/cyclonedds.xml A3_DDS_IFACE=wlan0
+```
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
