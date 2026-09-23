@@ -899,6 +899,21 @@ A3_SUDO_PASS=<sudo密码> python3 scripts/a3_test/f93_systemd_acceptance.py
 #   /a3/arm/enable 后三控制器 active、SIGKILL 后 NRestarts 增长且恢复、stop 无残留
 ```
 
+### 两点轨迹统一速度限幅（F94，URDF velocity 地板时长）
+
+规划路径（goto/playback）由 OMPL + TOTG/Ruckig 限速，但 `_two_point_trajectory` 的 6 个直发点（web jog、set_jog、goto/move_to 兜底、disable safe-park、park 修正、L7 线性）此前没有任何速度上限（web jog 最短可到 0.05 s）。F94 在**唯一出口** `_two_point_trajectory()` 内部加地板：`duration ≥ 2.2×max|Δq|/(vmax×joint_velocity_scale)`，vmax 只认 URDF velocity（L1–L3=33、L4–L7=50 rad/s）；2.2 是 JTC 两点 quintic 样条实测峰值/平均 ≈2.0–2.09 的形状系数（200 Hz 实测，含 5% 余量）。触发时有节流 WARN `F94 duration extended`，默认 scale=1.0 只堵无限速漏洞，保守请求行为不变。
+
+```bash
+# 仿真验收（mock 全链路；机械臂断电）
+python3 scripts/a3_test/f94_velocity_limit_acceptance.py
+#   通过标准：末尾「F94 验收通过」，11/11
+#   7 关节速度限加载、L1 Δq=3.0/0.05s → duration=0.20s 且中心差分峰值 ≤33
+#   保守 Δq=0.1/2.0s 不改时长、scale=0.5 → 0.40s 且峰值 ≤16.5、disable 回 home 回归
+
+# 现场整体收紧速度（运行时可调；立即生效）
+ros2 param set /a3_arm_controller joint_velocity_scale 0.5
+```
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

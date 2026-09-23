@@ -91,6 +91,15 @@ def _duration(sec: float) -> Duration:
     return d
 
 
+def _tfs_seconds(tfs: Duration) -> float:
+    return float(tfs.sec) + tfs.nanosec * 1e-9
+
+
+# F94: JTC VARIABLE_DEGREE_SPLINE 两点（端点 v/a=0）实测峰值速度/平均速度≈2.0–2.09
+# （mock 全栈 200 Hz 实测），地板时长须按该形状系数放大，否则只约束了平均值。
+_SPLINE_PEAK_FACTOR = 2.2
+
+
 def _smooth_points(
     points: List[JointTrajectoryPoint], window: int
 ) -> List[JointTrajectoryPoint]:
@@ -405,6 +414,8 @@ class ArmController(Node):
         self.declare_parameter("named_poses_pkg", "a3_description")
         # F41/F88: move_to/goto 兜底——最短时长；两点轨迹由 JTC 样条插值
         self.declare_parameter("move_to_min_duration_s", 3.0)
+        # F94: 两点轨迹速度限幅 = URDF velocity × scale（1.0=只堵无限速漏洞）
+        self.declare_parameter("joint_velocity_scale", 1.0)
         # F40: 失能保护（不在 home 容差内先平滑回 home 再失能）
         self.declare_parameter("disable_home_pose_name", "home")
         self.declare_parameter("disable_home_tol_rad", 0.15)
@@ -501,7 +512,13 @@ class ArmController(Node):
         # 命名预设点
         self._poses = self._load_poses()
         # 关节限位（来自 URDF，与前端滑动条上下限同源）
+        self._joint_vel_limits: Dict[str, float] = {}
         self._joint_limits = self._load_joint_limits()
+        if self._joint_vel_limits:
+            self.get_logger().info(
+                "F94 joint velocity limits (rad/s): "
+                + ", ".join(f"{n}={v:g}" for n, v in self._joint_vel_limits.items())
+            )
 
         # 订阅（/joint_states 为 best-effort；gate/state 为 transient_local 锁存）
         js_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -768,10 +785,14 @@ class ArmController(Node):
         return worst <= tol, worst
 
     def _load_joint_limits(self) -> Dict[str, Tuple[float, float]]:
-        """从 a3_description/urdf/el_a3.urdf 读取各关节 limit lower/upper（与前端滑动条同源）."""
+        """
+        从 a3_description/urdf/el_a3.urdf 读取各关节 limit lower/upper（与前端滑动条同源）；
+        F94: 同时把 velocity 存入 self._joint_vel_limits（两点轨迹地板时长的唯一来源）。
+        """
         import xml.etree.ElementTree as ET
 
         limits: Dict[str, Tuple[float, float]] = {}
+        vel_limits: Dict[str, float] = {}
         try:
             share = get_package_share_directory("a3_description")
             path = os.path.join(share, "urdf", "el_a3.urdf")
@@ -789,9 +810,43 @@ class ArmController(Node):
                 except (TypeError, ValueError):
                     continue
                 limits[name] = (lower, upper)
+                try:
+                    vel = float(limit.get("velocity"))
+                except (TypeError, ValueError):
+                    vel = 0.0
+                if vel > 0.0:
+                    vel_limits[name] = vel
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warn(f"cannot load joint limits from URDF: {exc}")
+        self._joint_vel_limits = vel_limits
         return limits
+
+    def _velocity_floor_duration(
+        self,
+        q0: List[float],
+        q1: List[float],
+        joint_names: Optional[List[str]] = None,
+    ) -> Tuple[float, str]:
+        """
+        F94: 两点轨迹峰值速度不超过 URDF velocity 所需的最小时长
+        _SPLINE_PEAK_FACTOR × max_i |Δq_i| / (vmax_i × scale)。
+        返回 (地板时长, 最慢关节名)；无速度限数据时返回 (0.0, "")——不阻断运动。
+        """
+        names = list(joint_names or self._joint_names)
+        scale = float(self.get_parameter("joint_velocity_scale").value)
+        if scale <= 0.0 or not self._joint_vel_limits:
+            return 0.0, ""
+        floor = 0.0
+        slowest = ""
+        for a, b, jn in zip(q0, q1, names):
+            vmax = self._joint_vel_limits.get(jn)
+            if vmax is None:
+                continue
+            need = _SPLINE_PEAK_FACTOR * abs(float(b) - float(a)) / (vmax * scale)
+            if need > floor:
+                floor = need
+                slowest = jn
+        return floor, slowest
 
     def _check_positions_in_limits(self) -> Tuple[bool, List[str]]:
         """
@@ -1101,10 +1156,23 @@ class ArmController(Node):
 
         JTC VARIABLE_DEGREE_SPLINE 据此生成 quintic S 曲线（位置-only 两点会退化为
         匀速线性、端点速度跳变）。motor_protocol topic 后端忽略 v/a、按位置线性插值。
+
+        F94: 在此集中强制速度地板时长（URDF velocity × joint_velocity_scale），
+        所有调用点（jog/park/纠偏）均不得绕过。
         """
+        names = list(joint_names or self._joint_names)
+        floor, slowest = self._velocity_floor_duration(q0, q1, names)
+        if floor > duration:
+            self.get_logger().warn(
+                f"F94 duration extended: {duration:.3f}s -> {floor:.3f}s "
+                f"(slowest={slowest}, joint_velocity_scale="
+                f"{float(self.get_parameter('joint_velocity_scale').value):g})",
+                throttle_duration_sec=1.0,
+            )
+            duration = floor
         n = len(q0)
         traj = JointTrajectory()
-        traj.joint_names = list(joint_names or self._joint_names)
+        traj.joint_names = names
         p0 = JointTrajectoryPoint()
         p0.positions = [float(v) for v in q0]
         p0.velocities = [0.0] * n
@@ -1246,6 +1314,7 @@ class ArmController(Node):
         g_dur = min(max(abs(delta) / speed, 1.0), 3.0)
         gtraj = self._two_point_trajectory(
             [self._positions[6]], [target], g_dur, joint_names=[JOINTS[6]])
+        g_dur = _tfs_seconds(gtraj.points[1].time_from_start)
         self._dispatch_trajectory(gtraj)
         return g_dur
 
@@ -1282,6 +1351,7 @@ class ArmController(Node):
             )
             q0 = list(self._positions)
             traj = self._two_point_trajectory(q0, home, duration)
+            duration = _tfs_seconds(traj.points[1].time_from_start)
             self._publish_mode("TRAJ_RUNNING")
             self._dispatch_trajectory(traj)
             self._set_state(STATE_SAFE_PARK, f"safe park -> home ({duration:.1f}s, 2 pts)")
@@ -1316,9 +1386,10 @@ class ArmController(Node):
                     and not settled():
                 gap = max(abs(p - h) for p, h in zip(self._positions, home))
                 c_dur = min(max(gap / 0.3, 2.0), 6.0)
-                self._dispatch_trajectory(
-                    self._two_point_trajectory(list(self._positions), home, c_dur)
-                )
+                c_traj = self._two_point_trajectory(
+                    list(self._positions), home, c_dur)
+                c_dur = _tfs_seconds(c_traj.points[1].time_from_start)
+                self._dispatch_trajectory(c_traj)
                 duration = (time.monotonic() - t0) + c_dur
                 corrective_sent = True
             if settled():
@@ -1976,6 +2047,7 @@ class ArmController(Node):
             float(self.get_parameter("move_to_min_duration_s").value),
         ), 60.0)
         traj = self._two_point_trajectory(q0, q1, duration)
+        duration = _tfs_seconds(traj.points[1].time_from_start)
 
         self._publish_mode("TRAJ_RUNNING")
         self._dispatch_trajectory(traj)
@@ -2023,6 +2095,7 @@ class ArmController(Node):
         min_dur = float(self.get_parameter("move_to_min_duration_s").value)
         duration = min(max(duration, min_dur), 60.0)
         traj = self._two_point_trajectory(q0, q1, duration)
+        duration = _tfs_seconds(traj.points[1].time_from_start)
 
         self._publish_mode("TRAJ_RUNNING")
         self._dispatch_trajectory(traj)
@@ -2136,6 +2209,7 @@ class ArmController(Node):
         q0 = list(self._positions)
         # F88: 两点轨迹，JTC splines 控制器侧插值
         traj = self._two_point_trajectory(q0, target, duration)
+        duration = _tfs_seconds(traj.points[1].time_from_start)
 
         self._publish_mode("TRAJ_RUNNING")
         self._dispatch_trajectory(traj)
