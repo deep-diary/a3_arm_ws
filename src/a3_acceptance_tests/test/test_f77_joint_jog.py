@@ -1,4 +1,5 @@
-"""launch_testing 封装 F77：MoveIt Servo JointJog 单关节点动验收。
+"""
+launch_testing 封装 F77：MoveIt Servo JointJog 单关节点动验收.
 
 被测栈：a3_bringup.launch.py hardware:=mock use_mqtt:=false（domain 63）。
 验收脚本：scripts/a3_test/f77_joint_jog_acceptance.py（单一事实源，8 项）。

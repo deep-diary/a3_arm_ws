@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Publish a short test JointTrajectory per TOPIC_CONTRACT.
+"""
+Publish a short test JointTrajectory per TOPIC_CONTRACT.
 
 Modes:
   sine        — small sinusoidal joint motion (XRCE-friendly)

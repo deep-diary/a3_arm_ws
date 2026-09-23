@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch a3_gripper_controller（L7 夹爪力控节点，需求 F24-F26）。"""
+"""Launch a3_gripper_controller（L7 夹爪力控节点，需求 F24-F26）."""
 
 import os
 

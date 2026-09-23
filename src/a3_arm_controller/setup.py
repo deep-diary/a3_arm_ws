@@ -26,4 +26,5 @@ setup(
             "arm_monitor = a3_arm_controller.arm_monitor_node:main",
         ],
     },
+    tests_require=['ament_lint_auto', 'ament_flake8', 'ament_pep257', 'pytest']
 )

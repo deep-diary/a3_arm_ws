@@ -103,7 +103,7 @@ def sample_joint_trajectory(
     elapsed_s: float,
     method: str = "auto",
 ) -> Tuple[List[float], List[float], List[float], bool]:
-    """Returns (positions, velocities, effort, finished)."""
+    """Return (positions, velocities, effort, finished)."""
     points = traj.points
     if not points:
         return [], [], [], True

@@ -12,7 +12,7 @@ Checks:
   3. stop publishing -> holds position, control_mode IDLE after timeout, FSM READY
   4. JointJog L1 -velocity -> moves back; joint limits never violated
   5. zero messages on legacy /joint_group_effort_controller/joint_trajectory
-  6. L7 gripper path still works (position service -> standard gripper JTC)
+  6. L7 gripper path still works (standard /gripper_controller/gripper_cmd action)
 """
 
 import math
@@ -22,8 +22,9 @@ from collections import deque
 from statistics import median
 
 import rclpy
+from rclpy.action import ActionClient
 from a3_msgs.msg import ArmStatus
-from a3_msgs.srv import GripperCommand
+from control_msgs.action import GripperCommand
 from control_msgs.msg import JointJog
 from controller_manager_msgs.srv import ListControllers
 from geometry_msgs.msg import TwistStamped  # noqa: F401  (ensures servo dep present)
@@ -94,6 +95,29 @@ def call(cli, request, timeout=8.0):
     raise RuntimeError(f"service call timeout: {cli.srv_name}")
 
 
+def send_gripper_goal(act, position, timeout=15.0):
+    goal = GripperCommand.Goal()
+    goal.command.position = position
+    gf = act.send_goal_async(goal)
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        rclpy.spin_once(node, timeout_sec=0.05)
+        if gf.done():
+            break
+    if not gf.done():
+        return None
+    gh = gf.result()
+    if not gh.accepted:
+        return False
+    rf = gh.get_result_async()
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        rclpy.spin_once(node, timeout_sec=0.05)
+        if rf.done():
+            return rf.result().result
+    return None
+
+
 def limits_ok():
     for j, lim in LIMITS.items():
         lo, hi = (-lim, lim) if isinstance(lim, float) else lim
@@ -143,12 +167,14 @@ def main():
     disable_cli = node.create_client(Trigger, "/a3/arm/disable")
     start_servo_cli = node.create_client(Trigger, "/servo_node/start_servo")
     pause_servo_cli = node.create_client(Trigger, "/servo_node/pause_servo")
-    gripper_cli = node.create_client(GripperCommand, "/a3/gripper/command")
+    gripper_act = ActionClient(node, GripperCommand, "/gripper_controller/gripper_cmd")
 
+    # servo_node 订阅 RELIABLE（SystemDefaultsQoS）；best-effort 发布在
+    # Cyclone 下被判不兼容，jog 静默失效（LL-104）。
     jog_pub = node.create_publisher(
         JointJog,
         "/servo_node/delta_joint_cmds",
-        QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT),
+        QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE),
     )
 
     for cli, label in (
@@ -264,16 +290,16 @@ def main():
         f"count={legacy_count['n']}",
     )
 
-    # ---- 6. L7 gripper path unaffected ----
+    # ---- 6. L7 gripper standard action ----
     l70 = recorder.current()["L7_joint"]
-    call(gripper_cli, GripperCommand.Request(mode="position", position=0.0))
-    spin(1.2)
+    send_gripper_goal(gripper_act, 0.0)
+    spin(0.5)
     l71 = recorder.current()["L7_joint"]
-    call(gripper_cli, GripperCommand.Request(mode="position", position=1.0))
-    spin(1.2)
+    send_gripper_goal(gripper_act, 1.0)
+    spin(0.5)
     l72 = recorder.current()["L7_joint"]
     check(
-        "6 gripper position service still drives L7",
+        "6 gripper action still drives L7",
         abs(l72 - l70) > 0.10 or abs(l71 - l70) > 0.05,
         f"L7 {l70:.3f}->{l71:.3f}->{l72:.3f}",
     )

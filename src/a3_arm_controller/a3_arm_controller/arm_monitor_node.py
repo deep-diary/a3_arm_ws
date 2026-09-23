@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""F50 故障监视看门狗（a3_arm_monitor）：跨数据源比对 → 故障类 → 升级处置阶梯。
+"""
+F50 故障监视看门狗（a3_arm_monitor）：跨数据源比对 → 故障类 → 升级处置阶梯.
 
 架构定位（分层保护原则）：
 - F42（执行层 200 Hz 力矩方向钳位）、F44/F40（编排层温度/失能保护）保留原位——
@@ -77,7 +78,9 @@ class ArmMonitorNode(Node):
     def __init__(self):
         super().__init__("a3_arm_monitor")
         self._declare_params()
-        p = lambda n: self.get_parameter(n).value
+
+        def p(n):
+            return self.get_parameter(n).value
 
         # ---- 订阅（js/motor_states 双 QoS：真机 BEST_EFFORT vs 仿真 RELIABLE，LL-030）----
         self._js = {}          # name -> pos；只保留最新 stamp 的
@@ -296,7 +299,7 @@ class ArmMonitorNode(Node):
     # -------------------------------------------------------------- 意图边界重基准
 
     def _motors_enable_state(self):
-        """整臂使能态：None=无新鲜数据 / 'none' / 'partial' / 'all'。"""
+        """整臂使能态：None=无新鲜数据 / 'none' / 'partial' / 'all'."""
         fresh = [s for s in self._motor.values() if s.fresh]
         if not fresh:
             return None
@@ -306,7 +309,8 @@ class ArmMonitorNode(Node):
         return "all" if on == len(fresh) else "partial"
 
     def _maybe_rebaseline(self, now: float):
-        """LL-039：在「意图边界」把保持参照重基准为当前实际位姿。
+        """
+        LL-039：在「意图边界」把保持参照重基准为当前实际位姿.
 
         边界①：control_mode 从 ZERO_TORQUE/GRAVITY_COMP 转出——示教拖动改写了实际
         位姿，执行层退出示教时把 MIT 目标重锚到反馈位（F38）；看门狗参照若仍停在
@@ -341,7 +345,9 @@ class ArmMonitorNode(Node):
             f"宽限 {grace:.1f}s")
 
     def _check_mode_latch(self, now: float):
-        """轻量守卫（只告警，不改行为，不动作）：control_mode 停留 TRAJ_RUNNING 但
+        """
+        轻量守卫（只告警，不改行为，不动作）：control_mode 停留 TRAJ_RUNNING 但.
+
         看门狗自建轨迹窗口已关闭（= 无轨迹在跑）——F29 类「轨迹结束不回收模式」锁存
         回归检测（如编排层中途崩溃/未补发 READY/IDLE，导致夹爪力控、FJT、新轨迹
         全部被互锁拒绝）。判据与执行语义独立：窗口关闭（_traj=None）在 _desired 中
@@ -376,12 +382,14 @@ class ArmMonitorNode(Node):
     # ------------------------------------------------------------------ 期望位置
 
     def _desired(self, now: float):
-        """返回 (window_active, q_d 或 None)，q_d 为 dict name->pos。窗口 = [t0, t_end+2s]。"""
+        """返回 (window_active, q_d 或 None)，q_d 为 dict name->pos。窗口 = [t0, t_end+2s]."""
         if self._traj is None:
             return False, None
         t0, names, pts, t_end = self._traj
         elapsed = now - t0
-        q = lambda lst: dict(zip(names, lst))
+
+        def q(lst):
+            return dict(zip(names, lst))
         if elapsed < 0.0:
             return True, q(pts[0][1])
         if elapsed > t_end + 2.0:
@@ -398,7 +406,7 @@ class ArmMonitorNode(Node):
         return True, q(pts[-1][1])  # elapsed < 第一个点时间（尚未起步）
 
     def _errs(self, q_d):
-        """按 js 关节顺序算 |q_d - actual|；期望缺的关节填 0.0。"""
+        """按 js 关节顺序算 |q_d - actual|；期望缺的关节填 0.0."""
         if q_d is None:
             return []
         errs = []
@@ -433,7 +441,8 @@ class ArmMonitorNode(Node):
         return ok
 
     def _gravity_reset_allowed(self) -> bool:
-        """F58/LL-053: 自动 reset 前重力检查。True=允许重置。
+        """
+        F58/LL-053: 自动 reset 前重力检查。True=允许重置.
 
         样本新鲜（reset_gravity_fresh_s 内）才判阈值；样本陈旧/缺失按旧行为放行
         （无 gravity 节点场景 / F51-F52 回归不破坏）。危险位形（max|τ_grav| 超阈）
@@ -448,7 +457,7 @@ class ArmMonitorNode(Node):
         return self._grav_effort <= limit
 
     def _execute(self, fault: str, action: str):
-        """执行处置动作；返回是否实际执行了服务调用（report 视为执行）。"""
+        """执行处置动作；返回是否实际执行了服务调用（report 视为执行）."""
         now = time.monotonic()
         label = f"{fault} -> {action}"
         if action == "report":
@@ -484,7 +493,7 @@ class ArmMonitorNode(Node):
     # ------------------------------------------------------------------ 故障判定
 
     def _check(self, now: float):
-        """各故障判定（True=条件成立）；返回 (checks, errs, win)。"""
+        """各故障判定（True=条件成立）；返回 (checks, errs, win)."""
         status = self._arm_status
         state = status.state if status else ""
         mode = status.mode if status else ""

@@ -38,7 +38,8 @@ from moveit_msgs.msg import (
     PositionConstraint,
     RobotTrajectory,
 )
-from moveit_msgs.srv import GetMotionPlan
+from moveit_msgs.srv import GetMotionPlan, GetPlanningScene
+from moveit_msgs.msg import PlanningSceneComponents
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
 from std_srvs.srv import Trigger
@@ -191,6 +192,32 @@ def wait_land(target, timeout=20.0):
     return False, max(per)
 
 
+def wait_move_group_current(target, timeout=10.0, eps=TOL):
+    """阻塞到 move_group 内部当前状态与 target 一致。
+
+    move_group 的 current-state monitor 经话题异步更新；高负载下 TF/关节
+    已到位而 move_group 内部状态还滞后时，LIN 目标 IK 用滞后状态做种子会
+    失败（-31，见 LL-103）。
+    """
+    req = GetPlanningScene.Request()
+    req.components.components = PlanningSceneComponents.ROBOT_STATE
+    t0 = time.monotonic()
+    last = 9.9
+    while time.monotonic() - t0 < timeout:
+        spin(0.1)
+        try:
+            r = call(scene_cli, req, timeout=3.0)
+        except RuntimeError:
+            continue
+        snap = dict(zip(r.scene.robot_state.joint_state.name,
+                        r.scene.robot_state.joint_state.position))
+        last = max(abs(snap.get(j, 0.0) - target[i])
+                   for i, j in enumerate(JOINTS))
+        if last < eps:
+            return True, last
+    return False, last
+
+
 def controller_states():
     r = call(list_cli, ListControllers.Request(), timeout=5.0)
     return {c.name: c.state for c in r.controller}
@@ -327,7 +354,7 @@ plan_cli = exec_cli = None
 
 
 def main():
-    global node, watcher, jscache, sampler, list_cli, plan_cli, exec_cli
+    global node, watcher, jscache, sampler, list_cli, plan_cli, exec_cli, scene_cli
     if os.environ.get("ROS_DOMAIN_ID") != "62":
         print("WARN: ROS_DOMAIN_ID != 62", file=sys.stderr)
 
@@ -340,6 +367,7 @@ def main():
     list_cli = node.create_client(ListControllers, "/controller_manager/list_controllers")
     enable_cli = node.create_client(Trigger, "/a3/arm/enable")
     plan_cli = node.create_client(GetMotionPlan, "/plan_kinematic_path")
+    scene_cli = node.create_client(GetPlanningScene, "/get_planning_scene")
     seq_plan_cli = node.create_client(GetMotionPlan, "/plan_sequence_path")
     exec_cli = rclpy.action.ActionClient(node, ExecuteTrajectory, "/execute_trajectory")
     seq_cli = rclpy.action.ActionClient(node, MoveGroupSequence, "/sequence_move_group")
@@ -420,6 +448,8 @@ def main():
               f"ec={ec} err={err:.4f}")
 
     # ---- 4. LIN ----
+    synced, sync_err = wait_move_group_current(ready)
+    check("4a move_group state synced", synced, f"err={sync_err:.4f}")
     tf0 = sampler.current_pose()
     p0 = [tf0.translation.x, tf0.translation.y, tf0.translation.z]
     q0 = quat_to_list(tf0.rotation)
@@ -466,6 +496,7 @@ def main():
     if code == 1:
         execute(traj)
         wait_land(ready)
+    wait_move_group_current(ready)
 
     # ---- 6. Sequence: 3xLIN triangle with blends ----
     cur = sampler.current_pose()

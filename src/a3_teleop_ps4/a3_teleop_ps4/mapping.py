@@ -114,7 +114,8 @@ def analog_01_from_axis(
 
 
 class ButtonEdgeTracker:
-    """Rising-edge, short-press and long-press detectors keyed by binding name.
+    """
+    Rising-edge, short-press and long-press detectors keyed by binding name.
 
     同一物理按键的多条绑定用不同 key（iter_button_bindings 生成 `btn#i` 后缀），
     各自独立跟踪——这是「短按=功能 A / 长按=功能 B」双义的基础（F55）。
@@ -153,7 +154,8 @@ class ButtonEdgeTracker:
         return False
 
     def shortpress(self, key: str, held: bool, now: float, hold_s: float) -> bool:
-        """释放时判定：按住持续时长 < hold_s → 触发一次；按住超时则本次作废。
+        """
+        释放时判定：按住持续时长 < hold_s → 触发一次；按住超时则本次作废.
 
         长按作废用 overshoot 标记（而不是直接不放行），保证释放帧既不误触发、
         也不影响其他同键绑定（key 唯一）。
@@ -211,7 +213,8 @@ def iter_axis_bindings(mapping: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any
 def iter_button_bindings(
     mapping: Dict[str, Any],
 ) -> List[Tuple[str, str, Dict[str, Any]]]:
-    """展开按钮绑定为 (bind_key, button_name, spec) 三元组。
+    """
+    展开按钮绑定为 (bind_key, button_name, spec) 三元组.
 
     - 普通 dict 条目：bind_key = button 名（single binding）；
     - list 条目（F55 双义，如 options 短按+长按）：逐条展开，

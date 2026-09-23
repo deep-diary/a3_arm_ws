@@ -29,7 +29,8 @@ def generate_launch_description():
         }
     with open(os.path.join(moveit_share, "config", "kinematics.yaml"), "r", encoding="utf-8") as f:
         kinematics = {"robot_description_kinematics": yaml.safe_load(f)}
-    with open(os.path.join(moveit_share, "config", "servo_config.yaml"), "r", encoding="utf-8") as f:
+    servo_cfg_path = os.path.join(moveit_share, "config", "servo_config.yaml")
+    with open(servo_cfg_path, "r", encoding="utf-8") as f:
         servo_yaml = yaml.safe_load(f)
     # Flatten: moveit_servo expects params at top level in some versions,
     # and under moveit_servo in others — provide both.

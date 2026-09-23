@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""[DEPRECATED F78] 旧 can_bridge C++ 栈全栈入口（仅历史回归保留）。
+"""
+[DEPRECATED F78] 旧 can_bridge C++ 栈全栈入口（仅历史回归保留）.
 
 F78 起唯一产品入口是 `a3_bringup.launch.py`（hardware:=mock|can，ros2_control
 标准栈）。本文件保留旧拓扑（供 F51 等历史脚本/旧排障复现），不再演进：

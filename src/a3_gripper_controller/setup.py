@@ -25,4 +25,5 @@ setup(
             "gripper_controller = a3_gripper_controller.gripper_controller_node:main",
         ],
     },
+    tests_require=['ament_lint_auto', 'ament_flake8', 'ament_pep257', 'pytest']
 )

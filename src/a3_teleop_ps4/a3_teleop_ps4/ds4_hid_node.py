@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Optional DualShock 4 hidraw reader: IMU, touchpad, battery.
+"""
+Optional DualShock 4 hidraw reader: IMU, touchpad, battery.
 
 Parses USB report 0x01 and BT report 0x11 (psdevwiki DualShock 4).
 If hidraw is missing or unreadable, logs once and stays idle.

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import math
 import os
 from typing import List, Optional
 
@@ -187,7 +186,8 @@ class MoveToPoseIkNode(Node):
         return False, "ik did not converge", []
 
     def _on_ik(self, req, resp):
-        ok, msg, q = self._solve_ik(req.pose, list(req.seed_positions) if req.seed_positions else None)
+        seed = list(req.seed_positions) if req.seed_positions else None
+        ok, msg, q = self._solve_ik(req.pose, seed)
         resp.success = ok
         resp.message = msg
         resp.joint_names = list(self._joint_names)

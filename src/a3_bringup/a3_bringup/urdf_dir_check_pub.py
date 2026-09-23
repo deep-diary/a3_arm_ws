@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""URDF 方向校验辅助发布器（真机，臂不失能）。
+"""
+URDF 方向校验辅助发布器（真机，臂不失能）.
 
 持续向执行层下发目标轨迹（默认目标静止在 home，摆幅 0；电机 mode=0 只收不
 执行，LL-018），并把同一目标位姿发布为 /a3/display_target_joint_states 供

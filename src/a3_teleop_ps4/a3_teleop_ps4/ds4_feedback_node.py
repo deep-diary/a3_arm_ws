@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""DS4 lightbar + rumble feedback from arm/power/monitor state (F61).
+"""
+DS4 lightbar + rumble feedback from arm/power/monitor state (F61).
 
 派生态五色灯：
   红双闪   FAULT / COOLING / temp_warn / 看门狗 TRIGGERED
@@ -138,7 +139,8 @@ def _hid_uevent_ids(hidraw: str) -> Optional[Tuple[int, int, int]]:
 
 
 def _is_gamepad_interface(hidraw: str) -> bool:
-    """DS4 over USB exposes two HID interfaces (gamepad + touchpad).
+    """
+    DS4 over USB exposes two HID interfaces (gamepad + touchpad).
 
     Output reports must go to the gamepad interface; identify it via the
     sibling input device name.
@@ -306,9 +308,13 @@ class Ds4FeedbackNode(Node):
                 [_RumblePhase(0.0, float(self.get_parameter("rumble_enable_s").value), 0.6, 0.0)],
             )
         # gate 开但 IDLE / 状态未知
+        status_line = (
+            f"power={self._power_state or '?'} gate={int(self._gate_open)} "
+            f"arm={self._arm_state or '?'}"
+        )
         return _Effect(
             CLS_IDLE, "orange", "solid",
-            f"power={self._power_state or '?'} gate={int(self._gate_open)} arm={self._arm_state or '?'}",
+            status_line,
         )
 
     def _on_class_entry(self, eff: _Effect, now: float) -> None:
@@ -419,8 +425,12 @@ class Ds4FeedbackNode(Node):
         self._device_path = path
         self._hid_bus = _HID_BUS_BT if bus == BUS_BLUETOOTH else _HID_BUS_USB
         self._last_report = b""
+        if self._hid_bus == _HID_BUS_BT:
+            proto = "BT 0x11+CRC"
+        else:
+            proto = "USB 0x05"
         self.get_logger().info(
-            f"DS4 feedback 输出已打开 {path} ({'BT 0x11+CRC' if self._hid_bus == _HID_BUS_BT else 'USB 0x05'})"
+            f"DS4 feedback 输出已打开 {path} ({proto})"
         )
 
     def _write_hid(self, report: bytes) -> None:

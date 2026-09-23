@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""A3 arm orchestration layer (facade).
+"""
+A3 arm orchestration layer (facade).
 
 统一对外交互门面：状态机、电机初始化闭环、使能/失能、预设点、状态聚合、
 示教录制/回放/保存、AI 模式、模式仲裁。底层能力全部通过调用现有服务/话题复用，
@@ -93,7 +94,8 @@ def _duration(sec: float) -> Duration:
 def _smooth_points(
     points: List[JointTrajectoryPoint], window: int
 ) -> List[JointTrajectoryPoint]:
-    """LL-047: 中心滑动平均低通（仅动 positions，保留 time_from_start）。
+    """
+    LL-047: 中心滑动平均低通（仅动 positions，保留 time_from_start）.
 
     手拖录制的 50Hz 轨迹天然带加速度尖峰（实测 L2 113→7 rad/s² @w=9），伺服忠实复现
     即"抖动"。对整条轨迹（ramp+录制）做中心滑动平均：凸组合不越出原始 min/max，
@@ -132,7 +134,8 @@ def _time_warp_points(
     dt_min_s: float,
     accel_max_rad_s2: float,
 ) -> List[JointTrajectoryPoint]:
-    """F59/LL-057: 回放时间轴匀速重排（两段式：弧长均匀重采样 + 加速度限幅膨胀）。
+    """
+    F59/LL-057: 回放时间轴匀速重排（两段式：弧长均匀重采样 + 加速度限幅膨胀）.
 
     F57 初版缺陷：`dt = max(s/v_eff, dt_min)` 保留全部点——零位移停顿段每点吃
     dt_min 地板，停顿被重新充气回时间轴（实测 16.6s 示教 → 30.9s 回放，违反「只
@@ -301,7 +304,7 @@ def _sanitize_name(name: str) -> str:
 
 
 def _traj_path_for(traj_dir: str, name: str) -> str:
-    """F54: 空名 ≡ latest 槽位（save/playback 都读写 latest.yaml）；非空名 → {name}.yaml。"""
+    """F54: 空名 ≡ latest 槽位（save/playback 都读写 latest.yaml）；非空名 → {name}.yaml."""
     if not (name or "").strip():
         return os.path.join(traj_dir, "latest.yaml")
     return os.path.join(traj_dir, f"{_sanitize_name(name)}.yaml")
@@ -520,13 +523,15 @@ class ArmController(Node):
             callback_group=self._cb_group,
         )
         self.create_subscription(
-            String, str(self.get_parameter("power_state_topic").value), self._on_power_state, latched_qos,
+            String, str(self.get_parameter("power_state_topic").value),
+            self._on_power_state, latched_qos,
             callback_group=self._cb_group,
         )
         # F43/F44: 电机原始状态（力矩统计 + 温度/故障监视）；发布端 SensorDataQoS，
         # best_effort 订阅兼容（js_qos 同）
         self.create_subscription(
-            MotorStates, str(self.get_parameter("motor_states_topic").value), self._on_motor_states,
+            MotorStates, str(self.get_parameter("motor_states_topic").value),
+            self._on_motor_states,
             js_qos, callback_group=self._cb_group,
         )
         # F51/LL-039: 看门狗状态（消费 UNEXPECTED_DISABLE——本节点在电机被带外失能后
@@ -554,34 +559,57 @@ class ArmController(Node):
         self._startup_mode_timer = self.create_timer(2.0, self._announce_startup_mode)
 
         # 服务（对外门面）
-        self.create_service(Trigger, "/a3/arm/init", self._init_cb, callback_group=self._cb_group)
-        self.create_service(Trigger, "/a3/arm/enable", self._enable_cb, callback_group=self._cb_group)
-        self.create_service(Trigger, "/a3/arm/disable", self._disable_cb, callback_group=self._cb_group)
-        self.create_service(GotoNamedPose, "/a3/arm/goto_named_pose", self._goto_cb, callback_group=self._cb_group)
+        self.create_service(
+            Trigger, "/a3/arm/init", self._init_cb, callback_group=self._cb_group)
+        self.create_service(
+            Trigger, "/a3/arm/enable", self._enable_cb, callback_group=self._cb_group)
+        self.create_service(
+            Trigger, "/a3/arm/disable", self._disable_cb, callback_group=self._cb_group)
+        self.create_service(
+            GotoNamedPose, "/a3/arm/goto_named_pose", self._goto_cb,
+            callback_group=self._cb_group)
         self.create_service(
             SetJointPositions, "/a3/arm/set_joint_positions", self._set_joint_positions_cb,
             callback_group=self._cb_group,
         )
         self.create_service(
-            MoveToJointPositions, "/a3/arm/move_to", self._move_to_cb, callback_group=self._cb_group
+            MoveToJointPositions, "/a3/arm/move_to", self._move_to_cb,
+            callback_group=self._cb_group,
         )
         self.create_service(
             SaveNamedPose, "/a3/arm/save_named_pose", self._save_named_pose_cb,
             callback_group=self._cb_group,
         )
-        self.create_service(Trigger, "/a3/arm/start_teach", self._start_teach_cb, callback_group=self._cb_group)
-        self.create_service(Trigger, "/a3/arm/stop_teach", self._stop_teach_cb, callback_group=self._cb_group)
-        self.create_service(SaveTrajectory, "/a3/arm/save_trajectory", self._save_cb, callback_group=self._cb_group)
-        self.create_service(PlaybackTrajectory, "/a3/arm/playback", self._playback_cb, callback_group=self._cb_group)
-        self.create_service(Trigger, "/a3/arm/enter_ai", self._enter_ai_cb, callback_group=self._cb_group)
-        self.create_service(Trigger, "/a3/arm/exit_ai", self._exit_ai_cb, callback_group=self._cb_group)
+        self.create_service(
+            Trigger, "/a3/arm/start_teach", self._start_teach_cb,
+            callback_group=self._cb_group)
+        self.create_service(
+            Trigger, "/a3/arm/stop_teach", self._stop_teach_cb,
+            callback_group=self._cb_group)
+        self.create_service(
+            SaveTrajectory, "/a3/arm/save_trajectory", self._save_cb,
+            callback_group=self._cb_group)
+        self.create_service(
+            PlaybackTrajectory, "/a3/arm/playback", self._playback_cb,
+            callback_group=self._cb_group)
+        self.create_service(
+            Trigger, "/a3/arm/enter_ai", self._enter_ai_cb,
+            callback_group=self._cb_group)
+        self.create_service(
+            Trigger, "/a3/arm/exit_ai", self._exit_ai_cb,
+            callback_group=self._cb_group)
 
         # 底层服务客户端
-        self._motor_cli = self.create_client(MotorCommand, "/a3/motor/set_zero", callback_group=self._cb_group)
-        self._enable_cli = self.create_client(MotorCommand, "/a3/motor/enable", callback_group=self._cb_group)
-        self._reset_cli = self.create_client(MotorCommand, "/a3/motor/reset", callback_group=self._cb_group)
-        self._zt_start_cli = self.create_client(Trigger, "/a3/zero_torque/start", callback_group=self._cb_group)
-        self._zt_stop_cli = self.create_client(Trigger, "/a3/zero_torque/stop", callback_group=self._cb_group)
+        self._motor_cli = self.create_client(
+            MotorCommand, "/a3/motor/set_zero", callback_group=self._cb_group)
+        self._enable_cli = self.create_client(
+            MotorCommand, "/a3/motor/enable", callback_group=self._cb_group)
+        self._reset_cli = self.create_client(
+            MotorCommand, "/a3/motor/reset", callback_group=self._cb_group)
+        self._zt_start_cli = self.create_client(
+            Trigger, "/a3/zero_torque/start", callback_group=self._cb_group)
+        self._zt_stop_cli = self.create_client(
+            Trigger, "/a3/zero_torque/stop", callback_group=self._cb_group)
         # F75: 标准栈使能客户端（motor_service_backend=controller_switch 时用）
         self._switch_cli = self.create_client(
             SwitchController,
@@ -676,7 +704,7 @@ class ArmController(Node):
         return os.path.expanduser(str(self.get_parameter("torque_stats_file").value))
 
     def _load_torque_stats(self) -> Dict[str, Dict[str, Any]]:
-        """启动恢复 ~/.a3/stats/torque_stats.yaml（不存在则空）。"""
+        """启动恢复 ~/.a3/stats/torque_stats.yaml（不存在则空）."""
         path = self._torque_stats_path()
         if os.path.exists(path):
             try:
@@ -719,7 +747,7 @@ class ArmController(Node):
     # ------------------------------------------------------------ F40 helpers
 
     def _home_pose(self) -> List[float]:
-        """失能安全位：优先 poses.yaml 的 home（用户层覆盖包级），缺失回退全零。"""
+        """失能安全位：优先 poses.yaml 的 home（用户层覆盖包级），缺失回退全零."""
         name = str(self.get_parameter("disable_home_pose_name").value)
         q = self._poses.get(name)
         if q is None:
@@ -730,7 +758,7 @@ class ArmController(Node):
         return [float(v) for v in q[: self._n_joints]]
 
     def _at_home(self, tol: float) -> Tuple[bool, float]:
-        """全部关节 |q_i - home_i| ≤ tol 视为已在 home；返回 (是否, 最大偏差)。"""
+        """全部关节 |q_i - home_i| ≤ tol 视为已在 home；返回 (是否, 最大偏差)."""
         if not self._have_js:
             return False, float("inf")
         home = self._home_pose()
@@ -740,7 +768,7 @@ class ArmController(Node):
         return worst <= tol, worst
 
     def _load_joint_limits(self) -> Dict[str, Tuple[float, float]]:
-        """从 a3_description/urdf/el_a3.urdf 读取各关节 limit lower/upper（与前端滑动条同源）。"""
+        """从 a3_description/urdf/el_a3.urdf 读取各关节 limit lower/upper（与前端滑动条同源）."""
         import xml.etree.ElementTree as ET
 
         limits: Dict[str, Tuple[float, float]] = {}
@@ -766,7 +794,8 @@ class ArmController(Node):
         return limits
 
     def _check_positions_in_limits(self) -> Tuple[bool, List[str]]:
-        """F48: 使能前读数限位检查。
+        """
+        F48: 使能前读数限位检查.
 
         返回 (全部在限位内, 违规描述列表)。未收到 /joint_states 或限位未加载
         也视为不通过——宁可拒绝使能也不盲使（LL-019 红线：断电多圈环绕读数
@@ -857,7 +886,7 @@ class ArmController(Node):
         self._mode_pub.publish(msg)
 
     def _announce_startup_mode(self) -> None:
-        """启动 2 s 后重发当前状态模式，覆盖订阅发现窗口（一次性）。"""
+        """启动 2 s 后重发当前状态模式，覆盖订阅发现窗口（一次性）."""
         self._startup_mode_timer.cancel()
         self._publish_mode(self._state)
 
@@ -872,7 +901,8 @@ class ArmController(Node):
         return client.service_is_ready()
 
     def _wait_future(self, future, timeout_s: float = 2.0) -> bool:
-        """轮询等待 future 完成。
+        """
+        轮询等待 future 完成.
 
         本节点跑在 MultiThreadedExecutor（默认 cpu_count 个线程），服务回调占住
         一个线程；若在回调里用 rclpy.spin_until_future_complete() 会把节点临时
@@ -886,7 +916,7 @@ class ArmController(Node):
         return bool(future.done() and future.result() is not None)
 
     def _all_motors_enabled(self) -> bool:
-        """所有有新鲜反馈的电机均已使能（且至少一路 fresh）。"""
+        """所有有新鲜反馈的电机均已使能（且至少一路 fresh）."""
         fresh_enabled = [
             en for en, fr in zip(self._motor_enabled, self._motor_state_fresh) if fr
         ]
@@ -896,7 +926,8 @@ class ArmController(Node):
         return str(self.get_parameter("motor_service_backend").value) == "controller_switch"
 
     def _cm_switch(self, command: int) -> Tuple[bool, str]:
-        """F75/F83: 标准 ros2_control 使能/失能编排。
+        """
+        F75/F83: 标准 ros2_control 使能/失能编排.
 
         command: 1 enable(activate) / 2 reset(deactivate) / 3 set_zero（绝对编码
         帧无此操作，跳过返回成功）。
@@ -973,7 +1004,8 @@ class ArmController(Node):
         return True, "controllers deactivated, hardware inactive"
 
     def _cm_freedrive_switch(self, enter: bool) -> Tuple[bool, str]:
-        """F89b: 标准栈自由拖动 = 一次原子 STRICT switch_controller 请求。
+        """
+        F89b: 标准栈自由拖动 = 一次原子 STRICT switch_controller 请求.
 
         enter: deactivate arm_controller + activate zero_torque_controller;
         exit:  反之。switch_controller 在同一请求内完成互换，任一名无效即整体
@@ -1064,9 +1096,12 @@ class ArmController(Node):
         duration: float,
         joint_names: Optional[List[str]] = None,
     ) -> JointTrajectory:
-        """F88: 起点(t=0)+终点(t=duration)两点轨迹；两端 velocity/acceleration=0，
+        """
+        F88: 起点(t=0)+终点(t=duration)两点轨迹；两端 velocity/acceleration=0.
+
         JTC VARIABLE_DEGREE_SPLINE 据此生成 quintic S 曲线（位置-only 两点会退化为
-        匀速线性、端点速度跳变）。motor_protocol topic 后端忽略 v/a、按位置线性插值。"""
+        匀速线性、端点速度跳变）。motor_protocol topic 后端忽略 v/a、按位置线性插值。
+        """
         n = len(q0)
         traj = JointTrajectory()
         traj.joint_names = list(joint_names or self._joint_names)
@@ -1084,7 +1119,8 @@ class ArmController(Node):
         return traj
 
     def _dispatch_trajectory(self, traj: JointTrajectory) -> None:
-        """按 control_backend 下发轨迹：旧栈话题直发 / 标准栈 action。
+        """
+        按 control_backend 下发轨迹：旧栈话题直发 / 标准栈 action.
 
         fjt_action 后端拆分：L1–L6 → arm_controller FJT；L7 →
         gripper_controller GripperCommand（取末点位置；末点 effort 非 0
@@ -1197,7 +1233,8 @@ class ArmController(Node):
             )
 
     def _dispatch_l7_linear(self, target: float, speed: float = 0.5) -> float:
-        """LL-077: move_group 只规划 arm 组（L1–L6），L7 单独补下发。
+        """
+        LL-077: move_group 只规划 arm 组（L1–L6），L7 单独补下发.
 
         fjt_action 后端走 GripperCommand action（末点位置）；topic 后端
         走两点轨迹（F88，motor_protocol 200 Hz 插值）。返回调度用估计
@@ -1213,7 +1250,8 @@ class ArmController(Node):
         return g_dur
 
     def _safe_park_then_disable(self) -> Tuple[bool, str]:
-        """F40: 平滑回 home → 连续确认收敛 → 失能（同步阻塞，仿 _init_cb 轮询先例）。
+        """
+        F40: 平滑回 home → 连续确认收敛 → 失能（同步阻塞，仿 _init_cb 轮询先例）.
 
         发布 home 轨迹抢占活跃轨迹（执行层 OnTrajectory 天然支持替换），
         SAFE_PARK 期间拒绝新运动指令；park 超时 → FAULT 且不 reset（保持使能，
@@ -1305,7 +1343,8 @@ class ArmController(Node):
         return True, f"safe park -> disabled ({time.monotonic() - t0:.1f}s)"
 
     def _check_cooling(self) -> Tuple[bool, str]:
-        """F44: COOLING 下重新使能门禁——全 fresh 关节 < protect−hysteresis 才放行。
+        """
+        F44: COOLING 下重新使能门禁——全 fresh 关节 < protect−hysteresis 才放行.
 
         无 fresh 反馈的关节不阻碍（电机不在线则无从谈温度）。
         """
@@ -1323,7 +1362,7 @@ class ArmController(Node):
         return True, ""
 
     def _trigger_temp_protect(self) -> None:
-        """F44: 超温保护——平滑回 home → 失能 → COOLING（在状态发布节拍执行）。"""
+        """F44: 超温保护——平滑回 home → 失能 → COOLING（在状态发布节拍执行）."""
         protect_c = float(self.get_parameter("temp_protect_c").value)
         hot = ", ".join(
             f"{jn}={t:.1f}" for jn, t, fr in zip(
@@ -1351,14 +1390,16 @@ class ArmController(Node):
             self._set_state(STATE_FAULT, f"overtemp: {hot}, protect failed: {msg}")
 
     def _handle_motor_fault(self) -> None:
-        """F44: 电机故障监视（fault_mask≠0，含固件过温锁存 bit3）→ 紧急失能 + FAULT。"""
+        """F44: 电机故障监视（fault_mask≠0，含固件过温锁存 bit3）→ 紧急失能 + FAULT."""
         jn, mask = self._pending_fault
         self.get_logger().error(f"motor fault: joint={jn} mask=0x{mask:X} -> emergency reset")
         ok, msg = self._motor_command(self._reset_cli, 2)
         if ok:
             self._set_state(STATE_FAULT, f"motor fault: {jn} mask=0x{mask:X}, disabled")
         else:
-            self._set_state(STATE_FAULT, f"motor fault: {jn} mask=0x{mask:X}, reset refused: {msg}")
+            self._set_state(
+                STATE_FAULT,
+                f"motor fault: {jn} mask=0x{mask:X}, reset refused: {msg}")
 
     def _schedule_back_to_ready(self, delay_s: float) -> None:
         self._traj_done_at = time.monotonic() + max(delay_s, 0.1)
@@ -1415,7 +1456,8 @@ class ArmController(Node):
         self._power_state = msg.data or ""
 
     def _on_motor_states(self, msg: MotorStates) -> None:
-        """F43/F44: 电机原始状态——最大力矩跟踪 + 温度/故障监视。
+        """
+        F43/F44: 电机原始状态——最大力矩跟踪 + 温度/故障监视.
 
         无反馈关节温度在 C++ 侧被置 0.0（非 NaN），所有温度判断必须 fresh 门控，
         否则断连会被误判「已冷却」放行使能（LL-011 教训）。6J 臂 MotorStates 仍
@@ -1491,7 +1533,8 @@ class ArmController(Node):
             self._all_disabled_since = 0.0
 
     def _on_monitor_status(self, msg: MonitorStatus) -> None:
-        """F51/LL-039：消费看门狗「已确认」故障——只认 TRIGGERED（瞬时 PENDING 不动作）。
+        """
+        F51/LL-039：消费看门狗「已确认」故障——只认 TRIGGERED（瞬时 PENDING 不动作）.
 
         仅在使能期望态挂起待处置标志：DISABLED 等非使能态下收到的 TRIGGERED 是
         上一故障窗口的余流（控制器进 DISABLED 后看门狗仍会补发约 clear_hold 的
@@ -1709,7 +1752,8 @@ class ArmController(Node):
         return resp
 
     def _disable_cb(self, req: Trigger.Request, resp: Trigger.Response) -> Trigger.Response:
-        """F40: 失能保护——不在 home 容差内先平滑回 home 再失能，避免掉臂。
+        """
+        F40: 失能保护——不在 home 容差内先平滑回 home 再失能，避免掉臂.
 
         服务语义：success=true ⟺ 已失能（或本就已失能）。拒绝时消息必含可执行下一步：
         · INIT/TEACH/SERVO/AI 状态 busy → 提示 /a3/motor/reset 紧急失能；
@@ -1814,7 +1858,8 @@ class ArmController(Node):
         label: str,
         state: str = STATE_TRAJ,
     ) -> Tuple[bool, float, str]:
-        """F67: move_group action 规划 + TOTG 定时 + Execute（经 FJT → 执行层）。
+        """
+        F67: move_group action 规划 + TOTG 定时 + Execute（经 FJT → 执行层）.
 
         返回 (成功, 执行时长 s, 说明)。任何不可用/失败均返回 False，调用方走本地兜底。
         """
@@ -1944,7 +1989,7 @@ class ArmController(Node):
     def _move_to_cb(
         self, req: MoveToJointPositions.Request, resp: MoveToJointPositions.Response
     ) -> MoveToJointPositions.Response:
-        """F39: 通用平滑移动——当前位姿到任意目标位姿，duration_s 内多点插值。"""
+        """F39: 通用平滑移动——当前位姿到任意目标位姿，duration_s 内多点插值."""
         if len(req.positions) != self._n_joints:
             resp.success = False
             resp.message = f"need {self._n_joints} positions, got {len(req.positions)}"
@@ -1975,7 +2020,8 @@ class ArmController(Node):
         q0 = list(self._positions)
         # F41/F88: 最短时长兜底（可配置，默认 3s）；两点轨迹由 JTC splines 插值
         duration = float(req.duration_s) if req.duration_s and req.duration_s > 0 else 1.0
-        duration = min(max(duration, float(self.get_parameter("move_to_min_duration_s").value)), 60.0)
+        min_dur = float(self.get_parameter("move_to_min_duration_s").value)
+        duration = min(max(duration, min_dur), 60.0)
         traj = self._two_point_trajectory(q0, q1, duration)
 
         self._publish_mode("TRAJ_RUNNING")
@@ -1990,7 +2036,7 @@ class ArmController(Node):
     def _save_named_pose_cb(
         self, req: SaveNamedPose.Request, resp: SaveNamedPose.Response
     ) -> SaveNamedPose.Response:
-        """F39: 保存命名点位（positions 留空 = 当前位姿）到 ~/.a3/poses.yaml 并即时生效。"""
+        """F39: 保存命名点位（positions 留空 = 当前位姿）到 ~/.a3/poses.yaml 并即时生效."""
         name = _sanitize_name(req.name)
         if not name:
             resp.success = False
@@ -2039,7 +2085,7 @@ class ArmController(Node):
     def _set_joint_positions_cb(
         self, req: SetJointPositions.Request, resp: SetJointPositions.Response
     ) -> SetJointPositions.Response:
-        """Web 滑动条 jog 直驱：设 7 关节目标位置，短插值下发执行层（需求 F23 扩展）。"""
+        """Web 滑动条 jog 直驱：设 7 关节目标位置，短插值下发执行层（需求 F23 扩展）."""
         if not self._have_js:
             resp.success = False
             resp.message = "no /joint_states yet"
@@ -2186,7 +2232,8 @@ class ArmController(Node):
         return resp
 
     def _dump_recording(self) -> dict:
-        """F54: 把当前内存录制(self._record: (t, pos) 列表)序列化为磁盘 YAML 数据。
+        """
+        F54: 把当前内存录制(self._record: (t, pos) 列表)序列化为磁盘 YAML 数据.
 
         F57/LL-053: 保存时对 positions 做轻量平滑（teach_save_smooth_samples，默认 5 点
         中心滑动平均，复用 _smooth_points 凸组合不越包络）——latest.yaml 与
@@ -2221,7 +2268,7 @@ class ArmController(Node):
         return data
 
     def _save_recording_to(self, path: str) -> bool:
-        """把当前录制写到 path，返回是否成功（异常已记录日志，不抛）。"""
+        """把当前录制写到 path，返回是否成功（异常已记录日志，不抛）."""
         try:
             with open(path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(self._dump_recording(), f)
@@ -2258,8 +2305,11 @@ class ArmController(Node):
         geo_times: Optional[List[float]] = None,
         target_duration: float = 0.0,
     ) -> Tuple[bool, Optional[JointTrajectory], str]:
-        """F68: 同步（轮询）调 /a3/arm/retime_trajectory。geo_times 给出各点
-        time_from_start（录制时刻 + ramp 偏移），用于 Ruckig 播种。"""
+        """
+        F68: 同步（轮询）调 /a3/arm/retime_trajectory。geo_times 给出各点.
+
+        time_from_start（录制时刻 + ramp 偏移），用于 Ruckig 播种。
+        """
         if not self._wait_service(self._retime_cli, 1.0):
             return False, None, "retime service unavailable"
         req = RetimeTrajectory.Request()

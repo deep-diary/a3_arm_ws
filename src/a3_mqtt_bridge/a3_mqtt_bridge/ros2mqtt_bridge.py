@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""ROS2 → MQTT telemetry bridge for A3 arm (rk3588).
+"""
+ROS2 → MQTT telemetry bridge for A3 arm (rk3588).
 
 Subscribes to a configurable whitelist of ROS topics, flattens each message
 into a ``points`` dict, and publishes:
@@ -47,6 +48,7 @@ from a3_msgs.srv import (
     SetJointPositions,
 )
 
+
 def _load_msg_class(type_str: str):
     """'sensor_msgs/msg/JointState' -> the message class."""
     module_path, cls_name = type_str.rsplit("/", 1)
@@ -59,7 +61,7 @@ def _short_joint(name: str) -> str:
 
 
 def _motor_id_arg(args: dict):
-    """motor 必须 int 1..127（F32 安全约束）；非法返回 None。"""
+    """Motor 必须 int 1..127（F32 安全约束）；非法返回 None."""
     try:
         motor = int(args.get("motor"))
     except (TypeError, ValueError):
@@ -83,7 +85,7 @@ def _motor_float_arg(args: dict, key: str, default: float) -> float:
 
 
 def _motor_hex_arg(args: dict, key: str):
-    """index 支持十进制 int 或 '0x7005' 十六进制字符串；非法返回 None。"""
+    """Index 支持十进制 int 或 '0x7005' 十六进制字符串；非法返回 None."""
     raw = args.get(key)
     try:
         if isinstance(raw, str) and raw.strip().lower().startswith("0x"):
@@ -113,7 +115,7 @@ def _now_iso() -> str:
 
 
 def _sanitize_nonfinite(obj):
-    """递归把 NaN/±Inf 浮点替换为 None，保证 allow_nan=False 序列化不抛（LL-011）。"""
+    """递归把 NaN/±Inf 浮点替换为 None，保证 allow_nan=False 序列化不抛（LL-011）."""
     if isinstance(obj, float):
         if obj != obj or obj in (float("inf"), float("-inf")):
             return None
@@ -208,7 +210,10 @@ class Ros2MqttBridge(Node):
         self.host = mqtt_cfg.get("host", "192.168.3.73")
         self.port = int(mqtt_cfg.get("port", 1883))
         self.path = mqtt_cfg.get("path", "/mqtt")
-        self.topic_prefix = (mqtt_cfg.get("topic_prefix") or "deep-trace/HOME-DEMO/RK3588").rstrip("/")
+        default_prefix = "deep-trace/HOME-DEMO/RK3588"
+        self.topic_prefix = (
+            mqtt_cfg.get("topic_prefix") or default_prefix
+        ).rstrip("/")
         client_id_prefix = mqtt_cfg.get("client_id_prefix", "a3-rk3588")
         self.client_id = f"{client_id_prefix}-{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
 
@@ -353,7 +358,8 @@ class Ros2MqttBridge(Node):
             self.get_logger().error(f"mqtt connect error: {exc}")
 
     def _publish(self, topic: str, payload, retain: bool = False, droppable: bool = False):
-        """入队给发布线程；任何线程（executor / paho 回调）调用都安全（F35）。
+        """
+        入队给发布线程；任何线程（executor / paho 回调）调用都安全（F35）.
 
         droppable=True（仅遥测）：队列满直接丢新值（最新值胜出，下个 flush 会补）。
         其余（cmd_result/status/info）：队列满挤掉最旧一条重试一次，保证不丢。
@@ -374,7 +380,7 @@ class Ros2MqttBridge(Node):
                 return False
 
     def _publish_loop(self) -> None:
-        """发布消费线程：JSON 串行化 + paho publish 全部在此执行（F35）。"""
+        """发布消费线程：JSON 串行化 + paho publish 全部在此执行（F35）."""
         while True:
             item = self._pub_queue.get()
             if item is None:  # 关闭哨兵
@@ -396,7 +402,7 @@ class Ros2MqttBridge(Node):
     # ------------------------------------------------------------- downlink
 
     def _setup_cmd_clients(self) -> dict:
-        """op -> (client, request_factory)。白名单仅限编排层服务。"""
+        """Op -> (client, request_factory)。白名单仅限编排层服务."""
         return {
             "init": (self.create_client(Trigger, "/a3/arm/init"), Trigger.Request),
             "enable": (self.create_client(Trigger, "/a3/arm/enable"), Trigger.Request),
@@ -555,7 +561,7 @@ class Ros2MqttBridge(Node):
         future.add_done_callback(lambda f, o=op: self._on_cmd_done(f, o))
 
     def _dispatch_gripper(self, op: str, args: dict) -> None:
-        """F87：夹爪 op → 标准 GripperCommand action（per-goal max_effort）。"""
+        """F87：夹爪 op → 标准 GripperCommand action（per-goal max_effort）."""
         if op == "gripper_set_max_torque":
             value = _motor_float_arg(args, "value", float("nan"))
             if not math.isfinite(value) or not 0.0 < value <= GRIPPER_FW_CLAMP_NM:
@@ -658,7 +664,7 @@ class Ros2MqttBridge(Node):
     # ------------------------------------------------------------- catalog
 
     def _build_catalog(self):
-        """node -> topics -> signals (for device/info.nodes and frontend cards)."""
+        """Node -> topics -> signals (for device/info.nodes and frontend cards)."""
         nodes: dict[str, list[dict]] = {}
         for rule in self.topics_rules:
             node_name = rule.get("node", "ros_node")
@@ -816,12 +822,12 @@ class Ros2MqttBridge(Node):
         return cb
 
     def _update_telemetry(self, points: dict):
-        """合并信号到缓存并置脏；由 _flush_telemetry 定时统一发布（F35 降频）。"""
+        """合并信号到缓存并置脏；由 _flush_telemetry 定时统一发布（F35 降频）."""
         self._points_cache.update(points)
         self._telemetry_dirty = True
 
     def _flush_telemetry(self) -> None:
-        """F35：脏且距上次发布 ≥ 最小间隔 → 发布完整 points（最新值胜出）。"""
+        """F35：脏且距上次发布 ≥ 最小间隔 → 发布完整 points（最新值胜出）."""
         if not self._telemetry_dirty:
             return
         now = time.time()

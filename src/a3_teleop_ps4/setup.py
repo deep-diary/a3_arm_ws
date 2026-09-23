@@ -34,4 +34,5 @@ setup(
             "ds4_tcp_joy_node = a3_teleop_ps4.ds4_tcp_joy_node:main",
         ],
     },
+    tests_require=['ament_lint_auto', 'ament_flake8', 'ament_pep257', 'pytest']
 )

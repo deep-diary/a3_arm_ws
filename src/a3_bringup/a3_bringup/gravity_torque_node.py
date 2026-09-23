@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Gravity torque publisher (reBot-aligned C3 / F8).
+"""
+Gravity torque publisher (reBot-aligned C3 / F8).
 
 Uses Pinocchio ``computeGeneralizedGravity`` on EL-A3 URDF for all 7 joints.
 Falls back to planar approx only if Pinocchio/URDF cannot load.

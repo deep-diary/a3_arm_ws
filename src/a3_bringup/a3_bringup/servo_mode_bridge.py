@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Publish SERVO control_mode while servo input commands are fresh.
+"""
+Publish SERVO control_mode while servo input commands are fresh.
 
 Watches both input channels of moveit_servo:
 - TwistStamped cartesian commands (delta_twist_cmds)

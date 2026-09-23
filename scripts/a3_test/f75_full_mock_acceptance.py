@@ -6,12 +6,12 @@
 
 验收项（对应 docs/edge/REQUIREMENTS.md F75）：
   0. boot：JTC inactive、FSM IDLE；零自研 sim 节点
-  1. enable → 两 JTC active、FSM READY
+  1. enable → 两控制器 active、FSM READY
   2. jog（含 L7）落点 ≤0.02；/joint_states 速度字段有效（LL-072）
   3. goto move_group：ready / home 落点
-  4. playback：retime + 双 JTC 回 home
-  5. 夹爪 /a3/gripper/command 位置命令 → L7 经标准 JTC 实际运动
-  6. disable safe-park → home，两 JTC inactive、FSM DISABLED
+  4. playback：retime 回 home
+  5. 夹爪标准 action /gripper_controller/gripper_cmd（control_msgs）→ L7 实际运动
+  6. disable safe-park → home，两控制器 inactive、FSM DISABLED
   7. MQTT 桥节点全程存活
 """
 
@@ -24,15 +24,16 @@ from collections import deque
 from statistics import median
 
 import rclpy
+from rclpy.action import ActionClient
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from a3_msgs.msg import ArmStatus
 from a3_msgs.srv import (
     GotoNamedPose,
-    GripperCommand,
     PlaybackTrajectory,
     SetJointPositions,
 )
+from control_msgs.action import GripperCommand
 from controller_manager_msgs.srv import ListControllers
 from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
@@ -41,8 +42,10 @@ JOINTS = [f"L{i}_joint" for i in range(1, 8)]
 TOL = 0.02
 RESULTS = []
 FORBIDDEN_NODES = {"motor_protocol_node", "sim_power_sequence_node", "gravity_torque_node"}
+# F87: standalone a3_gripper_controller 退役——夹爪是 controller_manager 内的
+# gripper_controller，存在性经 list_controllers 校验，不作为 ROS 图节点要求。
 PRODUCT_NODES = {
-    "a3_arm_controller", "a3_gripper_controller", "ros2mqtt_bridge",
+    "a3_arm_controller", "ros2mqtt_bridge",
     "a3_trajectory_processing", "move_group", "controller_manager",
 }
 
@@ -98,6 +101,29 @@ def call(cli, request, timeout=8.0):
     raise RuntimeError(f"service call timeout: {cli.srv_name}")
 
 
+def send_gripper_goal(act, position, timeout=15.0):
+    goal = GripperCommand.Goal()
+    goal.command.position = position
+    gf = act.send_goal_async(goal)
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        spin(0.05)
+        if gf.done():
+            break
+    if not gf.done():
+        return None
+    gh = gf.result()
+    if not gh.accepted:
+        return False
+    rf = gh.get_result_async()
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        spin(0.05)
+        if rf.done():
+            return rf.result().result
+    return None
+
+
 def wait_state(target, timeout=10.0):
     t0 = time.monotonic()
     while time.monotonic() - t0 < timeout:
@@ -127,7 +153,7 @@ def controller_states():
 
 
 def graph_node_names():
-    spin(0.5)
+    spin(2.0)
     names = set()
     for name, ns in node.get_node_names_and_namespaces():
         names.add(ns.rstrip("/") + "/" + name if ns != "/" else "/" + name)
@@ -189,12 +215,14 @@ def main():
     jog_cli = node.create_client(SetJointPositions, "/a3/arm/set_joint_positions")
     goto_cli = node.create_client(GotoNamedPose, "/a3/arm/goto_named_pose")
     playback_cli = node.create_client(PlaybackTrajectory, "/a3/arm/playback")
-    gripper_cli = node.create_client(GripperCommand, "/a3/gripper/command")
+    gripper_act = ActionClient(node, GripperCommand, "/gripper_controller/gripper_cmd")
 
     print("waiting for stack ...")
     t0 = time.monotonic()
     while time.monotonic() - t0 < 30:
         spin(0.1)
+        # LL-103: GAC action server only exists after controller activation,
+        # so it is intentionally not part of the pre-enable readiness wait.
         if recorder.current() is not None and all(
                 c.wait_for_service(timeout_sec=0.0)
                 for c in (list_cli, enable_cli, jog_cli, goto_cli, playback_cli)):
@@ -274,16 +302,17 @@ def main():
     if os.path.exists("/tmp/f75_latest_backup.yaml"):
         shutil.copy("/tmp/f75_latest_backup.yaml", path)
 
-    # ---- 5. gripper position → L7 via standard JTC topic ----
+    # ---- 5. gripper standard action → L7 actually moves ----
     cur0 = recorder.current()[JOINTS[6]]
-    r = call(gripper_cli, GripperCommand.Request(mode="position", position=0.0))
-    spin(1.5)
+    res1 = send_gripper_goal(gripper_act, 0.0)
+    spin(0.3)
     mid = recorder.current()[JOINTS[6]]
-    r2 = call(gripper_cli, GripperCommand.Request(mode="position", position=1.0))
-    spin(1.5)
+    res2 = send_gripper_goal(gripper_act, 1.0)
+    spin(0.3)
     cur1 = recorder.current()[JOINTS[6]]
-    moved = abs(cur1 - cur0) > 0.10 or abs(mid - cur0) > 0.05
-    check("5 gripper position moves L7", moved and r.success and r2.success,
+    moved = abs(cur1 - mid) > 0.10 or abs(mid - cur0) > 0.05
+    ok_res = res1 is not None and res2 is not None
+    check("5 gripper action moves L7", moved and ok_res,
           f"L7 {cur0:.3f}->{mid:.3f}->{cur1:.3f}")
 
     # ---- 6. disable safe-park ----

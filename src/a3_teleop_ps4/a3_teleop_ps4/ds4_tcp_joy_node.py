@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""TCP JSON → /joy（WSL 侧接收端，配合 Windows scripts/ps4/ds4_bridge_win.py）。
+"""
+TCP JSON → /joy（WSL 侧接收端，配合 Windows scripts/ps4/ds4_bridge_win.py）.
 
 Windows 桥接脚本把蓝牙 DS4 归一化为 deep-dog 抽象快照（JSON 行协议）经
 TCP 发来（WSL2 localhost 转发，Windows 连 127.0.0.1 即可）。本节点将其转换为

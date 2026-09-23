@@ -127,7 +127,10 @@ class Ps4Mapper(Node):
                 fn = str(spec.get("fn"))
                 kind = str(spec.get("kind", "analog_n11"))
                 if kind == "analog_01":
-                    source = str(spec.get("source", "trigger" if axis_name in ("l2", "r2") else "unit"))
+                    default_source = (
+                        "trigger" if axis_name in ("l2", "r2") else "unit"
+                    )
+                    source = str(spec.get("source", default_source))
                     if axis_name in self._extra and source != "trigger":
                         v = max(0.0, min(1.0, (self._extra[axis_name] + 1.0) * 0.5))
                     else:

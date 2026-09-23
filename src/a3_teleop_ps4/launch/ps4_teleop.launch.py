@@ -108,7 +108,8 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "layout",
             default_value="ds4_linux",
-            description="config/<name>.yaml；ds4_linux=蓝牙 hid-sony，ds4_linux_usb=USB 有线（ds4_generic 兜底布局）",
+            description="config/<name>.yaml；ds4_linux=蓝牙 hid-sony，"
+                        "ds4_linux_usb=USB 有线（ds4_generic 兜底布局）",
         ),
         OpaqueFunction(function=_launch_nodes),
     ])

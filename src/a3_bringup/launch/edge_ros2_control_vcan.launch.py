@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""F72 ros2_control 标准栈 vcan0 仿真闭环（验证真机 SystemInterface 插件）。
+"""
+F72 ros2_control 标准栈 vcan0 仿真闭环（验证真机 SystemInterface 插件）.
 
 与 F70 mock 栈完全相同的控制器/ MoveIt 接线，唯一区别：xacro 生成
 use_real_hardware:=true can_interface:=vcan0，controller_manager 加载

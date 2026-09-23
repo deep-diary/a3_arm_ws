@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""A3 机械臂唯一产品入口（F78）：hardware:=mock|can，两种模式拓扑完全一致。
+"""
+A3 机械臂唯一产品入口（F78）：hardware:=mock|can，两种模式拓扑完全一致.
 
 拓扑（ros2_control 标准栈，F75–F77 产品形态）：
   robot_state_publisher
@@ -38,13 +39,38 @@ from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
     IncludeLaunchDescription,
+    RegisterEventHandler,
     TimerAction,
 )
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterFile, ParameterValue
+
+
+def make_spawner_stage(spawner_node, on_success, max_retries=2, gap=2.0):
+    """
+    顺序 spawner 链的一级：退出码 0 → on_success；非零 → 延迟后重启同一 spawner.
+
+    重启是幂等的：spawner 启动先查 is_controller_loaded，已 load 的控制器
+    会跳过 load_controller 继续 configure/activate，因此高负载下 rmw 丢失
+    load_controller 响应（重试撞上 "already loaded"）不会再杀死起栈流程。
+    """
+    attempts = {"n": 0}
+
+    def on_exit(event, _context):
+        if event.returncode == 0:
+            return on_success
+        attempts["n"] += 1
+        if attempts["n"] > max_retries:
+            return []
+        return [TimerAction(period=gap, actions=[spawner_node])]
+
+    return RegisterEventHandler(
+        OnProcessExit(target_action=spawner_node, on_exit=on_exit)
+    )
 
 
 def load_yaml(package_name, file_path):
@@ -138,8 +164,11 @@ def generate_launch_description():
         parameters=[
             {"robot_description": robot_description},
             controllers_yaml,
-            gripper_plugin_file,
             gravity_scales_file_param,
+            # LL-103：rcl 参数文件后者覆盖，且 gravity_scales 留空时解析为
+            # controllers_yaml 本身——gripper 覆盖文件必须在最后，否则 mock 的
+            # position 插件覆写会被基础 yaml 冲掉（F88）。
+            gripper_plugin_file,
         ],
         output="screen",
     )
@@ -155,6 +184,10 @@ def generate_launch_description():
             "--inactive",
             "--controller-manager",
             "/controller_manager",
+            # 5 s × spawner 内部 3 次重试：单次丢响应可在链内自愈；
+            # 30 s 会让恢复（最长 90 s）远超验收/看门狗窗口。
+            "--service-call-timeout",
+            "5.0",
         ],
         output="screen",
     )
@@ -167,6 +200,8 @@ def generate_launch_description():
             "--inactive",
             "--controller-manager",
             "/controller_manager",
+            "--service-call-timeout",
+            "5.0",
         ],
         output="screen",
     )
@@ -178,6 +213,8 @@ def generate_launch_description():
             "joint_state_broadcaster",
             "--controller-manager",
             "/controller_manager",
+            "--service-call-timeout",
+            "5.0",
         ],
         output="screen",
     )
@@ -388,14 +425,20 @@ def generate_launch_description():
         condition=IfCondition(use_rosbag),
     )
 
-    # LL-072：JTC 先 configure（3 s），zero_torque 5 s，JSB 7 s 激活；
-    # 产品节点 4 s 后启动，避开 hardware 加载窗口。
+    # JTC（3 s）→ zero_torque → JSB 严格顺序执行，任一 spawner 非零退出自动
+    # 重启（最多 2 次）。顺序执行消除并发 load 突发，重启兜住 rmw 丢响应竞态。
+    # 产品节点必须等 JSB 成功后再启动：8 节点并发突发曾把 list_controllers
+    # 响应挤丢（rmw_response.cpp timeout），导致 /joint_states 永远不出现。
     delay_jtc = TimerAction(period=3.0, actions=[jtc_spawner])
-    delay_free_drive = TimerAction(period=5.0, actions=[free_drive_spawner])
-    delay_jsb = TimerAction(period=7.0, actions=[jsb_spawner])
-    delay_products = TimerAction(
-        period=4.0,
-        actions=[
+    stage_jtc = make_spawner_stage(
+        jtc_spawner, [TimerAction(period=1.0, actions=[free_drive_spawner])]
+    )
+    stage_free_drive = make_spawner_stage(
+        free_drive_spawner, [TimerAction(period=1.0, actions=[jsb_spawner])]
+    )
+    stage_jsb = make_spawner_stage(
+        jsb_spawner,
+        [TimerAction(period=1.0, actions=[
             fsm,
             monitor,
             retime_node,
@@ -403,7 +446,7 @@ def generate_launch_description():
             servo_node,
             servo_bridge,
             teleop,
-        ],
+        ])],
     )
 
     return LaunchDescription([
@@ -411,7 +454,8 @@ def generate_launch_description():
             "hardware",
             default_value="mock",
             choices=["mock", "can"],
-            description="硬件插件：mock=GenericSystem 无 CAN；can=A3MITHardwareInterface（配 can_interface）",
+            description="硬件插件：mock=GenericSystem 无 CAN；"
+                        "can=A3MITHardwareInterface（配 can_interface）",
         ),
         DeclareLaunchArgument(
             "can_interface",
@@ -465,7 +509,8 @@ def generate_launch_description():
             "fsm_backend",
             default_value="fjt_action",
             choices=["fjt_action", "topic"],
-            description="编排层轨迹后端：fjt_action=JTC 标准 action（产品栈默认）；topic=旧 motor_protocol 话题（legacy）",
+            description="编排层轨迹后端：fjt_action=JTC 标准 action（产品栈默认）；"
+                        "topic=旧 motor_protocol 话题（legacy）",
         ),
         DeclareLaunchArgument(
             "use_rosbag",
@@ -485,8 +530,8 @@ def generate_launch_description():
         controller_manager,
         move_group,
         delay_jtc,
-        delay_free_drive,
-        delay_jsb,
-        delay_products,
+        stage_jtc,
+        stage_free_drive,
+        stage_jsb,
         rviz,
     ])

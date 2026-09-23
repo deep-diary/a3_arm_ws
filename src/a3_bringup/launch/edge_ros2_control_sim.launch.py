@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""F70 ros2_control 标准栈仿真闭环（无电机 / 无 CAN）。
+"""
+F70 ros2_control 标准栈仿真闭环（无电机 / 无 CAN）.
 
 工业标准执行底座，取代手搓的 a3_fjt_action + motor_protocol_node 插值 + 自研
 sim 节点：

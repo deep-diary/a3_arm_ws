@@ -101,9 +101,10 @@ class ActionExecutor:
         self._arm_jtc_pub = node.create_publisher(
             JointTrajectory, self.arm_jtc_topic, 10
         )
-        # servo 输入订阅是 SensorDataQoS/BEST_EFFORT；RELIABLE 发布与之不匹配，
-        # 消息静默丢弃（LL-079）。
-        servo_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
+        # Humble moveit_servo 输入订阅是 SystemDefaultsQoS/RELIABLE（ros2 topic
+        # info -v 实测）；BEST_EFFORT 发布在 Cyclone DDS 下被直接判不兼容丢弃，
+        # 仅 Fast-DDS 宽松放行（LL-104）。
+        servo_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self._twist_pub = node.create_publisher(TwistStamped, self.twist_topic, servo_qos)
         self._joint_jog_pub = node.create_publisher(
             JointJog, self.joint_jog_topic, servo_qos
@@ -199,7 +200,7 @@ class ActionExecutor:
         return now < self._pose_busy_until
 
     def poll(self, now: float) -> None:
-        """每 tick 调用一次：重试挂起的夹爪目标、推进 L3 上电+使能挂起态。"""
+        """每 tick 调用一次：重试挂起的夹爪目标、推进 L3 上电+使能挂起态."""
         if self._pending_gripper is not None:
             self._gripper_goal(*self._pending_gripper)
         if not self._enable_pending or self._enable_called:
@@ -391,7 +392,8 @@ class ActionExecutor:
         self._power("shutdown")
 
     def arm_power_enable(self) -> None:
-        """F60 L3：一键「执行层上电开门禁 + 编排层使能」，非阻塞。
+        """
+        F60 L3：一键「执行层上电开门禁 + 编排层使能」，非阻塞.
 
         发 power start（Running 态仅被忽略，幂等）后进入挂起态，由 poll()
         在 gate_open && Running 时异步调 /a3/arm/enable；5s 未就绪打 ERROR。
@@ -522,7 +524,8 @@ class ActionExecutor:
         self._gripper_goal(q, self.gripper_default_effort)
 
     def gripper_force(self, v: float) -> None:
-        """F36/F87：R2 扳机 → GripperCommand action（50 Hz 每 tick 调用，迟滞状态机）。
+        """
+        F36/F87：R2 扳机 → GripperCommand action（50 Hz 每 tick 调用，迟滞状态机）.
 
         松开（v<0.15）→ 下降沿发一次全开位置目标；
         按过 0.22 → 闭合位置目标（1.79）+ per-goal max_effort（扳机行程映射
@@ -562,7 +565,7 @@ class ActionExecutor:
         return max(FORCE_TORQUE_MIN, min(FORCE_TORQUE_MAX, tau))
 
     def _gripper_goal(self, position: float, max_effort: float) -> bool:
-        """发送 GripperCommand 目标；server 暂不可用时挂起，poll() 每 tick 重试。"""
+        """发送 GripperCommand 目标；server 暂不可用时挂起，poll() 每 tick 重试."""
         if not self._gripper_ac.server_is_ready():
             self._pending_gripper = (float(position), float(max_effort))
             self._n.get_logger().warn(

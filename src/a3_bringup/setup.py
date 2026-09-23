@@ -37,4 +37,5 @@ setup(
             "urdf_dir_check_pub = a3_bringup.urdf_dir_check_pub:main",
         ],
     },
+    tests_require=['ament_lint_auto', 'ament_flake8', 'ament_pep257', 'pytest']
 )

@@ -1,4 +1,5 @@
-"""A3 夹爪（L7）自适应力控节点（需求 F24-F26）。
+"""
+A3 夹爪（L7）自适应力控节点（需求 F24-F26）.
 
 力外环（50 Hz PI，读 eff_L7）+ 电机位置内环：
   - FORCE 模式：e = tau_target - tau_meas；力不足 e>0 → 向闭合方向累加位置目标，
@@ -308,7 +309,7 @@ class GripperControllerNode(Node):
             self.get_logger().error(f"save overrides failed: {exc}")
 
     def _validate_torque(self, tau: float) -> Optional[str]:
-        """返回 None 表示合法，否则返回错误原因。"""
+        """返回 None 表示合法，否则返回错误原因."""
         if tau is None or not math.isfinite(tau):
             return "torque not finite"
         if tau <= 0:
@@ -321,7 +322,7 @@ class GripperControllerNode(Node):
 
     # ---------- 固件硬限（F24 双保险）----------
     def _fw_retry(self) -> None:
-        """服务未就绪时周期性重试写入固件力矩限制；就绪后只写一次。"""
+        """服务未就绪时周期性重试写入固件力矩限制；就绪后只写一次."""
         if self._fw_limit_written:
             return
         if self._set_param_cli.service_is_ready():
@@ -332,7 +333,9 @@ class GripperControllerNode(Node):
             self._fw_limit_written = True
             return True
         if not self._set_param_cli.service_is_ready():
-            self.get_logger().warn("set_param service not ready; retry later", throttle_duration_sec=10)
+            self.get_logger().warn(
+                "set_param service not ready; retry later",
+                throttle_duration_sec=10)
             return False
         req = SetMotorParam.Request()
         req.motor_id = int(self._motor_id)
@@ -402,7 +405,7 @@ class GripperControllerNode(Node):
 
     # ---------- 互锁 ----------
     def _interlocked(self) -> Optional[str]:
-        """返回 None 表示允许力控，否则返回拒绝原因。"""
+        """返回 None 表示允许力控，否则返回拒绝原因."""
         if self._require_gate and not self._gate_open:
             return "gate closed"
         blocked = {"TRAJ_RUNNING", "SERVO", "ZERO_TORQUE", "GRAVITY_COMP"}
@@ -453,7 +456,10 @@ class GripperControllerNode(Node):
                     self._error_code = ERR_INTERLOCK
                     self._message = resp.message
                     return resp
-                timeout = float(req.timeout_s) if req.timeout_s and req.timeout_s > 0 else self._grasp_timeout_s
+                if req.timeout_s and req.timeout_s > 0:
+                    timeout = float(req.timeout_s)
+                else:
+                    timeout = self._grasp_timeout_s
                 self._start_force(tau, timeout)
                 resp.success = True
                 resp.message = f"force grasp {tau:.2f}Nm"
@@ -513,7 +519,7 @@ class GripperControllerNode(Node):
 
     # ---------- 命令实现 ----------
     def _goto_position(self, norm_v: float) -> None:
-        """POSITION 模式：归一化 0..1 → L7 角度，单次轨迹。"""
+        """POSITION 模式：归一化 0..1 → L7 角度，单次轨迹."""
         self._force_active = False
         self._integral = 0.0
         self._state = ST_POSITION
@@ -530,7 +536,7 @@ class GripperControllerNode(Node):
         self._publish_traj(q, duration=0.6)
 
     def _start_force(self, tau: float, timeout: float) -> None:
-        """FORCE 模式：从当前位置开始，先恒速软闭合，接触后 PI 力环调节。"""
+        """FORCE 模式：从当前位置开始，先恒速软闭合，接触后 PI 力环调节."""
         self._mode = "force"
         self._target_torque = tau
         self._integral = 0.0
@@ -543,7 +549,10 @@ class GripperControllerNode(Node):
         now = self.get_clock().now().nanoseconds * 1e-9
         self._force_start_time = now
         # 每次夹取的超时以命令参数为准（默认回落配置值）
-        self._force_timeout_s = float(timeout) if timeout and timeout > 0 else self._grasp_timeout_s
+        if timeout and timeout > 0:
+            self._force_timeout_s = float(timeout)
+        else:
+            self._force_timeout_s = self._grasp_timeout_s
         self._in_band_since = 0.0
         # 力环从当前实测位置起步，避免阶跃
         self._q_cmd = self._q_meas if self._have_js else self._q_open
@@ -574,7 +583,7 @@ class GripperControllerNode(Node):
         self._schedule_gain_restore()
 
     def _schedule_gain_restore(self) -> None:
-        """释放完成后恢复位置模式增益（一次性 timer，重复释放先取消旧的）。"""
+        """释放完成后恢复位置模式增益（一次性 timer，重复释放先取消旧的）."""
         if self._release_gain_timer is not None:
             self._release_gain_timer.cancel()
         self._release_gain_timer = self.create_timer(
@@ -730,7 +739,10 @@ class GripperControllerNode(Node):
     # ---------- 状态发布 ----------
     def _publish_status_locked(self, now: float) -> None:
         # 力控期间 force_status_hz，否则 status_hz
-        target_hz = float(self._p("force_status_hz")) if self._force_active else float(self._p("status_hz"))
+        if self._force_active:
+            target_hz = float(self._p("force_status_hz"))
+        else:
+            target_hz = float(self._p("status_hz"))
         interval = 1.0 / target_hz
         if not hasattr(self, "_last_status_time"):
             self._last_status_time = 0.0
@@ -776,9 +788,3 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-

@@ -1,4 +1,5 @@
-"""URDF 方向校验（真机，臂不失能）：RViz 双模型 + 目标摆动发布器。
+"""
+URDF 方向校验（真机，臂不失能）：RViz 双模型 + 目标摆动发布器.
 
 前提：can_bridge（motor_protocol_node）已运行（refresh 播种保持反馈流），
 臂处于失能状态（电机 mode=0，轨迹帧只收不执行）。

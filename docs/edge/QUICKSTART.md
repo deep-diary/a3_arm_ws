@@ -133,11 +133,17 @@
     - 所有真机运动经安全限幅（目标 ≤0.30 rad、时长 ≥2.5 s），结束自动失能；零力矩步骤需人工在旁。
     - 详见 [`scripts/a3_test/README.md`](../../scripts/a3_test/README.md)。
 
-    **标准 CI 测试门（F79，launch_testing，无需硬件）：** F75/F76/F77 产品验收已封装为 `colcon test` 用例，自动起 mock 产品栈、跑验收脚本、SIGINT 拆栈，结果出 JUnit XML：
+    **一键工业质量门禁（F92，无需硬件）：** build → 全仓 lint（C++ lint_cmake/xmllint/cppcheck；Python flake8/pep257）→ F75/F76/F77 launch 验收 → JUnit/ctest 结果强执行，非零即不合格：
+    ```bash
+    ./scripts/a3_test/a3_ci_gate.sh     # ~2 min；门禁内固定 Cyclone DDS + 离线 xmllint catalog
+    ```
+    依赖 `ros-humble-rmw-cyclonedds-cpp`（门禁固定 RMW：Fast-DDS 对 BEST_EFFORT→RELIABLE 宽松放行会掩盖 QoS 问题，且起栈突发丢 service 响应；LL-104）。
+
+    只跑产品验收（F79，launch_testing）：F75/F76/F77 已封装为 `colcon test` 用例，自动起 mock 产品栈、跑验收脚本、SIGINT 拆栈，结果出 JUnit XML：
     ```bash
     colcon build --packages-select a3_acceptance_tests
-    colcon test --packages-select a3_acceptance_tests          # ~85 s，固定 domain 61/62/63
-    colcon test-result --verbose                              # JUnit：F75 15 项 / F76 12 项 / F77 8 项
+    colcon test --packages-select a3_acceptance_tests          # ~90 s，固定 domain 61/62/63
+    colcon test-result --verbose                              # JUnit：F75 15 项 / F76 13 项 / F77 8 项
     ```
     F75 用例含 MQTT 检查，EMQX（192.168.3.73）不可达时按失败计。人工单跑脚本的老方式仍保留（scripts/a3_test/f7[567]_*_acceptance.py）。
 

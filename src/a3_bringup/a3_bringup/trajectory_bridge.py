@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Bridge FollowJointTrajectory / JointTrajectory into the topic expected by a3_can_bridge.
+"""
+Bridge FollowJointTrajectory / JointTrajectory into the topic expected by a3_can_bridge.
 
 reBot ROS2 controllers typically expose:
   /rebotarm/follow_joint_trajectory  (action) or a JointTrajectory publisher

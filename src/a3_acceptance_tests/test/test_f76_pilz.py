@@ -1,4 +1,5 @@
-"""launch_testing 封装 F76：Pilz 工业运动规划器验收（PTP/LIN/CIRC + Sequence）。
+"""
+launch_testing 封装 F76：Pilz 工业运动规划器验收（PTP/LIN/CIRC + Sequence）.
 
 被测栈：a3_bringup.launch.py hardware:=mock use_mqtt:=false（domain 62）。
 验收脚本：scripts/a3_test/f76_pilz_acceptance.py（单一事实源，12 项）。

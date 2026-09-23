@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""PS4 teleop for A3 arm.
+"""
+PS4 teleop for A3 arm.
 
 Power / safety (aligned with trotbot power_sequence):
   - Square long-press or L1+R1 long-press -> 'start'

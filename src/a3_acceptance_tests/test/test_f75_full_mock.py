@@ -1,4 +1,5 @@
-"""launch_testing 封装 F75：全产品 mock-hardware 栈验收。
+"""
+launch_testing 封装 F75：全产品 mock-hardware 栈验收.
 
 被测栈：a3_bringup.launch.py hardware:=mock（默认组件全开，含 MQTT；
        MQTT check #7 要求 broker 192.168.3.73 可达）。

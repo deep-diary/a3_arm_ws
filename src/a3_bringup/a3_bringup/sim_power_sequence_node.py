@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""No-CAN power sequence simulator (gate_open=true, state=Running).
+"""
+No-CAN power sequence simulator (gate_open=true, state=Running).
 
 Replaces the real C++ `power_sequence_node` in `edge_web_sim.launch.py`. The real
 node gates motor trajectory forwarding until a start/handshake sequence completes;

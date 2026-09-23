@@ -162,7 +162,8 @@ def generate_arm_nodes(context, *args, **kwargs):
 
 
 def generate_controller_params(prefix: str, arm_name: str, update_rate: int) -> str:
-    """Generate controller parameter config file (arm L1-L6 + gripper L7)
+    """
+Generate controller parameter config file (arm L1-L6 + gripper L7)
     
     Returns temporary YAML file path
     """

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""全仿真 PS4 遥操作闭环（F62）：edge_web_sim + 内联 Servo + teleop + 双模型 RViz。
+"""
+全仿真 PS4 遥操作闭环（F62）：edge_web_sim + 内联 Servo + teleop + 双模型 RViz.
 
 用于无手柄合成 /joy 全功能验证（scripts/a3_test/ps4_sim_test.py）与用户看 RViz
 旁听：

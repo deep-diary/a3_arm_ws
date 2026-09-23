@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""F75 全产品 mock-hardware 标准栈（无电机 / 无 CAN / 零自研 sim 节点）。
+"""
+F75 全产品 mock-hardware 标准栈（无电机 / 无 CAN / 零自研 sim 节点）.
 
 与真机 F72 栈同构的产品级 bringup，拓扑：
 

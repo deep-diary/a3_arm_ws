@@ -83,7 +83,8 @@ class SimExecutor(Node):
 
         with self._lock:
             if streaming:
-                if self._traj is not None and len(self._traj.points) > 1 and self._traj_start is not None:
+                if (self._traj is not None and len(self._traj.points) > 1
+                        and self._traj_start is not None):
                     elapsed = (self.get_clock().now() - self._traj_start).nanoseconds * 1e-9
                     _pos, _vel, _eff, finished = sample_joint_trajectory(
                         self._traj, elapsed, self._interp_method

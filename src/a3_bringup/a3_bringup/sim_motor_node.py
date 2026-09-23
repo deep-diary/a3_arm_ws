@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""No-CAN motor protocol simulator (feedback = command + first-order plant).
+"""
+No-CAN motor protocol simulator (feedback = command + first-order plant).
 
 Replaces the real C++ `motor_protocol_node` in `edge_web_sim.launch.py`, so the
 whole stack (arm controller + gripper force control + gravity + power sequence)

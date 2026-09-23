@@ -25,4 +25,5 @@ setup(
             "ros2mqtt_bridge = a3_mqtt_bridge.ros2mqtt_bridge:main",
         ],
     },
+    tests_require=['ament_lint_auto', 'ament_flake8', 'ament_pep257', 'pytest']
 )

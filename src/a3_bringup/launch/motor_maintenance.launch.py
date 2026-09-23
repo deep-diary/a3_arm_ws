@@ -1,4 +1,5 @@
-"""F91 motor maintenance: standalone SetZero/SaveParam tool.
+r"""
+F91 motor maintenance: standalone SetZero/SaveParam tool.
 
 Run only while the product stack is STOPPED (the node owns an exclusive CAN
 socket and refuses service while arm/gripper/zero-torque controllers are
