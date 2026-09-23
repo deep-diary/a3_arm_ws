@@ -849,6 +849,24 @@ python3 scripts/a3_test/f90_blackbox_acceptance.py
 # 读取：ros2 bag info ~/.a3/blackbox/blackbox_*/；播放 ros2 bag play ...
 ```
 
+### 电机零点/参数维护验收（F91，独立维护节点 + 控制器联锁）
+
+产品栈的 SystemInterface 插件不能挂 ROS 服务，F91 把 MIT 电机 SetZero（0x06）/ SaveParam（0x16）维护收敛到**独立维护节点** `motor_maintenance`：复用已在真机验证的 `ProtocolCodec::BuildSetZeroFrame/BuildSaveParamFrame`（零新增协议代码），独占 SocketCAN socket；执行前先经独立探针节点调 `/controller_manager/list_controllers`，`arm_controller`/`gripper_controller`/`zero_torque_controller` 任一 active 即拒绝（消息点名控制器，一帧不发）；controller_manager 不在（栈已停）才放行。支持单机（1..7）与 255（0xFF）全发，命令间隔 50 ms（对标 EDULITE_A3 SDK），所有阈值可参数覆盖。PS4 Options 长按调零的死映射（产品栈无消费者）同步退役，L7 重标零不再需要切回 legacy 栈。
+
+```bash
+# 仿真验收（vcan91，域 91；真机断电）
+python3 scripts/a3_test/f91_maintenance_acceptance.py
+#   通过标准：末尾「F91 acceptance: 16/16」，退出码 0
+#   单机/255 全发：sim 计数正确、被标定电机角度归 0
+#   非法 motor_id（9）：success=false 且无计数
+#   产品栈 READY：两服务均被联锁拒绝且一帧不发；停栈后恢复放行
+
+# 真机维护流程（栈必须先停）
+ros2 launch a3_bringup motor_maintenance.launch.py can_interface:=can1
+ros2 service call /a3/maintenance/set_zero a3_msgs/srv/MotorIdCommand "{motor_id: 255}"
+ros2 service call /a3/maintenance/save_parameters a3_msgs/srv/MotorIdCommand "{motor_id: 255}"
+```
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

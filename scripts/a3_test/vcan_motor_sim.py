@@ -28,6 +28,8 @@ CMD_ENABLE = 0x03
 CMD_RESET = 0x04
 CMD_GET_PARAM = 0x11
 CMD_SET_PARAM = 0x12
+CMD_SET_ZERO = 0x06
+CMD_SAVE_PARAM = 0x16
 MASTER_ID = 0xFD
 
 PARAM_CAN_TIMEOUT = 0x7028
@@ -72,6 +74,10 @@ class MotorState:
         }
         self.tripped = False
         self.trip_delay = None
+        # F91 maintenance counters (SetZero 0x06 data[0]=1; SaveParam 0x16
+        # only latches with data 01..08, LL-019).
+        self.set_zero_count = 0
+        self.save_param_count = 0
         # Enabled latches on a Type-3 enable and clears on reset / watchdog
         # trip; feedback reports RUN mode (2) in CAN-id bits 22-23 while set.
         self.enabled = False
@@ -90,6 +96,9 @@ def write_state_file(path, motors):
                 "tripped": m.tripped,
                 "trip_delay": m.trip_delay,
                 "enabled": m.enabled,
+                "angle": m.angle,
+                "set_zero_count": m.set_zero_count,
+                "save_param_count": m.save_param_count,
             }
             for mid, m in sorted(motors.items())
         }
@@ -478,7 +487,25 @@ def main():
         m = motors.get(motor_id)
         now = time.monotonic()
         bus_last_t = now
-        if m is None:
+        broadcast_maintenance = (
+            motor_id == 0xFF and
+            cmd_type in (CMD_SET_ZERO, CMD_SAVE_PARAM))
+        if m is None and not broadcast_maintenance:
+            continue
+
+        if broadcast_maintenance:
+            if cmd_type == CMD_SET_ZERO:
+                if data[0] == 0x01:
+                    for mt in motors.values():
+                        mt.angle = 0.0
+                        mt.speed = 0.0
+                        mt.torque = 0.0
+                        mt.enabled = False
+                        mt.set_zero_count += 1
+            elif data == bytes(range(1, 9)):
+                for mt in motors.values():
+                    mt.save_param_count += 1
+            tick(now)
             continue
 
         silence.poll()
@@ -491,7 +518,18 @@ def main():
                 send_feedback(sock, m, health)
             m.report_torque = None
 
-        if cmd_type == CMD_RESET:
+        if cmd_type == CMD_SET_ZERO:
+            # No reply frame (reference SDK sends and forgets).
+            if data[0] == 0x01:
+                m.angle = 0.0
+                m.speed = 0.0
+                m.torque = 0.0
+                m.enabled = False
+                m.set_zero_count += 1
+        elif cmd_type == CMD_SAVE_PARAM:
+            if data == bytes(range(1, 9)):
+                m.save_param_count += 1
+        elif cmd_type == CMD_RESET:
             m.speed = 0.0
             m.torque = 0.0
             m.tripped = False

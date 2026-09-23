@@ -21,6 +21,8 @@
   <depend>diagnostic_msgs</depend>
   <depend>std_msgs</depend>
   <depend>a3_can_bridge</depend>
+  <depend>a3_msgs</depend>
+  <depend>controller_manager_msgs</depend>
   <depend>pinocchio</depend>
   <depend>yaml-cpp</depend>
   <depend>ament_index_cpp</depend>

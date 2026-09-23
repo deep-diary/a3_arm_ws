@@ -64,12 +64,9 @@ buttons:
     edge: shortpress
     hold_s: 3.0
   options:
-    # 双义：短按(释放时 <3s)=结束示教并保存；长按 3s=调零（互斥，长按不连带短按）
+    # F91: 长按调零已退役（产品栈无消费者；零点维护走 motor_maintenance 独立节点）
     - fn: teach_stop
       edge: shortpress
-      hold_s: 3.0
-    - fn: power_set_zero
-      edge: longpress
       hold_s: 3.0
   square:
     fn: playback_latest

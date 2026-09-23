@@ -18,6 +18,8 @@ find_package(sensor_msgs REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(a3_can_bridge REQUIRED)
+find_package(a3_msgs REQUIRED)
+find_package(controller_manager_msgs REQUIRED)
 find_package(pinocchio REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(ament_index_cpp REQUIRED)
@@ -51,11 +53,32 @@ ament_target_dependencies(
 target_link_libraries(
   a3_hardware_interface pinocchio::pinocchio yaml-cpp)
 
+add_executable(
+  motor_maintenance
+  src/motor_maintenance_node.cpp
+  src/socketcan_transport.cpp
+)
+target_include_directories(
+  motor_maintenance
+  PRIVATE
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+ament_target_dependencies(
+  motor_maintenance
+  rclcpp
+  a3_msgs
+  controller_manager_msgs
+)
+
 pluginlib_export_plugin_description_file(
   hardware_interface a3_hardware_interface.xml)
 pluginlib_export_plugin_description_file(
   controller_interface a3_controller_plugins.xml)
 
+install(
+  TARGETS motor_maintenance
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
 install(
   DIRECTORY include/
   DESTINATION include

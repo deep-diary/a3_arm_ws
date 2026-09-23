@@ -390,9 +390,6 @@ class ActionExecutor:
     def power_shutdown(self) -> None:
         self._power("shutdown")
 
-    def power_set_zero(self) -> None:
-        self._power("set_zero")
-
     def arm_power_enable(self) -> None:
         """F60 L3：一键「执行层上电开门禁 + 编排层使能」，非阻塞。
 

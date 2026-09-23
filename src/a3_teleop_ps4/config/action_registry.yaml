@@ -21,10 +21,6 @@ functions:
     kind: discrete
     description: Publish /power_sequence/command shutdown
 
-  power_set_zero:
-    kind: discrete
-    description: Publish /power_sequence/command set_zero
-
   stop_motion:
     kind: discrete
     description: Zero Twist and abort named-pose motion

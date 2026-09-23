@@ -1,0 +1,6 @@
+# Motor maintenance command (F91).
+# motor_id: 1..7 single motor; 255 (0xFF) = all motors.
+uint8 motor_id
+---
+bool success
+string message
