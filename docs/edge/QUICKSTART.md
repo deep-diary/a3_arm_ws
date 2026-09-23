@@ -981,6 +981,18 @@ python3 scripts/a3_test/f98_l7_limits_acceptance.py
 #   C GripperCommand 0.0 → pos=0.009
 ```
 
+### JTC 指令超时（F99：cmd_timeout 给话题接口陈旧指令确定性切 hold）
+
+JTC 除 action 外还在话题 `/arm_controller/joint_trajectory` 上接受轨迹（无 action 生命周期）：此前一条轨迹插值到末点后若无新指令，控制器永远停留在陈旧的末段采样上（本栈 `allow_nonzero_velocity_at_trajectory_end: true`，末速非零也接受），没有确定性到期边界。已配 `cmd_timeout: 2.0`（从轨迹最后一点计时；严格大于 `constraints.goal_time: 1.0`，否则 configure 时被静默置 0），超时后控制器告警 `Aborted due to command timeout` 并切到当前位置的 hold 点。action goal 在 goal_time=1.0 处先终结，产品 FJT 路径零行为变化。
+
+```bash
+# 仿真验收（需先 source /opt/ros/humble/setup.bash 与 install/local_setup.bash；机械臂断电）
+python3 scripts/a3_test/f99_jtc_cmd_timeout_acceptance.py
+#   通过标准：末尾「F99 acceptance: 5/5」
+#   A cmd_timeout=2.0 且无 configure 警告 → B action 轨迹仍 SUCCESSFUL
+#   → C 话题轨迹末点约 2 s 后 "Aborted due to command timeout"，位置保持
+```
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

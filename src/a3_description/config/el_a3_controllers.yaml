@@ -51,6 +51,11 @@ arm_controller:
     allow_nonzero_velocity_at_trajectory_end: true
     interpolation_method: splines
 
+    # F99: hard cap for stale commands on the topic interface, counted from
+    # the last trajectory point; must be strictly greater than
+    # constraints.goal_time (1.0), otherwise silently ignored at configure.
+    cmd_timeout: 2.0
+
     state_publish_rate: 200.0
     action_monitor_rate: 50.0
 
