@@ -1085,6 +1085,25 @@ python3 scripts/a3_test/f105_dds_network_acceptance.py
 export CYCLONEDDS_URI=file:///etc/a3/cyclonedds.xml A3_DDS_IFACE=wlan0
 ```
 
+### 一次性交付/上电冒烟测试（F106：一条命令六阶段，对标 EDULITE startup_test_demo）
+
+新机交付 / 现场上电的 one-shot commissioning：脚本自动起 F78 产品栈（mock 走隔离域 106，自建 `a3_shell_env.sh` 环境），依次验证 P1 图健康 → P2 控制器 + `/a3/arm/enable` → P3 反馈 → P4 小幅度 FJT 运动 → P5 夹爪 → P6 zero_torque 静态核验，输出逐 PASS/FAIL 报告与退出码，结束自动 SIGINT 清栈并核验无残留。P6 实时 STRICT 切换对标参考仓为 opt-in（`--test-zero-torque`）：mock_components 不支持 position→effort-only 模式切换（LL-122，同 F88），mock 下只静态核验 + SKIP；实时路径由 F89b vcan 20/20 覆盖。
+
+```bash
+# 仿真验收（机械臂断电；约 1–2 分钟）
+python3 scripts/a3_test/f106_commissioning_smoke.py
+#   通过标准：末尾「F106 RESULT: 22 PASS / 0 FAIL」，退出码 0
+#   launch 全量日志：/tmp/f106_launch_<时间戳>.log
+
+# 真机通电后（用户授权时）
+python3 scripts/a3_test/f106_commissioning_smoke.py --mode real --can-interface can1 \
+  --test-zero-torque
+
+# 附着当前已运行栈（不起/不停栈）
+python3 scripts/a3_test/f106_commissioning_smoke.py --mode connect
+#   对空栈：--wait-sec 超时后 FAIL 退出（不挂死）
+```
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
