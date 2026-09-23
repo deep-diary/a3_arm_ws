@@ -1,0 +1,8 @@
+# /etc/default/a3-arm — a3-arm.service 现场环境覆盖（可选）。
+# 复制为 /etc/default/a3-arm 后改值；EnvironmentFile 指向此文件，无需改单元。
+# 变更后：sudo systemctl restart a3-arm
+#
+# ROS_DOMAIN_ID=0
+# RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+# 日志：
+# ROS_LOG_DIR=/var/log/a3-arm

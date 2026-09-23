@@ -1,0 +1,26 @@
+[Unit]
+Description=A3 robotic arm production stack (ROS 2 Humble)
+Documentation=https://github.com/deep-diary/a3_arm_ws
+After=can-up.service network-online.target
+Wants=can-up.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=cat
+Group=cat
+WorkingDirectory=/home/cat/a3_arm_ws
+Environment=PYTHONNOUSERSITE=1
+Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+EnvironmentFile=-/etc/default/a3-arm
+ExecStart=/usr/bin/bash -c 'source /opt/ros/humble/setup.bash && source /home/cat/a3_arm_ws/install/local_setup.bash && exec ros2 launch a3_bringup a3_bringup.launch.py hardware:=can can_interface:=can1'
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+KillMode=mixed
+TimeoutStopSec=20
+SendSIGKILL=yes
+
+[Install]
+WantedBy=multi-user.target

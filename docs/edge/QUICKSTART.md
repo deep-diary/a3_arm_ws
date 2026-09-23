@@ -873,6 +873,32 @@ ros2 service call /a3/maintenance/set_zero a3_msgs/srv/MotorIdCommand "{motor_id
 ros2 service call /a3/maintenance/save_parameters a3_msgs/srv/MotorIdCommand "{motor_id: 255}"
 ```
 
+### 产品栈 systemd 托管（F93，开机自启/崩溃重启；默认禁用）
+
+产品栈的开机单元随仓库版本化（`systemd/a3-arm.service`）：输出进 journald，崩溃 `Restart=on-failure`（5 s 后拉起，60 s 内 3 次即停转人工），SIGINT 优雅关停；环境固化 `PYTHONNOUSERSITE=1` + Cyclone RMW，现场可用 `/etc/default/a3-arm` 覆盖。**安装后保持 disabled/inactive**——未经现场安全确认不得让机械臂上电自启。
+
+```bash
+# 安装（只拷贝单元 + daemon-reload，不 enable/start）
+sudo scripts/setup/install_a3_service.sh
+
+# 现场环境覆盖（可选；改后 systemctl restart a3-arm）
+sudo cp systemd/a3-arm.default /etc/default/a3-arm && sudo vi /etc/default/a3-arm
+
+# 现场确认安全后，显式启用开机自启 + 立即起栈（真机；can-up.service 先行）
+sudo systemctl enable --now a3-arm
+
+# 运维：查日志 / 查状态 / 手工重启
+journalctl -u a3-arm -f
+systemctl status a3-arm
+sudo systemctl restart a3-arm
+
+# 仿真验收（mock 全链路；机械臂断电，sudo 密码经环境变量）
+A3_SUDO_PASS=<sudo密码> python3 scripts/a3_test/f93_systemd_acceptance.py
+#   通过标准：末尾「F93 验收通过」，17/17
+#   verify 干净、安装保持 disabled/inactive、起栈 joint_states 3 s ≥100 条
+#   /a3/arm/enable 后三控制器 active、SIGKILL 后 NRestarts 增长且恢复、stop 无残留
+```
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
