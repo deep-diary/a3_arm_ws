@@ -35,8 +35,15 @@ try:  # Humble: RCLError 只在私有编译模块暴露（SIGINT 竞态兜底，
     from rclpy._rclpy_pybind11 import RCLError
 except ImportError:  # pragma: no cover - 其他发行版可能没有该符号
     RCLError = None
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import (
+    DurabilityPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+)
+from diagnostic_msgs.msg import DiagnosticStatus
+from diagnostic_updater import DiagnosticStatusWrapper, Updater
 from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 
 from control_msgs.action import GripperCommand as GripperCommandAction
@@ -207,8 +214,11 @@ class Ros2MqttBridge(Node):
         mqtt_cfg = config.get("mqtt", {})
         device_cfg = config.get("device", {})
 
-        self.host = mqtt_cfg.get("host", "192.168.3.73")
-        self.port = int(mqtt_cfg.get("port", 1883))
+        # F102：部署/验收可经环境变量覆盖 broker
+        self.host = os.environ.get(
+            "A3_MQTT_HOST", mqtt_cfg.get("host", "192.168.3.73"))
+        self.port = int(os.environ.get(
+            "A3_MQTT_PORT", mqtt_cfg.get("port", 1883)))
         self.path = mqtt_cfg.get("path", "/mqtt")
         default_prefix = "deep-trace/HOME-DEMO/RK3588"
         self.topic_prefix = (
@@ -238,6 +248,16 @@ class Ros2MqttBridge(Node):
 
         self._mqtt = None
         self._mqtt_connected = False
+        self._connect_changed_ts = time.monotonic()
+
+        # F102：连接态 latched 话题 + 标准诊断
+        self._mqtt_link_pub = self.create_publisher(
+            Bool, "/a3/comms/mqtt_connected",
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self._diag = Updater(node=self)
+        self._diag.setHardwareID(socket.gethostname())
+        self._diag.add("MQTT link", self._mqtt_link_diag)
         # 信号缓存：各话题回调只更新自己的信号，telemetry 始终发布完整聚合 points，
         # 避免不同话题各自发一条 points 不完整的 telemetry，导致前端信号时有时无。
         self._points_cache: dict = {}
@@ -326,19 +346,19 @@ class Ros2MqttBridge(Node):
         def on_connect(client, userdata, flags, rc, properties=None):
             code = int(getattr(rc, "value", rc))
             if code == 0:
-                self._mqtt_connected = True
+                self._set_mqtt_connected(True)
                 self._mqtt.subscribe(self.topic_cmd, qos=0)
                 self.get_logger().info(f"mqtt connected: {self.host}:{self.port}")
                 self._publish_info()
             else:
-                self._mqtt_connected = False
+                self._set_mqtt_connected(False)
                 self.get_logger().warning(f"mqtt connect failed rc={rc}")
 
         def on_disconnect(client, userdata, disconnect_flags=None, rc=None, properties=None):
             # paho 2.x (CallbackAPIVersion.VERSION2) 调用签名为 5 参数：
             # (client, userdata, disconnect_flags, reason_code, properties)；
             # 旧版 1.x 为 3 参数。缺 disconnect_flags 会 TypeError 导致断线后无法重连。
-            self._mqtt_connected = False
+            self._set_mqtt_connected(False)
             self.get_logger().warning(f"mqtt disconnected rc={rc}")
 
         def on_message(client, userdata, msg):
@@ -356,6 +376,28 @@ class Ros2MqttBridge(Node):
             self._mqtt.loop_start()
         except Exception as exc:  # noqa: BLE001
             self.get_logger().error(f"mqtt connect error: {exc}")
+
+    def _set_mqtt_connected(self, connected: bool):
+        if connected == self._mqtt_connected:
+            return
+        self._mqtt_connected = connected
+        self._connect_changed_ts = time.monotonic()
+        self._mqtt_link_pub.publish(Bool(data=connected))
+        self._diag.force_update()
+
+    def _mqtt_link_diag(self, stat: DiagnosticStatusWrapper):
+        if self._mqtt_connected:
+            stat.summary(
+                DiagnosticStatus.OK,
+                f"connected to {self.host}:{self.port}")
+        else:
+            for_s = time.monotonic() - self._connect_changed_ts
+            level = (DiagnosticStatus.WARN if for_s <= 10.0
+                     else DiagnosticStatus.ERROR)
+            stat.summary(
+                level,
+                f"disconnected from {self.host}:{self.port} for {for_s:.0f}s")
+        return stat
 
     def _publish(self, topic: str, payload, retain: bool = False, droppable: bool = False):
         """

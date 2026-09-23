@@ -18,6 +18,12 @@ diagnostic_aggregator:
         path: Arm Monitor
         timeout: 5.0
         startswith: ["arm_monitor:", "a3_arm_monitor:"]
+      comms:
+        # F102：MQTT 链路（ros2mqtt_bridge diagnostic_updater）
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: Comms
+        timeout: 10.0
+        startswith: ["ros2mqtt_bridge:"]
       host:
         # F96：板载主机资源（diagnostic_common_diagnostics）
         type: diagnostic_aggregator/GenericAnalyzer

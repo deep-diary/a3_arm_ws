@@ -1028,6 +1028,22 @@ python3 scripts/a3_test/f101_watchdog_acceptance.py
 #   4 杀 vcan_motor_sim → 25 s 内 NRestarts ≥ 1（实测 12.4 s ≈ 10+2）
 ```
 
+### MQTT 链路健康入标准诊断（F102：断链可观测、10 s 升级 ERROR）
+
+此前 MQTT 断链只存在于 bridge 节点内部状态与日志：EMQX 不可达时遥测静默停更，外部监控/现场状态无从感知。现已接入标准诊断通道：bridge 发布诊断任务 `ros2mqtt_bridge: MQTT link`（连接 OK；断连 ≤10 s WARN，超 10 s ERROR，消息含 host:port 与持续时长），并新增 latched 话题 `/a3/comms/mqtt_connected`（std_msgs/Bool）供其他节点消费；aggregator 新增 `Comms` 分组，链路 ERROR 进入 `/diagnostics_toplevel_state`。broker 地址支持 `A3_MQTT_HOST` / `A3_MQTT_PORT` 环境变量覆盖。断连期间下行指令天然不可达，臂保持末位无失控路径。
+
+```bash
+# 仿真验收（本地 mosquitto broker，隔离域 102；机械臂断电；需 apt 包 mosquitto）
+python3 scripts/a3_test/f102_mqtt_link_health_acceptance.py
+#   通过标准：末尾「F102 acceptance: 8/8」
+#   broker 在线 15 s 内 latched=true、诊断/聚合 OK
+#   杀 broker 15 s 内 latched=false；断连满 10 s 诊断 ERROR，Comms 组同步
+#   broker 重启 30 s 内 latched=true、诊断与聚合恢复 OK
+
+# 部署侧：如需指向非 config/bridge.yaml 的 broker
+export A3_MQTT_HOST=192.168.3.73 A3_MQTT_PORT=1883
+```
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
