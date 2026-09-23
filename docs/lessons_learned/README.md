@@ -131,3 +131,4 @@ LL-NNN-short-slug.md
 | [LL-115](LL-115-diagnostic-updater-task-name-prefixed-by-node-name.md) | F103：diagnostic_updater 任务名实际发布为「节点名: 任务名」，remap __node 会改变任务身份导致 aggregator startswith 静默匹配不到；多实例需要契约名时先停旧实例、用默认节点名，不要 remap | Edge | 2026-09-24 |
 | [LL-116](LL-116-python-headerlesstopicdiagnostic-needs-manual-tick.md) | F104：Python 绑定 HeaderlessTopicDiagnostic 内部订阅不投递，恒报 No events recorded；须自建订阅并在回调手动 task.tick()；类型运行时发现、话题暂不存在重试 | Edge | 2026-09-24 |
 | [LL-117](LL-117-aggregator-strips-leading-slash-item-name.md) | F104：aggregator 生成聚合项名时剥掉条目名前导斜杠（/f104_probe→f104_probe，留下双空格），按 /diagnostics 原名匹配聚合项静默落空；匹配用 lstrip("/")、先 echo 实际聚合名 | Edge | 2026-09-24 |
+| [LL-118](LL-118-background-node-dds-participant-vanishes-detach-fully.md) | Bash 工具里 setsid ... & 拉起的后台 ROS 节点会进程存活但 DDS 参与者从发现消失（node list 无节点、Publisher count 0）；用 nohup setsid ... </dev/null >log 2>&1 & disown 完全脱离，启动后以图端点而非 PID 验证 | Edge | 2026-09-24 |
