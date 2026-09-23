@@ -14,6 +14,10 @@ WorkingDirectory=/home/cat/a3_arm_ws
 Environment=PYTHONNOUSERSITE=1
 Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 EnvironmentFile=-/etc/default/a3-arm
+# F100: PAM limits do not apply to systemd services; grant RT directly so
+# controller_manager runs its 200 Hz loop under SCHED_FIFO.
+LimitRTPRIO=99
+LimitMEMLOCK=infinity
 ExecStart=/usr/bin/bash -c 'source /opt/ros/humble/setup.bash && source /home/cat/a3_arm_ws/install/local_setup.bash && exec ros2 launch a3_bringup a3_bringup.launch.py hardware:=can can_interface:=can1'
 Restart=on-failure
 RestartSec=5

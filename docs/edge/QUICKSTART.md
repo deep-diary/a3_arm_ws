@@ -993,6 +993,24 @@ python3 scripts/a3_test/f99_jtc_cmd_timeout_acceptance.py
 #   → C 话题轨迹末点约 2 s 后 "Aborted due to command timeout"，位置保持
 ```
 
+### 实时调度权限（F100：controller_manager 200 Hz 控制环跑上 SCHED_FIFO）
+
+此前每次起栈，controller_manager 都因 `ulimit -r = 0` 打印 `Could not enable FIFO RT scheduling policy: Operation not permitted` 并退回 SCHED_OTHER——200 Hz read/update/write 环可被编译、录包、MQTT 突发等普通负载抢占，造成周期抖动（F97 跟踪容差真机上可能误触发）。已按 ros2_control 官方部署项硬化：交互式/登录会话走 `realtime` 组 + pam_limits（`sudo scripts/setup/setup_realtime.sh`，幂等）；systemd 产品单元直接配 `LimitRTPRIO=99` / `LimitMEMLOCK=infinity`（PAM limits 对 systemd 服务不生效）。CM 起栈时 spawn 专用 RT 线程并只对该线程设 SCHED_FIFO（优先级 50），主线程仍是 SCHED_OTHER。内核仍为标准 SMP（非 PREEMPT_RT），升级实时内核属独立现场项。
+
+```bash
+# 一次性部署（建组/加用户/装 /etc/security/limits.d/99-a3-realtime.conf）
+sudo scripts/setup/setup_realtime.sh
+# PAM limits 只对【新登录会话】生效：SSH 重连后 ulimit -r 应为 99
+
+# 仿真验收（需先 source /opt/ros/humble/setup.bash 与 install/local_setup.bash；机械臂断电）
+python3 scripts/a3_test/f100_realtime_scheduling_acceptance.py
+#   通过标准：末尾「F100 acceptance: 5/5」
+#   A 新登录会话 ulimit -r=99 / ulimit -l=unlimited
+#   B 栈日志无 "Could not enable FIFO RT scheduling policy"
+#   C CM RT 线程（/proc/<pid>/task/*）为 SCHED_FIFO 优先级 50
+#   D enable → 两点 action 轨迹仍 SUCCESSFUL
+```
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
