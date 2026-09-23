@@ -56,18 +56,29 @@ arm_controller:
 
     constraints:
       stopped_velocity_tolerance: 0.1
-      goal_time: 0.0
+      # F97: goal_time <= 0 disables the goal-time check — a goal the state
+      # can never converge to would hang forever (F81 freeze-hold proved it).
+      # Allow 1.0 s past the last trajectory point, then abort.
+      goal_time: 1.0
+      # F97: per-joint trajectory (tracking) tolerance aborts on deviation
+      # mid-motion; goal tolerance gates convergence after the trajectory end.
       L1_joint:
+        trajectory: 0.05
         goal: 0.03
       L2_joint:
+        trajectory: 0.05
         goal: 0.03
       L3_joint:
+        trajectory: 0.05
         goal: 0.03
       L4_joint:
+        trajectory: 0.05
         goal: 0.03
       L5_joint:
+        trajectory: 0.05
         goal: 0.03
       L6_joint:
+        trajectory: 0.05
         goal: 0.03
 
 gripper_controller:

@@ -956,6 +956,18 @@ python3 scripts/a3_test/f96_host_diagnostics_acceptance.py
 #   通过标准：末尾「F96 验收通过」，8/8
 ```
 
+### JTC 轨迹容差（F97：goal_time 超时必 abort + 逐关节跟踪容差）
+
+产品 JTC（`arm_controller`，配置 `src/a3_description/config/el_a3_controllers.yaml`）的轨迹约束按工业标准补齐：`goal_time: 1.0`（轨迹最后一点后 1.0 s 内进不了 goal 容差即 abort），L1–L6 逐关节 `trajectory: 0.05`（运动中偏差 >0.05 rad 即 PATH_TOLERANCE_VIOLATED）。此前 `goal_time: 0.0` 会让无法收敛的目标（F81 freeze-hold）永久 pending。FSM 下发目标不带逐目标容差，控制器默认约束对 F88 两点轨迹 / goto / playback / jog 全路径生效。
+
+```bash
+# 仿真验收（vcan 注入单电机反馈冻结；机械臂断电）
+python3 scripts/a3_test/f97_jtc_tolerance_acceptance.py
+#   通过标准：末尾「F97 acceptance: 7/7」
+#   A 正常轨迹 SUCCESSFUL → B 冻结电机 4 反馈后 0.90 s 内 abort(-4)
+#   → C 清除 silence 后恢复 SUCCESSFUL
+```
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
