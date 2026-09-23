@@ -1056,6 +1056,18 @@ python3 scripts/a3_test/f103_can_bus_health_acceptance.py
 #   up 10 s 内双恢复 OK；指向 can99（不存在）10 s 内 ERROR 且节点不崩
 ```
 
+### 关键话题频率健康入标准诊断（F104：速率退化 WARN、停发 ERROR）
+
+F81 的 staleness 看门狗只在「完全断流 ≥1 s」后触发（二元生死判据）。工业现场更常见的劣化形态是发布速率从 50 Hz 逐渐掉到 ~10 Hz（调度抢占、发布者阻塞）——数据仍在更新、staleness 不触发，但 200 Hz 插值的执行层反馈间隔放大 5 倍，控制性能已实质下降。现新增 `topic_rate_monitor` 节点：用 diagnostic_updater `HeaderlessTopicDiagnostic` + `FrequencyStatusParam` 对关键话题做滚动窗 hztest，频率在带内 = OK、越界但有消息 = WARN、整窗零消息 = ERROR。产品默认监控 `/joint_states`（40–60 Hz），监控清单与频率带走 `topics`/`min_freq`/`max_freq` 参数；话题类型运行时发现（同 `ros2 topic hz`），BEST_EFFORT 订阅，话题暂不存在周期重试。aggregator 新增 `Topic Rates` 分组（`a3_topic_rate:` 前缀），速率 WARN/ERROR 进入 `/diagnostics_toplevel_state`。F104 只产生诊断态，硬安全兜底仍由 F81 的 freeze-hold 负责。
+
+```bash
+# 仿真验收（隔离域 104，受控速率发布 /f104_probe；机械臂断电）
+python3 scripts/a3_test/f104_topic_rate_acceptance.py
+#   通过标准：末尾「F104 acceptance: 4/4」
+#   50 Hz 15 s 内诊断 + 聚合 OK；降到 10 Hz 15 s 内双 WARN
+#   停发 15 s 内双 ERROR；恢复 50 Hz 15 s 内双恢复 OK
+```
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

@@ -25,6 +25,12 @@ diagnostic_aggregator:
         path: Comms
         timeout: 10.0
         startswith: ["ros2mqtt_bridge:"]
+      topics:
+        # F104：关键话题频率（HeaderlessTopicDiagnostic）
+        type: diagnostic_aggregator/GenericAnalyzer
+        path: Topic Rates
+        timeout: 10.0
+        startswith: ["a3_topic_rate:"]
       host:
         # F96：板载主机资源（diagnostic_common_diagnostics）
         type: diagnostic_aggregator/GenericAnalyzer

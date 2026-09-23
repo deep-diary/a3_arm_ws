@@ -463,6 +463,15 @@ def generate_launch_description():
         condition=can_bus_condition,
     )
 
+    # ---- F104：关键话题频率健康（退化 WARN / 停发 ERROR）----
+    topic_rate_monitor = Node(
+        package="a3_bringup",
+        executable="topic_rate_monitor",
+        name="a3_topic_rate",
+        output="screen",
+        condition=IfCondition(use_diagnostics),
+    )
+
     # ---- F90：故障黑匣子（rosbag2 snapshot-mode；FAULT 边沿 FSM 触发落盘）----
     # 常驻录制器只保留 32 MiB 内存循环缓冲（不落盘、无磁盘增长）；每次 snapshot
     # 把缓冲写为一个 mcap 分片，单分片超 64 MiB 自动切，天然有界。
@@ -510,6 +519,7 @@ def generate_launch_description():
             self_test_node,
             teleop,
             can_bus_monitor,
+            topic_rate_monitor,
         ])],
     )
 

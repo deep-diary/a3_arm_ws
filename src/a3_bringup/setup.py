@@ -37,6 +37,7 @@ setup(
             "urdf_dir_check_pub = a3_bringup.urdf_dir_check_pub:main",
             "systemd_watchdog_feed = a3_bringup.systemd_watchdog_feed_node:main",
             "can_bus_monitor = a3_bringup.can_bus_monitor_node:main",
+            "topic_rate_monitor = a3_bringup.topic_rate_monitor_node:main",
         ],
     },
     tests_require=['ament_lint_auto', 'ament_flake8', 'ament_pep257', 'pytest']
