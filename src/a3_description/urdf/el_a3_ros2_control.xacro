@@ -290,9 +290,11 @@
         <param name="direction">1.0</param>
         <param name="zero_torque_kd_min">0.02</param>
         <param name="zero_torque_kd_max">0.10</param>
+        <!-- F98: position interface matches L7 calibration [0.0, 1.78]
+             (mechanical stop 1.7825); replaces reference ±1.5708. -->
         <command_interface name="position">
-          <param name="min">-1.5708</param>
-          <param name="max">1.5708</param>
+          <param name="min">0.0</param>
+          <param name="max">1.78</param>
         </command_interface>
         <command_interface name="velocity">
           <param name="min">-50.0</param>

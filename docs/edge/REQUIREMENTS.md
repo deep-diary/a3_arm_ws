@@ -1219,6 +1219,26 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F81（freeze-hold 是本需求要兜底的故障形态）、F88/F94（产品轨迹均经同一 JTC）、F74（FSM 执行后端）
 - **状态：** `completed`（2026-09-23，vcan 验收 7/7：`scripts/a3_test/f97_jtc_tolerance_acceptance.py`。A 正常两点轨迹 SUCCESSFUL（2.98 s）；B 冻结电机 4 反馈后轨迹在运动 0.90 s 处即被逐关节跟踪容差中止，error_code=PATH_TOLERANCE_VIOLATED(-4)（远早于 2+1+1 s 上限，不再永久 pending）；C 清除 silence 后恢复 SUCCESSFUL（3.01 s）。验收脚本 in-process 驱动节点的 domain/RMW 环境坑见 LL-109）。真机验收待通电
 
+### F98 — L7 夹爪限位与实测标定统一（URDF / ros2_control / MoveIt 三处 [0.0, 1.78]；堵住模型与实物 12% 偏差）
+
+- **说明：** L7 夹爪 2026-09-13 在新电机上完成标定（`src/a3_gripper_controller/config/gripper_config.yaml`）：全开位设零、闭合为正，实测机械止位 **1.7825 rad**，运行钳位取 **1.78 rad**（不顶止位、无驻留力矩）。但三处模型限位仍是 reBot 参考值 **±1.5708**：
+  1. `src/a3_description/urdf/el_a3.urdf.xacro:279`（L7 joint limit lower/upper）
+  2. `src/a3_description/urdf/el_a3_ros2_control.xacro`（L7 position command_interface min/max）
+  3. `src/a3_moveit_config/config/joint_limits.yaml:59-66`（MoveIt L7 min/max_position）
+
+  工业现场不能接受「控制器模型与实际机构不一致」：MoveIt 对夹爪的任何规划/展示最多只能闭合到 1.57 rad（比实际行程少 0.21 rad ≈ 12%，夹爪永远合不拢到模型可知的全行程）；负方向在机械上无对应行程（开位即零位），模型却允许 -1.57 rad 的位置指令，存在反向驱动、扯线风险。修复取**与标定钳位一致的单一真值 [0.0, 1.78]**（can_bridge 侧 `control_gains.yaml` 早已是 [0, 1.8]，本次不改）。L5/L6 的 ±1.5708 是真实关节限位，不动。
+- **改动（仅配置，零代码逻辑）：**
+  1. `el_a3.urdf.xacro` L7 `<limit>`：`lower="0.0" upper="1.78"`
+  2. `el_a3_ros2_control.xacro` L7 position command_interface：`min 0.0 / max 1.78`
+  3. `joint_limits.yaml` L7：`min_position 0.0 / max_position 1.78`
+  4. 新增 `scripts/a3_test/f98_l7_limits_acceptance.py`
+- **验收标准（仿真；机械臂保持断电；脚本 `scripts/a3_test/f98_l7_limits_acceptance.py`）：**
+  1. **模型一致性**：解析 xacro 展开后的 URDF、ros2_control xacro、MoveIt joint_limits.yaml，L7 三处 lower=0.0、upper=1.78（且 L5/L6 仍为 ±1.5708 未误伤）
+  2. **全行程可达**：vcan 栈激活标准 `gripper_controller`（effort_controllers/GripperActionController），GripperCommand position=1.78 → `/joint_states` L7 在时限内到达 ≥1.65 rad（超过旧上限 1.5708，证明全行程打通）
+  3. **回零**：GripperCommand position=0.0 → L7 回到 ≤0.05 rad
+- **关联：** F87（GripperActionController 标准执行后端）、L7 零点标定记录、[shared/SAFETY.md](../shared/SAFETY.md)；a3_can_bridge `control_gains.yaml` 的 L7 [0, 1.8] 已是同方向约束
+- **状态：** `completed`（2026-09-23，vcan 验收 13/13：`scripts/a3_test/f98_l7_limits_acceptance.py`。A 模型一致性 8/8：xacro 展开后 URDF L7=[0,1.78]、ros2_control position 接口 [0,1.78]、MoveIt joint_limits L7=[0,1.78]，L5/L6 ±1.5708 未误伤；B GripperCommand 1.78 reached_goal，实测 pos=1.770（越过旧上限 1.5708，全行程打通）；C GripperCommand 0.0 回到 pos=0.009。f87b 回归 7/7。多限位源同步踩坑见 LL-110）。真机验收待通电
+
 ### F95 — 标准自检服务（ros-humble-self-test / diagnostic_msgs/SelfTest；开机/维护一键只读自检）
 
 - **说明：** 工业驱动惯例（URBK/ABB、ROS-I 驱动）提供**标准自检服务**：现场上电后或维护后，一条服务调用跑完「连通 → 子系统状态 → 故障检查」并给出逐项结果，而不是让人手工 `topic echo` 一个个查。ROS 标准实现是 `ros-humble-self-test`（`self_test::TestRunner`，头文件库；服务类型 `diagnostic_msgs/srv/SelfTest`，响应 `bool passed` + `DiagnosticStatus[]`；约定 level≥2 ERROR 判失败、WARN 不判失败；其中一项须 `setID` 上报设备标识）。现状 F71 的 `arm_monitor` 只有周期 `diagnostic_updater` 上报表，没有按需自检通道。

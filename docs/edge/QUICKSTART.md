@@ -968,6 +968,19 @@ python3 scripts/a3_test/f97_jtc_tolerance_acceptance.py
 #   → C 清除 silence 后恢复 SUCCESSFUL
 ```
 
+### L7 夹爪限位对齐标定（F98：URDF / ros2_control / MoveIt 三处统一 [0.0, 1.78]）
+
+L7 标定（2026-09-13，`src/a3_gripper_controller/config/gripper_config.yaml`）：全开=0.0、机械止位 1.7825、运行钳位 1.78 rad。此前三处模型限位沿用参考值 ±1.5708：MoveIt 规划闭合最多 1.57（行程少 12%），且允许无机械意义的负向指令。已将 URDF L7 `<limit>`、ros2_control position command_interface、MoveIt `joint_limits.yaml` 全部改为 `[0.0, 1.78]`（L5/L6 的 ±1.5708 是真实关节限位，不动）。
+
+```bash
+# 仿真验收（模型一致性 + vcan 全行程；机械臂断电）
+python3 scripts/a3_test/f98_l7_limits_acceptance.py
+#   通过标准：末尾「F98 acceptance: 13/13」
+#   A 三处模型限位一致、L5/L6 未误伤
+#   B GripperCommand 1.78 → pos=1.770（越过旧上限 1.5708）
+#   C GripperCommand 0.0 → pos=0.009
+```
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
