@@ -914,6 +914,27 @@ python3 scripts/a3_test/f94_velocity_limit_acceptance.py
 ros2 param set /a3_arm_controller joint_velocity_scale 0.5
 ```
 
+### 标准只读自检服务（F95，ros-humble-self-test / diagnostic_msgs/SelfTest）
+
+开机后或维护后一条服务调用跑完「连通 → 控制器 → 故障」三项只读检查，无需手工逐个 `topic echo`。新包 `a3_self_test`（C++，self_test 在 Humble 无 Python 绑定），状态全部由 subscriber + 500 ms timer 持续缓存，回调零阻塞、零运动。`a3_bringup.launch.py` 默认启动（`use_self_test:=false` 可关）；节点也可在无栈时单独运行——此时自检判失败本身就是故障检测。
+
+三项语义：**Connection** `/joint_states` 最近 1 s 速率 ≥ `min_joint_states_rate`（默认 40 Hz）且 7 关节名齐全；**Controllers** `list_controllers` 5 s 内有响应、joint_state_broadcaster active、`arm_controller/gripper_controller` 状态 ∈ inactive/active（未 enable 为 inactive，不判失败）；**Faults** 最近 2 s `/diagnostics` 无 ERROR 级状态（无诊断消息不算失败）。任一检查 ERROR（level≥2）则 `passed=false`，WARN 不判失败。
+
+```bash
+# 起栈后手动触发（mock/真机通用；只读）
+ros2 service call /a3_self_test/self_test diagnostic_msgs/srv/SelfTest
+#   响应：passed(bool) + id(hostname) + status[](DiagnosticStatus + 键值)
+#   注意：CLI 收到响应后可能不退出，属 CLI 问题（LL-107）
+
+# 仿真验收（mock 全栈；机械臂断电）
+python3 scripts/a3_test/f95_self_test_acceptance.py
+#   通过标准：末尾「F95 验收通过」，13/13
+#   无栈 passed=false+Connection ERROR → 未 enable passed=true（rate 200、arm inactive）
+#   → enable 后 arm active → disable safe-park 回 home（worst ≤0.15 rad）
+```
+
+Python 客户端注意：板载 diagnostic_msgs 4.9.1 把 `level`/`passed` 定义为 octet，rclpy 拿到 `b'\x00'`/`b'\x01'`，须按 `x[0]` 归一化（LL-107）。
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

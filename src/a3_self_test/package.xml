@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package.xml.format3.xsd"?>
+<package format="3">
+  <name>a3_self_test</name>
+  <version>0.0.1</version>
+  <description>F95: on-demand read-only self-test service (diagnostic_msgs/SelfTest) for the A3 arm stack</description>
+  <maintainer email="cat@todo.todo">cat</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>self_test</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>diagnostic_updater</depend>
+  <depend>sensor_msgs</depend>
+  <depend>controller_manager_msgs</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

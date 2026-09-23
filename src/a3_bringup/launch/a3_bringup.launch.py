@@ -92,6 +92,7 @@ def generate_launch_description():
     use_sw_render = LaunchConfiguration("use_sw_render")
     use_mqtt = LaunchConfiguration("use_mqtt")
     use_teleop = LaunchConfiguration("use_teleop")
+    use_self_test = LaunchConfiguration("use_self_test")
     teleop_mapping = LaunchConfiguration("teleop_mapping")
     use_monitor = LaunchConfiguration("use_monitor")
     use_diagnostics = LaunchConfiguration("use_diagnostics")
@@ -359,6 +360,15 @@ def generate_launch_description():
         condition=IfCondition(use_monitor),
     )
 
+    # ---- F95：标准只读自检（diagnostic_msgs/SelfTest；~ /a3_self_test/self_test）----
+    self_test_node = Node(
+        package="a3_self_test",
+        executable="a3_self_test",
+        name="a3_self_test",
+        output="screen",
+        condition=IfCondition(use_self_test),
+    )
+
     mqtt_bridge = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(bridge_share, "launch", "bridge.launch.py")
@@ -445,6 +455,7 @@ def generate_launch_description():
             mqtt_bridge,
             servo_node,
             servo_bridge,
+            self_test_node,
             teleop,
         ])],
     )
@@ -484,6 +495,12 @@ def generate_launch_description():
             description="MQTT 桥（web 遥测/指令，F18/F23）",
         ),
         DeclareLaunchArgument("use_teleop", default_value="true"),
+        DeclareLaunchArgument(
+            "use_self_test",
+            default_value="true",
+            description="F95 只读自检服务（diagnostic_msgs/SelfTest；"
+                        "ros2 service call /a3_self_test/self_test）",
+        ),
         DeclareLaunchArgument(
             "teleop_mapping",
             default_value="default",
