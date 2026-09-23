@@ -1,0 +1,5 @@
+float64 mass_kg
+float64[3] com_m
+---
+bool success
+string message

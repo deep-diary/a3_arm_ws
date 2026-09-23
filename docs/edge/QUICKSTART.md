@@ -1104,6 +1104,29 @@ python3 scripts/a3_test/f106_commissioning_smoke.py --mode connect
 #   对空栈：--wait-sec 超时后 FAIL 退出（不挂死）
 ```
 
+### 额定负载与占空比门禁（F107：rated payload 1.5 kg + duty-cycle）
+
+夹持工件作业时先登记负载，门禁（使能前 + 运动前静态力矩门、滚动窗口占空比门）会在超限位形/工作制耗尽时拒绝运动；细节见 [shared/SAFETY.md](../shared/SAFETY.md)。
+
+```bash
+# 仿真验收（机械臂断电；约 3–4 分钟）
+python3 scripts/a3_test/f107_payload_duty_acceptance.py
+#   通过标准：末尾「F107 RESULT: 33 PASS / 0 FAIL」，退出码 0
+#   launch 全量日志：/tmp/f107_launch_<时间戳>.log
+
+# 日常用法（任一栈，使能前后均可）
+ros2 service call /a3/arm/set_payload a3_msgs/srv/SetPayload \
+  "{mass_kg: 1.5, com_m: [0.0, 0.0, 0.0]}"
+#   质量上限 rated_payload_kg=1.5；当前位形静态力矩超限会被拒（保持旧值）
+#   作业结束设回零：mass_kg: 0.0
+
+# 被门禁拒绝时：
+#   static torque gate rejected: L3_joint static torque -7.02 N·m exceeds 1.44 ...
+#     → 该位形带载不可行，先减重或走到低重力位形，勿重复硬闯
+#   duty gate rejected: 480s motion in window, wait 120s before retrying
+#     → 等冷却（或先去低负载工序），窗口/比例可参数调：duty_window_s / duty_max_ratio
+```
+
 ## 相关文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)

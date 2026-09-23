@@ -21,6 +21,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/GripperSetConfig.srv"
   "srv/RetimeTrajectory.srv"
   "srv/MotorIdCommand.srv"
+  "srv/SetPayload.srv"
   "msg/ArmStatus.msg"
   "msg/GripperStatus.msg"
   "msg/MonitorStatus.msg"

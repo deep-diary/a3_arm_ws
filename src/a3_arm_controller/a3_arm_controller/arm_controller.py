@@ -9,13 +9,14 @@ A3 arm orchestration layer (facade).
 
 from __future__ import annotations
 
+import collections
 import math
 import os
 import re
 import threading
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import rclpy
 import yaml
@@ -55,6 +56,7 @@ from a3_msgs.srv import (
     SaveNamedPose,
     SaveTrajectory,
     SetJointPositions,
+    SetPayload,
 )
 
 JOINTS = [
@@ -450,6 +452,19 @@ class ArmController(Node):
         # 异步触发一次落盘；录制器不在（use_rosbag:=false）则静默跳过，不阻塞故障处置
         self.declare_parameter("blackbox_snapshot_enabled", True)
         self.declare_parameter("blackbox_snapshot_service", "/rosbag2_recorder/snapshot")
+        # F107: 额定负载（对标工业机器人 rated payload）
+        self.declare_parameter("payload_mass_kg", 0.0)
+        self.declare_parameter("payload_com_m", [0.0, 0.0, 0.0])
+        self.declare_parameter("rated_payload_kg", 1.5)
+        self.declare_parameter("payload_parent_link", "gripper_link")
+        # F107: 静态力矩门禁（电机连续额定，N·m；RS00 5.0、EL05 1.8）
+        self.declare_parameter(
+            "joint_rated_torque", [5.0, 5.0, 5.0, 1.8, 1.8, 1.8, 1.8])
+        self.declare_parameter("static_torque_margin_ratio", 0.8)
+        # F107: 占空比门禁（滚动窗口热保护前馈）
+        self.declare_parameter("duty_gate_enabled", True)
+        self.declare_parameter("duty_window_s", 600.0)
+        self.declare_parameter("duty_max_ratio", 0.8)
 
         self._joint_names: List[str] = list(
             self.get_parameter("joint_names").get_parameter_value().string_array_value
@@ -482,6 +497,17 @@ class ArmController(Node):
         self._feedback_stale = False
         # jog（滑动条直驱）进行中标志：区分 TRAJ 是 jog 还是 goto/playback
         self._jogging = False
+
+        # F107: 额定负载状态（当前负载质量/质心）+ pinocchio 模型缓存
+        self._payload_mass: float = float(self.get_parameter("payload_mass_kg").value)
+        self._payload_com: List[float] = [
+            float(v) for v in self.get_parameter("payload_com_m").value]
+        self._pin_model = None          # 反映当前负载的 pinocchio 模型
+        self._pin_q_idx: List[int] = []  # self._joint_names -> model q 索引
+        self._pin_v_idx: List[int] = []  # self._joint_names -> model v 索引
+        self._pin_ready = False
+        # F107: 占空比滚动窗，元素 (segment_start_monotonic, duration_s)
+        self._duty_segments: Deque[Tuple[float, float]] = collections.deque()
 
         # F43: 每关节最大力矩统计（正负双向 + 绝对值，节流落盘，重启恢复）
         self._torque_stats: Dict[str, Dict[str, Any]] = self._load_torque_stats()
@@ -582,6 +608,9 @@ class ArmController(Node):
             Trigger, "/a3/arm/enable", self._enable_cb, callback_group=self._cb_group)
         self.create_service(
             Trigger, "/a3/arm/disable", self._disable_cb, callback_group=self._cb_group)
+        self.create_service(
+            SetPayload, "/a3/arm/set_payload", self._set_payload_cb,
+            callback_group=self._cb_group)
         self.create_service(
             GotoNamedPose, "/a3/arm/goto_named_pose", self._goto_cb,
             callback_group=self._cb_group)
@@ -877,6 +906,177 @@ class ArmController(Node):
             if p < lo_hi[0] - margin or p > lo_hi[1] + margin:
                 viol.append(f"{jn}={p:+.4f} limit={lo_hi[0]:.4f}..{lo_hi[1]:.4f}")
         return not viol, viol
+
+    # ------------------------------------------------------------------
+    # F107: 额定负载 + 静态力矩门禁 + 占空比门禁
+    # ------------------------------------------------------------------
+
+    def _read_urdf_text(self) -> str:
+        share = get_package_share_directory("a3_description")
+        with open(os.path.join(share, "urdf", "el_a3.urdf"), "r") as fh:
+            return fh.read()
+
+    def _ensure_pin_model(self) -> None:
+        """
+        懒构建反映当前负载的 pinocchio 模型。负载以「附加 link + fixed joint」
+        注入 URDF 文本（本平台 Python pinocchio 无 appendBodyToJoint，见 LL-123）。
+        """
+        import numpy as np  # noqa: F401  (pinocchio 运行期依赖)
+        import pinocchio as pin  # type: ignore
+
+        base = self._read_urdf_text()
+        mass = self._payload_mass
+        com = self._payload_com
+        if mass > 0.0:
+            parent = str(self.get_parameter("payload_parent_link").value)
+            injection = (
+                "  <link name=\"a3_payload_link\">\n"
+                "    <inertial>\n"
+                "      <origin xyz=\"0 0 0\" rpy=\"0 0 0\"/>\n"
+                f"      <mass value=\"{mass:.9g}\"/>\n"
+                "      <inertia ixx=\"1e-6\" ixy=\"0\" ixz=\"0\""
+                " iyy=\"1e-6\" iyz=\"0\" izz=\"1e-6\"/>\n"
+                "    </inertial>\n"
+                "  </link>\n"
+                "  <joint name=\"a3_payload_joint\" type=\"fixed\">\n"
+                f"    <parent link=\"{parent}\"/>\n"
+                "    <child link=\"a3_payload_link\"/>\n"
+                f"    <origin xyz=\"{com[0]:.9g} {com[1]:.9g} {com[2]:.9g}\""
+                " rpy=\"0 0 0\"/>\n"
+                "  </joint>\n"
+                "</robot>"
+            )
+            base = base.replace("</robot>", injection, 1)
+        model = pin.buildModelFromXML(base)
+        q_idx: List[int] = []
+        v_idx: List[int] = []
+        for jn in self._joint_names:
+            jid = model.getJointId(jn)
+            q_idx.append(int(model.idx_qs[jid]))
+            v_idx.append(int(model.idx_vs[jid]))
+        self._pin_model = model
+        self._pin_q_idx = q_idx
+        self._pin_v_idx = v_idx
+        self._pin_ready = True
+
+    def _static_torque_violations(self, positions: List[float]) -> List[str]:
+        """
+        F107: 给定位形下静态重力矩 |rnea(q,0,0)| 是否超过
+        连续额定 × margin_ratio。返回违规描述列表（空=通过）。
+        pinocchio 不可用时不阻断（warn 一次）——不得让模型故障静默放行运动，
+        但也不能因环境缺包让既有零负载流程全部瘫痪：仅在声明了负载时硬拒。
+        """
+        if not self._pin_ready:
+            try:
+                self._ensure_pin_model()
+            except Exception as exc:  # noqa: BLE001
+                if self._payload_mass > 0.0:
+                    return [f"payload model unavailable: {exc}"]
+                self.get_logger().warn(
+                    f"F107 static gate disabled (model build failed): {exc}",
+                    throttle_duration_sec=60.0)
+                return []
+        import numpy as np  # type: ignore
+        import pinocchio as pin  # type: ignore
+
+        rated = [float(v) for v in self.get_parameter("joint_rated_torque").value]
+        ratio = float(self.get_parameter("static_torque_margin_ratio").value)
+        if len(rated) < len(self._joint_names):
+            rated = rated + [rated[-1]] * (len(self._joint_names) - len(rated))
+        q = np.zeros(self._pin_model.nq)
+        for pos, qi in zip(positions, self._pin_q_idx):
+            q[qi] = pos
+        tau = pin.rnea(self._pin_model, self._pin_model.createData(), q,
+                       np.zeros(self._pin_model.nv), np.zeros(self._pin_model.nv))
+        viol: List[str] = []
+        for i, jn in enumerate(self._joint_names):
+            val = float(tau[self._pin_v_idx[i]])
+            limit = rated[i] * ratio
+            if abs(val) > limit:
+                viol.append(
+                    f"{jn} static torque {val:+.2f} N·m exceeds "
+                    f"{limit:.2f} (rated {rated[i]:.1f} x {ratio:g})")
+        return viol
+
+    def _duty_prune(self, now: float) -> None:
+        window = float(self.get_parameter("duty_window_s").value)
+        while self._duty_segments and now - self._duty_segments[0][0] > window:
+            self._duty_segments.popleft()
+
+    def _duty_used_s(self, now: float) -> float:
+        self._duty_prune(now)
+        window = float(self.get_parameter("duty_window_s").value)
+        used = 0.0
+        for start, dur in self._duty_segments:
+            # 段与当前窗口左沿重叠的部分才计入
+            used += min(dur, start + dur - (now - window))
+        return max(0.0, used)
+
+    def _duty_check(self, duration_s: float) -> Tuple[bool, float, float]:
+        """
+        返回 (允许, 窗口内已用秒, 需冷却秒)。冷却秒 = 最早段滚出窗口、
+        使 used+proposed <= max 所需等待时间。
+        """
+        if not self.get_parameter("duty_gate_enabled").value:
+            return True, 0.0, 0.0
+        now = time.monotonic()
+        window = float(self.get_parameter("duty_window_s").value)
+        max_s = float(self.get_parameter("duty_max_ratio").value) * window
+        used = self._duty_used_s(now)
+        if used + duration_s <= max_s:
+            return True, used, 0.0
+        # 需要等多久：从头弹出运动段，直到余量容得下 proposed
+        need_cut = used + duration_s - max_s
+        cooling = 0.0
+        for start, dur in self._duty_segments:
+            cut = min(dur, start + dur - (now - window))
+            need_cut -= cut
+            # 段末端越过窗口左沿所需的等待（不是越过 now）
+            cooling = (start + dur) - (now - window)
+            if need_cut <= 0.0:
+                break
+        return False, used, max(0.0, cooling)
+
+    def _duty_record(self, duration_s: float) -> None:
+        if not self.get_parameter("duty_gate_enabled").value or duration_s <= 0.0:
+            return
+        self._duty_segments.append((time.monotonic(), float(duration_s)))
+
+    def _set_payload_cb(
+        self,
+        request: SetPayload.Request,
+        response: SetPayload.Response,
+    ) -> SetPayload.Response:
+        mass = float(request.mass_kg)
+        com = [float(v) for v in request.com_m]
+        if len(com) != 3:
+            response.success = False
+            response.message = "com_m must have exactly 3 elements"
+            return response
+        rated_max = float(self.get_parameter("rated_payload_kg").value)
+        if mass < 0.0 or mass > rated_max:
+            response.success = False
+            response.message = (
+                f"payload mass {mass:.3f} kg out of range [0, {rated_max:.2f}]")
+            return response
+        old_mass, old_com = self._payload_mass, self._payload_com
+        self._payload_mass = mass
+        self._payload_com = com
+        self._pin_ready = False
+        # 已使能/有当前读数时，新负载必须在当前位形静态可行，否则回滚
+        if self._have_js:
+            viol = self._static_torque_violations(self._positions)
+            if viol:
+                self._payload_mass, self._payload_com = old_mass, old_com
+                self._pin_ready = False
+                response.success = False
+                response.message = (
+                    "payload rejected: current pose static gate: " + "; ".join(viol))
+                return response
+        response.success = True
+        response.message = f"payload set to {mass:.3f} kg"
+        self.get_logger().info(response.message)
+        return response
 
     def _set_state(self, state: str, message: str = "") -> None:
         with self._lock:
@@ -1186,7 +1386,9 @@ class ArmController(Node):
         traj.points.append(p1)
         return traj
 
-    def _dispatch_trajectory(self, traj: JointTrajectory) -> None:
+    def _dispatch_trajectory(
+        self, traj: JointTrajectory, duty_exempt: bool = False
+    ) -> Tuple[bool, str]:
         """
         按 control_backend 下发轨迹：旧栈话题直发 / 标准栈 action.
 
@@ -1194,17 +1396,45 @@ class ArmController(Node):
         gripper_controller GripperCommand（取末点位置；末点 effort 非 0
         时作为 max_effort，否则用 gripper_default_effort）。新 goal 抢占
         旧 goal，与旧栈话题替换语义一致；异步发送，不阻塞服务回调。
+
+        F107: 下发前逐点静态重力矩门禁 + 占空比门禁。duty_exempt 用于
+        SAFE_PARK 等安全回零路径（静态力矩门禁仍生效）。
+        返回 (是否下发, 说明)。
         """
+        # F107 静态力矩门禁：未覆盖关节沿用当前读数
+        names = list(traj.joint_names)
+        for point in traj.points:
+            if not point.positions:
+                continue
+            full = list(self._positions)
+            for jn, pos in zip(names, point.positions):
+                if jn in self._joint_names:
+                    full[self._joint_names.index(jn)] = float(pos)
+            viol = self._static_torque_violations(full)
+            if viol:
+                msg = "static torque gate rejected: " + "; ".join(viol)
+                self.get_logger().warn(msg)
+                return False, msg
+
+        duration = _tfs_seconds(traj.points[-1].time_from_start) if traj.points else 0.0
+        if not duty_exempt:
+            allowed, used_s, cooling_s = self._duty_check(duration)
+            if not allowed:
+                msg = (
+                    f"duty gate rejected: {used_s:.0f}s motion in window, "
+                    f"wait {cooling_s:.0f}s before retrying")
+                self.get_logger().warn(msg)
+                return False, msg
+            self._duty_record(duration)
+
         backend = str(self.get_parameter("control_backend").value)
         self.get_logger().info(
             f"[F88] dispatch trajectory backend={backend} points={len(traj.points)} "
-            f"joints={list(traj.joint_names)}"
+            f"joints={names}"
         )
         if backend != "fjt_action":
             self._traj_pub.publish(traj)
-            return
-
-        names = list(traj.joint_names)
+            return True, "dispatched (topic)"
 
         def project(joint_subset: List[str]) -> Optional[JointTrajectory]:
             idx = [names.index(n) for n in joint_subset if n in names]
@@ -1234,6 +1464,7 @@ class ArmController(Node):
             last = traj.points[-1]
             effort = last.effort[li] if last.effort else 0.0
             self._send_gripper_goal(last.positions[li], effort)
+        return True, "dispatched (fjt_action)"
 
     def _send_gripper_goal(self, position: float, max_effort: float = 0.0) -> None:
         """Send a GripperCommand goal; newer goals preempt (GAC default)."""
@@ -1315,7 +1546,10 @@ class ArmController(Node):
         gtraj = self._two_point_trajectory(
             [self._positions[6]], [target], g_dur, joint_names=[JOINTS[6]])
         g_dur = _tfs_seconds(gtraj.points[1].time_from_start)
-        self._dispatch_trajectory(gtraj)
+        ok, msg = self._dispatch_trajectory(gtraj)
+        if not ok:
+            self.get_logger().warn(f"L7 linear to {target:+.3f} not dispatched: {msg}")
+            return 0.0
         return g_dur
 
     def _safe_park_then_disable(self) -> Tuple[bool, str]:
@@ -1353,7 +1587,11 @@ class ArmController(Node):
             traj = self._two_point_trajectory(q0, home, duration)
             duration = _tfs_seconds(traj.points[1].time_from_start)
             self._publish_mode("TRAJ_RUNNING")
-            self._dispatch_trajectory(traj)
+            ok, dmsg = self._dispatch_trajectory(traj, duty_exempt=True)
+            if not ok:
+                self._set_state(
+                    STATE_FAULT, f"safe park rejected by static gate: {dmsg}")
+                return False, f"safe park rejected: {dmsg}"
             self._set_state(STATE_SAFE_PARK, f"safe park -> home ({duration:.1f}s, 2 pts)")
 
         self._traj_done_at = 0.0  # 防旧 TRAJ 时间戳在 SAFE_PARK 中误触发回 READY
@@ -1389,8 +1627,10 @@ class ArmController(Node):
                 c_traj = self._two_point_trajectory(
                     list(self._positions), home, c_dur)
                 c_dur = _tfs_seconds(c_traj.points[1].time_from_start)
-                self._dispatch_trajectory(c_traj)
+                ok, cmsg = self._dispatch_trajectory(c_traj, duty_exempt=True)
                 duration = (time.monotonic() - t0) + c_dur
+                if not ok:
+                    self.get_logger().warn(f"park corrective not dispatched: {cmsg}")
                 corrective_sent = True
             if settled():
                 if converge_start == 0.0:
@@ -1797,6 +2037,13 @@ class ArmController(Node):
                     " zero pose then /a3/arm/init)"
                 )
                 return resp
+        # F107: 当前位形（含额定负载）静态重力矩门禁
+        if self._have_js:
+            viol_t = self._static_torque_violations(self._positions)
+            if viol_t:
+                resp.success = False
+                resp.message = "static torque check failed: " + "; ".join(viol_t)
+                return resp
         # F60：电源序列 EnableInit 在门禁关闭的预检阶段已使能全部电机。gate 打开
         # 后 F32 互锁会拒绝 /a3/motor/enable 调试写——电机既已使能就无需再写：
         # F48 限位检查已过、执行层在 SoftStand 锚定当前反馈位、看门狗已在
@@ -1941,6 +2188,30 @@ class ArmController(Node):
         if not self._moveit_cli.server_is_ready():
             return False, 0.0, "move_group action unavailable"
 
+        # F107: 当前→目标关节空间密集采样（≥21 点）静态重力矩预检。
+        # move_group 实际路径可能偏离采样直线，属工程近似，局限已记入 SAFETY.md。
+        if self._have_js:
+            samples = 21
+            for k in range(samples + 1):
+                frac = k / samples
+                full = list(self._positions)
+                for jn, tv in zip(joint_names, target):
+                    if jn in self._joint_names:
+                        ci = self._joint_names.index(jn)
+                        full[ci] = self._positions[ci] + (float(tv) - self._positions[ci]) * frac
+                viol = self._static_torque_violations(full)
+                if viol:
+                    return False, 0.0, "static torque gate rejected: " + "; ".join(viol)
+            # F107: duty 预检（以速度地板时长保守估计；实际时长在结果后入账）
+            q0_arm = [
+                self._positions[self._joint_names.index(jn)] for jn in joint_names]
+            est_dur, _slow = self._velocity_floor_duration(q0_arm, list(target), joint_names)
+            allowed, used_s, cooling_s = self._duty_check(max(est_dur, 0.1))
+            if not allowed:
+                return False, 0.0, (
+                    f"duty gate rejected: {used_s:.0f}s motion in window, "
+                    f"wait {cooling_s:.0f}s")
+
         goal = MoveGroup.Goal()
         mpr = MotionPlanRequest()
         mpr.group_name = str(self.get_parameter("moveit_planning_group").value)
@@ -2003,6 +2274,8 @@ class ArmController(Node):
         last = pts[-1]
         duration = float(last.time_from_start.sec) + float(last.time_from_start.nanosec) * 1e-9
         duration = max(duration, 0.1)
+        # F107: 实际执行时长入占空比账（FSM 串行化，预检与入账间无并发运动）
+        self._duty_record(duration)
         return True, duration, f"{label}: move_group {len(pts)} pts, {duration:.1f}s"
 
     def _goto_cb(
@@ -2050,7 +2323,12 @@ class ArmController(Node):
         duration = _tfs_seconds(traj.points[1].time_from_start)
 
         self._publish_mode("TRAJ_RUNNING")
-        self._dispatch_trajectory(traj)
+        ok, dmsg = self._dispatch_trajectory(traj)
+        if not ok:
+            self._publish_mode("IDLE")
+            resp.success = False
+            resp.message = dmsg
+            return resp
         self._set_state(STATE_TRAJ, f"goto {name}")
         self._schedule_back_to_ready(duration + 0.3)
 
@@ -2098,7 +2376,12 @@ class ArmController(Node):
         duration = _tfs_seconds(traj.points[1].time_from_start)
 
         self._publish_mode("TRAJ_RUNNING")
-        self._dispatch_trajectory(traj)
+        ok, dmsg = self._dispatch_trajectory(traj)
+        if not ok:
+            self._publish_mode("IDLE")
+            resp.success = False
+            resp.message = dmsg
+            return resp
         self._set_state(STATE_TRAJ, f"move_to ({duration:.1f}s)")
         self._schedule_back_to_ready(duration + 0.3)
 
@@ -2212,7 +2495,12 @@ class ArmController(Node):
         duration = _tfs_seconds(traj.points[1].time_from_start)
 
         self._publish_mode("TRAJ_RUNNING")
-        self._dispatch_trajectory(traj)
+        ok, dmsg = self._dispatch_trajectory(traj)
+        if not ok:
+            self._publish_mode("IDLE")
+            resp.success = False
+            resp.message = dmsg
+            return resp
         self._jogging = True
         self._set_state(STATE_TRAJ, "jog")
         self._schedule_back_to_ready(duration + 0.5)
@@ -2567,7 +2855,12 @@ class ArmController(Node):
 
         duration = self._traj_duration(traj)
         self._publish_mode("TRAJ_RUNNING")
-        self._dispatch_trajectory(traj)
+        ok, dmsg = self._dispatch_trajectory(traj)
+        if not ok:
+            self._publish_mode("IDLE")
+            resp.success = False
+            resp.message = dmsg
+            return resp
         self._set_state(STATE_TRAJ, f"playback {label}")
         self._schedule_back_to_ready(duration + 0.3)
 

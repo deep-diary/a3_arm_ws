@@ -120,6 +120,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/arm/disable` | `std_srvs/Trigger` | 失能保护（F40）：不在 home 容差内先自动平滑回 home（SAFE_PARK）再失能，状态 → `SAFE_PARK → DISABLED`；容差内直达。`success=true ⟺ 已失能`；park 超时 → FAULT 不 reset；reset 被 gate 拒 → 失败/回 READY（语义表见 [SAFETY.md](SAFETY.md)「失能保护」） |
 | `/a3/arm/goto_named_pose` | `a3_msgs/srv/GotoNamedPose` | `pose_name` 按 `named_poses.yaml` 插值下发 |
 | `/a3/arm/set_joint_positions` | `a3_msgs/srv/SetJointPositions` | 设 7 关节目标位置（`positions[7]` + `duration`），限位 clamp 后短插值下发；节流连续下发以覆盖语义衔接 |
+| `/a3/arm/set_payload` | `a3_msgs/srv/SetPayload` | 登记末端负载（`mass_kg` + `com_m[3]` 相对 gripper_link 质心偏移）：质量须 ≤ `rated_payload_kg`(1.5)；已使能时当前位形静态力矩门不通过则拒绝并保持旧值。静态/占空比门禁见 [SAFETY.md](SAFETY.md)「额定负载与占空比门禁」（F107） |
 | `/a3/arm/start_teach` | `std_srvs/Trigger` | 切零力矩拖动 + 开始记录 |
 | `/a3/arm/stop_teach` | `std_srvs/Trigger` | 停止记录 + 退出拖动；F54：样本 ≥ `teach_auto_save_min_samples`(默认 10) 时自动保存 `latest.yaml` + `teach_TIMESTAMP.yaml` 备份，误触发(样本不足)自动跳过不覆盖 |
 | `/a3/arm/save_trajectory` | `a3_msgs/srv/SaveTrajectory` | `name` → 保存为本地轨迹文件；`name` 为空 ≡ latest 槽位(`latest.yaml`) |

@@ -142,6 +142,15 @@ Web 端单电机调试（CAN 扫描 / MIT 直驱 / 保持）的安全边界：
 4. **fresh 门控**：温度判读一律以 `MotorState.fresh` 为准——无反馈时温度=0.0（不是 NaN），断连不得被误判「已冷却」放行使能。
 5. **固件故障监视**：fault_mask≠0（含固件过温锁存 bit3）→ reset 广播 + FAULT。
 
+## 额定负载与占空比门禁（F107）
+
+额定参数（工业机器人交付口径）：额定末端负载 `rated_payload_kg = 1.5`（挂载点 `gripper_link`）；关节连续额定力矩 `joint_rated_torque = [5,5,5,1.8,1.8,1.8,1.8] N·m`（RS00 用于 L1–L3：连续 5 / 峰值 14 N·m；EL05 用于 L4–L7：连续 1.8 / 峰值 6 N·m）。
+
+1. **负载登记**：夹持工件后必须先调 `/a3/arm/set_payload`（`a3_msgs/srv/SetPayload`：质量 + 相对 gripper_link 的质心偏移）登记，卸下工件后设回 0。质量必须 `0 ≤ m ≤ rated_payload_kg`，越界直接拒绝。FSM 在 URDF 文本末尾注入 payload link + fixed joint，用 pinocchio `rnea(q,0,0)` 求静态重力矩（LL-123）。
+2. **静态力矩门**：裕量 `static_torque_margin_ratio = 0.8` → 限值 L1–L3 4.0 N·m、L4–L7 1.44 N·m。任一关节 `|τ_static|` 超限即判该位形不可行。拦截点：**使能前**（`_enable_cb`）；**每条本地轨迹逐点**（dispatch 前，未覆盖关节以当前反馈补齐）；**move_group 路径发送 goal 前**。拒绝消息点名关节与数值（如 `L3_joint static torque -7.02 N·m exceeds 1.44`）。已使能时 set_payload 先校核当前位形，不通过则拒绝变更并回滚旧值——门禁被拒后不得靠重复下发硬闯，须改走低重力位形或减重。
+3. **占空比门（工作制）**：滚动窗口 `duty_window_s = 600 s`、`duty_max_ratio = 0.8`（均可运行时调，`duty_gate_enabled` 可关）。每次 dispatch 记录运动段时长（moveit 路径按实际执行结果记录），窗口内已用时长（含本次预估）超预算即拒绝，消息给出冷却秒数（等到最旧运动段末端滚出窗口左沿）。是 F44 真实温度硬门之外的**前馈热保护**，温度传感器未覆盖/仿真工况下兜底。
+4. **已知局限（工程近似）**：MoveIt 规划不含关节力矩，move_group 目标的静态校核是「当前位形→目标」**关节空间 ≥21 点线性采样**的静态重力矩近似：①只含静态重力矩，不含速度/加速度动力学力矩；②采样路径与规划器实际路径可能不同。该门只能保证沿途静态位形可行，**不能替代动力学限幅**；带载快速运动须主动降速或收紧 `static_torque_margin_ratio`。
+
 ## TX 帧率监视（F46）
 
 `/a3/motor/tx_stats`（5 s 窗口，先发布再清零）：每电机 `tx_hz`、`tx_traj_total`/`tx_refresh_total`、跳过计数（`skip_max_rate`/`skip_bus_disabled`/`skip_power_gate`，定位帧丢失）、`tx_rate_ok`。
