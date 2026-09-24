@@ -16,7 +16,8 @@
      torque_ff = 独立 Python-Pinocchio RNEA 重力矩 × direction（≤0.02 Nm）
   3. ready 姿态外力注入（sim ext 文件 motor3 +0.6 Nm）：关节单调跟随、
      全程 kp≈0、torque_ff 实时跟随 RNEA；撤力后在新位姿零力矩保持（漂移≤0.03）
-  4. 切回 arm_controller：kp≈80、kd≈2、torque_ff=0
+  4. 切回 arm_controller：kp≈80、kd≈2、torque_ff=RNEA×dir
+     （F108 位置模式重力前馈默认开启，与 F49 标定模型同源）
   5. 切回后 JTC home→ready→home 仍 ALL PASS（落位误差 ≤0.02）
 """
 
@@ -27,7 +28,9 @@ import subprocess
 import sys
 import time
 
+import numpy as np
 import rclpy
+import yaml
 from controller_manager_msgs.srv import SwitchController
 from rclpy.node import Node
 
@@ -57,6 +60,37 @@ KD_POSITION = 2.0
 MID = [0.30, -0.40, 0.60, -0.35, 0.25, 0.45]
 MID_TARGET_TOL = 0.03
 
+# F49 fitted inertia — must stay identical to the plugin's kF49JointToLink
+# and to the C++ GravityCompensationController. Both running controllers use
+# this model, so the independent reference must too.
+F49_LINK = {
+    "L2": "l2_l3_urdf_asm",
+    "L3": "l3_lnik_urdf_asm",
+    "L4": "l4_l5_urdf_asm",
+    "L5": "part_9",
+    "L6": "l5_l6_urdf_asm",
+}
+INERTIA_YAML = (
+    "/home/cat/a3_arm_ws/src/a3_description/config/inertia_params.yaml")
+
+
+def apply_f49_inertia(model):
+    with open(INERTIA_YAML, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not data.get("use_calibrated_params"):
+        return model
+    for key, link in F49_LINK.items():
+        entry = data["inertia_params"][key]
+        if not model.existBodyName(link):
+            continue
+        jid = model.frames[model.getBodyId(link)].parentJoint
+        Y = model.inertias[jid]
+        model.inertias[jid] = pinocchio.Inertia(
+            float(entry["mass"]),
+            np.asarray(entry["com"], dtype=np.float64),
+            Y.inertia)
+    return model
+
 
 def render_urdf():
     desc = "/home/cat/a3_arm_ws/src/a3_description/urdf/el_a3.urdf.xacro"
@@ -68,8 +102,8 @@ def render_urdf():
 
 
 def gravity_torques(urdf, joint_positions):
-    """独立参考实现：Python-Pinocchio RNEA（v=a=0），返回 L1–L6 重力矩。"""
-    model = pinocchio.buildModelFromXML(urdf)
+    """独立参考：Python-Pinocchio RNEA（v=a=0）+ F49 拟合惯量，返回 L1–L6 重力矩。"""
+    model = apply_f49_inertia(pinocchio.buildModelFromXML(urdf))
     data = pinocchio.Data(model)
     q = pinocchio.neutral(model)
     for k, joint in enumerate(ARM_JOINTS):
@@ -289,15 +323,20 @@ def main():
         if ok:
             spin_s(rec, 0.5)
             cmd, _ = sniffer.snapshot()
+            settled = rec.current()[:6]
+            expect_tau = gravity_torques(urdf, settled)
             kp_ok = all(abs(cmd.get(m, {}).get("kp", -1) - KP_POSITION) <= 0.5
                         for m in range(1, 7))
             kd_ok = all(abs(cmd.get(m, {}).get("kd", -1) - KD_POSITION) <= 0.05
                         for m in range(1, 7))
-            tff_ok = all(abs(cmd.get(m, {}).get("t_ff", 1.0)) <= 0.05
-                         for m in range(1, 7))
+            tff_err = max(
+                abs(cmd.get(m, {}).get("t_ff", 1.0)
+                    - expect_tau[m - 1] * DIRECTION[m - 1])
+                for m in range(1, 7))
             results.append((kp_ok, f"[切回 @{label} kp≈80]"))
             results.append((kd_ok, f"[切回 @{label} kd≈2]"))
-            results.append((tff_ok, f"[切回 @{label} torque_ff=0]"))
+            results.append((tff_err <= TORQUE_TOL,
+                            f"[切回 @{label} torque_ff=RNEA×dir] 最大偏差 {tff_err:.4f}"))
 
     # 切换回归：标准 JTC home→ready→home 仍正常
     ok, msg, _ = move_and_settle(rec, ready, GOTO_S, 0.02, "回归 ready")

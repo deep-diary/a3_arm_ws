@@ -75,6 +75,7 @@
     ros2 launch a3_bringup a3_bringup.launch.py hardware:=can   # 真机；servo 常驻无需另开
     ```
     - **default（真机生产映射，F60+F64）**：L3 一键开门禁+使能、R3 safe-park 失能、Cross 长按 1 s 硬急停；Triangle=ready、Circle=home；示教三步 **Share=开始 / Options=结束(自动保存) / Square=回放(latest)**；PS=init、Options 长按 3 s=set_zero；**L1=平移死人开关、R1=旋转死人开关（F64）、R2 夹爪力控不需要死人开关**；D-pad 上下调平移速度、左右调旋转速度（独立、步长 0.15、范围 0.10–1.0、按住不连发）；左摇杆平移 Y/Z，右摇杆 right_y 平移 X、right_x 偏航。touchpad/L2 预留不绑。
+    - **ready 点位 + 奇异阈值（F69）**：ready 已覆盖为 `[0,1.6,-0.7,0,0,0]`（L2 抬起到 ~92°，臂展更高；改自 `~/.a3/poses.yaml`），伺服奇异阈值 17/30→25/50（依据见 [shared/SAFETY.md](../shared/SAFETY.md)）——修复 L1 jog 触发速度缩放导致整臂变软下坠。四方向 3 s 连续 jog 仿真全状态码 0；真机 Triangle 到 ready 后若姿态明显异常先 Circle 回 home。
     - **灯带五色（F61）**：红闪=失电/硬急停、红双闪=FAULT、橙=已上电未使能、绿=READY/SERVO、蓝呼吸=TEACH、紫=TRAJ（goto/回放/safe-park）、白闪一次=init 完成。震动：使能/失能 120 ms 弱震，硬急停 600 ms 强震，FAULT 双震。无手柄时逻辑帧看 `/a3/ds4/feedback`（JSON）。
     - **操作员手册：[PS4_OPERATOR_GUIDE.md](PS4_OPERATOR_GUIDE.md)；完整参考表：`src/a3_teleop_ps4/README.md`。**
     - 改键位只编 `config/mappings/default.yaml`（零代码）；轴索引校准见 `config/ds4_linux.yaml`。

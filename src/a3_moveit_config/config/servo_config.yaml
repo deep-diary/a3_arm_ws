@@ -42,8 +42,13 @@ incoming_command_timeout: 0.2  # Command timeout (seconds)
 num_outgoing_halt_msgs_to_publish: 4
 
 ## Configure handling of singularities and joint limits
-lower_singularity_threshold: 17.0  # Singularity deceleration threshold
-hard_stop_singularity_threshold: 30.0  # Singularity stop threshold
+# F69（2026-09-22）：MoveIt 默认 17/30 对本臂过保守——全臂 Jacobian 条件数
+# 天然偏高（工作区谷底 13.3，常见 13–25），ready 附近正常遥操作即越过 17，
+# 速度被缩放→整臂变软下坠（pinocchio 网格分析 + 真机复现确认）。
+# 真正的危险奇异（L2/L3 肘锁死）cond≥100（SRDF ready 实测 982）。
+# 放宽至 25/50：25 以下全速度，25–50 减速区，≥50 硬停仍远在真奇异之前。
+lower_singularity_threshold: 25.0  # Singularity deceleration threshold
+hard_stop_singularity_threshold: 50.0  # Singularity stop threshold
 joint_limit_margin: 0.1  # Joint limit margin (rad)
 
 ## Collision checking (disabled for better performance)

@@ -13,7 +13,8 @@
   3. CAN 侧（vcan0 独立抓包）：
      - 7 个 motor_id 均收到 type-1 控制帧
      - 指令电机位置 = direction*关节位置+offset（落稳后对比）
-     - kp≈80 / kd≈2 / 速度指令=0 / torque_ff(id bits)=0
+     - kp≈80 / kd≈2 / 速度指令=0
+     - L1–L6 torque_ff = F49 RNEA 重力矩×direction（F108 位置前馈默认开启）；L7 torque_ff=0
      - 反馈帧电机角 = direction*关节位置+offset（落稳后对比）
   4. 栈内无自研 FJT / can_bridge 节点
 """
@@ -77,6 +78,7 @@ TORQUE_MAX = {i: (14.0 if i <= 3 else 6.0) for i in range(1, 8)}
 SPEED_MAX = {i: (33.0 if i <= 3 else 50.0) for i in range(1, 8)}
 
 CAN_POS_TOL = 0.01
+TORQUE_FF_TOL = 0.02
 
 
 def angdiff(a, b):
@@ -420,6 +422,14 @@ def main():
     cmd, fb = sniffer.snapshot()
     sniffer.stop()
 
+    # F108: arm position frames carry RNEA gravity feedforward; reference
+    # imported lazily to avoid the f72↔f73 module cycle.
+    from f73_gravity_comp_vcan_acceptance import (
+        gravity_torques as ref_gravity_torques,
+        render_urdf as ref_render_urdf,
+    )
+    expect_tau = ref_gravity_torques(ref_render_urdf(), settled[:6])
+
     cmd_motors = sorted(cmd.keys())
     results.append((
         cmd_motors == list(range(1, 8)),
@@ -429,7 +439,8 @@ def main():
     max_cmd_pos_err = 0.0
     max_fb_pos_err = 0.0
     max_vel = 0.0
-    max_tff = 0.0
+    max_tff_arm_err = 0.0
+    max_tff_l7 = 0.0
     kp_vals, kd_vals = {}, {}
     for motor in range(1, 8):
         j = motor - 1
@@ -437,7 +448,12 @@ def main():
         if motor in cmd:
             max_cmd_pos_err = max(max_cmd_pos_err, abs(cmd[motor]["pos"] - expect_motor))
             max_vel = max(max_vel, abs(cmd[motor]["vel"]))
-            max_tff = max(max_tff, abs(cmd[motor]["t_ff"]))
+            if motor <= 6:
+                max_tff_arm_err = max(
+                    max_tff_arm_err,
+                    abs(cmd[motor]["t_ff"] - expect_tau[j] * DIRECTION[j]))
+            else:
+                max_tff_l7 = max(max_tff_l7, abs(cmd[motor]["t_ff"]))
             kp_vals[motor] = cmd[motor]["kp"]
             kd_vals[motor] = cmd[motor]["kd"]
         if motor in fb:
@@ -456,8 +472,12 @@ def main():
         f"[CAN 速度指令=0] 最大 {max_vel:.5f}",
     ))
     results.append((
-        max_tff <= 0.05,
-        f"[CAN torque_ff=0] 最大 {max_tff:.5f}",
+        max_tff_arm_err <= TORQUE_FF_TOL,
+        f"[CAN L1–L6 torque_ff=RNEA×dir] 最大偏差 {max_tff_arm_err:.5f}",
+    ))
+    results.append((
+        max_tff_l7 <= 0.05,
+        f"[CAN L7 torque_ff=0] 最大 {max_tff_l7:.5f}",
     ))
     kp_ok = all(abs(v - 80.0) <= 0.5 for v in kp_vals.values()) and len(kp_vals) == 7
     results.append((kp_ok, f"[CAN kp≈80] { {m: round(v, 2) for m, v in kp_vals.items()} }"))

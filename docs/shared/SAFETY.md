@@ -30,6 +30,7 @@ A3 Edge 与 A3 CloudEdge 共同遵守的安全设计原则。具体参数以配�
 - gate 关闭时：强制退出运动相关模式，禁止新轨迹
 - Servo：`incoming_command_timeout` 超时后应回 `IDLE` 并停止下发
 - **Servo 通道分离（F65）：** Servo 50 Hz 单点帧走独立话题 `/a3/servo/joint_trajectory`，与编排层多点轨迹主话题 `/joint_group_effort_controller/joint_trajectory` 物理隔离。执行层对两条通道各自互锁：主话题在 `SERVO` 模式仍**一律丢弃**；servo 话题**仅在 gate 开 + 非零力矩 + `SERVO` 模式**消费，目标超 `servo_target_timeout_s`（0.3 s）过期即停刷新，丢弃计数在 MP gate 窗日志 `servo[cb/apply/drop]` 可观测。仿真节点不做此互锁（有意简化，仅仿真）。
+- **奇异阈值按本臂标定（F69）：** `lower_singularity_threshold`/`hard_stop_singularity_threshold` 由 MoveIt 默认 17/30 放宽为 **25/50**（`a3_moveit_config/config/servo_config.yaml`，a3_bringup 真机/仿真共用）。依据：pinocchio 全臂 Jacobian 分析——本臂工作区条件数天然偏高（谷底 ~13.3，ready 起连续 3 s @0.15 m/s 四方向实测峰值 13.7–22.2），默认 17 在正常 jog 中即触发缩放→速度近零→臂变软被重力拉走（真机事故现象）；真正的危险奇异是 L2/L3 肘锁死，cond **≥100**（SRDF ready 实测 982）。安全语义不变：<25 全速、25–50 朝奇异减速（status 1）/离开放大（status 6）、**≥50 硬停（status 2）**，硬停点仍以约 2 倍裕量先于真奇异。回归红线：若后续构型/URDF 变更使工作区 cond 落入 25–50，必须重新标定阈值，不得直接再抬硬停。
 - **L3 使能幂等（F65）：** 电源序列 EnableInit 已使能 7 电机时，L3 一键使能不再重复调 `/a3/motor/enable`（会被 F32 gate 拒绝），直接进 READY；判定要求全部电机状态新鲜且已使能。
 - 零力矩 ≠ 纯 `tau=0`：默认同重力前馈叠加，退出时恢复原 `kp`/`kd`
 - **手柄双模式死人开关（F60；F64 修订）：** 生产映射 `mapping:=default` 时，摇杆按动作分两个死人开关——**L1 按住** 才允许摇杆**平移** Twist（左摇杆 Y/Z、右摇杆 X），**R1 按住** 才允许摇杆**旋转** Twist（右摇杆左右=偏航）；松开立即发零速度（servo_mode_bridge 0.5 s 超时兜底停）。平移/旋转速度档相互独立，由 **D-pad 上下调平移档、左右调旋转档**（步进 0.15，clamp 0.1..1.0，F64；R1 的「全速档」绑定已删除）。**R2 夹爪力控不经 L1/R1 门控**（夹持操作需要独立于 jog 死人开关，F60 起）。`mapping:=simple` 调试档关闭门控（见 `config/mappings/simple.yaml`）。命名位姿/示教/电源键不要求 L1/R1。
