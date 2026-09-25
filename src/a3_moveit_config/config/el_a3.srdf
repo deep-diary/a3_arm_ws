@@ -36,12 +36,13 @@ EL-A3 Robot Arm SRDF (Semantic Robot Description Format)
         <joint name="L6_joint" value="0"/>
     </group_state>
 
+    <!-- F109: folded upright, CoM over base center, minimal static torque -->
     <group_state name="ready" group="arm">
         <joint name="L1_joint" value="0"/>
-        <joint name="L2_joint" value="0.785"/>
-        <joint name="L3_joint" value="-1.57"/>
+        <joint name="L2_joint" value="1.05"/>
+        <joint name="L3_joint" value="-1.575"/>
         <joint name="L4_joint" value="0"/>
-        <joint name="L5_joint" value="0.785"/>
+        <joint name="L5_joint" value="0"/>
         <joint name="L6_joint" value="0"/>
     </group_state>
 

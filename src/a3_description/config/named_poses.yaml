@@ -19,6 +19,7 @@ poses:
   home:
     positions: [0.0, 0.785, -0.785, 0.0, 0.0, 0.0, 0.0]
 
-  # Ready (suspended working pose; real-machine value lives in ~/.a3/poses.yaml override)
+  # F109: folded-upright ready; arm CoM projects over base center (|CoM_x|=8 mm),
+  # static gravity torque sum 1.90 Nm. Real-machine value in ~/.a3/poses.yaml override
   ready:
-    positions: [0.0, 0.785, -1.57, 0.0, 0.785, 0.0, 0.0]
+    positions: [0.0, 1.05, -1.575, 0.0, 0.0, 0.0, 0.0]
