@@ -495,6 +495,19 @@ def generate_launch_description():
         condition=IfCondition(use_rosbag),
     )
 
+    # ---- F110：mock 栈电源序列（对齐真机 C++ power_sequence_node）----
+    # 无 CAN 时执行层缺失会导致 gate 永不打开：ps4_mapper L3 5s 超时报错、
+    # F61 灯效按 power_state 空 + gate 关判离线而红闪（优先于 READY）。
+    # 复用 sim_power_sequence_node：上电锁存 gate_open=true / state=Running，
+    # command 往返仍保留。随早期栈启动，确保 teleop 订阅前锁存已发布。
+    sim_power_sequence = Node(
+        package="a3_bringup",
+        executable="sim_power_sequence_node",
+        name="power_sequence_node",
+        output="screen",
+        condition=IfCondition(PythonExpression(["'", hardware, "' == 'mock'"])),
+    )
+
     # JTC（3 s）→ zero_torque → JSB 严格顺序执行，任一 spawner 非零退出自动
     # 重启（最多 2 次）。顺序执行消除并发 load 突发，重启兜住 rmw 丢响应竞态。
     # 产品节点必须等 JSB 成功后再启动：8 节点并发突发曾把 list_controllers
@@ -611,6 +624,7 @@ def generate_launch_description():
             description="F90 黑匣子输出目录（默认每次启动生成带时间戳的新目录）",
         ),
         rsp,
+        sim_power_sequence,
         diagnostic_aggregator,
         cpu_monitor,
         ram_monitor,

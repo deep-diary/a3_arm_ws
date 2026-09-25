@@ -8,7 +8,7 @@
 1. Platform CAN（RK3588 真机）：见 [PLATFORM_CAN.md](PLATFORM_CAN.md)
 2. Build packages listed in [../../README.md](../../README.md)
 3. **唯一产品入口 `ros2 launch a3_bringup a3_bringup.launch.py hardware:=mock|can ...`（F78）**：ros2_control 标准栈，mock/can 两种模式拓扑完全一致（编排层 + MQTT 桥 + MoveIt OMPL/Pilz + Servo + 夹爪 + PS4）
-   - `hardware:=mock`（默认）：`mock_components/GenericSystem`，无需 CAN/电机即可起栈（仿真/开发用）
+   - `hardware:=mock`（默认）：`mock_components/GenericSystem`，无需 CAN/电机即可起栈（仿真/开发用）；mock 栈同时启动 `sim_power_sequence_node`（同名/同话题/同锁存 QoS 对齐真机执行层 power_sequence_node，F110），故 `/power_sequence/gate_open`/`state` 行为、PS4 L3 使能与 F61 灯效（READY 绿）与真机完全一致，不会出现离线红闪
    - `hardware:=can can_interface:=can1`：`a3_hardware_interface/A3MITHardwareInterface` 直连 SocketCAN（真机先 `sudo systemctl start can-up.service`；vcan 验收 `can_interface:=vcan0`）。非法 hardware 值会被 launch 硬拒，mock 不触碰任何 CAN socket
    - 组件开关：`use_mqtt` / `use_teleop` 默认 true，`use_rviz` / `use_monitor` 默认 false；`teleop_mapping:=default|simple`；`use_sw_render` 默认 true（LL-027）
    - JTC 默认 **inactive 启动**，需经 `/a3/arm/enable`（或 PS4 L3）激活后才会运动
