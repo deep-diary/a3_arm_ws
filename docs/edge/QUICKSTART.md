@@ -957,16 +957,24 @@ python3 scripts/a3_test/f96_host_diagnostics_acceptance.py
 #   通过标准：末尾「F96 验收通过」，8/8
 ```
 
-### JTC 轨迹容差（F97：goal_time 超时必 abort + 逐关节跟踪容差）
+### JTC 轨迹容差（F97：goal_time 超时必 abort + 逐关节跟踪容差；F112：按实测滞后放宽 0.05→0.15）
 
-产品 JTC（`arm_controller`，配置 `src/a3_description/config/el_a3_controllers.yaml`）的轨迹约束按工业标准补齐：`goal_time: 1.0`（轨迹最后一点后 1.0 s 内进不了 goal 容差即 abort），L1–L6 逐关节 `trajectory: 0.05`（运动中偏差 >0.05 rad 即 PATH_TOLERANCE_VIOLATED）。此前 `goal_time: 0.0` 会让无法收敛的目标（F81 freeze-hold）永久 pending。FSM 下发目标不带逐目标容差，控制器默认约束对 F88 两点轨迹 / goto / playback / jog 全路径生效。
+产品 JTC（`arm_controller`，配置 `src/a3_description/config/el_a3_controllers.yaml`）的轨迹约束按工业标准补齐：`goal_time: 1.0`（轨迹最后一点后 1.0 s 内进不了 goal 容差即 abort），L1–L6 逐关节 `trajectory: 0.15`（运动中偏差 >0.15 rad 即 PATH_TOLERANCE_VIOLATED）。此前 `goal_time: 0.0` 会让无法收敛的目标（F81 freeze-hold）永久 pending。FSM 下发目标不带逐目标容差，控制器默认约束对 F88 两点轨迹 / goto / playback / jog 全路径生效。
+
+**F112（2026-09-25）**：真机实测 home↔ready goto 稳态跟随滞后 0.050~0.055 rad（err≈TC·v_ref，巡航 v_ref≈0.46 rad/s、TC≈0.11 s），常态化越过 F97 初设的 0.05 → 正常运动被误判 PATH_TOLERANCE_VIOLATED 中途 abort 停住（P2）+ 重复按键起跑-反冲（P1）。放宽到 0.15（3× 实测上界）后堵/卡照常触发（0.15 仍远小于 F81 堵转门槛 0.5 rad 量级，单调陡增偏差照样快速 abort），`goal: 0.03`、`goal_time: 1.0`、`cmd_timeout: 2.0` 收敛兜底全部保留。依据与边界见 [SAFETY.md §JTC 跟踪容差](../shared/SAFETY.md)。
 
 ```bash
-# 仿真验收（vcan 注入单电机反馈冻结；机械臂断电）
+# F97 仿真验收（vcan 注入单电机反馈冻结；机械臂断电）
 python3 scripts/a3_test/f97_jtc_tolerance_acceptance.py
 #   通过标准：末尾「F97 acceptance: 7/7」
 #   A 正常轨迹 SUCCESSFUL → B 冻结电机 4 反馈后 0.90 s 内 abort(-4)
 #   → C 清除 silence 后恢复 SUCCESSFUL
+
+# F112 仿真验收（vcan 注入真机同量级一阶滞后，A/B 相对位移 / C 复现窗口 / 0.05 回归）
+python3 scripts/a3_test/p1p2_tracking_lag_acceptance.py
+#   通过标准：末尾「P1P2 tracking-lag acceptance: 5/5」
+#   A/B Δ-rel 带滞后 SUCCESSFUL(0)；C 峰值 |ref-fbk| ∈[0.050, 0.085]
+#   0.05 回归：临时把 yaml trajectory 收回 0.05 → A 必 abort(-4)
 ```
 
 ### L7 夹爪限位对齐标定（F98：URDF / ros2_control / MoveIt 三处统一 [0.0, 1.78]）

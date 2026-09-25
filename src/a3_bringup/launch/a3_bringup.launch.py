@@ -107,6 +107,7 @@ def generate_launch_description():
     arm_share = get_package_share_directory("a3_arm_controller")
     bridge_share = get_package_share_directory("a3_mqtt_bridge")
     teleop_share = get_package_share_directory("a3_teleop_ps4")
+    can_bridge_share = get_package_share_directory("a3_can_bridge")
 
     xacro_file = os.path.join(desc_share, "urdf", "el_a3.urdf.xacro")
     # mock/can 仅切换 xacro 插件参数；其余拓扑共用同一份描述命令。
@@ -508,6 +509,22 @@ def generate_launch_description():
         condition=IfCondition(PythonExpression(["'", hardware, "' == 'mock'"])),
     )
 
+    # ---- F111：真机栈电源序列（C++ power_sequence_node）----
+    # 统一栈硬件插件直驱 SocketCAN，旧执行层未并入：can 模式下 gate 话题同样
+    # 0 publisher，L3 必超时。启动 C++ 节点补 gate/state 时序；其 /can_tx_frames
+    # 使能帧在统一栈无桥接节点自动丢弃，硬件使能由插件 controller switch 完成。
+    can_power_sequence = Node(
+        package="a3_can_bridge",
+        executable="power_sequence_node",
+        name="power_sequence_node",
+        output="screen",
+        parameters=[
+            os.path.join(can_bridge_share, "config", "power_sequence.yaml"),
+            os.path.join(can_bridge_share, "config", "motor_map.yaml"),
+        ],
+        condition=IfCondition(PythonExpression(["'", hardware, "' == 'can'"])),
+    )
+
     # JTC（3 s）→ zero_torque → JSB 严格顺序执行，任一 spawner 非零退出自动
     # 重启（最多 2 次）。顺序执行消除并发 load 突发，重启兜住 rmw 丢响应竞态。
     # 产品节点必须等 JSB 成功后再启动：8 节点并发突发曾把 list_controllers
@@ -625,6 +642,7 @@ def generate_launch_description():
         ),
         rsp,
         sim_power_sequence,
+        can_power_sequence,
         diagnostic_aggregator,
         cpu_monitor,
         ram_monitor,

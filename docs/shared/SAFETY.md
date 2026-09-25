@@ -189,6 +189,10 @@ Web 端单电机调试（CAN 扫描 / MIT 直驱 / 保持）的安全边界：
 5. **启动门 fail-fast**：`on_activate` 先 reset-all（电机进 coast），500 ms 内验证 7/7 应答才发 enable；任一暗电机 → ERROR 且零 enable 帧。框架对激活失败的处理是 abort controller_manager 进程（整机停机），因此顺序不可颠倒。
 6. **恢复**：反馈恢复后 latch 自动清除、freeze-hold 解除，无须重启即可继续（disable/enable 与运动均已仿真验证）。
 
+## JTC 跟踪容差（F97 配置 / F112 放宽）
+
+JTC 逐关节 `trajectory:` 跟踪容差在运动中检查 实际位置 vs 采样参考，超出即 abort（PATH_TOLERANCE_VIOLATED）。F112 将 L1–L6 从 0.05 rad 放宽到 **0.15 rad**：真机 home↔ready goto 稳态跟随滞后实测 0.050~0.055 rad（err≈TC·v_ref，巡航 v_ref≈0.46 rad/s、TC≈0.11 s），常态化越过 0.05 → 正常运动被误判为故障、中途 abort 停住（P2）且重复按键起跑-反冲（P1）。**放宽不削弱堵/卡检测**：堵转/被拽偏是单调陡增偏差，0.15 仍远小于 F81 堵转/保护性手术检测的量级门槛（0.5 rad 级），照常快速触发；`goal: 0.03`、`goal_time: 1.0`、`cmd_timeout: 2.0` 等收敛兜底全部保留；重负载/力矩类异常由 F107 额定负载门禁与 F110/F48 通道门禁覆盖，不依赖 position 跟踪容差。vcan 验收（F112）用真插件+真 JTC+真容差引擎注入实测滞后：0.05 下 A/B 均 error -4（复刻故障）、0.15 下恢复 SUCCESSFUL。
+
 ## 使能安全（F51，LL-039 事故条款）
 
 **使能 = 保当前位置，绝不执行历史目标。** 2026-09-14 真机事故：示教退出后目标被重锚到拖动位姿（1.98 rad），看门狗假触发 stop→reset（臂卸力、人工搬回 home 0.03 rad），使能时**无人校验「目标 vs 实际」**，kp=80 对 1.956 rad 误差满增益输出 → L2 3.1 s 冲 1.97 rad → 甩断 L6 打印关节（F42 是防撞设计，拦不住满速甩动）。

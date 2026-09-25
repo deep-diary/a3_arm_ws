@@ -1210,7 +1210,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **改动（仅标准 JTC 参数，零自研代码）：**
   1. `src/a3_description/config/el_a3_controllers.yaml` `arm_controller.constraints`：
      - `goal_time: 1.0`（轨迹最后一点之后 1.0 s 内必须进入 goal 容差，否则 abort → GOAL_TOLERANCE_VIOLATED）
-     - L1–L6 逐关节增加 `trajectory: 0.05`（运动中位置偏差 > 0.05 rad 即 abort → PATH_TOLERANCE_VIOLATED）；保留 `goal: 0.03`
+     - L1–L6 逐关节增加 `trajectory: 0.05`（运动中位置偏差 > 0.05 rad 即 abort → PATH_TOLERANCE_VIOLATED）；保留 `goal: 0.03`（后由 F112 放宽至 0.15，见下）
   2. 新增 `scripts/a3_test/f97_jtc_tolerance_acceptance.py`（vcan 注入，不触真机）
 - **验收标准（仿真；机械臂保持断电；脚本 `scripts/a3_test/f97_jtc_tolerance_acceptance.py`）：**
   1. **回归**：vcan 栈（vcan_motor_sim 一阶跟随）使能后下发正常两点轨迹，结果 `SUCCESSFUL`(0)
@@ -1233,6 +1233,36 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   4. `hardware:=can` 时不启动该节点（launch 条件检查，日志/节点列表无 sim_power_sequence）；结束无残留进程，退出码 0
 - **关联：** F78（统一 bringup 入口，拓扑对齐遗漏的执行层节点）、F83（厂商标准使能编排依赖 gate）、F61（灯效派生态）、F75（mock 栈声明）、edge_web_sim（sim_power_sequence 原使用方）
 - **状态：** `completed`（2026-09-25，mock 验收 11/11：`scripts/a3_test/f110_mock_power_acceptance.py`。P1 锁存 gate=true/state=Running；P2 shutdown/start 命令往返；P3 enable 成功、FSM READY、ds4 feedback class=ready/color=green/pattern=solid；P4 日志无 L3 超时；P5 launch mock 条件静态核对。验收脚本排查期间曾因 FsmState 订阅 topic 误写 `/a3_arm_status`（下划线，实际为 `/a3/arm_status`）导致长时间误判为 rcl/rmw reader 怪癖，见 LL-127）。用户手柄 L3/灯效实测与真机验收待通电
+
+### F111 — 真机（hardware:=can）栈补接 C++ power_sequence_node（修复真机 L3 gate 0 publisher）
+
+- **说明：** F110 修复 mock 栈后切真机（2026-09-25，用户在场授权上电）发现：F78 统一栈 `hardware:=can` 分支同样没有任何节点发布 `/power_sequence/gate_open`、`/power_sequence/state`（topic info：gate publisher count=0，3 个订阅者：ps4_mapper、FSM、ds4_feedback）。统一栈用 ros2_control 硬件插件直接驱动 SocketCAN（200 Hz，/joint_states 实测 199 Hz 正常），旧执行层三件套（can_transport/motor_protocol/power_sequence）整体未并入；F110 只补了 mock 条件分支，设计条款「hardware:=can 行为不变（真机 C++ power_sequence_node）」实际不成立——真机按 L3 会和修复前 mock 一样 5 s 超时、灯效红闪
+- **设计（复用现有 C++ 节点，零新逻辑）：**
+  1. `hardware:=can` 时条件启动已存在的 `a3_can_bridge/power_sequence_node`（节点名同名，同话题、同 QoS：reliable+TRANSIENT_LOCAL depth1 锁存），参数沿用 `a3_can_bridge/config/power_sequence.yaml` + `motor_map.yaml`（与 can_bridge.launch.py 一致）
+  2. 该节点启动 state=Idle/gate=false，收到 start 后走 Precheck(0.2s)→EnableInit(0.35s)→SoftStand(0.5s)→Running 并开 gate；总耗时约 1.1 s，在 mapper L3 的 5 s 轮询窗口内
+  3. 节点经 `/can_tx_frames` 话题发出的 MIT 使能/active-report 帧在统一栈无桥接节点（无 can_transport_node），自然丢弃；真正的硬件使能由 ros2_control 插件在 controller switch 时完成，两条路径不冲突
+- **验收标准（仿真 vcan：`scripts/a3_test/f111_can_power_acceptance.py`，隔离域 ROS_DOMAIN_ID=111；真机：用户在场同脚本硬件验收）：**
+  1. 栈启动后存在节点 `/power_sequence_node`（a3_can_bridge C++），gate 初始 false/state=Idle（latched 可晚订阅）
+  2. 发 start 后 5 s 内 gate=true、state=Running；发 shutdown 后 gate=false
+  3. 模拟 L3：Running+gate 条件下调 /a3/arm/enable 成功，FSM READY，/a3/ds4/feedback class=ready/color=green
+  4. `hardware:=mock` 时不启动 C++ 节点，`hardware:=can` 时不启动 sim 节点（launch 条件静态核对：两节点互斥）
+- **关联：** F110（mock 侧同构修复）、F78（统一 bringup 入口遗漏）、F83（使能编排依赖 gate）、F61（灯效派生）
+- **状态：** `completed`（2026-09-25，vcan 验收 11/11：`scripts/a3_test/f111_can_power_acceptance.py`。P1 初启 gate=false/state=Idle 锁存可晚订阅；P2 start→Running/gate=true 耗时 1.10 s（mapper L3 5 s 窗口内）、shutdown→Idle/gate=false；P3 Running+gate 下 enable 成功、FSM READY；P4 ds4 feedback class=ready/color=green/pattern=solid；P5 launch 静态核对 can/sim 电源节点互斥）。真机 L3 使能链路通电后复核
+
+### F112 — JTC trajectory 跟踪容差按真机实测滞后放宽（0.05→0.15；修复 home↔ready goto 误报 PATH_TOLERANCE_VIOLATED 导致中途停与重复按键起跑-反冲）
+
+- **说明：** 真机实测（2026-09-24，/tmp/a3_real_stack.log）：home↔ready goto 起跑约 0.2 s 内 L2 的 |Position Error| 已达 0.0508，越过 F97 设置的 trajectory tolerance 0.05 → `PATH_TOLERANCE_VIOLATED`(-4) → FSM 中途停住（P2）；用户再按起跑 → 已 abort 的目标退避 + 重发 → 起跑-急冻-反冲（P1）。由 稳态滞后 err ≈ TC·v_ref 反推：巡航 v_ref≈0.46 rad/s、跟随时间常数 TC≈0.11 s → 常规稳态滞后 0.050~0.055 rad 常态化落在 0.05 容差之外。F97 的 0.05 本意是拦截堵转/卡死（偏差只会持续陡增），却把正常跟随滞后误判为故障
+- **设计（仅 JTC 参数；零自研代码）：**
+  1. `src/a3_description/config/el_a3_controllers.yaml` `arm_controller.constraints` L1–L6 `trajectory: 0.05 → 0.15 rad`；保留 `goal: 0.03`、`goal_time: 1.0`（误差收敛仍受目标容差 + 超时兜底）
+  2. 0.15 依据：3× 实测滞后上界（0.055）；仍比 F81 堵转看门狗量化门槛（0.5 rad 量级）小一个数量级，堵/卡（偏差单调陡增）照样快速触发；重负载/力矩类异常由 F107 与 F110 通道门禁，不依赖 position 跟踪容差
+- **验收标准（仿真；机械臂保持断电；脚本 `scripts/a3_test/p1p2_tracking_lag_acceptance.py`，隔离域 ROS_DOMAIN_ID=93）：**
+  1. **A** 从使能后的活锚点按 home→ready 的相对位移 Δ 运动，vcan 插件注入实测级滞后（`--alpha 0.023`，TC=1/(0.023×200)=0.22 s；轨迹时长 11.5 s 使 JTC spline 峰参考速度压回真机巡航量级约 0.35 rad/s）→ `SUCCESSFUL`(0)
+  2. **B** 按 −Δ 反回锚点 → `SUCCESSFUL`(0)
+  3. **C** JTC controller_state 实测最大 |ref−fbk|（JTC 容差引擎实际检查的量；仅窗口收集轨迹执行期，排出使能重锚瞬态）落入 0.050~0.085 rad 窗口（复现实测 0.0508 的量级，证明测试真有负载、非走过场；TC 不必等于真机 0.11 s——容差引擎只关心峰值 |err| 的量级。3.5 s 两点会峰到 ≈2.2 rad/s = 6.3× 本验收峰值而过度加载，故必须用 11.5 s 慢轨迹）
+  4. **回归**：临时将 yaml `trajectory` 收紧回 0.05 → A 必须 `PATH_TOLERANCE_VIOLATED`(-4)（坐实修复前故障，abort 在 τ≈0.34、trajectory elapsed≈3.9 s、err≈0.051 时触发）、C 仍在窗口；恢复 0.15 后重跑 5/5 转绿
+  - A/B 运动量固定为「使能后活锚点」的相对位移 Δ，而非绝对 home/ready 目标：sim 冷启动有一个首帧 dt≈15 s 的启动 artifact（effort 物理大步积分 + position-mode 重锚定落在 ±2π 环绕位，如 L2 +0.785→−4.831），使能锚点非确定；真机折叠后多圈计数归零（F91）不会 wrap。err≈TC·v 只取决于 Δ 与时长，相对 Δ 运动让本验收在任意锚点下确定性复现实测滞后，同时免疫该 artifact
+- **关联：** F97（本需求放宽其 trajectory 容差并保留 goal_time/goal 双兜底）、F81（堵转看门狗打底，0.5 rad 量级门槛不受影响）、F109（ready 点位）、F74（FSM 执行后端）、LL-128（容差按实测稳态滞后带宽定的踩坑条目）
+- **状态：** `completed`（2026-09-25，vcan 验收 5/5：`scripts/a3_test/p1p2_tracking_lag_acceptance.py` ROS_DOMAIN_ID=93。A/B 带实测级滞后 SUCCESSFUL(0)（elapsed 各 ≈11.5 s）；C 窗口收集实测 0.071∈[0.050,0.085]；0.05 回归 A 于 τ≈0.34 处 abort -4（elapsed≈3.9 s）、C 仍 0.051∈窗口；恢复 0.15 后重跑 5/5 转绿）。真机通电后与 F110/F111 一并实测确认
 
 ### F109 — ready 点位重定义（折叠竖直、臂重心投影过底座中心；对标官方 zero/home/ready 点位语义）
 

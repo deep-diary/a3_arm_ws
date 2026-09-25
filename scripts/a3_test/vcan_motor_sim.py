@@ -44,6 +44,9 @@ TORQUE_MAX = {i: (14.0 if i <= 3 else 6.0) for i in range(1, 8)}
 SPEED_MAX = {i: (33.0 if i <= 3 else 50.0) for i in range(1, 8)}
 # Initial motor angles at joint home [0, .785, -.785, 0,0,0,0]
 INIT_ANGLE = {1: 0.0, 2: 0.785, 3: 0.785, 4: 0.0, 5: 0.0, 6: 0.0, 7: 0.0}
+# A3_SIM_DEBUG=1 periodic per-motor branch/rate logging (dev only)
+_sim_debug = os.environ.get("A3_SIM_DEBUG") == "1"
+_dbg_n = 0
 
 
 def float_to_u16(value, lo, hi):
@@ -390,10 +393,16 @@ class HealthCtl:
 
 
 def main():
+    global _dbg_n
     parser = argparse.ArgumentParser()
     parser.add_argument("--interface", default="vcan0")
     parser.add_argument("--alpha", type=float, default=0.2,
                         help="first-order follow gain per control frame")
+    parser.add_argument("--alpha-hz", type=float, default=None,
+                        help="normalize alpha to a fixed time constant: treat "
+                             "alpha as the fraction closed per 1/alpha-hz-s "
+                             "step (dt-corrected, load-invariant lag). None "
+                             "(default) keeps legacy per-frame alpha.")
     parser.add_argument("--ext-file", default="/tmp/f73_ext.json",
                         help="external-force injection file (effort mode only)")
     parser.add_argument("--inertia", type=float, default=0.08,
@@ -567,6 +576,14 @@ def main():
                 #  - F87b per-motor override: applied torque taken at face value
                 #  - legacy: t_ff cancels an implicit static load, only push
                 # moves the rotor.
+                if _sim_debug and motor_id in (2, 3):
+                    _dbg_n += 1
+                    if _dbg_n % 200 == 1:
+                        print(f"[simdbg-effort] m={motor_id} kp={kp:.3f} "
+                              f"kd={kd:.3f} t_ff={t_ff:+.3f} dt_ms={dt*1000:.2f} "
+                              f"tgt={target:+.3f} ang={m.angle:+.3f} "
+                              f"spd={m.speed:+.3f} vref={target_v:+.3f}",
+                              flush=True)
                 ext.poll()
                 push = ext.torque if ext.motor == motor_id else 0.0
                 m.torque = max(-fw_limit,
@@ -587,7 +604,19 @@ def main():
                 m.angle += m.speed * dt
             else:
                 prev = m.angle
-                m.angle += args.alpha * (target - m.angle)
+                if args.alpha_hz:
+                    a = 1.0 - (1.0 - args.alpha) ** (dt * args.alpha_hz)
+                else:
+                    a = args.alpha
+                if _sim_debug and motor_id in (2, 3):
+                    _dbg_n += 1
+                    if _dbg_n % 200 == 1:
+                        print(f"[simdbg] m={motor_id} kp={kp:.2f} "
+                              f"dt_ms={dt*1000:.2f} a={a:.4f} alpha={args.alpha} "
+                              f"alpha_hz={args.alpha_hz} v={m.speed:+.3f} "
+                              f"tgt={target:+.3f} ang={m.angle:+.3f}",
+                              flush=True)
+                m.angle += a * (target - m.angle)
                 m.speed = max(-vmax, min(vmax, (m.angle - prev) / dt))
                 if gravity is not None:
                     # F89 static-hold calibration pairing: the stiff inner
