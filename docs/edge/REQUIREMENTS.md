@@ -159,7 +159,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   2. 改 `config/mappings/*.yaml` 即可换绑，不必改 Python
   3. 仿真 `edge_teleop_sim.launch.py`（`simple`）：右摇杆基座系左右/上下；左摇杆 Y 前后；松杆停止
   4. `simple`：L2→L6、R2→L7 模拟量；Square/Circle 夹爪开/合；`default`：L1+R2 夹爪
-  5. D-pad 上/下/左/右分别到 `ready` / `zero` / `home` / `ready`（上键暂与右键同）
+  5. D-pad 上/下/左/右分别到 `ready` / `zero` / `idle` / `ready`（上键暂与右键同）
   6. Cross 立即停；Square/Triangle/Options 长按电源语义与 F3 一致（`default` 映射）
   7. 无 `/joy` 或 1 s 无更新时 mapper 不发任何轨迹/Servo 令
 - **关联：** [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)；[shared/SAFETY.md](../shared/SAFETY.md)；`a3_teleop_ps4`
@@ -243,7 +243,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   1. 设备 YAML `topics.cmd_result` 存在；`nodes` 含 `a3_arm_controller`（话题 `/a3/arm_status`，信号 `arm_state`/`arm_mode`/`arm_message`）；`points` 含上述 3 个 `discrete` 信号；`load_device_config` 后 `GET /auth/my-lines` 的 `edge.nodes`/`edge.topics` 体现
   2. RK3588 页出现「机械臂编排节点」卡片，点击展开控制面板；选中其它节点保持现有遥测曲线联动
   3. 面板状态区显示 `arm_state`（READY=绿/FAULT=红/其余蓝或黄）、`arm_mode`、`arm_message`，随 `/a3/arm_status` 实时刷新
-  4. 10 个动作可下发：初始化/使能/失能、示教开始/结束、保存/回放（带轨迹名输入）、goto（zero/home/ready 下拉）、进入/退出 AI；点击先弹二次确认，确认后才 publish
+  4. 10 个动作可下发：初始化/使能/失能、示教开始/结束、保存/回放（带轨迹名输入）、goto（zero/idle/ready 下拉）、进入/退出 AI；点击先弹二次确认，确认后才 publish
   5. 收到 `cmd_result` 后：`ok=true` 弹成功 toast、`ok=false` 弹失败 toast 并在消息列表标红；消息列表保留最近约 20 条（时间、op、成败 tag、message）
   6. MQTT 未连接/断网时所有动作按钮禁用；轨迹名为空或 goto 未选姿态时本地拦截提示，不下发
   7. `bridge.yaml` 新增 `/a3/arm_status` 展平后 `colcon build --packages-select a3_mqtt_bridge`，telemetry 的 `points.arm_state/arm_mode/arm_message` 随编排节点发布
@@ -589,7 +589,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   | Circle | 短按 | `playback` 空名（回放定义最新） |
   | Touchpad | 短按 | `arm_init`（0/mode，F51 越限只 WARN） |
   | L3 | 短按 | `arm_enable`（使能安全门禁：重锚 + 软起步） |
-  | R3 | 短按 | `arm_disable`（F40：离 home 先 safe park） |
+  | R3 | 短按 | `arm_disable`（F40：离 idle 先 safe park） |
   | Triangle | 长按 1 s | `power_shutdown`（**唯一**手柄急停） |
   | Square / Cross / D-pad / L1 / R1 / R2 | 不变 | 上电 / 立即停 / 命名位姿 / deadman / boost / 力控夹爪 |
 
@@ -658,10 +658,10 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   | 按键 | 手势 | 动作 |
   |---|---|---|
   | L3 | 短按 | `arm_power_enable`：执行层 `power start` → 等 gate_open+Running → 编排层 `/a3/arm/enable`，一键到 READY（非阻塞轮询，5 s 超时） |
-  | R3 | 短按 | `arm_disable`（F40：离 home 先 SAFE_PARK 再失能） |
+  | R3 | 短按 | `arm_disable`（F40：离 idle 先 SAFE_PARK 再失能） |
   | Cross(X) | **长按 1 s** | `power_shutdown` 硬急停：门禁关、电机失能；恢复需重新 L3 |
   | Triangle | 短按（rising） | goto 命名位姿 `ready` |
-  | Circle | 短按（rising） | goto 命名位姿 `home`（非 zero——机械零位 servo IK 奇异，LL-007） |
+  | Circle | 短按（rising） | goto 命名位姿 `idle`（非 zero——机械零位 servo IK 奇异，LL-007） |
   | Share | 短按 | `teach_start` |
   | Options | 短按 / 长按 3 s | `teach_stop`（自动保存 latest，F54）/ `power_set_zero` |
   | Square | 短按 | `playback_latest`（空名 ≡ latest 槽位） |
@@ -768,7 +768,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   2. `auto_start_servo:=false` 下：不推摇杆时新话题 0 帧；按住 L1+摇杆后 mapper 日志出现 `called /servo_node/start_servo`，新话题 ~50 Hz 出帧，非奇异 ready 位关节随动（实测 6 s L2 +0.225 / L3 −0.179 rad）
   3. 话题拓扑：`/a3/servo/joint_trajectory` 1 publisher（servo_node），订阅者 motor_protocol_node + a3_arm_monitor；主轨迹话题在 SERVO 模式仍被互锁
   4. 电源序列 EnableInit 后按 L3：直接 READY 绿灯，无 gate 拒绝日志
-  5. **真机待验（断电未测）**：上电开机 → L3 绿 → 先按 Circle 回 home（避开零位奇异 LL-007）→ L1+摇杆运动；motor 日志窗 `servo[cb= apply=]` 计数增长、`drop=0`
+  5. **真机待验（断电未测）**：上电开机 → L3 绿 → 先按 Circle 回 idle（避开零位奇异 LL-007）→ L1+摇杆运动；motor 日志窗 `servo[cb= apply=]` 计数增长、`drop=0`
 - **关联：** 修订 F14（真机入环路径）；F60（L3 语义）、F32（gate 互锁保留）、F62（仿真验证）；[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（新话题与仿真分歧说明）；[shared/SAFETY.md](../shared/SAFETY.md)；LL-007（零位 servo 奇异）
 - **状态：** `in-progress`（2026-09-21 代码完成、编译通过、仿真 46/0 + 按需启动链路验证；真机板测待用户上电确认）
 
@@ -1086,7 +1086,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   1. 两点 FJT goal 被 JTC 接受（error_code=0），末点在 goal 容差内收敛；全程无 PATH/GOAL_TOLERANCE 违约
   2. `controller_state` 采样证据：起点与终点速度 ≈0（≤0.02 rad/s）；quintic 钟形速度剖面 `v/(Δq/T)=30α²(1−α)²`——α=0.1 处比值 ≤0.50（理论 0.243）、α=0.5 附近出现峰值且峰值比 ≥1.5（理论 1.875），证明控制器侧 quintic 样条在工作，而非线性折线段（注：原拟在 α=0.25 判 ≤0.95 与 quintic 数学不符——该点理论比值 1.055，故改在 α=0.1 判据 + 中点峰值）
   3. 编排层 set_joint_positions jog（连续抢占 3 次）、goto/move_to 兜底路径全部成功；实际下发轨迹点数 = 2（抓 `/arm_controller/follow_joint_trajectory` goal 证据）
-  4. safe-park→disable 全链路回归绿（回 home 收敛 → DISABLED）
+  4. safe-park→disable 全链路回归绿（回 idle 收敛 → DISABLED）
   5. 栈内无 `goto_waypoints`/`move_to_points_hz`/`move_to_max_points`/`_traj_point_count` 残留引用；topic 后端（motor_protocol 200 Hz 插值）两点轨迹回归通过
 - **关联：** F41（原 ≥50 Hz 稠密插值，本项取代其默认路径）、F74（FJT 标准后端）、F68（retime 服务消费 ramp 几何）、F76/F77（同样的「标准工具替代手写」路线）
 - **状态：** 已完成（2026-09-23，仿真 22/22：phase 1 mock-hardware fjt_action 后端 + phase 2 vcan topic 后端；脚本退出码 0，LL-091～LL-096）。真机验收待通电。
@@ -1264,6 +1264,20 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F97（本需求放宽其 trajectory 容差并保留 goal_time/goal 双兜底）、F81（堵转看门狗打底，0.5 rad 量级门槛不受影响）、F109（ready 点位）、F74（FSM 执行后端）、LL-128（容差按实测稳态滞后带宽定的踩坑条目）
 - **状态：** `completed`（2026-09-25，vcan 验收 5/5：`scripts/a3_test/p1p2_tracking_lag_acceptance.py` ROS_DOMAIN_ID=93。A/B 带实测级滞后 SUCCESSFUL(0)（elapsed 各 ≈11.5 s）；C 窗口收集实测 0.071∈[0.050,0.085]；0.05 回归 A 于 τ≈0.34 处 abort -4（elapsed≈3.9 s）、C 仍 0.051∈窗口；恢复 0.15 后重跑 5/5 转绿）。真机通电后与 F110/F111 一并实测确认
 
+### F113 — 失能态电机 0x18 主动上报保活（R3 后 RViz 实时 + L3 立即使能；修复 reset 后总线静默）
+
+- **说明：** 真机复盘（2026-09-26，`/tmp/a3_real_stack2.log` + `/tmp/a3_arm_monitor.log`）：R3 失能 → 插件 `on_deactivate` 发 BuildResetFrame 后总线彻底静默（candump 0 帧）→ `/joint_states` 冻结在最后解码的固件"无有效位置"满量程标记 ±12.49635 → RViz 不再更新；再按 L3 → `on_activate` 的 reset-all 后 500 ms 内凑不齐 7/7 `has_feedback`（`DecodeFeedback`（codec:103）只认 0x02/0x18，reset 应答不可靠）→ abort「only X/Y motors answered」，L3 永久失效。实证（`/tmp/a3_0x18_on.py`，对已 reset 的 1–7 补发 `kMotorCmdActiveReport=0x18` ON）：7/7 立即以实测 ~101 Hz 持续回流（2 s 各 200+ 帧），总线复活，L3 立即使能、RViz 恢复实时；零扭矩、臂不动。0x18 为手册纯遥测通道（数据域同 0x02），power_sequence 原设计即保活意图（cpp:437「不下发上报 OFF：shutdown 后 RViz 仍依赖 0x18」），但统一 can 栈其 `/can_tx_frames` 使能帧被 launch 断言自动丢弃，0x18 从未在真机栈真正打开（唯一 0x18 支持是 RX 侧 filter，socketcan_transport.cpp:48）
+- **设计（插件 on_activate/on_deactivate 两处补发，零协议/零新节点改动）：**
+  1. `on_deactivate`：在 disarm CAN 超时 → 3× 零增益刷新 → BuildResetFrame 循环**之后**，对 7 台补发 `ProtocolCodec::BuildActiveReportFrame(bus_, motor_id, true)`（复用 codec:225 现成帧）→ reset 电机在 coast 态持续主动上报，RViz 恒实时
+  2. `on_activate`：在 reset-all 循环**之后**、500 ms `has_feedback` 等待之前，同样补发 0x18-ON ×7 → 首启 / 任意历史态下 7/7 必然在窗口内成立，不再赌 reset 应答
+  3. 使能成功后**不补发 0x18-OFF**（持续流）：使能态叠加 ~9% 恒定总线负载（叠加命令应答最坏 ~20% of 1 Mbps，仍远未饱和），换取「插件重载 / 进程崩溃电机照常上报、RViz 恒实时」的冗余；正是 power_sequence 原设计语义。若日后要省带宽，可在 on_activate 末尾补 OFF，本轮不做
+- **验收标准（仿真，vcan0 插件 + 顶真机断电；脚本 `scripts/a3_test/f113_keepalive_acceptance.py`，隔离域 ROS_DOMAIN_ID=113）：**
+  1. **帧级 A**：vcan 栈使能后调 `/a3/arm/disable`，candump 过滤 0x18（ID 高 5 位）断言 7 台均收到 `(0x18<<24)|(0xFD<<8)|motor_id` 的 ON 帧（data[6]=1），且**后续持续流**不停发（≥1 s 窗口每台 ≥ 若干帧）
+  2. **帧级 B**：再调 `/a3/arm/enable`，断言 on_activate 同样补发 0x18-ON ×7（首启路径同样有 0x18，不再依赖 reset 应答）
+  3. **闭环 C**：enable → disable → enable 循环 ≥ 3 次全部成功、FSM READY（旧故障形态 enable-after-disable abort 消失在回归中）；disable 态 `/joint_states` 持续更新（帧率不归零、位置不复现 ±12.49635 冻结标记）
+  4. **回归 D**：vcan sim 注入「不响应 0x18」的 motor 静默 → disable 后再 enable 必须复现 abort（坐实修复前故障形态），恢复后 C 重跑 3/3 转绿
+- **关联：** F83（on_activate 的 has_feedback 门，本需求补 0x18 使其必然成立）、F81/LL-083（失能态反馈丢失 freeze-hold）、F111（真机电源节点 /can_tx_frames 被统一栈丢弃是 0x18 从未打开的根因）、F86（on_deactivate 首步 disarm CAN 超时，保活流不与之冲突）
+- **状态：** `completed`（2026-09-26，vcan 验收 42/42：`scripts/a3_test/f113_keepalive_acceptance.py` ROS_DOMAIN_ID=113。P1–P3 同一栈 enable/disable ×3 全部成功，on_activate/on_deactivate 各补发 0x18-ON ×7（count=7），READY 态 86–88 fps / DISABLED 态 46–47 fps 持续流，disable 下 /joint_states 持续更新（帧率不归零）且位置不复现 ±12.49635 冻结标记；P4 注入「m4 静默」→ enable 必败（日志 `activate aborted: only 6/7`，hardware active 请求被 `state 3 rejected`），FSM 停在 IDLE；P5 清除注入、fresh 栈恢复 7/7 → READY，m4 恢复 0x18 流 193 帧）。真机断电后与 F110/F111 一并实测确认
 ### F109 — ready 点位重定义（折叠竖直、臂重心投影过底座中心；对标官方 zero/home/ready 点位语义）
 
 - **说明：** 用户真机-仿真手柄验收（2026-09-24）反馈：Triangle 到达的 F69 ready（[0, 1.6, -0.7]）只是 L2 向上抬一个角度，整臂重心落在底座前方，静态受力大，希望 ready 时重心位于底座中心正上方、静态力矩最小。pinocchio 复核 F69：活动臂（L1–L6 连杆，2.51 kg）CoM 在底座系前移 106 mm，静态重力矩绝对值之和 4.83 N·m。官方 EDULITE_A3 另有两个点位可对标：SRDF home [0, .785, -.785]（CoM 前移 8 mm、2.64 N·m）与 test_moveit_waypoints ready [0, .785, -1.57, 0, .785, 0]（前移 43 mm、2.86 N·m，6 轴 Jacobian 条件数 47），均不满足「重心过中心 + 静态力矩最小」。本需求在 |CoM_x| ≤ 10 mm 约束下重新网格搜索选点，并把结论同步到全部三处点位来源
@@ -1533,7 +1547,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   2. 超限请求：L1 Δq=3.0 rad、duration=0.05 s（vmax=33 → 地板 2.2×3.0/33=0.20 s）→ 响应回显 duration ≥ 0.20 s；从 `/joint_states` 中心差分实测运动窗口内 L1 峰值速度 ≤ vmax×scale（容差 5%；中心差分容忍 DDS 成批投递的早到帧，前向差分实测有 2 倍假峰）
   3. 保守请求（Δq=0.1 rad、duration=2.0 s）→ duration 不被修改（=2.0 s）
   4. `joint_velocity_scale:=0.5` 重测同超限请求：地板翻倍（0.40 s）、实测 L1 峰值速度 ≤ 0.5×33（+容差）
-  5. 回归：safe-park（disable 回 home）正常完成、最终位姿在 home 容差内
+  5. 回归：safe-park（disable 回 idle）正常完成、最终位姿在 idle 容差内
 - **关联：** F88（两点标准轨迹取代手搓稠密插值）、F40/F41（park/move_to 时长语义）、[shared/SAFETY.md](../shared/SAFETY.md)；MoveIt joint_limits.yaml 与 URDF 必须同源（本需求不改二者数值）
 - **状态：** completed（2026-09-23，mock 全栈验收 11/11：`scripts/a3_test/f94_velocity_limit_acceptance.py`。实测：7 关节速度限加载（L1–L3=33、L4–L7=50）；L1 Δq=3.0/0.05s → 回显 duration=0.200s、中心差分峰值 28.87 rad/s；保守 Δq=0.1/2.0s → 2.000s 不变；scale=0.5 → 0.400s、峰值 14.94 rad/s；disable safe-park 成功、最终 worst=0.010 rad。形状系数 2.2 与中心差分的踩坑见 LL-106）
 
@@ -1557,9 +1571,9 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** L7 零点标定（断电丢多圈计数）、LL-019（save 数据域须 01..08）、F83（使能编排）、F40（停机维护语义）；[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)
 - **状态：** `completed`（2026-09-23，vcan91 仿真验收 16/16：单机/255 广播 zero+save 计数与角度归零正确、越界 id 拒绝无副作用、READY 态联锁拒绝并列出 active 控制器、停栈后放行；LL-102）。真机验收待通电
 
-### F40 — 失能保护（disable → 自动回 home → 失能）
+### F40 — 失能保护（disable → 自动回 idle（原 home，F113）→ 失能）
 
-- **说明：** `/a3/arm/disable` 不再是「无条件直接失能」——不在 home 容差内时先平滑回 home 再失能，防止 ready 位直接掉臂。新增参数：`disable_home_pose_name: "home"`、`disable_home_tol_rad: 0.15`、`disable_home_duration_s: 3.0`、`disable_home_confirm_s: 0.5`、`disable_park_timeout_s: 8.0`。新辅助 `_at_home()`（全关节 |q−home| ≤ tol）与 `_safe_park_then_disable()`（同步阻塞：发布 home 轨迹抢占活跃轨迹——执行层 OnTrajectory 天然支持替换，无需排队 → `SAFE_PARK`（期间拒绝新运动指令）→ 轮询连续 `confirm_s` 收敛 → reset → `DISABLED`）。服务语义（同步阻塞返回，`success=true ⟺ 已失能`）：READY/TRAJ 容差内 → 直达 reset → DISABLED；容差外 → safe park → reset → DISABLED（message 含耗时）；IDLE → 直达 reset；DISABLED/COOLING → 幂等不动电机；FAULT → 紧急直达 reset；INIT/TEACH/SERVO/AI → 拒绝 busy；SAFE_PARK → 拒绝「already safe parking」。park 超时 → **FAULT 不 reset**（保持使能、停在半途，人工介入）；reset 被 gate 拒 → park 前 `success=false` + 原文 + "(stop power sequence first)"，park 完成后被拒 → 回 READY（已在 home 位，安全）；`_have_js==False` → 直达 reset + WARN（保持旧行为）。`/a3/motor/reset` 直达保留作紧急失能。
+- **说明：** `/a3/arm/disable` 不再是「无条件直接失能」——不在 idle（原 home，F113 改名、点位值不变）容差内时先平滑回 idle 再失能，防止 ready 位直接掉臂。新增参数：`disable_home_pose_name: "idle"`（F113 起，原 `"home"`）、`disable_home_tol_rad: 0.15`、`disable_home_duration_s: 3.0`、`disable_home_confirm_s: 0.5`、`disable_park_timeout_s: 8.0`。新辅助 `_at_home()`（全关节 |q−home| ≤ tol）与 `_safe_park_then_disable()`（同步阻塞：发布 home 轨迹抢占活跃轨迹——执行层 OnTrajectory 天然支持替换，无需排队 → `SAFE_PARK`（期间拒绝新运动指令）→ 轮询连续 `confirm_s` 收敛 → reset → `DISABLED`）。服务语义（同步阻塞返回，`success=true ⟺ 已失能`）：READY/TRAJ 容差内 → 直达 reset → DISABLED；容差外 → safe park → reset → DISABLED（message 含耗时）；IDLE → 直达 reset；DISABLED/COOLING → 幂等不动电机；FAULT → 紧急直达 reset；INIT/TEACH/SERVO/AI → 拒绝 busy；SAFE_PARK → 拒绝「already safe parking」。park 超时 → **FAULT 不 reset**（保持使能、停在半途，人工介入）；reset 被 gate 拒 → park 前 `success=false` + 原文 + "(stop power sequence first)"，park 完成后被拒 → 回 READY（已在 home 位，安全）；`_have_js==False` → 直达 reset + WARN（保持旧行为）。`/a3/motor/reset` 直达保留作紧急失能。
 - **验收标准：**
   1. 容差外 disable：`READY → SAFE_PARK`（`_traj_done_at` 清零防旧 TRAJ 时间戳误回 READY）→ 收敛连续 0.5 s → reset → `DISABLED`，最终位姿全部在 home ±0.15 rad 内
   2. 容差内 disable：跳过 park 直达 reset；park 超时：FAULT 且电机保持使能、不 reset
@@ -1648,6 +1662,32 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - 不与 MotorBridge 同时占用同一 `can1`
 - 不把 Windows 编译产物直接部署到 ARM 板
 - CloudEdge 薄边缘形态不在本产品线范围
+
+### F113 — 点位改名 home→idle + 弃用 `~/.a3/poses.yaml` 用户覆盖（点位统一收敛到包内 named_poses.yaml）
+
+- **说明：** 真机标定的折叠自然下垂位（重力稳定，F40 失能保护位）原名 `home`，只存在于仓外 `~/.a3/poses.yaml`（F39 用户层覆盖）；包内 `named_poses.yaml` 的 `home` 还是 EDULITE 半抬遗留值——同名不同值，靠覆盖文件才正确，仓外文件不可版本管理。本次：① `home` 整体改名 `idle`，值 = 2026-09-13 真机标定 `[-0.0002, 0.0006, 0.0002, 0.3351, 0.0121, -0.0002, -0.0002]`（位置不变）；EDULITE 半抬 `home` 退役删除；② 点位唯一定义收回包内 `a3_description/config/named_poses.yaml`，MoveIt `el_a3.srdf` group_state 同步改名改值；`~/.a3/poses.yaml` 弃用（改名 `.bak` 留底）；③ Circle（default 映射）/D-pad 左（simple 映射）与 F40/F44 safe-park 目标（三份 `arm_controller*.yaml` + 代码默认值 `disable_home_pose_name`）同步改指 `idle`。遗留注意：`/a3/arm/save_named_pose`（F39）被调用时会重建 `~/.a3/poses.yaml` 形成覆盖——约定不再使用，或后续单独收敛该服务。
+- **验收标准：**
+  1. `named_poses.yaml` / `el_a3.srdf` 含 `idle`（折叠自然下垂值）且不再含 `home`；三份 `arm_controller*.yaml` 与代码默认值 `disable_home_pose_name: idle`
+  2. Circle（default）/ D-pad 左（simple）→ `idle`；`goto_named_pose {pose_name: idle}` 成功，`{pose_name: home}` 返回 unknown pose
+  3. 真机回归：R3 safe-park 收敛到 idle ±0.15 rad 后失能（行为与改名前逐位一致）；Triangle→ready、Square 回放不受影响
+- **关联：** F39（save_named_pose 用户层覆盖）、F40（失能保护）、F60/F64（PS4 映射）、F109（ready 重定义）；[shared/ROBOT_MODEL.md](../shared/ROBOT_MODEL.md)（命名姿态表）
+- **状态：** `implemented`（2026-09-26 改名落地；真机回归待上电）
+
+
+
+### F114 — PS4 一键保存当前位姿为命名点位（L2 短按，保存到包内 named_poses.yaml）
+
+- **说明：** 手柄示教/拖动到目标位后，希望能一键把当前位姿存为命名点位，之后可 `goto` 回去。三处改动：
+  1. **`/a3/arm/save_named_pose`（F39）写入目标从 `~/.a3/poses.yaml` 改为包内 `a3_description/config/named_poses.yaml`**（F113 弃用用户层覆盖后的收敛）；写入后同步更新 `self._poses` 运行时即时生效；同名覆盖仍支持。
+  2. **时间戳命名**：手柄无法输入文本，`name` 为空时自动命名 `snap_YYYYMMDD_HHMMSS`；服务仍支持显式 `name`（Web/CLI 调用不受限）。
+  3. **L2 短按绑定**：`a3_teleop_ps4` 新增 `save_named_pose` action（无参数，调编排层服务，位置留空 = 当前位姿），`default.yaml` 绑定 `l2` 短按；L2 此前预留未绑（LL-052 只提 touchpad 蓝牙无事件，L2 可用）。
+- **验收标准：**
+  1. 真机/仿真 READY 或示教拖动中按 L2 短按 → 服务返回 `success=true`，`message` 含自动名 `snap_*`；`named_poses.yaml` 追加对应点位且值 = 当前 7 关节读数
+  2. 保存后立即 `goto_named_pose {pose_name: <返回的名>}` 可执行（运行时 `_poses` 已合并）
+  3. 显式 `name: idle/ready/zero` 调用仍覆盖内置点（与 F39 原语义一致）；`positions` 显式给定时长度≠7 报错
+  4. L2 短按绑定不影响 R2 夹爪力控（扳机轴）与其他键
+- **关联：** F39（save_named_pose 服务）、F113（点位收敛包内）、F60/F64（PS4 映射）；[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（arm 服务表）
+- **状态：** `implemented`（2026-09-26 落地；真机回归待上电）
 
 ## 验收标准
 

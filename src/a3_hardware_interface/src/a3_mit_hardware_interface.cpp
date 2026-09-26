@@ -496,6 +496,16 @@ public:
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
+    // F113: re-arm the 0x18 active-report stream right after reset-all. Reset
+    // silences the bus — in the canonical stack power_sequence's own 0x18-ON
+    // frames are dropped by launch (F111), so without this, has_feedback never
+    // reaches 7/7 and enable aborts. Active report is telemetry-only (motors
+    // stay reset/coast); it feeds both the gate below and RViz on deactivate.
+    for (const auto & j : joints_) {
+      transport_.Send(ProtocolCodec::BuildActiveReportFrame(bus_, j.motor_id, true), nullptr);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
     while (std::chrono::steady_clock::now() < deadline) {
       size_t seen = 0;
@@ -652,6 +662,15 @@ public:
     for (const auto & j : joints_) {
       transport_.Send(ProtocolCodec::BuildResetFrame(bus_, j.motor_id), nullptr);
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    // F113: keep the 0x18 active-report stream open after deactivate so
+    // /joint_states stays live in RViz and the next enable's 7/7 gate has
+    // data. Always-on by design: the ~9% constant load buys telemetry that
+    // survives plug-in reloads/crashes, matching power_sequence's intent of
+    // never sending 0x18-OFF.
+    for (const auto & j : joints_) {
+      transport_.Send(ProtocolCodec::BuildActiveReportFrame(bus_, j.motor_id, true), nullptr);
     }
 
     RCLCPP_INFO(rclcpp::get_logger(kLoggerName), "deactivated, motors reset");

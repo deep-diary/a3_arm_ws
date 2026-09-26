@@ -7,8 +7,12 @@ protocol_codec.hpp):
                  control (0x01): bits 8-23 carry torque_ff u16
   TX feedback:   id = (0x02<<24) | (motor_id<<8) | 0xFD
 Behaviour: first-order position follow on control frames; type-2 feedback
-on reset/enable/control. Initial angles match the URDF home pose through
-the joint direction mapping (motor 2=+0.785, motor 3=+0.785).
+on enable/control. Reset is faithful to the real firmware — it clears the
+0x18 active report and emits NO echo, so the plugin must re-arm the stream
+itself (F113). Armed active report streams 0x18 telemetry ~100 Hz/channel
+unconditionally (reset/coast included), which also satisfies motor-side bus
+watchdogs while the host is silent. Initial angles match the URDF home pose
+through the joint direction mapping (motor 2=+0.785, motor 3=+0.785).
 """
 
 import argparse
@@ -30,6 +34,7 @@ CMD_GET_PARAM = 0x11
 CMD_SET_PARAM = 0x12
 CMD_SET_ZERO = 0x06
 CMD_SAVE_PARAM = 0x16
+CMD_ACTIVE_REPORT = 0x18
 MASTER_ID = 0xFD
 
 PARAM_CAN_TIMEOUT = 0x7028
@@ -84,6 +89,11 @@ class MotorState:
         # Enabled latches on a Type-3 enable and clears on reset / watchdog
         # trip; feedback reports RUN mode (2) in CAN-id bits 22-23 while set.
         self.enabled = False
+        # 0x18 active report: armed by an ACTIVE-REPORT command (data[6]&1),
+        # streamed as telemetry every ~10 ms; cleared by reset (faithful — a
+        # reset MIT motor is silent until the stream is re-armed, F113).
+        self.active_report = False
+        self.last_report_t = 0.0
 
     @property
     def timeout_counts(self):
@@ -106,7 +116,9 @@ def write_state_file(path, motors):
             for mid, m in sorted(motors.items())
         }
     }
-    tmp = f"{path}.tmp"
+    # 并发多实例（F113 验收同 vcan 复跑）共用固定 tmp 名会互相 os.replace 抢名 -> ENOENT；
+    # 用 pid 分桶后各自原子替换同一目标，后来者胜。
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as f:
         json.dump(payload, f)
     os.replace(tmp, path)
@@ -126,8 +138,8 @@ def pack_frame(can_id, data):
     return struct.pack(CAN_FORMAT, can_id | CAN_EFF_FLAG, 8, bytes(data))
 
 
-def send_feedback(sock, m, health):
-    can_id = (CMD_FEEDBACK << 24) | (m.motor_id << 8) | MASTER_ID
+def send_feedback(sock, m, health, cmd=CMD_FEEDBACK):
+    can_id = (cmd << 24) | (m.motor_id << 8) | MASTER_ID
     if health.motor == m.motor_id:
         can_id |= (int(health.fault) & 0x3F) << 16
         can_id |= (int(health.mode) & 0x3) << 22
@@ -392,6 +404,44 @@ class HealthCtl:
             self.motor = None
 
 
+class NoActiveReportCtl:
+    """Per-motor 0x18 active-report kill switch, read from a JSON file.
+
+    Format: {"motors": [3, 5]}; {} / {"motors": []} clears. Motors listed
+    here still acknowledge 0x18-ON (active_report arms) but never emit the
+    autonomous stream — the F113 dark-motor failure form. Enable's 7/7 gate
+    reads the plugin's has_feedback, which only the stream satisfies, so a
+    fully dark motor must block enable (and across stack restarts it stays
+    black because has_feedback latches fresh per instance).
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.mtime = 0.0
+        self.last_check = 0.0
+        self.motors = set()
+
+    def poll(self):
+        now = time.monotonic()
+        if now - self.last_check < 0.05:
+            return
+        self.last_check = now
+        try:
+            mtime = os.path.getmtime(self.path)
+        except OSError:
+            return
+        if mtime == self.mtime:
+            return
+        self.mtime = mtime
+        try:
+            with open(self.path) as f:
+                data = json.load(f)
+            raw = data or {}
+            self.motors = set(int(x) for x in raw.get("motors", []))
+        except (OSError, ValueError, KeyError, TypeError):
+            self.motors = set()
+
+
 def main():
     global _dbg_n
     parser = argparse.ArgumentParser()
@@ -414,6 +464,10 @@ def main():
     parser.add_argument("--health-file", default="/tmp/f84_health.json",
                         help="temp/mode/fault injection: "
                              "{\"motor\": 3, \"temp_c\": 92, \"fault\": 4}, {} clears")
+    parser.add_argument("--no-active-report-file",
+                        default="/tmp/f113_no_active_report.json",
+                        help="fully-dark motor injection: {\"motors\": [4]}, "
+                             "{} / {\"motors\": []} clears (F113)")
     parser.add_argument("--state-file", default="/tmp/f86_timeout_state.json",
                         help="F86 watchdog state (armed/tripped per motor)")
     parser.add_argument("--dynamics-file", default="/tmp/f87_dynamics.json",
@@ -445,6 +499,7 @@ def main():
     dyn = DynamicsCtl(args.dynamics_file)
     silence = SilenceCtl(args.silence_file)
     health = HealthCtl(args.health_file)
+    noar = NoActiveReportCtl(args.no_active_report_file)
     gravity = None
     if args.gravity_model == "urdf":
         if not args.gravity_urdf:
@@ -466,6 +521,24 @@ def main():
     last_state_write = 0.0
     print(f"vcan motor sim on {args.interface}, alpha={args.alpha}", flush=True)
 
+    def emit_active_reports(now):
+        # Armed active-report streams run unconditionally (idle, tripped,
+        # coasted) at ~100 Hz per motor — the always-on behavior F113 re-arms
+        # on the real arm, where the motor-side CAN watchdog counts bus
+        # activity and must stay fed after disable. Does NOT touch bus_last_t:
+        # the F86 host-death watchdog stays RX-only.
+        for mt in motors.values():
+            if not mt.active_report:
+                continue
+            if mt.motor_id in noar.motors:
+                continue
+            if silence.motor == mt.motor_id:
+                continue
+            if now - mt.last_report_t < 0.01:
+                continue
+            mt.last_report_t = now
+            send_feedback(sock, mt, health, cmd=CMD_ACTIVE_REPORT)
+
     def tick(now):
         nonlocal last_state_write
         changed = False
@@ -482,6 +555,7 @@ def main():
         if changed or now - last_state_write > 0.1:
             write_state_file(args.state_file, motors)
             last_state_write = now
+        emit_active_reports(now)
 
     while True:
         try:
@@ -519,11 +593,12 @@ def main():
 
         silence.poll()
         health.poll()
+        noar.poll()
         dyn.poll()
         dyncfg = dyn.entries.get(motor_id)
 
         def reply():
-            if silence.motor != motor_id:
+            if motor_id not in noar.motors and silence.motor != motor_id:
                 send_feedback(sock, m, health)
             m.report_torque = None
 
@@ -539,12 +614,18 @@ def main():
             if data == bytes(range(1, 9)):
                 m.save_param_count += 1
         elif cmd_type == CMD_RESET:
-            m.speed = 0.0
-            m.torque = 0.0
+            # Type 4 doubles as full reset (data[1]=0xC0 — returns SW version)
+            # and clear-fault (data[0]=1). Only a genuine reset silences the
+            # armed 0x18 stream; clear-fault must leave it armed, else the F83
+            # choreography's clear-fault step (sent right after on_activate's
+            # 0x18-ON re-arm) would disarm every motor post-enable (F113).
+            if data[1] == 0xC0:
+                m.speed = 0.0
+                m.torque = 0.0
+                m.enabled = False
+                m.active_report = False
             m.tripped = False
             m.trip_delay = None
-            m.enabled = False
-            reply()
         elif cmd_type == CMD_ENABLE:
             m.enabled = True
             reply()
@@ -555,6 +636,9 @@ def main():
         elif cmd_type == CMD_GET_PARAM:
             param_id = data[0] | (data[1] << 8)
             send_param_reply(sock, m, param_id, m.params.get(param_id, 0))
+        elif cmd_type == CMD_ACTIVE_REPORT:
+            # data[6]&1 = autonomous active-report ON; fire-and-forget (no ACK).
+            m.active_report = bool(data[6] & 0x01)
         elif cmd_type == CMD_CONTROL and not m.tripped:
             vmax = SPEED_MAX[motor_id]
             target = u16_to_float((data[0] << 8) | data[1], -P_RANGE, P_RANGE)

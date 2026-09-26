@@ -977,6 +977,20 @@ python3 scripts/a3_test/p1p2_tracking_lag_acceptance.py
 #   0.05 回归：临时把 yaml trajectory 收回 0.05 → A 必 abort(-4)
 ```
 
+### 失能态电机 0x18 主动上报保活（F113：R3 后 RViz 恒实时 + L3 立即使能；修复 reset 后总线静默）
+
+真机复盘（2026-09-26）：R3 失能 → 插件 `on_deactivate` 发 reset 后总线彻底静默，`/joint_states` 冻结在固件满量程标记 ±12.49635 → RViz 不再更新；再按 L3 时 `on_activate` 在 500 ms 内凑不齐 7/7 反馈 → abort「only 6/7」-> L3 永久失效。根因：统一 can 栈里 power_sequence 的 0x18 使能帧被 launch 断言丢弃（F111），0x18 从未真正打开。插件现在 `on_activate` / `on_deactivate` 两处都补发 0x18-ON ×7（零协议/零新节点改动），电机无论使能/失能都持续主动上报（遥测纯通道，零扭矩），RViz 恒实时、L3 任意历史态下立即使能。使能态叠加 ~9% 恒定总线负载换取「插件重载/崩溃电机照常上报」冗余，有意不补发 0x18-OFF（power_sequence 原设计语义）。
+
+```bash
+# F113 仿真验收（vcan 插件 + 隔离域 ROS_DOMAIN_ID=113，42 项；机械臂断电）
+# 内部自带栈启停与 0x18-ON 注入；每轮按 PGID 自清上一轮残留（见 LL-129）
+python3 scripts/a3_test/f113_keepalive_acceptance.py
+#   通过标准：末尾「TOTAL: 42 passed, 0 failed / RESULT: PASS」
+#   P1–P3 同栈 enable/disable ×3 全绿、on_activate/deactivate 各 0x18-ON≥7、
+#   DISABLED 态 /joint_states 持续更新且无 ±12.49635 冻结标记
+#   P4 注入「m4 静默」→ enable 必败 only 6/7；P5 清除恢复 7/7 → READY
+```
+
 ### L7 夹爪限位对齐标定（F98：URDF / ros2_control / MoveIt 三处统一 [0.0, 1.78]）
 
 L7 标定（2026-09-13，`src/a3_gripper_controller/config/gripper_config.yaml`）：全开=0.0、机械止位 1.7825、运行钳位 1.78 rad。此前三处模型限位沿用参考值 ±1.5708：MoveIt 规划闭合最多 1.57（行程少 12%），且允许无机械意义的负向指令。已将 URDF L7 `<limit>`、ros2_control position command_interface、MoveIt `joint_limits.yaml` 全部改为 `[0.0, 1.78]`（L5/L6 的 ±1.5708 是真实关节限位，不动）。
