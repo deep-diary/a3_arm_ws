@@ -57,7 +57,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 |------|------|------|
 | `/a3/control_mode` | `std_msgs/String` | 模式互锁广播 |
 | `/a3/gravity_compensation/start\|stop` | `std_srvs/Trigger` | 重力补偿 |
-| `/a3/zero_torque/start\|stop` | `std_srvs/Trigger` | 零力矩/拖动（软 kp + 重力 FF） |
+| `/a3/zero_torque/start\|stop` | `std_srvs/Trigger` | 零力矩/拖动（软 kp + 重力 FF）；F127 起重力补偿覆盖 **L1–L7**（含夹爪，start_teach 时与 gripper_controller 原子互切释放夹爪） |
 | `/a3/move_to_pose_ik` | `a3_msgs/srv/MoveToPoseIK` | 仅 IK |
 | `/a3/move_to_pose` | `a3_msgs/action/MoveToPose` | IK + 执行 |
 | `/a3/gravity_torque` | `sensor_msgs/JointState` | URDF 系重力力矩（effort） |
@@ -124,7 +124,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/arm/start_teach` | `std_srvs/Trigger` | 切零力矩拖动 + 开始记录 |
 | `/a3/arm/stop_teach` | `std_srvs/Trigger` | 停止记录 + 退出拖动；F54：样本 ≥ `teach_auto_save_min_samples`(默认 10) 时自动保存 `latest.yaml` + `teach_TIMESTAMP.yaml` 备份，误触发(样本不足)自动跳过不覆盖 |
 | `/a3/arm/save_trajectory` | `a3_msgs/srv/SaveTrajectory` | `name` → 保存为本地轨迹文件；`name` 为空 ≡ latest 槽位(`latest.yaml`) |
-| `/a3/arm/playback` | `a3_msgs/srv/PlaybackTrajectory` | `name` → 读取并回放；`name` 为空 ≡ 回放 latest，无 latest 时返回 start_teach 引导消息 |
+| `/a3/arm/playback` | `a3_msgs/srv/PlaybackTrajectory` | `name` → 读取并回放；`name` 为空 ≡ 回放 latest，无 latest 时返回 start_teach 引导消息。F124：当前位与录制首点差 >0.02 且 `playback_return_use_moveit:=true`（默认）时，先经 MoveIt 规划回首点（state=`playback return {label}`），再执行录制轨迹（state=`playback {label}`）；规划失败回落几何 ramp |
 | `/a3/arm/enter_ai` | `std_srvs/Trigger` | 状态 → `AI`（LeRobot 采集/回放） |
 | `/a3/arm/exit_ai` | `std_srvs/Trigger` | 状态 → `READY` |
 

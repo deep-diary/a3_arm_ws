@@ -1709,3 +1709,65 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)
 - [shared/SAFETY.md](../shared/SAFETY.md)
 - [shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)
+### F124 — 示教回放回首点改走 MoveIt 轨迹规划（替代几何插值 ramp）
+
+- **说明：** 现状：`_playback_cb` 回放前若当前位与录制首点差 >0.02 rad 且 `playback_ramp_duration_s` >0.05，会 prepend 一段**几何插值** ramp（`[q0,q1]`，q0=当前位）。用户诉求：回首点改用 MoveIt 轨迹规划（比插值更合适）。本需求：`use_ramp` 成立且 `playback_return_use_moveit:=true`（默认）时，回首点段改用 `_moveit_move`（MoveGroup action，group "arm"，JointConstraint ±`moveit_goal_tolerance_rad`，F107 static-torque/duty 前置门禁）规划执行；起跑前 `control_mode=TRAJ_RUNNING`、state=`{label} (planning)`→成功后 `playback return {label}`。失败 graceful 回落原 join-ramp（行为同今天）。回首点期间 L7 经 `_dispatch_l7_linear` 同步到录制首点位（1–3 s 线性，仅标准栈/真机有 GripperCommand action，edge_web_sim no-op）。回首点成功 → phase P 用**纯录制几何**（不再含 ramp 段）经 retime 平滑再下发，`_schedule_back_to_ready` 只用 phase P 时长。
+- **验收标准：**
+  1. 首点≠当前位（distance>0.02）：playback 消息序列**先**出现 `playback return` 前缀（回首点段）**再**出现 `playback ` 前缀（执行段）；回首点由 MoveIt 规划（FJT 管辖）
+  2. `playback_return_use_moveit:=false` 负例：回落原几何 ramp，无 `playback return` 段，回放照常
+  3. 回首点执行期间控制模式 TRAJ_RUNNING、结束后正常 `_schedule_back_to_ready`
+  4. move_group 不可用 / 规划失败 → WARN 日志 + graceful fallback，replay 不中断
+- **关联：** F54（auto-save）、F67（goto 复用 `_moveit_move`）、F68（retime）、F87/F98（L7→GripperCommand）、F107（门前置）、F109（ready 定义）
+- **状态：** `accepted`（2026-09-27 定稿；mock 验收进行中）
+
+### F125 — 回首点 / 执行示教轨迹 LED 双段异色（cyan→purple）
+
+- **说明：** 现状：`ds4_feedback_node._derive` 对 `state==TRAJ` 泛分支（msg≠"jog"）一律常亮 purple，回首点与执行示教轨迹段无法区分。本需求：回首点段（`arm_msg.startswith("playback return")`）改走 **cyan**（COLORS 新增 `(0,255,255)`），插在泛 TRAJ purple 分支前；phase P（`playback {label}` 前缀）仍走泛 purple 分支 → 双段异色。
+- **验收标准：**
+  1. 回首点段 LED = cyan 常亮；执行示教轨迹段 LED = purple 常亮
+  2. 其他 TRAJ 行为（goto/demo/jog 排除项）不受影响（cyan 分支仅 keyed on `playback return` 前缀）
+- **关联：** F124（回首点）、F60/F61（TEACH 状态灯效）、ds4 全映射
+- **状态：** `accepted`（2026-09-27 定稿；mock 验收进行中）
+
+### F126 — 密集示教点 → 单条 MoveIt 平滑轨迹评估（复用 F68 Ruckig retime）
+
+- **说明：** 用户诉求：评估多点密集点能否拼成一条完整 MoveIt 平滑轨迹。评估结论（2026-09-27）：**已有机制，无需新后端**——F68 `_call_retime`（默认 Ruckig）把任意密度录制点集作为一条 waypoint 序列，整体 retime 成单条平滑轨迹（位置/速度/加速度受 Ruckig 约束、点间无跳变），phase P 拆出后即纯录制点集单条平滑产物；MoveIt Cartesian 后端（PTJ/PTP 同关节空间）不必要。本需求交付 = 评估结论文档化 + sim 密集录制（≥40 点大空间扫点）验证 retime 产物的速度/加速度连续性。
+- **验收标准：**
+  1. 密集录制（≥40 点）→ playback 下发的 FJT 为单条轨迹，首末端径迹、相邻点速度差有界、无跳变
+  2. 回放总时长 ≥ 录制时长（retime 尊重 recorded_duration 地板），回落 ready
+- **关联：** F68（Ruckig retime）、F124（回首点=phase P 前置）、F62（合成验收）
+- **状态：** `accepted`（2026-09-27 评估结论已定：复用 F68，无 Cartesian 后端；sim 验证进行中）
+
+### F127 — 示教（free-drive）期间夹爪 L7 同步释放 + 回放仅到终点位
+
+- **说明：** 用户实测：示教（start_teach，ZERO_TORQUE 重力补偿自由拖动）期间夹爪（L7）仍上电有力矩。根因：`zero_torque_controller`（GravityCompensationController，rnea 全模型）joints 列表只有 L1–L6，L7 不在重力补偿范围 → TEACH 时 L7 保持位置/力矩。本需求两件：
+  1. **示教释放**：`el_a3_controllers.yaml` 的 `zero_torque_controller.joints` 追加 `L7_joint`（rnea 按名映射 order-independent，gripper_link 惯性参与重力项）。**接口冲突**：gripper_controller 与 zero_torque 都 claim `[L7_joint/effort]` → Humble STRICT switch 拒绝「zero_torque active 时 gripper 仍 active」→ `_cm_freedrive_switch` 必须扩展为同一原子请求 deactivate `[arm_controller, gripper_controller]` + activate `[zero_torque]`（enter），exit 反向；用 ListControllers 探测 gripper 实际 active 才纳入（新参 `freedrive_gripper_controller` 默认 `"gripper_controller"`）。
+  2. **回放语义（用户已选「记录 L7 + 回放终点位」）**：录制期间 L7 随体位记录；回放时经现有 GripperCommand 路径只重放记录轨迹的**最终 L7 值**（`_dispatch_trajectory` L7 末点分支），不回放 L7 全轨迹。
+- **验收标准：**
+  1. start_teach 后 list_controllers：`gripper_controller==inactive`、`zero_torque_controller==active`（STRICT 原子 swap 通过；zero_torque 覆盖 L1–L7）；TEACH 稳态 1 s 漂移 ≤0.02 rad（含 L7）
+  2. stop_teach 后反向恢复：gripper active、zero_torque inactive
+  3. 回放示教文件：L7 到位最终录制值，L1–L6 走关节轨迹
+  4. legacy 栈（edge_web_sim，无 controller_manager）不进 `_cm_freedrive_switch`，零影响
+- **关联：** F54（auto-save）、F73（standard ZeroTorqueController）、F87/F98（L7→GripperActionController 与限位 [0,1.78]）、F89b（freedrive FSM switch）、F110（mock 栈），[SAFETY.md](../shared/SAFETY.md) 示教小节
+- **状态：** `accepted`（2026-09-27 定稿；mock 验收进行中）
+
+## 验收标准
+
+1. `can-up.service` 启动后 `can1` 为 UP，1 Mbps
+2. `ros2 launch a3_bringup a3_bringup.launch.py` 无致命错误
+3. PS4 启动后 `/power_sequence/gate_open` 为 `true`
+4. 测试轨迹（见 [QUICKSTART.md](QUICKSTART.md)）在 2 s 内完成运动
+5. F60：Cross(X) 长按 1 s 硬急停后 gate 关闭；R3 失能（F40）；L3 一键 start+enable 到 READY
+6. MoveIt demo 可规划（mock 或真机模式）
+7. F6–F9：Wave A 见 [dev/WAVE_A_SIM_TEST_REPORT.md](../dev/WAVE_A_SIM_TEST_REPORT.md)
+8. F10–F15：见 QUICKSTART Wave B / [dev/WAVE_B_SIM_NOTES.md](../dev/WAVE_B_SIM_NOTES.md) / [dev/WAVE_B_SIM_TEST_REPORT.md](../dev/WAVE_B_SIM_TEST_REPORT.md)
+9. F16：`ros2 launch a3_bringup edge_teleop_sim.launch.py use_rviz:=true`；先 `joy_dump` 核对轴序
+
+## 关联文档
+
+- [ARCHITECTURE.md](ARCHITECTURE.md)
+- [QUICKSTART.md](QUICKSTART.md)
+- [PLATFORM_CAN.md](PLATFORM_CAN.md)
+- [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)
+- [shared/SAFETY.md](../shared/SAFETY.md)
+- [shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)

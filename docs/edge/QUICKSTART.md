@@ -76,7 +76,7 @@
     ```
     - **default（真机生产映射，F60+F64）**：L3 一键开门禁+使能、R3 safe-park 失能、Cross 长按 1 s 硬急停；Triangle=ready、Circle=home；示教三步 **Share=开始 / Options=结束(自动保存) / Square=回放(latest)**；PS=init、Options 长按 3 s=set_zero；**L1=平移死人开关、R1=旋转死人开关（F64）、R2 夹爪力控不需要死人开关**；D-pad 上下调平移速度、左右调旋转速度（独立、步长 0.15、范围 0.10–1.0、按住不连发）；左摇杆平移 Y/Z，右摇杆 right_y 平移 X、right_x 偏航。touchpad/L2 预留不绑。
     - **ready 点位（F109 取代 F69）+ 奇异阈值**：ready 已覆盖为 `[0,1.05,-1.575,0,0,0]`（折叠竖直构型；同步于包内 named_poses.yaml/SRDF 与 `~/.a3/poses.yaml`），pinocchio 复核臂重心投影在底座中心正上方（CoM_x=-8 mm）、静态重力矩和 1.90 N·m（较 F69 降 61%）。伺服奇异阈值 25/50（依据见 [shared/SAFETY.md](../shared/SAFETY.md)）；ready 点 cond6=29 略高于缩放起始 25，启动 Servo 若明显变软改用备选点 `[0,0.85,-0.675]`。真机 Triangle 到 ready 后若姿态明显异常先 Circle 回 home。
-    - **灯带五色（F61）**：红闪=失电/硬急停、红双闪=FAULT、橙=已上电未使能、绿=READY/SERVO、蓝呼吸=TEACH、紫=TRAJ（goto/回放/safe-park）、白闪一次=init 完成。震动：使能/失能 120 ms 弱震，硬急停 600 ms 强震，FAULT 双震。无手柄时逻辑帧看 `/a3/ds4/feedback`（JSON）。
+    - **灯带多色（F61/F125）**：红闪=失电/硬急停、红双闪=FAULT、橙=已上电未使能、绿=READY/SERVO、蓝呼吸=TEACH、紫=TRAJ（goto/回放/safe-park）、**青(cyan)=回首点（F125：回放前 MoveIt 规划段）**、白闪一次=init 完成。震动：使能/失能 120 ms 弱震，硬急停 600 ms 强震，FAULT 双震。无手柄时逻辑帧看 `/a3/ds4/feedback`（JSON）。
     - **操作员手册：[PS4_OPERATOR_GUIDE.md](PS4_OPERATOR_GUIDE.md)；完整参考表：`src/a3_teleop_ps4/README.md`。**
     - 改键位只编 `config/mappings/default.yaml`（零代码）；轴索引校准见 `config/ds4_linux.yaml`。
     - 勿另开 `servo.launch.py`（双 RSP + sim_executor 冲突）。
@@ -240,8 +240,9 @@
     ros2 service call /a3/zero_torque/start std_srvs/srv/Trigger "{}"
     ros2 service call /a3/zero_torque/stop std_srvs/srv/Trigger "{}"
 
-    # (f) 示教 5s → 回放（F54 自动保存 latest.yaml；F38b：回放先按 playback_ramp_duration_s 插值到首记录点，无跳变）
+    # (f) 示教 5s → 回放（F54 自动保存 latest.yaml；回首点默认走 MoveIt 规划 `playback_return_use_moveit:=true`（F124，灯 cyan），失败回落按 playback_ramp_duration_s 插值 ramp（F38b 无跳变））
     ros2 service call /a3/arm/start_teach std_srvs/srv/Trigger "{}"
+    #   示教期间夹爪随臂一体重力补偿释放（F127：zero_torque 覆盖 L1–L7，与 gripper 原子互切；防夹手勿把手指伸入夹具接触面）
     ros2 service call /a3/arm/stop_teach std_srvs/srv/Trigger "{}"
     #   stop_teach 即自动保存：latest.yaml + teach_TIMESTAMP.yaml（样本<阈值自动跳过）
     ros2 service call /a3/arm/playback a3_msgs/srv/PlaybackTrajectory "{name: ''}"
