@@ -117,6 +117,9 @@ zero_torque_controller:
       - L4_joint
       - L5_joint
       - L6_joint
+      # F127: 示教自由拖动（ZERO_TORQUE）期间 L7 随 L1-L6 一并释放；
+      # STRICT 互斥要求 enter 时把 gripper_controller 原子 swap 出（LL-136）
+      - L7_joint
     # URDF resolved at configure time: controller node robot_description param,
     # then urdf_path file, then the controller_manager node parameter.
     robot_description: ""

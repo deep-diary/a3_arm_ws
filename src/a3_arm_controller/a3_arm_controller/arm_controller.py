@@ -23,7 +23,7 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory, GripperCommand
-from controller_manager_msgs.srv import SetHardwareComponentState, SwitchController
+from controller_manager_msgs.srv import ListControllers, SetHardwareComponentState, SwitchController
 from lifecycle_msgs.msg import State as LifecycleState
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -536,6 +536,9 @@ class ArmController(Node):
         self._recording = False
         self._record_start = 0.0
         self._record: List[Tuple[float, List[float]]] = []
+        # F127: freedrive enter 是否真把 gripper 换出——INACTIVE 无法区分「被我们
+        # 停」与「未配置」，故记标志而非 exit 再探测（LL-136）
+        self._freedrive_gripper_swapped = False
 
         # 轨迹持久化目录
         self._traj_dir = os.path.expanduser(str(self.get_parameter("trajectories_dir").value))
@@ -666,6 +669,11 @@ class ArmController(Node):
         self._switch_cli = self.create_client(
             SwitchController,
             str(self.get_parameter("controller_manager_switch_srv").value),
+            callback_group=self._cb_group,
+        )
+        # F127/LL-136: 探测控制器 active 集合 → freedrive enter 是否连 gripper 一并 swap
+        self._list_cli = self.create_client(
+            ListControllers, "/controller_manager/list_controllers",
             callback_group=self._cb_group,
         )
         self._hw_state_cli = self.create_client(
@@ -1266,22 +1274,38 @@ class ArmController(Node):
 
     def _cm_freedrive_switch(self, enter: bool) -> Tuple[bool, str]:
         """
-        F89b: 标准栈自由拖动 = 一次原子 STRICT switch_controller 请求.
+        F89b/F127: 标准栈自由拖动 = 一次原子 STRICT switch_controller 请求.
 
-        enter: deactivate arm_controller + activate zero_torque_controller;
-        exit:  反之。switch_controller 在同一请求内完成互换，任一名无效即整体
-        拒绝、控制器保持原状，不会出现「臂既无位置闭环也无重力补偿」的窗口。
+        enter: deactivate arm_controller(+gripper_controller，若 realtime active) +
+               activate zero_torque_controller；
+        exit:  反向恢复。switch_controller 在同一请求内完成互换，任一名无效即整体
+        拒绝、控制器保持原状，不会出现「夹爪/臂既无闭环也无重力补偿」窗口。
+        F127/LL-136: gripper 与 zero_torque 都 claim L7/effort，STRICT 互斥 → enter
+        需先 probe gripper 是否 active 才能决定是否一并 swap 出去；INACTIVE 无法区分
+        「被我们停」与「未配置」，故 exit 凭 _freedrive_gripper_swapped 标志恢复。
         """
         if not self._wait_service(self._switch_cli, 3.0):
             return False, "controller_manager switch service unavailable"
         arm = str(self.get_parameter("freedrive_arm_controller").value)
         free = str(self.get_parameter("freedrive_controller").value)
+        grp = str(self.get_parameter("freedrive_gripper_controller").value)
+        with_g = self._freedrive_gripper_swapped
         req = SwitchController.Request()
         if enter:
+            if not self._wait_service(self._list_cli, 3.0):
+                return False, "controller_manager list service unavailable"
+            lf = self._list_cli.call_async(ListControllers.Request())
+            if not self._wait_future(lf, 3.0):
+                return False, "list_controllers timeout"
+            with_g = False
+            for c in lf.result().controller:
+                if c.name == grp and c.state == "active":
+                    with_g = True
+                    break
+            req.deactivate_controllers = [arm] + ([grp] if with_g else [])
             req.activate_controllers = [free]
-            req.deactivate_controllers = [arm]
         else:
-            req.activate_controllers = [arm]
+            req.activate_controllers = [arm] + ([grp] if with_g else [])
             req.deactivate_controllers = [free]
         req.strictness = SwitchController.Request.STRICT
         self.get_logger().info(
@@ -1295,6 +1319,7 @@ class ArmController(Node):
         res = future.result()
         if not bool(res.ok):
             return False, "switch_controller rejected (STRICT)"
+        self._freedrive_gripper_swapped = enter and with_g
         return True, ""
 
     def _motor_command(self, client, command: int) -> Tuple[bool, str]:
