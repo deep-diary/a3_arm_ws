@@ -19,6 +19,8 @@
     # LL-046: 2.5s→5s——ramp 把末位→首位差（如 L4 深垂 1.18 rad 段）压缩进 2.5s 会
     # 形成 ~0.47 rad/s 的突兀下砸，肉眼即"回放开局快/不平滑"；5s 拉平该过渡。
     playback_ramp_duration_s: 5.0
+    # F124: 回放回首点段走 move_group 轨迹规划（true，LED cyan）；false/规划失败回落 ramp
+    playback_return_use_moveit: true
     # LL-047: 回放低通平滑窗口（中心滑动平均，@50Hz 采样数）。手拖录制 50Hz 数据天然带
     # 加速度尖峰（实测 reBot L2 113 rad/s²），伺服忠实复现即"抖动"；7 点平滑把尖峰
     # 砍 ~93%（→~8 rad/s²），路径几何扰动 ≤20 mrad，停点几乎不动。0/1 关闭，热设置生效。
@@ -80,3 +82,5 @@
 
     trajectories_dir: "~/.a3/trajectories"
     named_poses_pkg: a3_description
+    # F127: 示教自由拖动（ZERO_TORQUE）时随 arm 一并互切的夹爪控制器（LL-136 原子 swap）
+    freedrive_gripper_controller: gripper_controller

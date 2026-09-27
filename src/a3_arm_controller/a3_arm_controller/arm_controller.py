@@ -359,6 +359,9 @@ class ArmController(Node):
         # 的原子 STRICT 切换；gripper_controller 不动，拖动中夹爪仍可用。
         self.declare_parameter("freedrive_arm_controller", "arm_controller")
         self.declare_parameter("freedrive_controller", "zero_torque_controller")
+        # F127: 示教自由拖动（ZERO_TORQUE）期间夹爪 L7 一并释放——enter 时 gripper
+        # 与 arm 同一原子 STRICT swap 出、exit 按进入时是否真带 g 恢复（LL-136）
+        self.declare_parameter("freedrive_gripper_controller", "gripper_controller")
         self.declare_parameter("freedrive_switch_timeout_s", 5.0)
         # F83/LL-086: Humble switch_controller does NOT auto-activate hardware
         # booted INACTIVE; arm/disarm must drive the component lifecycle
@@ -395,6 +398,9 @@ class ArmController(Node):
         self.declare_parameter("playback_velocity_scaling", 0.2)
         self.declare_parameter("playback_acceleration_scaling", 0.2)
         self.declare_parameter("playback_retime_min_duration_s", 1.0)
+        # F124: 回放回首点段走 move_group 轨迹规划（true，灯 cyan）；false 或规划失败
+        # 回落几何 ramp 插值（F38b，无跳变）
+        self.declare_parameter("playback_return_use_moveit", True)
         # LL-047: 回放低通平滑窗口（中心滑动平均，@50Hz 采样数）。7 点把录制 L2/L3 最大
         # 加速度 119/86 → ~8 rad/s²（-93%），几何扰动 ≤20 mrad；0/1 关闭。手拖录制天然带
         # 加速度尖峰，伺服忠实复现即"抖"——平滑压尖峰而非改路径。热设置回放前读取。
@@ -2306,7 +2312,9 @@ class ArmController(Node):
         if bool(self.get_parameter("goto_use_moveit").value):
             ok, duration, msg = self._moveit_move(q1[:6], JOINTS[:6], f"goto {name}")
             if ok:
-                duration = max(duration, self._dispatch_l7_linear(q1[6]))
+                if self._n_joints >= 7:
+                    # LL-077: move_group 只规划 arm 组，L7 需单独补下发；6J 变体无此关节
+                    duration = max(duration, self._dispatch_l7_linear(q1[6]))
                 self._schedule_back_to_ready(duration + 0.3)
                 resp.success = True
                 resp.message = msg
@@ -2769,9 +2777,30 @@ class ArmController(Node):
             if self._have_js else 0.0
         )
         use_ramp = ramp_s > 0.05 and self._have_js and ramp_dist > 0.02
+        # F124: use_ramp 且 playback_return_use_moveit=true 时，回首点段改用 move_group
+        # 轨迹规划（OMPL+TOTG，经 FJT→执行层），覆盖几何 ramp；灯带该段 cyan。MoveIt
+        # 不可用/规划/执行失败 → WARN 并回落 join-ramp（与 goto 现行为一致）。
+        first_q = recorded_std[0]
+        moved = False
+        r_dur = 0.0
+        if use_ramp and bool(self.get_parameter("playback_return_use_moveit").value):
+            ok, dur, msg = self._moveit_move(
+                first_q[:6], JOINTS[:6], f"playback return {label}")
+            if ok:
+                moved = True
+                # 覆盖 _moveit_move 的 "(planning)" 状态 → LED cyan 判定前缀
+                self._set_state(STATE_TRAJ, f"playback return {label}")
+                r_dur = dur
+                if self._n_joints >= 7:
+                    # LL-077: move_group 只规划 arm 组（L1–L6），首点夹爪位补下发
+                    r_dur = max(dur, self._dispatch_l7_linear(first_q[6]))
+            else:
+                self.get_logger().warn(
+                    f"playback return {label}: {msg} -- join-ramp fallback")
+        ramp_in_geo = use_ramp and not moved
         geo: List[List[float]] = []
         geo_times: List[float] = []
-        if use_ramp:
+        if ramp_in_geo:
             q0 = list(self._positions)
             q1 = recorded_std[0]
             geo = [q0, q1]
@@ -2798,7 +2827,8 @@ class ArmController(Node):
             if bool(self.get_parameter("playback_match_recorded_duration").value):
                 # Ruckig 用录制时刻播种（结果时长天然逼近录制）；TOTG 兜底时
                 # target_duration 驱动服务端迭代缩放限值。
-                target = max(recorded_duration, ramp_s if use_ramp else 0.0, min_dur)
+                # R5/F124: MoveIt 回首点已另耗 r_dur，此处排除 ramp_s 防重定时拖长
+                target = max(recorded_duration, ramp_s if ramp_in_geo else 0.0, min_dur)
             ok, rtraj, msg = self._call_retime(
                 geo, self._joint_names, backend, v_scale, a_scale,
                 geo_times=geo_times, target_duration=target,
@@ -2820,7 +2850,7 @@ class ArmController(Node):
                 pt.positions = list(pos)
                 pt.time_from_start = _duration(t)
                 traj.points.append(pt)
-            if use_ramp:
+            if ramp_in_geo:
                 q1 = [float(v) for v in traj.points[0].positions]
                 q0: List[float] = []
                 for jn in traj.joint_names:
@@ -2858,6 +2888,9 @@ class ArmController(Node):
         ok, dmsg = self._dispatch_trajectory(traj)
         if not ok:
             self._publish_mode("IDLE")
+            # R6/F124: phase R（MoveIt 回首点）已把 state 置于 TRAJ，此处失败必须
+            # 显式复位 READY，否则 FSM 卡在 TRAJ/灯带滞留
+            self._set_state(STATE_READY, f"playback {label}: {dmsg}")
             resp.success = False
             resp.message = dmsg
             return resp
@@ -2867,6 +2900,8 @@ class ArmController(Node):
         suffix = f"retime [{retime_msg}]" if retime_msg else "legacy chain"
         resp.success = True
         resp.message = f"playback {label} ({len(traj.points)} pts, {duration:.1f}s, {suffix})"
+        if moved:
+            resp.message += f"; return=MoveIt {r_dur:.1f}s"
         return resp
 
     def _enter_ai_cb(self, req: Trigger.Request, resp: Trigger.Response) -> Trigger.Response:
