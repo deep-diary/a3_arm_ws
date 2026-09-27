@@ -37,7 +37,7 @@
 | `TEACH` | 示教拖动 | 零力矩（执行层 ZERO_TORQUE） | ⇔ zero_torque/start|
 | `AI` | AI/大模型接管 | 外部直发轨迹 | 编排层只守入口 |
 | `SERVO` | **保留/防御态** | （当前无入口） | PS4 伺服走 mode=SERVO 共享位 |
-| `SAFE_PARK` | F40 平滑回 home | park 轨迹 | disable/超温保护中 |
+| `SAFE_PARK` | F40 平滑回 idle | park 轨迹 | disable/超温保护中 |
 | `DISABLED` | 已失能 | 电机 off | disable / 带外失能到达 |
 | `COOLING` | 超温保护降温 | 电机 off | 降温达标才放行 enable |
 | `FAULT` | 故障锁存 | 已紧急 reset | 需人工恢复（init/enable） |
@@ -161,12 +161,12 @@ flowchart TD
     M -- 是 --> E9["⛔ 先 /a3/zero_torque/stop 再 disable<br/>紧急 /a3/motor/reset"]
     M -- 否 --> JS{"有 /joint_states?"}
     JS -- 无 --> E5["直达 reset + WARN → DISABLED"]
-    JS -- 有 --> HM{"在 home ±tol?"}
+    JS -- 有 --> HM{"在 idle ±tol?"}
     HM -- 是 --> E4
-    HM -- 否 --> PK["SAFE_PARK 平滑回 home"]
+    HM -- 否 --> PK["SAFE_PARK 平滑回 idle"]
     PK --> R{"reset ok?"}
     R -- ok --> E3["DISABLED"]
-    R -- 被拒--> E6["回 READY（已在 home，安全）"]
+    R -- 被拒--> E6["回 READY（已在 idle，安全）"]
     PK -. park 超时 .-> E7["FAULT（保持使能，人工介入）"]
     PK -. 带外失能 .-> E3
 ```

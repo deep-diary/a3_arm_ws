@@ -47,6 +47,7 @@ def generate_launch_description():
     use_gripper = LaunchConfiguration("use_gripper")
     mapping = LaunchConfiguration("mapping")
     use_joy_node = LaunchConfiguration("use_joy_node")
+    use_servo_anchor = LaunchConfiguration("use_servo_anchor")
 
     desc_share = get_package_share_directory("a3_description")
     moveit_share = get_package_share_directory("a3_moveit_config")
@@ -81,6 +82,13 @@ def generate_launch_description():
     servo_yaml = load_yaml("a3_moveit_config", "config/servo_config.yaml")
     servo_params = {"moveit_servo": servo_yaml}
     servo_params.update(servo_yaml)
+    # F118 接线：servo_config.yaml 的 command_out_topic 是绝对话题名，remap 无法
+    # 改写 → 参数层面覆盖（与 a3_bringup.launch.py / edge_web_sim.launch.py 一致）。
+    servo_params["moveit_servo"]["command_out_topic"] = IfElseSubstitution(
+        use_servo_anchor,
+        "/a3/servo/joint_trajectory/cmd",
+        "/a3/servo/joint_trajectory",
+    )
 
     servo_mode_bridge = Node(
         package="a3_bringup",
@@ -103,9 +111,32 @@ def generate_launch_description():
         ],
         remappings=[
             ("~/delta_twist_cmds", "/servo_node/delta_twist_cmds"),
-            ("~/command_out", "/a3/servo/joint_trajectory"),
+            # F118：use_servo_anchor:=true 时改道 /cmd，anchor 锚定后转发
+            (
+                "~/command_out",
+                IfElseSubstitution(
+                    use_servo_anchor,
+                    "/a3/servo/joint_trajectory/cmd",
+                    "/a3/servo/joint_trajectory",
+                ),
+            ),
         ],
         output="screen",
+    )
+    servo_anchor_node = Node(
+        package="a3_bringup",
+        executable="servo_anchor",
+        name="a3_servo_anchor",
+        output="screen",
+        parameters=[
+            {
+                "in_topic": "/a3/servo/joint_trajectory/cmd",
+                "out_topic": "/a3/servo/joint_trajectory",
+                "joint_states_topic": "/joint_states",
+                "max_joint_delta_rad": 0.05,
+            }
+        ],
+        condition=IfCondition(use_servo_anchor),
     )
 
     teleop = GroupAction([
@@ -162,9 +193,15 @@ def generate_launch_description():
             default_value="default",
             description="PS4 映射（config/mappings/<name>.yaml）",
         ),
+        DeclareLaunchArgument(
+            "use_servo_anchor",
+            default_value="false",
+            description="F118: 在 servo 下游叠 a3_servo_anchor 累积器（绝对目标/外力回弹）",
+        ),
         web_sim,
         servo_mode_bridge,
         servo_node,
+        servo_anchor_node,
         teleop,
         rviz,
     ])

@@ -6,7 +6,8 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import Command
+from launch.conditions import IfCondition
+from launch.substitutions import Command, IfElseSubstitution, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 import yaml
@@ -36,10 +37,23 @@ def generate_launch_description():
     # and under moveit_servo in others — provide both.
     servo_params = {"moveit_servo": servo_yaml}
     servo_params.update(servo_yaml)
+    use_servo_anchor = LaunchConfiguration("use_servo_anchor")
+    # F118 接线：servo_config.yaml 的 command_out_topic 是绝对话题名，remap 无法
+    # 改写 → 参数层面覆盖（与 a3_bringup.launch.py / edge_web_sim.launch.py 一致）。
+    servo_params["moveit_servo"]["command_out_topic"] = IfElseSubstitution(
+        use_servo_anchor,
+        "/a3/servo/joint_trajectory/cmd",
+        "/a3/servo/joint_trajectory",
+    )
 
     return LaunchDescription(
         [
             DeclareLaunchArgument("use_sim", default_value="true"),
+            DeclareLaunchArgument(
+                "use_servo_anchor",
+                default_value="false",
+                description="F118: 在 servo 下游叠 a3_servo_anchor 累积器（绝对目标/外力回弹）",
+            ),
             Node(
                 package="robot_state_publisher",
                 executable="robot_state_publisher",
@@ -72,9 +86,32 @@ def generate_launch_description():
                 ],
                 remappings=[
                     ("~/delta_twist_cmds", "/servo_node/delta_twist_cmds"),
-                    ("~/command_out", "/a3/servo/joint_trajectory"),
+                    # F118：use_servo_anchor:=true 时改道 /cmd，anchor 锚定后转发
+                    (
+                        "~/command_out",
+                        IfElseSubstitution(
+                            use_servo_anchor,
+                            "/a3/servo/joint_trajectory/cmd",
+                            "/a3/servo/joint_trajectory",
+                        ),
+                    ),
                 ],
                 output="screen",
+            ),
+            Node(
+                package="a3_bringup",
+                executable="servo_anchor",
+                name="a3_servo_anchor",
+                output="screen",
+                parameters=[
+                    {
+                        "in_topic": "/a3/servo/joint_trajectory/cmd",
+                        "out_topic": "/a3/servo/joint_trajectory",
+                        "joint_states_topic": "/joint_states",
+                        "max_joint_delta_rad": 0.05,
+                    }
+                ],
+                condition=IfCondition(use_servo_anchor),
             ),
         ]
     )

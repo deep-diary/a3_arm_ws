@@ -15,6 +15,15 @@
     require_gate: false
 
     goto_duration_s: 3.0
+    # goto position（goto_use_moveit=true 走 move_group）规划时间调慢：velocity+acc
+    # 0.30→0.15 使整条轨迹时长约翻倍，实际关节速度随之减半（2026-09-26 用户反馈
+    # "goto 规划出来挺快"；真机实测 p95 已 0.3 rad/s、p99 ~2 rad/s，减速在 L2/L3 亦有
+    # 减小 JTC 跟踪误差余量的附加收益）
+    moveit_velocity_scaling: 0.15
+    moveit_acceleration_scaling: 0.15
+    # F116: /a3/arm/random_pose_tour 默认抽点数与点位池黑名单（zero=机械零位，真机排除）
+    random_tour_count: 5
+    random_tour_exclude_poses: ["zero"]
     # 回放前从当前位姿插值到首记录点的时长（s）；≤0.05 关闭插值（F38）
     # LL-046: 2.5s→5s——ramp 把末位→首位差（如 L4 深垂 1.18 rad 段）压缩进 2.5s 会
     # 形成 ~0.47 rad/s 的突兀下砸，肉眼即"回放开局快/不平滑"；5s 拉平该过渡。
@@ -42,8 +51,8 @@
     teach_save_smooth_samples: 5
     # F41/F88: move_to/goto 兜底——最短时长；两点轨迹由 JTC splines 插值
     move_to_min_duration_s: 3.0
-    # F40: 失能保护（不在 home 容差内先平滑回 home 再失能，防掉臂）
-    disable_home_pose_name: home
+    # F40: 失能保护（不在 idle 容差内先平滑回 idle 再失能，防掉臂）；F113 home→idle
+    disable_home_pose_name: idle
     disable_home_tol_rad: 0.15
     disable_home_duration_s: 5.0
     disable_home_confirm_s: 0.5
@@ -51,11 +60,13 @@
     # F75: 工业级落定判据——位置 AND 速度双落定连续 confirm_s 才允许失能
     disable_home_settle_tol_rad: 0.02
     disable_home_settle_vel_rad_s: 0.05
+    # F119: R3 任意模式软失能——退出 SERVO/零力矩/重力补偿模式的等待上限（s）
+    disable_mode_exit_timeout_s: 2.0
     # F43: 最大力矩持久化
     motor_states_topic: /a3/motor/states
     torque_stats_file: "~/.a3/stats/torque_stats.yaml"
     torque_stats_save_interval_s: 10.0
-    # F44: 温度管理（warn 仅告警；protect 自动回 home 失能降温；迟滞恢复）
+    # F44: 温度管理（warn 仅告警；protect 自动回 idle 失能降温；迟滞恢复）
     # 阈值 2026-09-13 真机调高：官方电机自带 130°C 保护兜底，初版 65°C 过低
     # （ready 位 L3 保位 1.26 Nm 几分钟即触发 overtemp park，LL-023）
     temp_protect_enabled: true

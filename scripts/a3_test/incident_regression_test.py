@@ -5,7 +5,7 @@
   ① 示教退出把 MIT 目标重锚到拖动位姿（L2=1.98 rad）；
   ② 看门狗假触发 HOLD_DRIFT → /a3/motor/stop 写 NaN + 卸力帧——但卸力帧不改变
      mode（仍=2），refresh 播种分支 5 ms 后把 NaN 覆盖、目标锚回拖动位姿；
-  ③ 看门狗升级 reset → 电机 mode 0（人工把臂搬回 home，实际 0.03 rad）；
+  ③ 看门狗升级 reset → 电机 mode 0（人工把臂搬回 idle，实际 0.03 rad）；
   ④ /a3/arm/enable → kp=80 对 2 rad 误差满输出 → 3 s 甩到位，甩断 L6 打印关节。
 
 本测试断言修复后的行为（F51）：
@@ -62,7 +62,7 @@ FEEDBACK_HZ = 50.0
 PLANT_MAX_SPEED = 6.0      # rad/s，一阶跟随的限速（模拟真实关节被驱动时的运动）
 
 Q_DRAG = 1.98    # 示教拖动后的 L2 位姿（真机事故值 1.98462）
-Q_HOME = 0.03    # 人工搬回 home 后（真机 0.0286）
+Q_HOME = 0.03    # 人工搬回 idle 后（真机 0.0286）
 TOL_CMD = 0.10   # 使能后命令位置与反馈位允许的最大偏差（rad）
 
 
@@ -317,7 +317,7 @@ def main():
                 return 2
         log("→ 服务就绪")
 
-        # 初始位姿：home，全部失能
+        # 初始位姿：idle，全部失能
         for m in node.motors:
             node.set_pose(m, Q_HOME)
         time.sleep(1.0)   # 等 refresh 保活帧 + 反馈新鲜度建立
@@ -382,7 +382,7 @@ def main():
         else:
             log("T3 reset → motor2 mode=0 ✓")
 
-        # ---- T4 人工搬回 home → 使能必须重锚 + 软起步 ----
+        # ---- T4 人工搬回 idle → 使能必须重锚 + 软起步 ----
         node.set_pose(2, Q_HOME)
         time.sleep(0.3)
         t_en = node.t()
@@ -452,7 +452,7 @@ def main():
         if not stale_cmd or abs(stale_cmd[-1][3] - Q_STALE) > 0.10:
             failures.append(f"T5 前置失败：满关节轨迹未把 L2 目标带到 {Q_STALE}: {stale_cmd[-1:]}")
         else:
-            # 失能 + 人工搬回 home（与事故时间线一致）
+            # 失能 + 人工搬回 idle（与事故时间线一致）
             call(node, cli["stop"], MotorStop.Request(motor_id=0))
             call(node, cli["reset"], MotorCommand.Request(motor_id=0, command=2))
             time.sleep(0.4)

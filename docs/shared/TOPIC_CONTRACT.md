@@ -19,7 +19,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | 笛卡尔运动 | `a3_msgs/action/MoveToPose` | IK + 轨迹执行 |
 | Servo 速度 | `geometry_msgs/TwistStamped` | MoveIt Servo 输入 |
 | 手柄 | `sensor_msgs/Joy` | `joy_node` 轴/按键 |
-| 命名姿态 | `std_msgs/String` | `zero` / `home` / `ready`（`work` 已并入 `ready`，2026-09-13） |
+| 命名姿态 | `std_msgs/String` | `zero` / `idle` / `ready`（`work` 并入 `ready` 2026-09-13；`home` 改名 `idle` F113 2026-09-26） |
 | 夹爪开合 | `std_msgs/Float32` | 0 闭合 … 1 张开（POSITION 模式输入） |
 | 夹爪力控命令 | `a3_msgs/srv/GripperCommand` | `mode`：`position`/`force`/`release`/`stop`；`position` 0–1；`torque_nm` 目标握力；`timeout_s` |
 | 夹爪配置 | `a3_msgs/srv/GripperSetConfig` | 键值下发（`max_torque_nm` 等），返回是否接受与原因 |
@@ -34,7 +34,8 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | 话题 | 优先级 | 说明 |
 |------|--------|------|
 | `/joint_group_effort_controller/joint_trajectory` | 主 | 执行层默认输入（含 `effort` 重力补偿后）；编排层多点轨迹/FJT/重力保持/web 单关节。**`control_mode=SERVO` 时执行层互锁丢弃** |
-| `/a3/servo/joint_trajectory` | Servo 专用 | L6：MoveIt Servo `command_out` 50Hz 单点帧（F65）。执行层**仅在 gate 开 + `SERVO` 模式**消费，插值 tick 200Hz 直接刷新 MIT 目标；看门狗订阅本话题同步保持参照。与主轨迹话题物理分离，互不抢占 |
+| `/a3/servo/joint_trajectory` | Servo 专用 | L6：50Hz 单点帧（F65）。默认直连 MoveIt Servo `command_out`；**`use_servo_anchor:=true` 时改经 `a3_servo_anchor` 锚定**（F118：`anchor = clamp(anchor + clamp(in − measured, ±0.05), URDF 限位)`，绝对目标抗外力漂移）后再对外。执行层**仅在 gate 开 + `SERVO` 模式**消费，插值 tick 200Hz 直接刷新 MIT 目标；看门狗订阅本话题同步保持参照。与主轨迹话题物理分离，互不抢占 |
+| `/a3/servo/joint_trajectory/cmd` | Servo 专用（内部） | L6：MoveIt Servo 原始 `command_out`（**RELIABLE**，moveit_servo 2.5.x 发布侧 QoS(1)；anchor 订阅 QoSProfile(depth=10) 亦 RELIABLE，已核验实测可达），仅由 `a3_servo_anchor` 订阅（`use_servo_anchor:=true` 时 `~/command_out` 重映射到此）。**未清洗的原始增量目标，勿直接消费** |
 | `/a3/planned_joint_trajectory` | 规划输出 | CloudEdge：MoveIt / 测试发布器 → 重力补偿节点 |
 | `/a3/joint_trajectory` | 桥接 | 测试与外部集成 |
 | `/rebotarm/joint_trajectory` | 桥接 | reBot 工具链输出 |
@@ -58,6 +59,8 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/control_mode` | `std_msgs/String` | 模式互锁广播 |
 | `/a3/gravity_compensation/start\|stop` | `std_srvs/Trigger` | 重力补偿 |
 | `/a3/zero_torque/start\|stop` | `std_srvs/Trigger` | 零力矩/拖动（软 kp + 重力 FF）；F127 起重力补偿覆盖 **L1–L7**（含夹爪，start_teach 时与 gripper_controller 原子互切释放夹爪） |
+| `/a3/servo_anchor/reanchor` | `std_srvs/Trigger` | F118：`a3_servo_anchor` 锚点手动重置到当前位置（写入后下一帧重锚定）。默认无需调用（锚自动随指令爬行），用于外部绝对参考切换 |
+| `/a3/motor/sim_push` | `std_srvs/Trigger` | F118：**仅仿真**（`sim_motor_node`，`sim_push_enabled` 参数开关，默认关）。按 `sim_push_rad[7]` 给每个关节 plant 位置加扰动（不动 target）——模拟瞬态外力/外力矩，是 F118「伺服抗漂移」判据的注入源。真机栈无此服务 |
 | `/a3/move_to_pose_ik` | `a3_msgs/srv/MoveToPoseIK` | 仅 IK |
 | `/a3/move_to_pose` | `a3_msgs/action/MoveToPose` | IK + 执行 |
 | `/a3/gravity_torque` | `sensor_msgs/JointState` | URDF 系重力力矩（effort） |
@@ -117,8 +120,9 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 |------|------|------|
 | `/a3/arm/init` | `std_srvs/Trigger` | 设零 → 异步确认 7 电机到位 → 使能；`message` 携带 `n/7`。F48：读数越限只 WARN 不阻断（恢复路径——set_zero 把当前位姿定义为零位，仅限已知位姿执行） |
 | `/a3/arm/enable` | `std_srvs/Trigger` | 使能 7 电机，状态 → `READY`。F48：使能前读数限位门禁——越限（疑似断电多圈环绕）或无 /joint_states 一律拒绝并点名关节（`enable_position_check`） |
-| `/a3/arm/disable` | `std_srvs/Trigger` | 失能保护（F40）：不在 home 容差内先自动平滑回 home（SAFE_PARK）再失能，状态 → `SAFE_PARK → DISABLED`；容差内直达。`success=true ⟺ 已失能`；park 超时 → FAULT 不 reset；reset 被 gate 拒 → 失败/回 READY（语义表见 [SAFETY.md](SAFETY.md)「失能保护」） |
+| `/a3/arm/disable` | `std_srvs/Trigger` | 失能保护（F40）：不在 idle 容差内先自动平滑回 idle（SAFE_PARK）再失能，状态 → `SAFE_PARK → DISABLED`；容差内直达。`success=true ⟺ 已失能`；park 超时 → FAULT 不 reset；reset 被 gate 拒 → 失败/回 READY（语义表见 [SAFETY.md](SAFETY.md)「失能保护」） |
 | `/a3/arm/goto_named_pose` | `a3_msgs/srv/GotoNamedPose` | `pose_name` 按 `named_poses.yaml` 插值下发 |
+| `/a3/arm/random_pose_tour` | `a3_msgs/srv/RandomPoseTour` | F116：从 `named_poses.yaml` 点位池随机抽 `count`（0=参数 `random_tour_count` 默认 5）个点，允许重复但相邻不重，从当前位姿起逐点 MoveIt 规划执行；`seed` 非 0 可复现；池由参数 `random_tour_exclude_poses`（默认 `["zero"]`）过滤。返回 `success/message/sequence[]/total_duration_s`，任一腿失败即中止并回传已完成序列；L7 不参与 |
 | `/a3/arm/set_joint_positions` | `a3_msgs/srv/SetJointPositions` | 设 7 关节目标位置（`positions[7]` + `duration`），限位 clamp 后短插值下发；节流连续下发以覆盖语义衔接 |
 | `/a3/arm/set_payload` | `a3_msgs/srv/SetPayload` | 登记末端负载（`mass_kg` + `com_m[3]` 相对 gripper_link 质心偏移）：质量须 ≤ `rated_payload_kg`(1.5)；已使能时当前位形静态力矩门不通过则拒绝并保持旧值。静态/占空比门禁见 [SAFETY.md](SAFETY.md)「额定负载与占空比门禁」（F107） |
 | `/a3/arm/start_teach` | `std_srvs/Trigger` | 切零力矩拖动 + 开始记录 |
@@ -169,7 +173,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 下行 `cmd`（JSON，QoS 建议 1）：
 
 ```json
-{ "op": "goto", "args": { "pose": "home" } }
+{ "op": "goto", "args": { "pose": "idle" } }
 ```
 
 | op | args | 对应服务 |
@@ -177,7 +181,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `init` | `{}` | `/a3/arm/init`（Trigger） |
 | `enable` | `{}` | `/a3/arm/enable` |
 | `disable` | `{}` | `/a3/arm/disable` |
-| `goto` | `{"pose": "zero\|home\|ready"}` | `/a3/arm/goto_named_pose`（`pose_name=args.pose`） |
+| `goto` | `{"pose": "zero\|idle\|ready"}` | `/a3/arm/goto_named_pose`（`pose_name=args.pose`） |
 | `set_joints` | `{"positions": [7 个 rad], "duration": 0.3}` | `/a3/arm/set_joint_positions`（`SetJointPositions`，滑动条 jog 直驱，限位 clamp + 短插值） |
 | `teach_start` | `{}` | `/a3/arm/start_teach` |
 | `teach_stop` | `{}` | `/a3/arm/stop_teach` |
@@ -189,7 +193,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 回执 `cmd_result`（JSON）：
 
 ```json
-{ "op": "goto", "ok": true, "message": "goto home done", "ts": "2026-09-02T13:30:00+08:00" }
+{ "op": "goto", "ok": true, "message": "goto idle done", "ts": "2026-09-02T13:30:00+08:00" }
 ```
 
 - `op`：回显指令 op；`ok`：服务 `success`（未知 op / 服务不可用 / 调用异常均为 `false`）；`message`：服务返回文本或错误原因（如 `init` 的 `n/7`）；`ts`：本地 ISO8601 时间戳。
@@ -200,7 +204,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 
 ### 状态机与仲裁
 
-11 态状态机（F45）：`IDLE → INIT → READY`；`READY ↔ TRAJ / SERVO / TEACH / AI`；保护路径 `READY/TRAJ → SAFE_PARK → DISABLED`（disable 非 home，F40）或 `→ COOLING`（温度保护，F44）；`SAFE_PARK 超时 / reset 被拒 / motor fault → FAULT`；`enable（COOLING 已降温）→ READY`。IDLE = 上电未初始化；DISABLED = 曾使能已失能、须显式 enable。
+11 态状态机（F45）：`IDLE → INIT → READY`；`READY ↔ TRAJ / SERVO / TEACH / AI`；保护路径 `READY/TRAJ → SAFE_PARK → DISABLED`（disable 非 idle，F40）或 `→ COOLING`（温度保护，F44）；`SAFE_PARK 超时 / reset 被拒 / motor fault → FAULT`；`enable（COOLING 已降温）→ READY`。IDLE = 上电未初始化；DISABLED = 曾使能已失能、须显式 enable。
 
 | 状态 | 含义 | 运动命令 |
 |------|------|----------|
@@ -209,8 +213,8 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `READY` | 已使能待命 | 允许（受 mode/gate 互锁） |
 | `TRAJ` | 轨迹执行中 | 新轨迹替换活跃轨迹（F40 park 抢占） |
 | `SERVO` / `TEACH` / `AI` | 专项模式 | 拒绝（busy） |
-| `SAFE_PARK` | 回 home 中（disable/温度保护） | 拒绝「already safe parking」 |
-| `DISABLED` | 已失能（在 home） | 拒绝，须显式 enable |
+| `SAFE_PARK` | 回 idle 中（disable/温度保护） | 拒绝「already safe parking」 |
+| `DISABLED` | 已失能（在 idle） | 拒绝，须显式 enable |
 | `COOLING` | 温度保护后降温 | 拒绝，降温至保护阈−迟滞后方可 enable |
 | `FAULT` | 不可恢复事件 | 拒绝（`disable` 直达 reset 恢复） |
 

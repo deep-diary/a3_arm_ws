@@ -43,16 +43,18 @@ N_BTN = 14
 AX_LX, AX_LY, AX_L2, AX_RX, AX_RY, AX_R2, AX_DX, AX_DY = range(8)
 TRIG_REST, TRIG_PRESSED = 1.0, -1.0
 
-_BUILTIN_READY = [0.0, 0.785, -1.57, 0.0, 0.785, 0.0, 0.0]
 _BUILTIN_HOME = [0.0, 0.785, -0.785, 0.0, 0.0, 0.0, 0.0]
+_BUILTIN_IDLE = [-0.0002, 0.0006, 0.0002, 0.3351, 0.0121, -0.0002, -0.0002]
 POSE_TOL = 0.08
 
 
 def _load_named_pose(name, builtin):
-    """~/.a3/poses.yaml 覆盖包内置位姿（真机标定值；arm_controller 同规则）。"""
+    """包内置位姿（a3_description/config/named_poses.yaml；F113 起 ~/.a3/poses.yaml 弃用）。"""
     try:
         import yaml
-        with open(os.path.expanduser("~/.a3/poses.yaml"), "r", encoding="utf-8") as f:
+        from ament_index_python.packages import get_package_share_directory
+        share = get_package_share_directory("a3_description")
+        with open(os.path.join(share, "config", "named_poses.yaml"), "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         p = (data.get("poses") or {}).get(name)
         if isinstance(p, dict):
@@ -64,8 +66,14 @@ def _load_named_pose(name, builtin):
     return builtin
 
 
-READY_POSE = _load_named_pose("ready", _BUILTIN_READY)
 HOME_POSE = _load_named_pose("home", _BUILTIN_HOME)
+IDLE_POSE = _load_named_pose("idle", _BUILTIN_IDLE)
+
+# F115: home 周边 4 个笛卡尔偏移点（值同 named_poses.yaml，离线兜底）
+HOME_BACK_POSE = _load_named_pose("home_back", [0.0, 1.8674, -1.6192, -0.2482, 0.0, 0.0, 0.0])
+HOME_FRONT_POSE = _load_named_pose("home_front", [0.0, 0.1266, -0.8918, 0.7653, 0.0, 0.0, 0.0])
+HOME_UP_POSE = _load_named_pose("home_up", [0.0, 1.2862, -1.9643, 0.678, 0.0, 0.0, 0.0])
+HOME_DOWN_POSE = _load_named_pose("home_down", [0.0, 0.7154, -0.2479, -0.4675, 0.0, 0.0, 0.0])
 
 LATEST_YAML = os.path.expanduser("~/.a3/trajectories/latest.yaml")
 
@@ -300,20 +308,20 @@ def main():
     green = fb_any(t0, lambda d: d.get("color") == "green" and d.get("state") == "READY")
     rep.check("S1 随后绿灯 READY", green)
 
-    # ---- 场景 2：Triangle → ready，TRAJ/紫 → READY/绿 ----
+    # ---- 场景 2：Triangle → home，TRAJ/紫 → READY/绿 ----
     node.sleep(0.5)
     t0 = node.marker()
-    print("[INFO] 场景2: Triangle 短按（goto ready）", flush=True)
+    print("[INFO] 场景2: Triangle 短按（goto home）", flush=True)
     node.tap(B_TRIANGLE)
     purple_goto = False
-    ok_pose = node.wait_pose(READY_POSE, POSE_TOL, 9.0)
+    ok_pose = node.wait_pose(HOME_POSE, POSE_TOL, 9.0)
     purple_goto = fb_any(t0, lambda d: d.get("color") == "purple"
-                         and "goto ready" in d.get("reason", ""))
+                         and "goto home" in d.get("reason", ""))
     ok_ready = node.wait_arm("READY", 3.0)
     q = node.joints()
-    rep.check("S2 收敛 ready 位姿（tol 0.08）", ok_pose,
-              f"maxerr={pose_err(q, READY_POSE):.3f} q={['%.2f' % x for x in (q or [])]}")
-    rep.check("S2 过程紫灯 TRAJ(goto ready)", purple_goto)
+    rep.check("S2 收敛 home 位姿（tol 0.08）", ok_pose,
+              f"maxerr={pose_err(q, HOME_POSE):.3f} q={['%.2f' % x for x in (q or [])]}")
+    rep.check("S2 过程紫灯 TRAJ(goto home)", purple_goto)
     rep.check("S2 结束回 READY/绿灯", ok_ready and green_steady(node),
               f"state={node.arm_state()}")
     node.sleep(4.0)  # 等 mapper pose_block（响应后锁 3.5s）释放
@@ -356,11 +364,11 @@ def main():
     rep.check("S4 松手释放：L7 回到 ≤0.15rad", q_end <= 0.15, f"q7={q_end:.3f}")
 
     # ---- 场景 5：F64 双死人开关（L1 平移 / R1 旋转）+ D-pad 独立调速 ----
-    # 必须从 ready 标定位开始：平移扫轴会漂向腕部奇异区，折叠 home 位 servo 直接
+    # 必须从 home 标定位开始：平移扫轴会漂向腕部奇异区，折叠 idle 位 servo 直接
     # IK -31 / emergency stop（LL-007 族，实测见 /tmp 栈日志）。
-    print("[INFO] 场景5 预备: Triangle 回 ready（逐轴前离开奇异区）", flush=True)
+    print("[INFO] 场景5 预备: Triangle 回 home（逐轴前离开奇异区）", flush=True)
     node.tap(B_TRIANGLE)
-    node.wait_pose(READY_POSE, POSE_TOL, 9.0)
+    node.wait_pose(HOME_POSE, POSE_TOL, 9.0)
     node.wait_arm("READY", 3.0)
     node.sleep(4.0)  # 等 mapper pose_block（goto 后锁 3.5s）释放
 
@@ -401,11 +409,11 @@ def main():
                   f"Δ{ee_key}={d:+.3f}m  ee0={['%.3f' % v for v in (ee0 or [])]}"
                   f"→{['%.3f' % v for v in (ee1 or [])]}")
 
-    # 平移扫轴后构型漂向奇异；回 ready 再做门控互斥/偏航。
-    print("[INFO] 场景5b 预备: Triangle 回 ready（门控互斥前离开奇异区）",
+    # 平移扫轴后构型漂向奇异；回 home 再做门控互斥/偏航。
+    print("[INFO] 场景5b 预备: Triangle 回 home（门控互斥前离开奇异区）",
           flush=True)
     node.tap(B_TRIANGLE)
-    node.wait_pose(READY_POSE, POSE_TOL, 9.0)
+    node.wait_pose(HOME_POSE, POSE_TOL, 9.0)
     node.wait_arm("READY", 3.0)
     node.sleep(4.0)
 
@@ -472,7 +480,7 @@ def main():
     rep.check("S5c 松死人开关后 ~1s 停住（Δ<0.03rad）",
               d_halt < 0.03, f"maxΔ={d_halt:.4f}")
 
-    # ---- S5d：D-pad 双独立速度档（用下发 twist 模长断言）----
+    # ---- S5d：F115 D-pad 4 键 → home 周边 4 个偏移点位（F64 调速已退役）----
     def measure_linear():
         node.press(B_L1)
         node.sleep(0.2)
@@ -503,83 +511,58 @@ def main():
         node._axes[axis] = 0.0
         node.sleep(0.3)
 
-    print("[INFO] 场景5d: 基线 twist（初始档 0.35）", flush=True)
+    print("[INFO] 场景5d: 基线平移 twist（默认档 0.35）", flush=True)
     v_lin0 = measure_linear()
     rep.check("S5d 基线平移 twist >0.05m/s", v_lin0 > 0.05,
               f"|lin|max={v_lin0:.3f}")
 
-    print("[INFO] 场景5d: D-pad 上持续按住（0→-1 单边沿，平移档 0.35→0.50）",
+    dpad_keys = [
+        ("上", AX_DY, -1.0, "home_up", HOME_UP_POSE),
+        ("下", AX_DY, 1.0, "home_down", HOME_DOWN_POSE),
+        ("左", AX_DX, -1.0, "home_back", HOME_BACK_POSE),
+        ("右", AX_DX, 1.0, "home_front", HOME_FRONT_POSE),
+    ]
+    for label, axis, sign, pname, target in dpad_keys:
+        print(f"[INFO] 场景5d: D-pad {label}（goto {pname}）", flush=True)
+        t0 = node.marker()
+        dpad_tap(axis, sign)
+        ok_pose = node.wait_pose(target, POSE_TOL, 15.0)
+        purple = fb_any(t0, lambda d, n=pname: d.get("color") == "purple"
+                        and f"goto {n}" in d.get("reason", ""))
+        ok_ready = node.wait_arm("READY", 8.0)
+        q = node.joints()
+        rep.check(f"S5d D-pad {label} → {pname}",
+                  ok_pose and purple and ok_ready,
+                  f"maxerr={pose_err(q, target):.3f} purple={purple} "
+                  f"ready={ok_ready} state={node.arm_state()}")
+        # executor 在 goto 服务返回后还有 named_pose_duration_s(3.0)+0.5s 按键封锁窗，
+        # 窗内下一次 D-pad 点按会被静默丢弃（真机防连打设计）——必须等过窗再点下一键
+        node.sleep(3.8)
+
+    print("[INFO] 场景5d: 4 点位后 D-pad 无调速副作用（twist 比 0.85..1.15）",
           flush=True)
-    node._axes[AX_DY] = -1.0
-    node.sleep(0.4)
     v_lin1 = measure_linear()
-    r = v_lin1 / v_lin0 if v_lin0 > 1e-6 else 0.0
-    rep.check("S5d D-pad 上：平移提速（比 1.25..1.65）",
-              1.25 <= r <= 1.65, f"{v_lin0:.3f}→{v_lin1:.3f} ratio={r:.2f}")
-
-    print("[INFO] 场景5d: 继续按住 1.5s，必须不连发", flush=True)
-    node.sleep(1.5)
-    v_lin2 = measure_linear()
-    node._axes[AX_DY] = 0.0
-    node.sleep(0.3)
-    r = v_lin2 / v_lin1 if v_lin1 > 1e-6 else 0.0
-    rep.check("S5d 持续按住不连发（比 0.85..1.15）",
-              0.85 <= r <= 1.15, f"{v_lin1:.3f}→{v_lin2:.3f} ratio={r:.2f}")
-
-    print("[INFO] 场景5d: 平移档不影响旋转通道", flush=True)
     v_ang1 = measure_angular()
-    r = v_ang1 / v_ang_base if v_ang_base > 1e-6 else 0.0
-    rep.check("S5d 旋转 twist 不变（比 0.85..1.15）",
-              0.85 <= r <= 1.15, f"{v_ang_base:.3f}→{v_ang1:.3f} ratio={r:.2f}")
+    rl = v_lin1 / v_lin0 if v_lin0 > 1e-6 else 0.0
+    ra = v_ang1 / v_ang_base if v_ang_base > 1e-6 else 0.0
+    rep.check("S5d 平移档恒定（比 0.85..1.15）",
+              0.85 <= rl <= 1.15, f"{v_lin0:.3f}→{v_lin1:.3f} ratio={rl:.2f}")
+    rep.check("S5d 旋转档恒定（比 0.85..1.15）",
+              0.85 <= ra <= 1.15, f"{v_ang_base:.3f}→{v_ang1:.3f} ratio={ra:.2f}")
 
-    print("[INFO] 场景5d: D-pad 右一次（旋转档 0.35→0.50）", flush=True)
-    dpad_tap(AX_DX, 1.0)
-    v_ang2 = measure_angular()
-    r = v_ang2 / v_ang1 if v_ang1 > 1e-6 else 0.0
-    rep.check("S5d D-pad 右：旋转提速（比 1.25..1.65）",
-              1.25 <= r <= 1.65, f"{v_ang1:.3f}→{v_ang2:.3f} ratio={r:.2f}")
-
-    print("[INFO] 场景5d: 旋转档不影响平移通道", flush=True)
-    v_lin3 = measure_linear()
-    r = v_lin3 / v_lin2 if v_lin2 > 1e-6 else 0.0
-    rep.check("S5d 平移 twist 不变（比 0.85..1.15）",
-              0.85 <= r <= 1.15, f"{v_lin2:.3f}→{v_lin3:.3f} ratio={r:.2f}")
-
-    print("[INFO] 场景5d: D-pad 左一次（旋转档 0.50→0.35）", flush=True)
-    dpad_tap(AX_DX, -1.0)
-    v_ang3 = measure_angular()
-    r = v_ang3 / v_ang2 if v_ang2 > 1e-6 else 0.0
-    rep.check("S5d D-pad 左：旋转降速（比 0.55..0.90）",
-              0.55 <= r <= 0.90, f"{v_ang2:.3f}→{v_ang3:.3f} ratio={r:.2f}")
-
-    print("[INFO] 场景5d: 连续上 6 次到 clamp 1.0；连续下 6 次回 0.1",
-          flush=True)
-    for _ in range(6):
-        dpad_tap(AX_DY, -1.0)
-    v_lin_hi = measure_linear()
-    r = v_lin_hi / v_lin0 if v_lin0 > 1e-6 else 0.0
-    rep.check("S5d clamp 1.0（比 2.4..3.1）",
-              2.4 <= r <= 3.1, f"{v_lin0:.3f}→{v_lin_hi:.3f} ratio={r:.2f}")
-    for _ in range(6):
-        dpad_tap(AX_DY, 1.0)
-    v_lin_lo = measure_linear()
-    r = v_lin_lo / v_lin0 if v_lin0 > 1e-6 else 0.0
-    rep.check("S5d 降回 ≤0.10 档（比 ≤0.45）",
-              r <= 0.45, f"{v_lin0:.3f}→{v_lin_lo:.3f} ratio={r:.2f}")
-
-    # ---- 场景 6：Circle → home ----
+    # ---- 场景 6：Circle → idle ----
     node.sleep(1.0)
     t0 = node.marker()
-    print("[INFO] 场景6: Circle 短按（goto home）", flush=True)
+    print("[INFO] 场景6: Circle 短按（goto idle）", flush=True)
     node.tap(B_CIRCLE)
-    ok_home = node.wait_pose(HOME_POSE, POSE_TOL, 9.0)
-    purple_home = fb_any(t0, lambda d: d.get("color") == "purple"
-                         and "goto home" in d.get("reason", ""))
+    ok_idle = node.wait_pose(IDLE_POSE, POSE_TOL, 9.0)
+    purple_idle = fb_any(t0, lambda d: d.get("color") == "purple"
+                         and "goto idle" in d.get("reason", ""))
     ok_ready = node.wait_arm("READY", 3.0)
     q = node.joints()
-    rep.check("S6 收敛 home 位姿", ok_home,
-              f"maxerr={pose_err(q, HOME_POSE):.3f}")
-    rep.check("S6 紫灯(goto home)→绿", purple_home and ok_ready and green_steady(node))
+    rep.check("S6 收敛 idle 位姿", ok_idle,
+              f"maxerr={pose_err(q, IDLE_POSE):.3f}")
+    rep.check("S6 紫灯(goto idle)→绿", purple_idle and ok_ready and green_steady(node))
     node.sleep(4.0)
 
     # ---- 场景 7：示教 Share/Options + Square 回放 ----
@@ -632,13 +615,13 @@ def main():
               f"state={node.arm_state()} msg={node.arm_msg()!r}")
     node.sleep(4.0)
 
-    # ---- 场景 8 前：确保不在 home（在 home 时 R3 直接失能、无 SAFE_PARK）----
-    # 折叠 home 位 servo 处于奇异硬停，jog 推不动（run1 假失败根因）；直接
-    # Triangle 去 ready，ready 确定离 home。
-    print("[INFO] 场景8 预备: Triangle 回 ready（离开 home 以触发 safe-park）",
+    # ---- 场景 8 前：确保不在 idle（在 idle 时 R3 直接失能、无 SAFE_PARK）----
+    # 折叠 idle 位 servo 处于奇异硬停，jog 推不动（run1 假失败根因）；直接
+    # Triangle 去 home，home 确定离 idle。
+    print("[INFO] 场景8 预备: Triangle 回 home（离开 idle 以触发 safe-park）",
           flush=True)
     node.tap(B_TRIANGLE)
-    node.wait_pose(READY_POSE, POSE_TOL, 9.0)
+    node.wait_pose(HOME_POSE, POSE_TOL, 9.0)
     node.wait_arm("READY", 3.0)
     node.sleep(4.0)
 
@@ -661,7 +644,7 @@ def main():
     orange_dis = node.arm_state() == "DISABLED" and fb_any(
         t0, lambda d: d.get("color") == "orange" and d.get("state") == "DISABLED")
     rep.check("S8 经过 SAFE_PARK（紫灯）", saw_park and purple_park,
-              f"终态={node.arm_state()}（若已在 home 会直接失能，无 park）")
+              f"终态={node.arm_state()}（若已在 idle 会直接失能，无 park）")
     rep.check("S8 终态 DISABLED + 橙灯", node.arm_state() == "DISABLED"
               and any(d.get("color") == "orange" for d in node.fb_since(t0)),
               f"state={node.arm_state()}")

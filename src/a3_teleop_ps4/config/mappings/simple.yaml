@@ -47,7 +47,7 @@ buttons:
     edge: rising
   dpad_left:
     fn: goto_named_pose
-    kwargs: {name: home}
+    kwargs: {name: idle}
     edge: rising
   dpad_right:
     fn: goto_named_pose

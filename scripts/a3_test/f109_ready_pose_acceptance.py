@@ -6,7 +6,7 @@
 
   P1 使能                P2 goto ready 规划/到位
   P3 独立 RNEA CoM/力矩  P4 GripperCommand 开合（R2 链路）
-  P5 goto home 回归
+  P5 goto idle 回归
 
 隔离域 ROS_DOMAIN_ID=109。
 """
@@ -46,7 +46,7 @@ def load_effective_poses():
 
 POSES = load_effective_poses()
 READY = POSES["ready"][:6]
-HOME = POSES["home"][:6]
+HOME = POSES["idle"][:6]
 
 
 def ensure_env() -> None:
@@ -345,12 +345,12 @@ def main():
         gripper_action(node, rec, rep, 1.79)
         gripper_action(node, rec, rep, 0.0)
 
-        # ---------------- P5 home regression ----------------
-        rep.phase("P5 回归：goto home 仍正常")
-        r = goto_pose(node, state_rec, "home")
-        rep.check("goto_named_pose(home) success", r.success, r.message)
+        # ---------------- P5 idle regression ----------------
+        rep.phase("P5 回归：goto idle 仍正常")
+        r = goto_pose(node, state_rec, "idle")
+        rep.check("goto_named_pose(idle) success", r.success, r.message)
         settled, last = wait_joints(rec, HOME, ARM_JOINTS, 0.03, 25.0)
-        rep.check("joints settle at home ±0.03", settled,
+        rep.check("joints settle at idle ±0.03", settled,
                   "actual=" + ",".join(f"{v:.3f}" for v in (last or [])))
 
     finally:

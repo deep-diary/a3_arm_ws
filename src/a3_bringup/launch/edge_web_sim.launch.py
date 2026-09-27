@@ -32,7 +32,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import IfElseSubstitution, LaunchConfiguration
 from launch_ros.actions import Node
 
 
@@ -48,6 +48,7 @@ def load_yaml(package_name, file_path):
 
 def generate_launch_description():
     use_gripper = LaunchConfiguration("use_gripper")
+    use_servo_anchor = LaunchConfiguration("use_servo_anchor")
     use_rviz = LaunchConfiguration("use_rviz")
     use_target_ghost = LaunchConfiguration("use_target_ghost")
     use_moveit = LaunchConfiguration("use_moveit")
@@ -235,6 +236,15 @@ def generate_launch_description():
     servo_yaml = load_yaml("a3_moveit_config", "config/servo_config.yaml")
     servo_params = {"moveit_servo": servo_yaml}
     servo_params.update(servo_yaml)
+    # F118 接线：servo_config.yaml 的 command_out_topic 是绝对话题名，
+    # launch 的 remap 只匹配相对键（~/command_out → /servo_node/command_out），
+    # 对绝对话题名的发布者无效 → 必须在参数层面覆盖 command_out_topic，
+    # moveit_servo 才会把原始输出发到 /cmd 让 a3_servo_anchor 锚定。
+    servo_params["moveit_servo"]["command_out_topic"] = IfElseSubstitution(
+        use_servo_anchor,
+        "/a3/servo/joint_trajectory/cmd",
+        "/a3/servo/joint_trajectory",
+    )
     servo_mode_bridge = Node(
         package="a3_bringup",
         executable="servo_mode_bridge",
@@ -254,10 +264,35 @@ def generate_launch_description():
         ],
         remappings=[
             ("~/delta_twist_cmds", "/servo_node/delta_twist_cmds"),
-            ("~/command_out", "/a3/servo/joint_trajectory"),
+            # F118: use_servo_anchor:=true 时 moveit_servo 原始输出改道
+            # /a3/servo/joint_trajectory/cmd，由 a3_servo_anchor 锚定后转发
+            # /a3/servo/joint_trajectory（绝对目标回弹语义）。
+            (
+                "~/command_out",
+                IfElseSubstitution(
+                    use_servo_anchor,
+                    "/a3/servo/joint_trajectory/cmd",
+                    "/a3/servo/joint_trajectory",
+                ),
+            ),
         ],
         output="screen",
         condition=IfCondition(use_servo),
+    )
+    servo_anchor_node = Node(
+        package="a3_bringup",
+        executable="servo_anchor",
+        name="a3_servo_anchor",
+        output="screen",
+        parameters=[
+            {
+                "in_topic": "/a3/servo/joint_trajectory/cmd",
+                "out_topic": "/a3/servo/joint_trajectory",
+                "joint_states_topic": "/joint_states",
+                "max_joint_delta_rad": 0.05,
+            }
+        ],
+        condition=IfCondition(use_servo_anchor),
     )
 
     rviz = Node(
@@ -293,6 +328,12 @@ def generate_launch_description():
                 default_value="false",
                 description="MoveIt Servo 笛卡尔 jog（可与 use_moveit 共存）",
             ),
+            DeclareLaunchArgument(
+                "use_servo_anchor",
+                default_value="false",
+                description="F118: 在 servo 下游叠 a3_servo_anchor 累积器（绝对目标/外力回弹）；"
+                "true 时 servo ~/command_out 改道 /a3/servo/joint_trajectory/cmd 经锚定转发",
+            ),
             rsp,
             rsp_target,
             static_tf,
@@ -308,6 +349,7 @@ def generate_launch_description():
             retime_node,
             servo_mode_bridge,
             servo_node,
+            servo_anchor_node,
             rviz,
         ]
     )

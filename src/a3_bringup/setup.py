@@ -38,6 +38,7 @@ setup(
             "systemd_watchdog_feed = a3_bringup.systemd_watchdog_feed_node:main",
             "can_bus_monitor = a3_bringup.can_bus_monitor_node:main",
             "topic_rate_monitor = a3_bringup.topic_rate_monitor_node:main",
+            "servo_anchor = a3_bringup.servo_anchor:main",
         ],
     },
     tests_require=['ament_lint_auto', 'ament_flake8', 'ament_pep257', 'pytest']

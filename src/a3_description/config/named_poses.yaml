@@ -15,11 +15,40 @@ poses:
   zero:
     positions: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-  # Legacy half-raised (EDULITE SRDF home)
-  home:
-    positions: [0.0, 0.785, -0.785, 0.0, 0.0, 0.0, 0.0]
+  # F113: 折叠自然下垂位（重力稳定，F40/F44 safe-park 失能保护位）——原真机
+  # ~/.a3/poses.yaml 的 home 标定值（2026-09-13 抽掉 L4 泡沫垫后按自然下垂实测
+  # 读数保存）；改名 idle 收回包内统一定义，EDULITE 半抬 home 退役。
+  idle:
+    positions: [-0.0002, 0.0006, 0.0002, 0.3351, 0.0121, -0.0002, -0.0002]
 
   # F109: folded-upright ready; arm CoM projects over base center (|CoM_x|=8 mm),
   # static gravity torque sum 1.90 Nm. Real-machine value in ~/.a3/poses.yaml override
   ready:
     positions: [0.0, 1.05, -1.575, 0.0, 0.0, 0.0, 0.0]
+
+  # Legacy half-raised (EDULITE SRDF home)
+  home:
+    positions: [0.0, 0.785, -0.785, 0.0, 0.0, 0.0, 0.0]
+
+  # F115: 以 legacy home 为基准、末端保持 home 姿态不变的笛卡尔偏移点
+  # （base_link 系；Pinocchio 严格 6D IK 探针，el_a3.urdf，2026-09-26）。
+  # home 末端 (-0.177, 0, 0.326) m；距离取物理可达包络最大值：
+  # 前 +X 20cm 越水平臂展（取 15cm），上 +Z 20cm 仅腕翻限位边缘分支（取 15cm），
+  # 下 -Z 15/20cm 严格保姿态不可达（取 10cm），后 -X 20cm 可达。
+  # D-pad：上=home_up / 下=home_down / 左=home_back / 右=home_front。
+  home_back:
+    positions: [0.0, 1.8674, -1.6192, -0.2482, 0.0, 0.0, 0.0]
+  home_front:
+    positions: [0.0, 0.1266, -0.8918, 0.7653, 0.0, 0.0, 0.0]
+  home_up:
+    positions: [0.0, 1.2862, -1.9643, 0.6780, 0.0, 0.0, 0.0]
+  home_down:
+    positions: [0.0, 0.7154, -0.2479, -0.4675, 0.0, 0.0, 0.0]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-09-27 11:45:43
+  snap_20260927_114543:
+    positions: [-0.0040, 0.1287, -0.8879, 0.7659, 0.0021, 0.0017, -0.0006]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-09-27 11:51:43
+  snap_20260927_115143:
+    positions: [0.0048, 0.7931, -0.7828, -0.0075, -0.0021, 0.0079, -0.0010]

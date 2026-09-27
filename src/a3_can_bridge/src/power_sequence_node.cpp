@@ -81,15 +81,6 @@ public:
 
     stand_z_ = this->declare_parameter<double>("stand_z", 0.0);
     prone_z_ = this->declare_parameter<double>("prone_z", -0.35);
-    start_longpress_s_ = this->declare_parameter<double>("start_longpress_s", 1.0);
-    shutdown_longpress_s_ = this->declare_parameter<double>("shutdown_longpress_s", 1.0);
-    prone_longpress_s_ = this->declare_parameter<double>("prone_longpress_s", 0.8);
-
-    button_l1_ = this->declare_parameter<int>("button_l1", 4);
-    button_r1_ = this->declare_parameter<int>("button_r1", 5);
-    button_share_ = this->declare_parameter<int>("button_share", 8);
-    button_circle_ = this->declare_parameter<int>("button_circle", 1);
-    button_square_ = this->declare_parameter<int>("button_square", 3);
 
     motor_master_id_ = this->declare_parameter<int>("motor_master_id", 253);
 
@@ -284,90 +275,9 @@ private:
       option_action_done_this_hold_ = true;
     }
 
-    const bool l1 = ButtonOn(button_l1_);
-    const bool r1 = ButtonOn(button_r1_);
-    const bool share = ButtonOn(button_share_);
-    const bool circle = ButtonOn(button_circle_);
-    const bool square = (button_square_ >= 0) && ButtonOn(button_square_);
-
-    // □ 长按与 L1+R1（且非 Share）共用 start_longpress_s，等价话题 start
-    const bool start_combo = (l1 && r1 && !share) || square;
-    const bool shutdown_combo = l1 && r1 && share;
-    const bool prone_combo = circle;
-
-    start_hold_s_ = start_combo ? (start_hold_s_ + dt) : 0.0;
-    shutdown_hold_s_ = shutdown_combo ? (shutdown_hold_s_ + dt) : 0.0;
-    prone_hold_s_ = prone_combo ? (prone_hold_s_ + dt) : 0.0;
-
-    if (!start_combo) {
-      start_latch_ = false;
-    }
-    if (!shutdown_combo) {
-      shutdown_latch_ = false;
-    }
-    if (!prone_combo) {
-      prone_latch_ = false;
-    }
-
-    if (state_ == SequenceState::Idle) {
-      if (!start_latch_ && start_hold_s_ >= start_longpress_s_) {
-        start_latch_ = true;
-        use_stand_resume_for_softstand_ = false;
-        EnterState(SequenceState::Precheck);
-        return;
-      }
-      if (!shutdown_latch_ && shutdown_hold_s_ >= shutdown_longpress_s_) {
-        shutdown_latch_ = true;
-        BeginSoftProne(true);
-        return;
-      }
-      return;
-    }
-
-    if (state_ == SequenceState::Running) {
-      if (!shutdown_latch_ && shutdown_hold_s_ >= shutdown_longpress_s_) {
-        shutdown_latch_ = true;
-        BeginSoftProne(true);
-      } else if (!prone_latch_ && prone_hold_s_ >= prone_longpress_s_) {
-        prone_latch_ = true;
-        BeginSoftProne(false);
-      }
-      return;
-    }
-
-    if (state_ == SequenceState::ProneHold) {
-      if (!shutdown_latch_ && shutdown_hold_s_ >= shutdown_longpress_s_) {
-        shutdown_latch_ = true;
-        EnterState(SequenceState::Disable);
-      } else if (!start_latch_ && start_hold_s_ >= start_longpress_s_) {
-        start_latch_ = true;
-        EnterState(SequenceState::SoftStand);
-      }
-      TickState(dt);
-      return;
-    }
-
-    if (
-      state_ == SequenceState::SoftStand || state_ == SequenceState::EnableInit ||
-      state_ == SequenceState::Precheck)
-    {
-      if (!shutdown_latch_ && shutdown_hold_s_ >= shutdown_longpress_s_) {
-        shutdown_latch_ = true;
-        BeginSoftProne(true);
-        return;
-      }
-    }
-
-    if (state_ == SequenceState::SoftProne && !soft_prone_then_disable_) {
-      if (!start_latch_ && start_hold_s_ >= start_longpress_s_) {
-        start_latch_ = true;
-        pending_start_after_prone_ = true;
-        RCLCPP_INFO(
-          this->get_logger(),
-          "joy start latched during SoftProne(prone path): will enter SoftStand when prone motion completes");
-      }
-    }
-
+    // 电源/急停/唤醒输入统一走 /power_sequence/command（ps4_mapper default.yaml 绑定）。
+    // F60 起废弃 raw /joy 组合键直读（F3 时代的 □/L1+R1 start、L1+R1+Share shutdown、
+    // ○ prone）：三键组合与 L1/R1 死人开关 + Share 示教互相打架，误触即断电；此处不再解析。
     TickState(dt);
   }
 
@@ -784,16 +694,6 @@ private:
   double prone_duration_s_{2.5};
   double stand_z_{0.0};
   double prone_z_{-0.35};
-  double start_longpress_s_{1.0};
-  double shutdown_longpress_s_{1.0};
-  double prone_longpress_s_{0.8};
-
-  int button_l1_{4};
-  int button_r1_{5};
-  int button_share_{8};
-  int button_circle_{1};
-  int button_square_{3};
-
   int motor_master_id_{253};
   double init_kp_{20.0};
   double init_kd_{1.5};
@@ -841,13 +741,6 @@ private:
   double enable_resend_acc_s_{0.0};
   static constexpr double enable_resend_interval_s_{0.05};  // F66：使能帧补发
   bool disable_sent_{false};
-
-  double start_hold_s_{0.0};
-  double shutdown_hold_s_{0.0};
-  double prone_hold_s_{0.0};
-  bool start_latch_{false};
-  bool shutdown_latch_{false};
-  bool prone_latch_{false};
 
   rclcpp::Publisher<UInt8MultiArray>::SharedPtr tx_pub_;
   rclcpp::Publisher<Pose>::SharedPtr pose_pub_;

@@ -77,4 +77,4 @@ ros2 launch a3_bringup edge_web_sim.launch.py use_gripper:=true
 - **需求先行**：实现新功能前先在 `docs/edge/REQUIREMENTS.md`（Edge）或 `docs/cloud_edge/REQUIREMENTS.md`（CloudEdge）加需求 ID + 验收标准；话题/安全变更同步 `docs/shared/`；完成后更新对应 `QUICKSTART.md`。
 - **踩坑落文档**：问题确认修复后，同一轮回复里在 `docs/lessons_learned/` 按 `LL-NNN` 模板写条目并更新索引（环境/source 顺序/DISPLAY/依赖缺失这类换机必踩坑）。
 - **外部仓库**：Web 前端/后端在 `/home/cat/deep-trace`（分支 `rk3588`），ESP32 固件在外置 xiaozhi-esp32 仓库——本仓只做 ROS 侧与契约文档，不要在本仓写固件或前端代码。
-- 机器人安全：真机改动要过 [docs/shared/SAFETY.md](docs/shared/SAFETY.md)；轨迹在 gate_open 前被阻断；PS4 Triangle 或 L1+R1+Share 急停。
+- 机器人安全：真机改动要过 [docs/shared/SAFETY.md](docs/shared/SAFETY.md)；轨迹在 gate_open 前被阻断；PS4 Cross(✕) 长按 1 s 急停（Triangle=运行到 ready，非急停；三键组合已废弃）。

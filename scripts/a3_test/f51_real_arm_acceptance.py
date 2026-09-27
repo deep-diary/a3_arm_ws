@@ -11,7 +11,7 @@
   · 唯一运动项是 P6 的小幅 move_to：增量经 safety_limits.clamp_delta（≤0.30 rad）、
     时长 ≥3 s（≥2.5 s 下限）、先走再原路返回；
   · 使能/失效能都由执行层 F51 语义保护（重锚到反馈位 + kp 软起步）；
-  · 全程结束时电机处于失能态（最后一步是带外 reset），**不做 F40 回 home 的 park**
+  · 全程结束时电机处于失能态（最后一步是带外 reset），**不做 F40 回 idle 的 park**
     （本机臂悬在 L4≈-1.1 rad，park 是 ~1.4 rad 的单次运动，超出今晚无人在场的授权范围）。
 
 用法（先 source scripts/a3_shell_env.sh）：

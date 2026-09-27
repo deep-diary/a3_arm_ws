@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from typing import List, Optional
 
 import rclpy
@@ -91,6 +92,13 @@ class SimMotorNode(Node):
         self.declare_parameter("max_hold_duration_s", 30.0)
         # F43 验证：注入偏置力矩（默认全 0），供编排层最大力矩统计/持久化测试
         self.declare_parameter("sim_bias_torque_nm", [0.0] * 7)
+        # F118：瞬态外力扰动旋钮（sim-only）。用于 Servo 绝对目标回弹验收的外部推力注入。
+        # sim_push 服务开启时对每个 i：plant _positions[i] += sim_push_rad[i]（只动 plant 不动 target）。
+        self.declare_parameter("sim_push_enabled", False)
+        self.declare_parameter("sim_push_rad", [0.0] * 7)
+        # F118 验收：sim_push 后把手把臂"捏在"被推位停留 sim_push_hold_s 秒
+        # （默认 0=不冻结，保持原有回弹语义），模拟人手握住臂的物理。
+        self.declare_parameter("sim_push_hold_s", 0.0)
 
         self._joint_names: List[str] = list(
             self.get_parameter("joint_names").get_parameter_value().string_array_value
@@ -109,6 +117,7 @@ class SimMotorNode(Node):
         self._bias_torque_nm: List[float] = (bias + [0.0] * self._n)[: self._n]
 
         self._positions = [0.0] * self._n
+        self._push_hold_until: List[float] = [0.0] * self._n
         self._velocities = [0.0] * self._n
         self._effort = [0.0] * self._n
         self._target = [0.0] * self._n
@@ -165,6 +174,7 @@ class SimMotorNode(Node):
                 with self._lock:
                     if command == 3:  # set_zero
                         self._positions = [0.0] * self._n
+                        self._push_hold_until = [0.0] * self._n
                         self._velocities = [0.0] * self._n
                         self._target = [0.0] * self._n
                         self._traj = None
@@ -199,6 +209,11 @@ class SimMotorNode(Node):
         )
         self.create_service(
             Trigger, "/a3/zero_torque/stop", lambda req, resp: self._zt_stop(req, resp)
+        )
+
+        # F118：外部推力注入（sim-only）。默认关闭；改动通过 ParameterClient 远端下发。
+        self.create_service(
+            Trigger, "/a3/motor/sim_push", lambda req, resp: self._sim_push_cb(req, resp)
         )
 
         # ---- F32 电机调试服务（仿真对齐：零 CAN 可跑通 web 全链路）----
@@ -250,6 +265,30 @@ class SimMotorNode(Node):
         self._publish_mode("IDLE")
         resp.success = True
         resp.message = "ZERO_TORQUE off (sim)"
+        return resp
+
+    # F118：瞬态外力扰动。只动 plant（_positions），不动 target（_target），
+    # mimic 真机外力推关节：servo 目标跟随逻辑不受影响。
+    def _sim_push_cb(self, req, resp):
+        if not bool(self.get_parameter("sim_push_enabled").value):
+            resp.success = False
+            resp.message = "sim_push disabled (set sim_push_enabled:=true)"
+            return resp
+        rad = list(
+            self.get_parameter("sim_push_rad").get_parameter_value().double_array_value
+        )
+        rad = (rad + [0.0] * self._n)[: self._n]
+        hold_s = float(self.get_parameter("sim_push_hold_s").value)
+        with self._lock:
+            for i, r in enumerate(rad):
+                self._positions[i] += r
+                if hold_s > 0.0 and r != 0.0:
+                    # 冻结 deadline：把手捏住被推位，阻止一阶跟随回弹，
+                    # 模拟人手握住臂的物理（F118 reanchor 验收依赖）。
+                    self._push_hold_until[i] = time.monotonic() + hold_s
+        self.get_logger().info(f"sim_push applied +{rad} rad to plant")
+        resp.success = True
+        resp.message = f"sim_push applied {rad}"
         return resp
 
     # ------------------------------------------------- F32 电机调试服务
@@ -422,7 +461,12 @@ class SimMotorNode(Node):
                     self._traj_start = None
 
             # 一阶跟随 + 速度估计 + L7 接触弹簧力矩
+            _hold_now = time.monotonic()
             for i in range(self._n):
+                if self._push_hold_until[i] > _hold_now:
+                    # 被"手"握住：冻结在推后位，速度 0（F118 sim_push_hold_s）
+                    self._velocities[i] = 0.0
+                    continue
                 q_old = self._positions[i]
                 q_new = q_old + (self._target[i] - q_old) * self._follow_alpha
                 self._positions[i] = q_new

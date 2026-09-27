@@ -131,7 +131,7 @@ def main():
         else:
             log(f"S1 陈旧目标已建立：L2 命令/实测 ≈{node.pos[2]:.3f}")
 
-        # ---- S2：X 硬急停——gate 关沿 + 电源序列带外裸失能；人工搬回 home ----
+        # ---- S2：X 硬急停——gate 关沿 + 电源序列带外裸失能；人工搬回 idle ----
         set_gate(False)
         with node._lock:
             for m in MOTORS:
@@ -173,11 +173,11 @@ def main():
             worst = max(abs(f[3] - Q_HOME) for f in fr)
             max_kp = max(f[4] for f in fr)
             first_kp = fr[0][4]
-            log(f"A2 重开后 {len(fr)} 帧：目标最大偏离 home {worst:.4f} rad，"
+            log(f"A2 重开后 {len(fr)} 帧：目标最大偏离 idle {worst:.4f} rad，"
                 f"kp {first_kp:.1f}→{max_kp:.1f}")
             if worst > TOL:
                 failures.append(
-                    f"A2 F66 失败：重开后目标被拉向陈旧位（最大偏离 home {worst:.3f} rad"
+                    f"A2 F66 失败：重开后目标被拉向陈旧位（最大偏离 idle {worst:.3f} rad"
                     f"，首帧目标 {fr[0][3]:.3f}）——会再次甩臂")
             if max_kp < 40.0:
                 failures.append(f"A2 kp 未升到额定（max {max_kp:.1f}）")

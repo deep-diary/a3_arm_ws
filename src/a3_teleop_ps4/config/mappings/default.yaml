@@ -1,18 +1,20 @@
-# Default PS4 → A3 mapping (F60, F64 修订 2026-09-21). Change this file to rebind; no code change needed.
+# Default PS4 → A3 mapping (F60/F64；F115 修订 2026-09-26 D-pad 改绑 home 偏移点位；F120 Triangle 改绑 home). Change this file to rebind; no code change needed.
 # Source names: buttons/axes keys from ds4_linux.yaml, plus virtual_buttons.
 #
 # == 全功能速查（完整操作手册见 docs/edge/PS4_OPERATOR_GUIDE.md，参考表见本包 README.md）==
-#   电源:      L3 短按=一键上电开门禁+使能 / R3 短按=safe-park 后失能 / Cross 长按 1s=硬急停(断电关闸)
-#   位姿:      Triangle 短按=ready / Circle 短按=home（home 非机械零位；zero 不绑定手柄）
+#   电源:      L3 短按=一键上电开门禁+使能 / R3 短按=任意模式软失能(F119:先退出当前模式→F40 safe-park→失能) / Cross 长按 1s=硬急停(断电关闸)
+#   位姿:      Triangle 短按=home（F120）/ Circle 短按=idle（自然趴着位，非机械零位；zero 不绑定手柄）
+#              D-pad=home 周边 4 点（F115）：上=home_up / 下=home_down / 左=home_back / 右=home_front
 #   示教:      Share 短按=开始示教 / Options 短按=结束并自动保存 / Square 短按=回放 latest
+#   点位:      L2 短按=保存当前位姿为 snap_YYYYMMDD_HHMMSS（F114，写包内 named_poses.yaml）
 #   功能:      PS 短按=init(调零+自动使能) / Options 长按 3s=set_zero
 #   运动:      L1 按住+摇杆=末端平移死人开关 / R1 按住+摇杆=末端旋转死人开关(首批仅偏航)
 #              左摇杆=平移 Y(左右)/Z(上下)；右摇杆上下=平移 X(前后)，右摇杆左右=偏航
-#   调速:      D-pad 上/下=平移速度档 +/-；D-pad 左/右=旋转速度档 -/+（步进 0.15，clamp 0.1..1.0）
+#              （F115 起 D-pad 调速退役，平移/旋转恒用 speed_normal 默认档）
 #   夹爪:      R2=直接力控（不需要 L1/R1），按得越深抓得越紧，松开即全开
-#   预留不绑:  touchpad（蓝牙无键事件 LL-052）、l2
+#   预留不绑:  touchpad（蓝牙无键事件 LL-052）
 
-# 初始速度档（平移/旋转两通道各自的起点；之后由 D-pad 独立步进）
+# 初始速度档（平移/旋转共用；F115 起 D-pad 不再调速，step_*_scale 函数保留供自定义映射）
 speed_normal: 0.35
 
 axes:
@@ -37,14 +39,15 @@ axes:
     kind: analog_n11
     gates: [r1]
 
-# F64：D-pad hat 轴（-1/0/+1）0→±1 边沿各触发一次；持续按住不连发，回中后才能再步
+# F115：D-pad hat 轴（-1/0/+1）0→±1 边沿各触发一次；持续按住不连发，回中后才能再按。
+# 上/下/左/右 = home 周边 4 个笛卡尔偏移命名点（走 goto_named_pose → F67 MoveIt）。
 dpad:
   - axis: dpad_y
-    neg: {fn: step_linear_scale, kwargs: {delta: 0.15}}    # 上：平移档 +
-    pos: {fn: step_linear_scale, kwargs: {delta: -0.15}}   # 下：平移档 -
+    neg: {fn: goto_named_pose, kwargs: {name: home_up}}      # 上：home 上方 15cm
+    pos: {fn: goto_named_pose, kwargs: {name: home_down}}    # 下：home 下方 10cm
   - axis: dpad_x
-    neg: {fn: step_angular_scale, kwargs: {delta: -0.15}}  # 左：旋转档 -
-    pos: {fn: step_angular_scale, kwargs: {delta: 0.15}}   # 右：旋转档 +
+    neg: {fn: goto_named_pose, kwargs: {name: home_back}}    # 左：home 后方 20cm
+    pos: {fn: goto_named_pose, kwargs: {name: home_front}}   # 右：home 前方 15cm
 
 buttons:
   cross:
@@ -53,11 +56,11 @@ buttons:
     hold_s: 1.0
   triangle:
     fn: goto_named_pose
-    kwargs: {name: ready}
+    kwargs: {name: home}
     edge: rising
   circle:
     fn: goto_named_pose
-    kwargs: {name: home}
+    kwargs: {name: idle}
     edge: rising
   share:
     fn: teach_start
@@ -82,6 +85,11 @@ buttons:
     hold_s: 3.0
   r3:
     fn: arm_disable
+    edge: shortpress
+    hold_s: 3.0
+  l2:
+    # F114: 示教/任意时刻一键保存当前位姿（空名 → 服务端自动命名 snap_*）
+    fn: save_named_pose
     edge: shortpress
     hold_s: 3.0
   # 蓝牙下触摸板按键在独立 input 设备("Wireless Controller Touchpad")，js0 收不到 → 不绑定（LL-052）

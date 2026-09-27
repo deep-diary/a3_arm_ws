@@ -8,7 +8,7 @@
 退出码 0 = 全部验收项通过。
 
 验收链：
-  1. 直连官方 JTC home→ready→home + 夹爪开合（五次 S 曲线多点轨迹）
+  1. 直连官方 JTC seed→ready→seed + 夹爪开合（五次 S 曲线多点轨迹）
   2. move_group MoveGroup plan+execute（全程无 a3_fjt_action）
   3. CAN 侧（vcan0 独立抓包）：
      - 7 个 motor_id 均收到 type-1 控制帧
@@ -360,46 +360,46 @@ def main():
     spin_s(rec, 1.0)
 
     poses = load_package_poses()
-    home = poses["home"][:7]
+    seed = [0.0, 0.785, -0.785, 0.0, 0.0, 0.0, 0.0]  # vcan_motor_sim 播种位（非命名点位）
     ready = poses["ready"][:7]
     start = rec.current()
-    if max(abs(angdiff(start[j], home[j])) for j in range(7)) > 0.02:
-        print(f"当前位 {start} 不是包内 home {home}，先核对栈/模拟器")
+    if max(abs(angdiff(start[j], seed[j])) for j in range(7)) > 0.02:
+        print(f"当前位 {start} 不是 vcan 播种位 {seed}，先核对栈/模拟器")
         return 1
 
     results = []
 
     t0 = time.monotonic()
     ok, msg = send_jtc(rec, "/arm_controller/follow_joint_trajectory",
-                       ARM_JOINTS, home[:6], ready[:6], GOTO_S)
-    results.append((ok, f"[JTC home→ready 发送] {msg}"))
+                       ARM_JOINTS, seed[:6], ready[:6], GOTO_S)
+    results.append((ok, f"[JTC seed→ready 发送] {msg}"))
     spin_s(rec, GOTO_S + 2.0)
-    ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), ready, JTC_V_SCALE, "JTC home→ready")
+    ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), ready, JTC_V_SCALE, "JTC seed→ready")
     results.append((ok and ok_a, msg_a))
 
     t0 = time.monotonic()
     ok, msg = send_jtc(rec, "/arm_controller/follow_joint_trajectory",
-                       ARM_JOINTS, ready[:6], home[:6], GOTO_S)
-    results.append((ok, f"[JTC ready→home 发送] {msg}"))
+                       ARM_JOINTS, ready[:6], seed[:6], GOTO_S)
+    results.append((ok, f"[JTC ready→seed 发送] {msg}"))
     spin_s(rec, GOTO_S + 2.0)
-    ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), home, JTC_V_SCALE, "JTC ready→home")
+    ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), seed, JTC_V_SCALE, "JTC ready→seed")
     results.append((ok and ok_a, msg_a))
 
     t0 = time.monotonic()
     ok, msg = send_jtc(rec, "/gripper_controller/follow_joint_trajectory",
-                       GRIPPER_JOINTS, [home[6]], [GRIP_AMP], GRIP_S)
+                       GRIPPER_JOINTS, [seed[6]], [GRIP_AMP], GRIP_S)
     results.append((ok, f"[JTC 夹爪张开 发送] {msg}"))
     spin_s(rec, GRIP_S + 1.0)
-    open_target = home[:6] + [GRIP_AMP]
+    open_target = seed[:6] + [GRIP_AMP]
     ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), open_target, JTC_V_SCALE, "JTC 夹爪张开")
     results.append((ok and ok_a, msg_a))
 
     t0 = time.monotonic()
     ok, msg = send_jtc(rec, "/gripper_controller/follow_joint_trajectory",
-                       GRIPPER_JOINTS, [GRIP_AMP], [home[6]], GRIP_S)
+                       GRIPPER_JOINTS, [GRIP_AMP], [seed[6]], GRIP_S)
     results.append((ok, f"[JTC 夹爪闭合 发送] {msg}"))
     spin_s(rec, GRIP_S + 1.0)
-    ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), home, JTC_V_SCALE, "JTC 夹爪闭合")
+    ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), seed, JTC_V_SCALE, "JTC 夹爪闭合")
     results.append((ok and ok_a, msg_a))
 
     t0 = time.monotonic()
@@ -410,13 +410,13 @@ def main():
     results.append((ok and ok_a, msg_a))
 
     t0 = time.monotonic()
-    ok, msg = send_move_group(rec, home)
-    results.append((ok, f"[move_group → home] {msg}"))
+    ok, msg = send_move_group(rec, seed)
+    results.append((ok, f"[move_group → seed] {msg}"))
     spin_s(rec, 2.0)
-    ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), home, MOVE_GROUP_V_SCALE, "move_group → home")
+    ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), seed, MOVE_GROUP_V_SCALE, "move_group → seed")
     results.append((ok and ok_a, msg_a))
 
-    # CAN 侧校验：落稳 home 后抓最新帧（write() 每个控制周期持续发送）
+    # CAN 侧校验：落稳 seed 后抓最新帧（write() 每个控制周期持续发送）
     spin_s(rec, 0.5)
     settled = rec.current()
     cmd, fb = sniffer.snapshot()

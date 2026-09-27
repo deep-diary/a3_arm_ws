@@ -73,24 +73,33 @@ arm_controller:
       # stall watchdog (>0.5 rad) and F110-covered heavy checks; still catches
       # blocked/stalled motion orders of magnitude before thermal limits.
       # goal tolerance still gates convergence after the trajectory end.
+      #
+      # F117 (2026-09-26) TEMPORARY: widened 0.15 -> 0.30 / goal 0.03 -> 0.05,
+      # persisting the live-validated hot-set combo. NOT anti-collision — this
+      # is a stall/zero-tracking detector; anti-collision lives in URDF limits +
+      # MoveIt + safety_limits.py + power gate + F107/F110/F48. 0.30 << F81
+      # stall bound 0.5 rad; zero-tracking under degraded CAN (error grows to
+      # fold-around ~1.6 rad) still aborts. Real fix = CAN health. Re-tighten
+      # trigger: run scripts/a3_test/f117_jtc_tolerance_deg_acceptance.py green
+      # on trajectory: 0.15 after CAN health is restored.
       L1_joint:
-        trajectory: 0.15
-        goal: 0.03
+        trajectory: 0.30
+        goal: 0.05
       L2_joint:
-        trajectory: 0.15
-        goal: 0.03
+        trajectory: 0.30
+        goal: 0.05
       L3_joint:
-        trajectory: 0.15
-        goal: 0.03
+        trajectory: 0.30
+        goal: 0.05
       L4_joint:
-        trajectory: 0.15
-        goal: 0.03
+        trajectory: 0.30
+        goal: 0.05
       L5_joint:
-        trajectory: 0.15
-        goal: 0.03
+        trajectory: 0.30
+        goal: 0.05
       L6_joint:
-        trajectory: 0.15
-        goal: 0.03
+        trajectory: 0.30
+        goal: 0.05
 
 gripper_controller:
   ros__parameters:

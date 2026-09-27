@@ -7,7 +7,11 @@ functions:
   goto_named_pose:
     kind: discrete
     kwargs: {name: string}
-    description: Call /a3/arm/goto_named_pose (F60; 编排层插值, TRAJ 态, zero/home/ready)
+    description: Call /a3/arm/goto_named_pose (F60; 编排层插值, TRAJ 态, zero/idle/ready)
+
+  save_named_pose:
+    kind: discrete
+    description: 'F114 L2: save current pose via /a3/arm/save_named_pose (空名 → snap_YYYYMMDD_HHMMSS, 写包内 named_poses.yaml)'
 
   arm_power_enable:
     kind: discrete
@@ -67,7 +71,7 @@ functions:
 
   arm_disable:
     kind: discrete
-    description: "Call /a3/arm/disable (F40: 离 home 先 safe park 再失能)"
+    description: "Call /a3/arm/disable (F40: 离 idle 先 safe park 再失能)"
 
   teach_start:
     kind: discrete

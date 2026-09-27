@@ -166,7 +166,7 @@ sequenceDiagram
     Note over EXEC: F42 力矩方向钳位（200Hz latch）——撞堵立即冻结目标
     EXEC->>EXEC: trip + latch 符号，目标钉在反馈位
     Note over AC: F44 温度保护——warn 90 / protect 95
-    AC->>AC: READY→SAFE_PARK→COOLING（回 home 后失能）
+    AC->>AC: READY→SAFE_PARK→COOLING（回 idle 后失能）
     Note over MON: F50 跨源比对（期望 vs 实际）
     MON->>MON: 20Hz 检查 tracking_errors / js 新鲜度
     alt FOLLOW_STUCK 持续 0.5s

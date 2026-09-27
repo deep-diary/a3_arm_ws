@@ -12,13 +12,13 @@ t_ff = ratio * tau_scale * RNEA(q)，消除自重稳态下垂。
 退出码 0 = 全部验收项通过。
 
 验收链：
-  P1 ratio=0：home 保持帧 t_ff ≈ 0（含 L7）
-  P2 ratio=1：home→ready→mid→home，保持帧与运动抽样 t_ff =
+  P1 ratio=0：seed 保持帧 t_ff ≈ 0（含 L7）
+  P2 ratio=1：seed→ready→mid→seed，保持帧与运动抽样 t_ff =
      独立参考 RNEA（F49 标定惯量同源）× direction，≤0.02 N·m
   P3 ratio=0.5：ready 保持帧 t_ff ≈ 0.5 × RNEA
   P4 STRICT arm↔zero_torque 切换：effort 帧 kp=0、力矩=RNEA；
      切回后位置帧 t_ff=RNEA（zero_torque 路径不受 F108 影响）
-  P5 JTC home→ready→home 全 SUCCESSFUL；全程 L7 帧 t_ff=0
+  P5 JTC seed→ready→seed 全 SUCCESSFUL；全程 L7 帧 t_ff=0
 """
 
 import os
@@ -237,11 +237,11 @@ def main():
 
     spin_s(rec, 1.0)
     poses = load_package_poses()
-    home = poses["home"][:6]
+    seed = [0.0, 0.785, -0.785, 0.0, 0.0, 0.0]  # vcan_motor_sim 播种位（非命名点位）
     ready = poses["ready"][:6]
 
-    if max(abs(angdiff(rec.current()[j], home[j])) for j in range(6)) > 0.02:
-        print(f"当前位不是包内 home，先核对栈/模拟器：{rec.current()}")
+    if max(abs(angdiff(rec.current()[j], seed[j])) for j in range(6)) > 0.02:
+        print(f"当前位不是 vcan 播种位，先核对栈/模拟器：{rec.current()}")
         return 1
 
     # Controllers spawn while the component stays INACTIVE (LL-086); drive it
@@ -279,7 +279,7 @@ def main():
     cur = rec.current()[:6]
     ok, msg, w_motion = jtc_with_motion_samples(
         node, sniffer, ref_model, cur, ready, GOTO_S)
-    results.append((ok, f"[P2 JTC home→ready + 运动抽样] {msg}"))
+    results.append((ok, f"[P2 JTC seed→ready + 运动抽样] {msg}"))
     results.append((w_motion <= TORQUE_TOL,
                     f"[P2 运动中 t_ff=RNEA×dir] 最大偏差 {w_motion:.4f}"))
     spin_s(rec, 2.0)
@@ -301,29 +301,29 @@ def main():
     track_l7()
 
     ok, msg = send_jtc(node, "/arm_controller/follow_joint_trajectory",
-                       ARM_JOINTS, MID, home, GOTO_S)
+                       ARM_JOINTS, MID, seed, GOTO_S)
     spin_s(rec, GOTO_S + 2.0)
     worst, _ = hold_error(sniffer, ref_model, 1.0)
-    results.append((ok, f"[P2 JTC mid→home] {msg}"))
+    results.append((ok, f"[P2 JTC mid→seed] {msg}"))
     results.append((worst is not None and worst <= TORQUE_TOL,
-                    f"[P2 home 保持帧] 最大偏差 {fmt_worst(worst)}"))
+                    f"[P2 seed 保持帧] 最大偏差 {fmt_worst(worst)}"))
     track_l7()
 
     # ---- P3 ratio=0.5 ----
     results.append((node.set_ratio(0.5), "[P3 ratio=0.5 设置]"))
     ok, msg = send_jtc(node, "/arm_controller/follow_joint_trajectory",
-                       ARM_JOINTS, home, ready, GOTO_S)
+                       ARM_JOINTS, seed, ready, GOTO_S)
     spin_s(rec, GOTO_S + 2.0)
     worst, _ = hold_error(sniffer, ref_model, 0.5)
-    results.append((ok, f"[P3 JTC home→ready] {msg}"))
+    results.append((ok, f"[P3 JTC seed→ready] {msg}"))
     results.append((worst is not None and worst <= TORQUE_TOL,
                     f"[P3 ready 保持帧 t_ff≈0.5RNEA] 最大偏差 {fmt_worst(worst)}"))
     track_l7()
 
     ok, msg = send_jtc(node, "/arm_controller/follow_joint_trajectory",
-                       ARM_JOINTS, ready, home, GOTO_S)
+                       ARM_JOINTS, ready, seed, GOTO_S)
     spin_s(rec, GOTO_S + 2.0)
-    results.append((ok, f"[P3 JTC ready→home] {msg}"))
+    results.append((ok, f"[P3 JTC ready→seed] {msg}"))
     track_l7()
 
     # ---- P4 STRICT switch regression ----
@@ -356,13 +356,13 @@ def main():
 
     # ---- P5 motion regression + L7 ----
     ok, msg = send_jtc(node, "/arm_controller/follow_joint_trajectory",
-                       ARM_JOINTS, home, ready, GOTO_S)
-    results.append((ok, f"[P5 JTC home→ready SUCCESSFUL] {msg}"))
+                       ARM_JOINTS, seed, ready, GOTO_S)
+    results.append((ok, f"[P5 JTC seed→ready SUCCESSFUL] {msg}"))
     spin_s(rec, GOTO_S + 2.0)
     track_l7()
     ok, msg = send_jtc(node, "/arm_controller/follow_joint_trajectory",
-                       ARM_JOINTS, ready, home, GOTO_S)
-    results.append((ok, f"[P5 JTC ready→home SUCCESSFUL] {msg}"))
+                       ARM_JOINTS, ready, seed, GOTO_S)
+    results.append((ok, f"[P5 JTC ready→seed SUCCESSFUL] {msg}"))
     spin_s(rec, GOTO_S + 2.0)
     track_l7()
     results.append((max_l7_tff <= ZERO_TOL,

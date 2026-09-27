@@ -438,7 +438,7 @@ def phase1(env, node):
               node.wait_settle(jog_end[:6], timeout=8)
               and node.wait_ready(timeout=8))
 
-        req = GotoNamedPose.Request(pose_name="home")
+        req = GotoNamedPose.Request(pose_name="idle")
         resp = call(node, node.goto_cli, req, timeout=30)
         check("3 goto fallback succeeds (two-point fallback msg)",
               resp.success and "two-point fallback" in resp.message,
@@ -464,7 +464,7 @@ def phase1(env, node):
               dispatch2 >= 5, f"count={dispatch2}")
 
         # ---- Criterion 4: safe-park -> disable ----
-        # Jog off home first: disable from within disable_home_tol_rad
+        # Jog off idle first: disable from within disable_home_tol_rad
         # (0.15) short-circuits to a direct reset, so move 0.20 rad to force
         # the safe-park two-point path.
         away = [v + 0.20 for v in node.all_positions()]
@@ -477,7 +477,7 @@ def phase1(env, node):
             abs(a - b)
             for a, b in zip(node.arm_positions(), away_exp[:6]))
         moved_off = resp.success and settled_away
-        check("4 moved off home before disable", moved_off,
+        check("4 moved off idle before disable", moved_off,
               f"resp={resp.success} residual={residual:.3f}")
 
         resp = call(node, node.disable_cli, Trigger.Request(), timeout=40)
@@ -563,7 +563,7 @@ def phase2(env, node):
         if not node.wait_ready(timeout=8):
             raise RuntimeError(f"FSM not READY after jog: {node.state}")
 
-        req = GotoNamedPose.Request(pose_name="home")
+        req = GotoNamedPose.Request(pose_name="idle")
         resp = call(node, node.goto_cli, req, timeout=30)
         check("topic goto fallback succeeds", resp.success, resp.message)
         node.wait_ready(timeout=10)

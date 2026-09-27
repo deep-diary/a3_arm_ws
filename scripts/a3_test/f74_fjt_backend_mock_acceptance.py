@@ -7,11 +7,11 @@
 
 验收项（对应 docs/edge/REQUIREMENTS.md F74）：
   A. jog：set_joint_positions 多点目标（含 L7），落点 ≤ 0.02 rad
-  B. goto 线性兜底：goto_use_moveit=false → ready / home
+  B. goto 线性兜底：goto_use_moveit=false → ready / idle
   C. playback：latest.yaml 经 ruckig retime 后 FJT 执行（含 L7）
   D. preempt：连续两个 jog，后发 goal 抢占先发 goal（不排队）
   E. 全程旧话题 /joint_group_effort_controller/joint_trajectory 零消息
-  F. disable：safe-park → home，reset 服务被调用
+  F. disable：safe-park → idle，reset 服务被调用
 """
 
 import math
@@ -150,7 +150,7 @@ def load_poses():
     return poses
 
 
-def write_latest(home):
+def write_latest(idle):
     traj_dir = os.path.expanduser("~/.a3/trajectories")
     os.makedirs(traj_dir, exist_ok=True)
     path = os.path.join(traj_dir, "latest.yaml")
@@ -163,7 +163,7 @@ def write_latest(home):
         u = k / (N - 1)
         s = math.sin(math.pi * u)
         points.append({
-            "positions": [home[i] + amps[i] * s for i in range(7)],
+            "positions": [idle[i] + amps[i] * s for i in range(7)],
             "time_from_start_sec": u * T,
         })
     with open(path, "w", encoding="utf-8") as f:
@@ -238,7 +238,7 @@ def main():
         return 1
 
     poses = load_poses()
-    home = poses["home"]
+    idle = poses["idle"]
     ready = poses["ready"]
 
     # ---- A. jog（3 组含 L7）----
@@ -267,7 +267,7 @@ def main():
 
     # ---- B. goto 线性兜底 ----
     set_param("goto_use_moveit", False)
-    for k, name in enumerate(("ready", "home")):
+    for k, name in enumerate(("ready", "idle")):
         r = call(goto_cli, GotoNamedPose.Request(pose_name=name))
         if not r.success:
             check(f"B{k} goto {name} dispatch", False, r.message)
@@ -279,13 +279,13 @@ def main():
     set_param("goto_use_moveit", True)
 
     # ---- C. playback（latest.yaml, ruckig retime）----
-    path = write_latest(home)
+    path = write_latest(idle)
     r = call(playback_cli, PlaybackTrajectory.Request(name=""))
     if not r.success:
         check("C playback dispatch", False, r.message)
     else:
-        ok, err = wait_land(home, timeout=20.0)
-        check("C playback retime+FJT land home", ok, f"err={err:.4f}")
+        ok, err = wait_land(idle, timeout=20.0)
+        check("C playback retime+FJT land idle", ok, f"err={err:.4f}")
         if not wait_state("READY", timeout=10.0):
             check("C back to READY", False, f"state={watcher.state}")
     if os.path.exists("/tmp/f74_latest_backup.yaml"):
@@ -323,11 +323,11 @@ def main():
     while time.monotonic() - t0 < 15:
         spin(0.1)
         cur = recorder.current()
-        err = max(abs(cur[j] - home[i]) for i, j in enumerate(JOINTS))
+        err = max(abs(cur[j] - idle[i]) for i, j in enumerate(JOINTS))
         if err < TOL and reset_calls >= 1:
             parked = True
             break
-    check("F safe-park home + reset", parked,
+    check("F safe-park idle + reset", parked,
           f"reset_calls={reset_calls}")
 
     total = len(RESULTS)

@@ -18,6 +18,17 @@ FAIL=0
 pass() { echo "PASS: $*"; PASS=$((PASS + 1)); }
 fail() { echo "FAIL: $*"; FAIL=$((FAIL + 1)); }
 
+# ros2 node list races DDS discovery on freshly-launched stacks (RK3588 under load
+# routinely misses in the first seconds) -> re-poll instead of single-shot.
+node_up() {
+  local pat="$1" tries="${2:-15}" i
+  for i in $(seq 1 "$tries"); do
+    if ros2 node list 2>/dev/null | grep -q "$pat"; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
 sample_js() {
   python3 - <<PY
 import os, time, rclpy
@@ -67,22 +78,22 @@ ros2 launch a3_bringup edge_moveit_execute.launch.py \
   >/tmp/wave_b_launch.log 2>&1 &
 sleep 6
 
-if ros2 node list 2>/dev/null | grep -q a3_sim_executor; then
+if node_up a3_sim_executor; then
   pass "sim_executor up"
 else
   fail "sim_executor missing"; tail -40 /tmp/wave_b_launch.log
 fi
-if ros2 node list 2>/dev/null | grep -q a3_fjt_action; then
+if node_up a3_fjt_action; then
   pass "fjt_action up"
 else
   fail "fjt_action missing"
 fi
-if ros2 node list 2>/dev/null | grep -q a3_move_to_pose_ik; then
+if node_up a3_move_to_pose_ik; then
   pass "move_to_pose_ik up"
 else
   fail "move_to_pose_ik missing"
 fi
-if ros2 node list 2>/dev/null | grep -q a3_gravity_torque; then
+if node_up a3_gravity_torque; then
   pass "gravity_torque up"
 else
   fail "gravity_torque missing"
@@ -212,10 +223,14 @@ sleep 2
 echo "=== 7. Servo launch smoke ==="
 ros2 launch a3_bringup servo.launch.py >/tmp/wave_b_servo.log 2>&1 &
 sleep 8
-if grep -qiE 'Error|Exception|Traceback|FATAL' /tmp/wave_b_servo.log && ! ros2 node list 2>/dev/null | grep -qi servo; then
+# 排除 moveit 启动期的良性 octomap/planning-scene 提示（无 3D 传感器配置仅告警非崩溃）；
+# 真崩溃时必有 Traceback/FATAL/发散的 Error 行。servo_node_main 有发现滞后，用重轮询。
+if (grep -iE 'Error|Exception|Traceback|FATAL' /tmp/wave_b_servo.log \
+    | grep -viE 'No 3D sensor plugin|Resolution not specified' | grep -q .) \
+   && ! node_up 'servo'; then
   fail "servo launch"; tail -50 /tmp/wave_b_servo.log
 else
-  if ros2 node list 2>/dev/null | grep -qiE 'servo|a3_servo'; then
+  if node_up 'servo_node'; then
     pass "servo-related nodes up"
     timeout 8 ros2 service call /servo_node/start_servo std_srvs/srv/Trigger {} >/tmp/wave_b_start_servo.log 2>&1 || true
     python3 - <<PY

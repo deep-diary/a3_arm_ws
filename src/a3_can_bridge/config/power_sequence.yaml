@@ -11,17 +11,8 @@
     can_tx_frames_qos_depth: 4000
     motor_master_id: 253
 
-    # PS4: L1+R1 or Square long-press = start; L1+R1+Share = shutdown; Options = set_zero
-    # Circle/prone kept for API compatibility but unused for arm soft-home semantics
-    button_l1: 4
-    button_r1: 5
-    button_share: 8
-    button_circle: 1
-    button_square: 3
-    start_longpress_s: 1.0
-    shutdown_longpress_s: 1.0
-    prone_longpress_s: 0.8
-
+    # 电源/急停/唤醒输入统一走 /power_sequence/command（ps4_mapper default.yaml 绑定）。
+    # F60 起废弃 raw /joy 组合键直读（start/shutdown/prone）；仅保留 Options 长按 set_zero。
     track_body_pose_height: false
     body_pose_stale_s: 2.0
     track_z_clamp_min: -0.5

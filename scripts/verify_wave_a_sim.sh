@@ -68,10 +68,12 @@ timeout 3 ros2 topic echo /a3/gravity_torque --once >"${LOG_DIR}/verify_grav_rea
 timeout 3 ros2 topic echo /a3/control_mode --once >"${LOG_DIR}/verify_mode.txt" 2>&1 || true
 
 python3 - <<'PY' | tee -a "${REPORT_SNIP}"
-import re, pathlib, sys
+import re, pathlib, sys, yaml
 log = pathlib.Path("docs/dev/_wave_a_sim_logs")
 js = (log / "verify_js_final.txt").read_text()
 grav = (log / "verify_grav_ready.txt").read_text()
+np = yaml.safe_load(pathlib.Path("src/a3_description/config/named_poses.yaml").read_text())
+ready = list(np["poses"]["ready"]["positions"])
 
 def positions(text):
     m = re.search(r"position:\n((?:- .*\n)+)", text)
@@ -86,7 +88,6 @@ def efforts(text):
     return [float(x[2:]) for x in m.group(1).strip().splitlines()]
 
 q = positions(js)
-ready = [0.0, 0.785, -1.57, 0.0, 0.785, 0.0, 0.0]
 err = max(abs(a-b) for a,b in zip(q, ready))
 print(f"final q={q}")
 print(f"max |q-ready|={err:.6f}")
@@ -129,7 +130,7 @@ EDGE_DOMAIN=10 CE_DOMAIN=20 DURATION_S=2.5 bash "${ROOT}/scripts/dual_domain_zer
   | tee -a "${REPORT_SNIP}"
 
 python3 - <<'PY' | tee -a "${REPORT_SNIP}"
-import re, pathlib, sys
+import re, pathlib, sys, yaml
 log = pathlib.Path("docs/dev/_wave_a_sim_logs")
 def pos(path):
     t = path.read_text()
@@ -138,7 +139,8 @@ def pos(path):
     return [float(x[2:]) for x in m.group(1).strip().splitlines()]
 qe = pos(log / "edge_joint_states.txt")
 qc = pos(log / "cloud_edge_joint_states.txt")
-ready = [0.0, 0.785, -1.57, 0.0, 0.785, 0.0, 0.0]
+np = yaml.safe_load(pathlib.Path("src/a3_description/config/named_poses.yaml").read_text())
+ready = list(np["poses"]["ready"]["positions"])
 ee = max(abs(a-b) for a,b in zip(qe, ready))
 ec = max(abs(a-b) for a,b in zip(qc, ready))
 print(f"Edge err={ee:.6f} CloudEdge err={ec:.6f}")

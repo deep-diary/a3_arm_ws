@@ -162,7 +162,7 @@ flowchart LR
   READY <--> SERVO["SERVO"]
   READY <--> TEACH["TEACH"]
   READY <--> AI["AI"]
-  READY -->|"disable 非 home（F40）"| PARK["SAFE_PARK<br/>回 home"]
+  READY -->|"disable 非 idle（F40）"| PARK["SAFE_PARK<br/>回 idle"]
   PARK -->|"reset 后"| DIS["DISABLED"]
   READY -->|"温度保护（F44）→ SAFE_PARK"| COOLING["COOLING<br/>降温后 enable"]
   PARK -.->|"park 超时 / reset 被拒 / motor fault"| FAULT["FAULT"]
@@ -179,8 +179,8 @@ flowchart LR
   </div>
   <table>
     <tr><th>服务</th><th>类型</th><th>说明</th></tr>
-    <tr><td><code>/a3/arm/init|enable|disable</code></td><td>Trigger</td><td>init=设零+异步确认 n/7+使能；enable=使能（F48 读数限位门禁）；disable=失能保护（F40，非 home 先 park）</td></tr>
-    <tr><td><code>/a3/arm/goto_named_pose</code></td><td>GotoNamedPose</td><td>按 named_poses.yaml 插值下发（zero/home/ready）</td></tr>
+    <tr><td><code>/a3/arm/init|enable|disable</code></td><td>Trigger</td><td>init=设零+异步确认 n/7+使能；enable=使能（F48 读数限位门禁）；disable=失能保护（F40，非 idle 先 park）</td></tr>
+    <tr><td><code>/a3/arm/goto_named_pose</code></td><td>GotoNamedPose</td><td>按 named_poses.yaml 插值下发（zero/idle/ready）</td></tr>
     <tr><td><code>/a3/arm/set_joint_positions</code></td><td>SetJointPositions</td><td>Web 滑条 jog：限位 clamp + 短插值</td></tr>
     <tr><td><code>/a3/arm/move_to</code></td><td>MoveToJointPositions</td><td>按时长插值平滑移动（F39/F41，≥50 Hz 点数）</td></tr>
     <tr><td><code>/a3/arm/save_named_pose</code></td><td>SaveNamedPose</td><td>写用户层 ~/.a3/poses.yaml 并即时生效（F39）</td></tr>

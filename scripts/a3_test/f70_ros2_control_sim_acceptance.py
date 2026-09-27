@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """F70 仿真数值验收：ros2_control 标准栈（JTC/JSB/controller_manager + mock hw）。
 
-前置：edge_ros2_control_sim.launch.py 已起（mock 初始位 = 包内 home）。
+前置：edge_ros2_control_sim.launch.py 已起（mock 初始位 = URDF 播种位 seed）。
 用法：ROS_DOMAIN_ID=<同栈> python3 f70_ros2_control_sim_acceptance.py
 退出码 0 = 全部验收项通过。
 
 验收链：
-  1. 直连 /arm_controller/follow_joint_trajectory（官方 JTC）home→ready→home
+  1. 直连 /arm_controller/follow_joint_trajectory（官方 JTC）seed→ready→seed
   2. 直连 /gripper_controller/follow_joint_trajectory L7 开合
   3. move_group MoveGroup action plan+execute（全程无 a3_fjt_action）
   4. 进程/节点检查：栈内无自研 FJT action
@@ -277,49 +277,49 @@ def main():
     spin_s(rec, 1.0)
 
     poses = load_package_poses()
-    home = poses["home"][:7]
+    seed = [0.0, 0.785, -0.785, 0.0, 0.0, 0.0, 0.0]  # URDF initial_value 播种位（mock 初始位，非命名点位）
     ready = poses["ready"][:7]
     start = rec.current()
-    if max(abs(angdiff(start[j], home[j])) for j in range(7)) > 0.02:
-        print(f"mock 初始位 {start} 不是包内 home {home}，先核对栈")
+    if max(abs(angdiff(start[j], seed[j])) for j in range(7)) > 0.02:
+        print(f"mock 初始位 {start} 不是 URDF 播种位 {seed}，先核对栈")
         return 1
 
     results = []
 
-    # 1a. 直连 arm JTC：home → ready（五次 S 曲线多点轨迹）
+    # 1a. 直连 arm JTC：seed → ready（五次 S 曲线多点轨迹）
     t0 = time.monotonic()
     ok, msg = send_jtc(rec, "/arm_controller/follow_joint_trajectory",
-                       ARM_JOINTS, home[:6], ready[:6], GOTO_S)
-    results.append((ok, f"[JTC home→ready 发送] {msg}"))
+                       ARM_JOINTS, seed[:6], ready[:6], GOTO_S)
+    results.append((ok, f"[JTC seed→ready 发送] {msg}"))
     spin_s(rec, GOTO_S + 2.0)
-    ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), ready, JTC_V_SCALE, "JTC home→ready")
+    ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), ready, JTC_V_SCALE, "JTC seed→ready")
     results.append((ok and ok_a, msg_a))
 
-    # 1b. 直连 arm JTC：ready → home
+    # 1b. 直连 arm JTC：ready → seed
     t0 = time.monotonic()
     ok, msg = send_jtc(rec, "/arm_controller/follow_joint_trajectory",
-                       ARM_JOINTS, ready[:6], home[:6], GOTO_S)
-    results.append((ok, f"[JTC ready→home 发送] {msg}"))
+                       ARM_JOINTS, ready[:6], seed[:6], GOTO_S)
+    results.append((ok, f"[JTC ready→seed 发送] {msg}"))
     spin_s(rec, GOTO_S + 2.0)
-    ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), home, JTC_V_SCALE, "JTC ready→home")
+    ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), seed, JTC_V_SCALE, "JTC ready→seed")
     results.append((ok and ok_a, msg_a))
 
     # 2. 直连 gripper JTC：0 → 0.8 → 0
     t0 = time.monotonic()
     ok, msg = send_jtc(rec, "/gripper_controller/follow_joint_trajectory",
-                       GRIPPER_JOINTS, [home[6]], [GRIP_AMP], GRIP_S)
+                       GRIPPER_JOINTS, [seed[6]], [GRIP_AMP], GRIP_S)
     results.append((ok, f"[JTC 夹爪张开 发送] {msg}"))
     spin_s(rec, GRIP_S + 1.0)
-    open_target = home[:6] + [GRIP_AMP]
+    open_target = seed[:6] + [GRIP_AMP]
     ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), open_target, JTC_V_SCALE, "JTC 夹爪张开")
     results.append((ok and ok_a, msg_a))
 
     t0 = time.monotonic()
     ok, msg = send_jtc(rec, "/gripper_controller/follow_joint_trajectory",
-                       GRIPPER_JOINTS, [GRIP_AMP], [home[6]], GRIP_S)
+                       GRIPPER_JOINTS, [GRIP_AMP], [seed[6]], GRIP_S)
     results.append((ok, f"[JTC 夹爪闭合 发送] {msg}"))
     spin_s(rec, GRIP_S + 1.0)
-    ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), home, JTC_V_SCALE, "JTC 夹爪闭合")
+    ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), seed, JTC_V_SCALE, "JTC 夹爪闭合")
     results.append((ok and ok_a, msg_a))
 
     # 3a. move_group plan+execute → ready
@@ -330,12 +330,12 @@ def main():
     ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), ready, MOVE_GROUP_V_SCALE, "move_group → ready")
     results.append((ok and ok_a, msg_a))
 
-    # 3b. move_group → home（验收结束停在 home）
+    # 3b. move_group → seed（验收结束停在 seed）
     t0 = time.monotonic()
-    ok, msg = send_move_group(rec, home, "home")
-    results.append((ok, f"[move_group → home] {msg}"))
+    ok, msg = send_move_group(rec, seed, "seed")
+    results.append((ok, f"[move_group → seed] {msg}"))
     spin_s(rec, 2.0)
-    ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), home, MOVE_GROUP_V_SCALE, "move_group → home")
+    ok_a, msg_a = analyze(rec.window(t0, time.monotonic()), seed, MOVE_GROUP_V_SCALE, "move_group → seed")
     results.append((ok and ok_a, msg_a))
 
     # 4. 栈内节点/进程无 a3_fjt_action

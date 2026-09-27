@@ -28,8 +28,8 @@
     playback_smooth_samples: 7
     # F41/F88: move_to/goto 兜底——最短时长；两点轨迹由 JTC splines 插值
     move_to_min_duration_s: 3.0
-    # F40: 失能保护（不在 home 容差内先平滑回 home 再失能，防掉臂）
-    disable_home_pose_name: home
+    # F40: 失能保护（不在 idle 容差内先平滑回 idle 再失能，防掉臂）；F113 home→idle
+    disable_home_pose_name: idle
     disable_home_tol_rad: 0.15
     disable_home_duration_s: 5.0
     disable_home_confirm_s: 0.5
@@ -38,7 +38,7 @@
     motor_states_topic: /a3/motor/states
     torque_stats_file: "~/.a3/stats/torque_stats.yaml"
     torque_stats_save_interval_s: 10.0
-    # F44: 温度管理（warn 仅告警；protect 自动回 home 失能降温；迟滞恢复）
+    # F44: 温度管理（warn 仅告警；protect 自动回 idle 失能降温；迟滞恢复）
     # 阈值与 arm_controller.yaml 同步调高（官方电机自带 130°C 保护，LL-023）
     temp_protect_enabled: true
     temp_warn_c: 90.0

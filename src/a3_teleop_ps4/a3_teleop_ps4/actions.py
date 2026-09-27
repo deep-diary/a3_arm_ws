@@ -17,7 +17,7 @@ from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-from a3_msgs.srv import GotoNamedPose, PlaybackTrajectory
+from a3_msgs.srv import GotoNamedPose, PlaybackTrajectory, SaveNamedPose
 
 
 JOINTS = [
@@ -126,6 +126,8 @@ class ActionExecutor:
         self._playback = node.create_client(PlaybackTrajectory, "/a3/arm/playback")
         # F60：命名位姿改走编排层服务（TRAJ 态可被灯带感知；F53 显式拒绝语义）
         self._goto_pose_cli = node.create_client(GotoNamedPose, "/a3/arm/goto_named_pose")
+        # F114：L2 短按保存当前位姿（空名 → 服务端时间戳名 snap_*）
+        self._save_pose_cli = node.create_client(SaveNamedPose, "/a3/arm/save_named_pose")
 
         # F64：平移/旋转速度档相互独立（D-pad 上下/左右分别步进）
         self.linear_scale = 0.35
@@ -384,6 +386,31 @@ class ActionExecutor:
             message = getattr(resp, "message", "no response")
             self._n.get_logger().error(f"goto_named_pose {name} rejected: {message}")
             self._servo_unpause()
+
+    def save_named_pose(self) -> None:
+        """F114 L2 短按：当前 7 关节位姿存为命名点位（空名 → 服务端时间戳名 snap_*）."""
+        if not self._save_pose_cli.service_is_ready():
+            self._n.get_logger().warn("arm/save_named_pose not available; skip")
+            return
+        # name/positions 均留空：服务端自动命名 snap_* 并取当前 /joint_states
+        future = self._save_pose_cli.call_async(SaveNamedPose.Request())
+        if future is None:
+            self._n.get_logger().error("save_named_pose call failed")
+            return
+        future.add_done_callback(self._on_save_pose_done)
+        self._n.get_logger().info("save_named_pose requested (current pose)")
+
+    def _on_save_pose_done(self, future) -> None:
+        try:
+            resp = future.result()
+        except Exception as exc:  # noqa: BLE001
+            self._n.get_logger().error(f"save_named_pose call failed: {exc}")
+            return
+        if resp is not None and resp.success:
+            self._n.get_logger().info(f"{resp.message} -> {resp.path}")
+        else:
+            message = getattr(resp, "message", "no response")
+            self._n.get_logger().error(f"save_named_pose rejected: {message}")
 
     def power_start(self) -> None:
         self._power("start")

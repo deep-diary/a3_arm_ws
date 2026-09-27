@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from typing import Dict, List
 
 import rclpy
@@ -41,6 +42,7 @@ class ZeroToReadyPublisher(Node):
         self.declare_parameter("num_waypoints", 11)
         self.declare_parameter("publish_once", True)
         self.declare_parameter("delay_s", 1.0)
+        self.declare_parameter("match_timeout_s", 6.0)
 
         data = _load_poses()
         self._joint_names: List[str] = list(data["joint_names"])
@@ -49,10 +51,35 @@ class ZeroToReadyPublisher(Node):
         topic = self.get_parameter("trajectory_topic").value
         self._pub = self.create_publisher(JointTrajectory, topic, 10)
         delay = float(self.get_parameter("delay_s").value)
-        self._timer = self.create_timer(delay, self._publish)
+        self._timer = self.create_timer(delay, self._attempt)
         self._done = False
+        self._wait_start = None
+        self._match_timeout = float(self.get_parameter("match_timeout_s").value)
         self.get_logger().info(f"Will publish {self.get_parameter('start_pose').value}"
                                f"→{self.get_parameter('goal_pose').value} on {topic}")
+
+    def _attempt(self) -> None:
+        if self._done and self.get_parameter("publish_once").value:
+            return
+        if self._done:
+            self._publish()
+            return
+        # 单发轨迹在无订阅者匹配时会因 volatile QoS 被丢弃（轻载下偶发）：
+        # 重设在匹配到订阅者（或超时）后才首播，避免 zero→ready 从未生效。
+        if self._pub.get_subscription_count() < 1:
+            if self._wait_start is None:
+                self._wait_start = time.monotonic()
+                self.get_logger().info(
+                    f"Waiting for subscriber on "
+                    f"{self.get_parameter('trajectory_topic').value} before publishing..."
+                )
+            elif time.monotonic() - self._wait_start >= self._match_timeout:
+                self.get_logger().warn(
+                    f"No subscriber matched within {self._match_timeout:.1f}s; publishing anyway"
+                )
+                self._publish()
+            return
+        self._publish()
 
     def _publish(self) -> None:
         if self._done and self.get_parameter("publish_once").value:

@@ -12,7 +12,7 @@
    - `hardware:=can can_interface:=can1`：`a3_hardware_interface/A3MITHardwareInterface` 直连 SocketCAN（真机先 `sudo systemctl start can-up.service`；vcan 验收 `can_interface:=vcan0`）。非法 hardware 值会被 launch 硬拒，mock 不触碰任何 CAN socket
    - 组件开关：`use_mqtt` / `use_teleop` 默认 true，`use_rviz` / `use_monitor` 默认 false；`teleop_mapping:=default|simple`；`use_sw_render` 默认 true（LL-027）
    - JTC 默认 **inactive 启动**，需经 `/a3/arm/enable`（或 PS4 L3）激活后才会运动
-4. PS4 电源（F60）：L3 短按 = 一键使能；R3 短按 = safe-park 后失能；Cross 长按 1 s = 硬急停（恢复需重新 L3）。完整键位/灯效见第 10 节与 [PS4_OPERATOR_GUIDE.md](PS4_OPERATOR_GUIDE.md)。
+4. PS4 电源（F60/F119）：L3 短按 = 一键使能；R3 短按 = 任意模式软失能（先从 SERVO/示教/重力补偿退出当前模式 → safe-park 回 idle → 失能）；Cross 长按 1 s = 硬急停（恢复需重新 L3）。完整键位/灯效见第 10 节与 [PS4_OPERATOR_GUIDE.md](PS4_OPERATOR_GUIDE.md)。
 5. 冒烟测试（mock 起栈后）：
    ```bash
    ros2 service call /a3/arm/enable std_srvs/srv/Trigger
@@ -59,12 +59,14 @@
     export ROS_DOMAIN_ID=45
     export DISPLAY=:0
     ros2 launch a3_bringup edge_teleop_full_sim.launch.py
-    # 另开终端（同域）：合成 /joy 12 场景 46 项自动验收，逐项打印 PASS/FAIL + 关节证据：
+    # 另开终端（同域）：合成 /joy 12 场景 44 项自动验收，逐项打印 PASS/FAIL + 关节证据：
     python3 scripts/a3_test/ps4_sim_test.py
+    # F116 随机点位 MoveIt 巡游（服务 /a3/arm/random_pose_tour）专项验收：
+    python3 scripts/a3_test/f116_random_tour_sim_acceptance.py
     ```
     - RViz 双模型：实体色 = 实际反馈（`/joint_states`），半透明 = 目标 ghost（`target/` TF）。
     - 本机 RViz 两个必备前缀已由 launch 自动加：`LIBGL_ALWAYS_SOFTWARE=1`（LL-027）、`LD_PRELOAD=~/.a3/hide_randr/libhide_randr.so`（LL-065）。
-    - S0 基线检查只能在干净栈上通过；重复跑须重启栈（速度档/位姿有记忆），首次 46/46 为准。
+    - S0 基线检查只能在干净栈上通过；重复跑须重启栈（编排层/位姿状态有记忆；F115 起速度档已不可调），首次干净栈结果为准。
     - 合成全绿后，手柄实操把启动命令换成 `ros2 launch a3_bringup edge_teleop_full_sim.launch.py use_joy_node:=true`（域不变）。
 
     **(b) 真机 / 校准：**
@@ -74,8 +76,8 @@
     # 统一入口默认已含 mapper + ds4_feedback_node + servo_node，默认 mapping:=default：
     ros2 launch a3_bringup a3_bringup.launch.py hardware:=can   # 真机；servo 常驻无需另开
     ```
-    - **default（真机生产映射，F60+F64）**：L3 一键开门禁+使能、R3 safe-park 失能、Cross 长按 1 s 硬急停；Triangle=ready、Circle=home；示教三步 **Share=开始 / Options=结束(自动保存) / Square=回放(latest)**；PS=init、Options 长按 3 s=set_zero；**L1=平移死人开关、R1=旋转死人开关（F64）、R2 夹爪力控不需要死人开关**；D-pad 上下调平移速度、左右调旋转速度（独立、步长 0.15、范围 0.10–1.0、按住不连发）；左摇杆平移 Y/Z，右摇杆 right_y 平移 X、right_x 偏航。touchpad/L2 预留不绑。
-    - **ready 点位（F109 取代 F69）+ 奇异阈值**：ready 已覆盖为 `[0,1.05,-1.575,0,0,0]`（折叠竖直构型；同步于包内 named_poses.yaml/SRDF 与 `~/.a3/poses.yaml`），pinocchio 复核臂重心投影在底座中心正上方（CoM_x=-8 mm）、静态重力矩和 1.90 N·m（较 F69 降 61%）。伺服奇异阈值 25/50（依据见 [shared/SAFETY.md](../shared/SAFETY.md)）；ready 点 cond6=29 略高于缩放起始 25，启动 Servo 若明显变软改用备选点 `[0,0.85,-0.675]`。真机 Triangle 到 ready 后若姿态明显异常先 Circle 回 home。
+    - **default（真机生产映射，F60+F64+F119）**：L3 一键开门禁+使能、R3 任意模式软失能（先退出 SERVO/示教/重力补偿 → safe-park → 失能）、Cross 长按 1 s 硬急停；Triangle=home（F120）、Circle=idle；示教三步 **Share=开始 / Options=结束(自动保存) / Square=回放(latest)**；PS=init、Options 长按 3 s=set_zero；**L1=平移死人开关、R1=旋转死人开关（F64）、R2 夹爪力控不需要死人开关**；D-pad 上/下/左/右=home 周边 4 点直达（home_up/home_down/home_back/home_front，F115，不再调速）；左摇杆平移 Y/Z，右摇杆 right_y 平移 X、right_x 偏航。touchpad/L2 预留不绑。
+    - **ready 点位（F109 取代 F69）+ 奇异阈值**：ready 已覆盖为 `[0,1.05,-1.575,0,0,0]`（折叠竖直构型；同步于包内 named_poses.yaml/SRDF 与 `~/.a3/poses.yaml`），pinocchio 复核臂重心投影在底座中心正上方（CoM_x=-8 mm）、静态重力矩和 1.90 N·m（较 F69 降 61%）。伺服奇异阈值 25/50（依据见 [shared/SAFETY.md](../shared/SAFETY.md)）；ready 点 cond6=29 略高于缩放起始 25，启动 Servo 若明显变软改用备选点 `[0,0.85,-0.675]`。真机 Triangle 到 home 后若姿态明显异常先 Circle 回 idle。
     - **灯带多色（F61/F125）**：红闪=失电/硬急停、红双闪=FAULT、橙=已上电未使能、绿=READY/SERVO、蓝呼吸=TEACH、紫=TRAJ（goto/回放/safe-park）、**青(cyan)=回首点（F125：回放前 MoveIt 规划段）**、白闪一次=init 完成。震动：使能/失能 120 ms 弱震，硬急停 600 ms 强震，FAULT 双震。无手柄时逻辑帧看 `/a3/ds4/feedback`（JSON）。
     - **操作员手册：[PS4_OPERATOR_GUIDE.md](PS4_OPERATOR_GUIDE.md)；完整参考表：`src/a3_teleop_ps4/README.md`。**
     - 改键位只编 `config/mappings/default.yaml`（零代码）；轴索引校准见 `config/ds4_linux.yaml`。
@@ -462,7 +464,7 @@ ros2 topic pub --rate 10 /a3/display_target_joint_states sensor_msgs/msg/JointSt
 
 ### goto/回放工业轨迹验收（F67/F68，仿真全闭环）
 
-goto（Triangle→ready、Circle/R3→home）走 MoveIt move_group + TOTG；示教回放走 `/a3/arm/retime_trajectory`（Ruckig 默认，TOTG 备选），只重定时不改几何。move_group/retime 不可用时分别自动回退本地线性插值 / 旧 smooth+time_warp 链路（参数 `goto_use_moveit`、`playback_retime`，默认 true）。
+goto（Triangle→home、Circle→idle；R3=失能）走 MoveIt move_group + TOTG；示教回放走 `/a3/arm/retime_trajectory`（Ruckig 默认，TOTG 备选），只重定时不改几何。move_group/retime 不可用时分别自动回退本地线性插值 / 旧 smooth+time_warp 链路（参数 `goto_use_moveit`、`playback_retime`，默认 true）。
 
 ```bash
 # 全自动验收（自建域 55 闭环栈，约 3~5 分钟；结束自动收栈）
@@ -990,6 +992,18 @@ python3 scripts/a3_test/f113_keepalive_acceptance.py
 #   P1–P3 同栈 enable/disable ×3 全绿、on_activate/deactivate 各 0x18-ON≥7、
 #   DISABLED 态 /joint_states 持续更新且无 ±12.49635 冻结标记
 #   P4 注入「m4 静默」→ enable 必败 only 6/7；P5 清除恢复 7/7 → READY
+```
+
+### gate 关闭失能态零增益保活（F122：gate 关期间 RViz 恒实时，反馈不单点依赖 0x18）
+
+F113 的 0x18 主动上报道保证电机**无论使能/失能都持续上报**，是「遥测纯通道」。但 gate 关闭（急停 / R3 失能 / 软下电）期间 `OnTxRefreshTimer` 原本整段 return——主运动路径静默，反馈新鲜度只单点依赖 0x18 这一条流。F122 把 refresh 的静默改为对**失能/未知**（mode ∈ {0,-1}）电机补发零增益控制帧（`p=反馈位|0, vel=default_velocity_, kp=kd=τ=0`），勾回其 **0x02 控制应答**——反馈与指令同源，且无力矩输出；已知使能（≥1）电机绝不触碰（LL-022 零增益=卸力）。0x18 保留作为纵深冗余（F86 电机侧超时兜底依赖其流）。真机观察：gate 关 + 失能时 `candump can1` 应见周期 0x01 帧 + 0x02 勾回，`/joint_states` 持续更新。
+
+```bash
+# F121/F122 真机诊断探针（建议带栈日志补 L1 套接字真值；75s 基线，期间手动开/关 gate）
+python3 scripts/a3_test/f121_feedback_probe.py --duration 75 --log <stack.log>
+#   判定：F121 基线 PASS = /motor_feedback 满 7 电机且 /joint_states 平均间隔<30ms（解析实时、无饱和）
+#   L5 tx_stats 窗口 skip_power_gate>0 且 tx_refresh 增量>0 → F122 保活帧在流
+#   开关：motor_protocol_node -p refresh_keepalive_when_gate_closed:=false 复归静默
 ```
 
 ### L7 夹爪限位对齐标定（F98：URDF / ros2_control / MoveIt 三处统一 [0.0, 1.78]）

@@ -624,10 +624,16 @@ def main():
                 m.torque = 0.0
                 m.enabled = False
                 m.active_report = False
+                # Integration clock starts fresh on reset: a gap since the
+                # previous frame must not smear its torque across it (LL-138).
+                m.last_t = now
             m.tripped = False
             m.trip_delay = None
         elif cmd_type == CMD_ENABLE:
             m.enabled = True
+            # Same fresh-clock rule (LL-138): no phantom torque accumulated
+            # over the pre-enable idle; next control's dt measures from here.
+            m.last_t = now
             reply()
         elif cmd_type == CMD_SET_PARAM:
             param_id = data[0] | (data[1] << 8)

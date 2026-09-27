@@ -1689,26 +1689,127 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F39（save_named_pose 服务）、F113（点位收敛包内）、F60/F64（PS4 映射）；[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（arm 服务表）
 - **状态：** `implemented`（2026-09-26 落地；真机回归待上电）
 
-## 验收标准
+### F115 — D-pad 退役 F64 调速，改绑 home 周边 4 个笛卡尔偏移命名点位
 
-1. `can-up.service` 启动后 `can1` 为 UP，1 Mbps
-2. `ros2 launch a3_bringup a3_bringup.launch.py` 无致命错误
-3. PS4 启动后 `/power_sequence/gate_open` 为 `true`
-4. 测试轨迹（见 [QUICKSTART.md](QUICKSTART.md)）在 2 s 内完成运动
-5. F60：Cross(X) 长按 1 s 硬急停后 gate 关闭；R3 失能（F40）；L3 一键 start+enable 到 READY
-6. MoveIt demo 可规划（mock 或真机模式）
-7. F6–F9：Wave A 见 [dev/WAVE_A_SIM_TEST_REPORT.md](../dev/WAVE_A_SIM_TEST_REPORT.md)
-8. F10–F15：见 QUICKSTART Wave B / [dev/WAVE_B_SIM_NOTES.md](../dev/WAVE_B_SIM_NOTES.md) / [dev/WAVE_B_SIM_TEST_REPORT.md](../dev/WAVE_B_SIM_TEST_REPORT.md)
-9. F16：`ros2 launch a3_bringup edge_teleop_sim.launch.py use_rviz:=true`；先 `joy_dump` 核对轴序
+- **说明：** 2026-09-26 用户确认：default 映射下 D-pad 不再分通道调速（速度恒为默认档 0.35，`step_linear_scale/step_angular_scale` 函数保留但不绑定），改为一键 goto 4 个以 legacy `home`（半抬位 `[0,.785,-.785,0,0,0,0]`，末端 base_link 系 (-0.177, 0, 0.326) m）为基准、末端保持 home 姿态不变的偏移点。点位值由 Pinocchio 严格 6D IK 探针（el_a3.urdf，200 种子+独立 FK 复核）按物理可达包络确定：
+  | 点位 | base_link 偏移 | L1..L6 (rad) | 绑定 |
+  |---|---|---|---|
+  | `home_back` | 后 −X 20cm | `[0, 1.8674, -1.6192, -0.2482, 0, 0]` | D-pad 左 |
+  | `home_front` | 前 +X 15cm（20cm 越水平臂展） | `[0, 0.1266, -0.8918, 0.7653, 0, 0]` | D-pad 右 |
+  | `home_up` | 上 +Z 15cm（20cm 仅腕翻转限位边缘分支） | `[0, 1.2862, -1.9643, 0.6780, 0, 0]` | D-pad 上 |
+  | `home_down` | 下 −Z 10cm（15/20cm 严格保姿态不可达） | `[0, 0.7154, -0.2479, -0.4675, 0, 0]` | D-pad 下 |
+  4 点写入包内 `named_poses.yaml`（L7=0）并同步 `el_a3.srdf` group_state；goto 复用 F67 MoveIt 路径，不新增 action。
+- **验收标准：**
+  1. 仿真 READY 下合成 /joy 依次触发 D-pad 上/下/左/右 → `/a3/arm/goto_named_pose` 收到 `home_up/home_down/home_back/home_front`，7 关节到点容差 0.02 rad
+  2. D-pad 操作后 `linear_scale/angular_scale` 恒为 0.35（无调速副作用）；L1/R1 摇杆 jog、R2 夹爪等其余映射零回归
+  3. RViz MotionPlanning  Goal State 下拉可见 4 个新 group_state
+- **关联：** F64（退役其 default 调速绑定，函数保留）、F67（goto MoveIt 路径）、F113（点位包内统一）；[shared/ROBOT_MODEL.md](../shared/ROBOT_MODEL.md)（命名姿态表）
+- **状态：** `implemented`（2026-09-26 落地；真机回归待上电）
 
-## 关联文档
+### F116 — 随机命名点位 MoveIt 巡游服务（数量可配，相邻不重，从当前点起）
 
-- [ARCHITECTURE.md](ARCHITECTURE.md)
-- [QUICKSTART.md](QUICKSTART.md)
-- [PLATFORM_CAN.md](PLATFORM_CAN.md)
-- [shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)
-- [shared/SAFETY.md](../shared/SAFETY.md)
-- [shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)
+- **说明：** 新增服务 `/a3/arm/random_pose_tour`（`a3_msgs/RandomPoseTour`）：从包内 named_poses.yaml 已加载点位中随机抽取 N 个点（默认参数 `random_tour_count=5`，请求 `count` 可覆盖；`seed` 可复现，0=真随机），**允许重复但相邻两点不同**，然后从**当前位姿**起逐点调用现有 F67 `_moveit_move`（OMPL+TOTG，MoveGroup action）规划并执行，每条腿保留 F107 静力矩/占空比预检。点位池默认排除 `zero`（参数 `random_tour_exclude_poses`，真机机械零位风险）。任一腿规划/执行失败即中止并返回已完成序列；L7 不参与（arm 组规划，点位 L7 均为 0）。不绑手柄（无空闲键；LL-052），CLI/Web/脚本调用。
+- **验收标准：**
+  1. 仿真 `ros2 service call /a3/arm/random_pose_tour "{count: 5, seed: 0}"` → `success=true`，`sequence` 长度 5、相邻不重、不含 `zero`；/joint_states 按序到每个点（0.02 rad 容差），`total_duration_s>0`
+  2. `seed: 123` 两次调用返回相同 sequence（可复现）；`count: 2` 覆盖默认 5
+  3. 非 READY 态（DISABLED/TRAJ 中）调用被 `_can_move` 拒绝；池少于 2 个点返回 success=false
+  4. 某腿规划失败时：success=false、message 含失败点与原因、已完成序列如实回传、状态机回 READY 不卡死
+- **关联：** F67（MoveGroup 规划/执行链）、F107（力矩/占空比预检）、F115（新增点位扩大巡游池）、F53（状态机拒绝语义）；[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（arm 服务表）
+- **状态：** `implemented`（2026-09-26 仿真验收；真机回归待上电）
+
+### F117 — JTC 跟踪容差 0.30/0.05 临时定型（持久化实测热设组合；语义=卡滞检测非防撞）
+
+- **说明：** 真机事件（2026-09-25 goto 回 idle 中止）：JTC 报 `Position Error: 0.3073 > 0.300000` 触发 `PATH_TOLERANCE_VIOLATED`。三项独立 bag 证据（controller_state / 原始 /joint_states / error==恰好指令距离）表明**根因不是容差过窄，而是 CAN 反馈降级导致机械臂零跟踪**：/joint_states 掉到 ~12.3 Hz（标称 50）、max gap 0.392 s、491 s 内 1255 个 >200 ms 空洞，末尾 `CAN write failed: Resource temporarily unavailable`。0.30/0.05 只是运行时 `ros2 param set` 的 hot-set，**未持久化，重启即回退** 0.15/0.03。本需求把实测跑过的组合 `trajectory: 0.30 / goal: 0.05` 写入 `el_a3_controllers.yaml`（L1–L6）。**语义澄清：JTC 轨迹容差是卡滞/零跟踪检测器，不是防撞**——防撞靠 URDF 限位 + MoveIt 碰撞 + `safety_limits.py` 限速 ± 电源门禁 + F107 力矩门禁 + F110/F48 通道门禁；0.30 仍 << F81 卡滞界 0.5 rad，零跟踪下 0.30 也会中止（error 会冲到关节折叠幅）。**TEMPORARY**：回收紧 trigger = CAN 健康恢复后重跑 f117 验收在 0.15 配置下全绿。
+- **验收标准：**
+  1. `el_a3_controllers.yaml` 六个 arm joint（L1–L6）加载生效 `trajectory: 0.30 / goal: 0.05`（重启级持久，非 param set）；注释块标明 TEMPORARY 原因、非防撞语义、回收紧条件
+  2. vcan `f117_jtc_tolerance_deg_acceptance.py`（`--alpha 0.0088` 注入滞后 ≈0.20 rad ∈ (0.15, 0.30)）：idle↔ready 双向 FJT error 0，无 `PATH_TOLERANCE_VIOLATED`
+  3. 同 alpha 下 hot-set `trajectory: 0.15` → FJT 中止（`PATH_TOLERANCE_VIOLATED`）——证明配置生效、0.30 是覆盖降级滞后区的必要放宽
+  4. `--alpha 0.002`（插值跟随滞后 ≈0.9 rad）→ 0.30 下也中止——证明 0.30 不是无限容差
+- **关联：** F97/F112（容差配置演进）、F81（卡滞看门狗）、F110/F48（通道门禁）、F107（力矩门禁）；[LL-131](../lessons_learned/LL-131-jtc-tolerance-not-anti-collision.md)、[SAFETY.md](../shared/SAFETY.md)
+- **状态：** `implemented`（2026-09-26 yaml 持久化 + 仿真验收；CAN 反馈根因另行持续跟踪）
+
+### F118 — MoveIt Servo 绝对目标（薄桥接锚点节点，抗外力漂移）
+
+- **说明：** moveit_servo（2.5.10）无原生绝对/粘连目标（已核验 `servo_parameters.h` 全参数字段与源码：每次更新目标 = 测量 + 周期增量，外力持续推就随测量漂移——"servo 软"；pause/resume 又重锚定为测量）。经确认采用**薄桥接累积器节点**方案：新增 `a3_servo_anchor` 节点，订阅 moveit_servo `~/command_out`（launch 重映射为 `/a3/servo/joint_trajectory/cmd`，RELIABLE，已核验 moveit_servo 2.5.x 发布侧 QoS(1)），内部维护绝对锚点 `anchor`：每周期 `raw = in − measured`、`delta = clamp(raw, ±max_joint_delta_rad)`、`anchor = clamp(anchor + delta, URDF 限位)`（**用 measured 不用 anchor 作基准**——否则外力持续推会把外力当指令累进锚）、RELIABLE 发 `/a3/servo/joint_trajectory`（下游沿用 JTC → motor_protocol 200 Hz 插值 → CAN，零改动）；服务 `/a3/servo_anchor/reanchor`（Trigger）下一帧重锚定；被钳制时补算 `vel` 避免速度字段陈旧。`max_joint_delta_rad: 0.05`（50 Hz ≈ 2.5 rad/s 当量，> 合法指令 ~1.5 rad/s 又远慢于电机 kp 恢复 → 瞬态外力回弹当前位置，不永久占压）。非 arm 关节（L7）逐字透传。全部 `use_servo_anchor` launch 参数**默认 false**（新旧行为零回归）。同步给 mock `sim_motor_node` 加 `/a3/motor/sim_push`（sim-only）扰动服务模拟瞬态外力。
+- **验收标准：**
+  1. `edge_web_sim use_servo_anchor:=true`：一组 twist 后停，`sim_push` 把 L2 推 +0.35 rad，2 s 后 `|measured_L2 − 基线 b| < 0.08 rad`（锚点回弹当前位置，不随外力漂移）
+  2. 同场景 `use_servo_anchor:=false`（对照轴）：残差 ≥ 0.15 rad ——证明测试本身能抓到旧漂移行为（归因成立）
+  3. 锚定下小指令仍能运动（0.03 m/s 1.5 s，L2 位移 ≥ 0.005 rad）——锚不冻结正常运动
+  4. `/a3/servo_anchor/reanchor` 触发下一帧重锚定；L7 逐字透传不受钳制
+- **关联：** F77（PS4 D-pad 改走 Servo JointJog）、F65（servo 话题入环）、F14/F16（Servo 支持）；[LL-132](../lessons_learned/LL-132-moveit-servo-no-absolute-target.md)、[TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)
+- **状态：** `implemented`（2026-09-26 仿真验收；默认 off，真机复验待上电）
+
+### F119 — 任意模式软失能（R3：先退出当前模式 → 回 idle → 保电失能）
+
+- **说明：** R3 语义本应是软失能（先回 idle 再失能），代码已实现 `_disable_cb` → `_safe_park_then_disable`（F40/F113）。**真实缺口**：`_mode ∈ BLOCKED_MODES{SERVO, ZERO_TORQUE, GRAVITY_COMP}` 或 busy state ∈ {TEACH, SERVO, AI} 时 `_disable_cb` 直接拒绝——servo/示教测试完按 R3 无反应。本需求把失能前置为**先安全退出锁定模式**：`STATE_TEACH` → 复用 `_stop_teach_cb`（退出 ZERO_TORQUE，F54 自动存档为接受副作用）；`mode ∈ BLOCKED_MODES` → SERVO→`/servo_node/stop_servo`（已核验真实 Trigger server）/ ZERO_TORQUE→`/a3/zero_torque/stop` / GRAVITY_COMP→`/a3/gravity_compensation/stop`；随后等待 `_mode` 离开 BLOCKED_MODES 至多 `disable_mode_exit_timeout_s=2.0`（servo 桥 0.5 s 后回 IDLE），超时给出可执行拒绝文案（不改状态守护安全）。busy 拒绝集由 `{INIT, TEACH, SERVO, AI}` 缩为 `{INIT, AI}`，`BLOCKED_MODES` 拒绝保留为防御断言。**不用** `/servo_node/pause_servo`（语义=重锚定测量，非停 servo）。
+- **验收标准：**
+  1. READY 下 disable → 状态序含 SAFE_PARK（回 idle）→ DISABLED 终态、无错
+  2. SERVO 下（start_servo + twist 后）disable → `_mode` 在 2 s 内出 SERVO → SAFE_PARK → DISABLED；重使能后 start_servo 仍可用
+  3. TEACH 下 disable → TEACH 退出 + mode→IDLE → SAFE_PARK → DISABLED；F54 自动存档触发
+  4. 重力补偿下 disable → 出 GRAVITY_COMP → SAFE_PARK → DISABLED
+  5. 负例：持续按 twist 使 SERVO 不消 → 2 s 超时拒绝 + 可执行文案 + 状态机不崩
+- **关联：** F40/LL-077（失能语义）、F12（desired 保持）、F54（示教自动存档）、F53（组合拒绝语义）、F113（idle 点位）；[SAFETY.md](../shared/SAFETY.md)
+- **状态：** `implemented`（2026-09-26 仿真验收；真机回归待上电）
+
+### F120 — Triangle 改绑 home（不绑 ready）
+
+- **说明：** ready（`[0,1.05,-1.575,0,0,0]`，F109 折叠竖直构型）距 idle 较远，作长按前就位不合用。把 **Triangle 短按从 goto ready 改为 goto home**（`[0.0, 0.785, -0.785, 0.0, 0.0, 0.0, 0.0]`，即 F115 D-pad 偏移基准点 / F40 safe-park 目标 / 重力标定锚点），工作位语义与 ready 一样确定离 idle、非奇异。纯 `default.yaml` 映射改动，零代码；ready 点位本身保留（service `/a3/arm/goto_named_pose {pose_name: ready}`、F68 回放/测试仍用）。
+- **验收标准：**
+  1. `default.yaml` `buttons.triangle` → `goto_named_pose {name: home}`（edge: rising），Circle → `{name: idle}` 保持不变
+  2. 仿真 ps4_sim_test 场景 2 回归：Triangle 短按 → 状态 TRAJ(紫 reason "goto home") → 收敛 home 位姿（tol 0.08 rad）→ READY(绿)
+  3. 场景 5/5b/8 预备（servo 扫轴 / 门控互斥 / safe-park 触发）改用 home 作为离 idle 标定位，全部 PASS
+- **关联：** F109（ready 保留）、F115（home 为 D-pad 偏移基准）、F40（safe-park 目标）、F89（重力标定锚点）、F60/F64（PS4 全映射）；[PS4_OPERATOR_GUIDE.md](PS4_OPERATOR_GUIDE.md)、[README.md](../../src/a3_teleop_ps4/README.md)
+- **状态：** `implemented`（2026-09-26 配置落地；仿真回归见 ps4_sim_test，真机复验待上电）
+
+### F121 — 反馈新鲜度与解析实时性诊断探针（真机基线）
+
+- **说明：** 用真机可执行基线量化「0x18 主动上报量大、反馈来不及解析」是否成立，给 F122 的关闭点（gate 关闭）提供解锁依据。四层证据链 + 一层保活层：
+  - **L1 物理层** can_transport 日志 `CAN bus counts(5s)` 行 `rx_can0/rx_can1` 增量——socket 实际收包真值（`--log` 交叉引用）；
+  - **L2 网络层** `/can_rx_frames`（UInt8MultiArray，BEST_EFFORT depth 5）消息计数——DDS hop 丢包探测点；
+  - **L3 解码层** `/motor_feedback`（String）消息计数 + 每 motor 的 `mode=` 分布——motor_protocol 实际解码吞吐；
+  - **L4 发布层** `/joint_states` 到达间隔直方（期望 20 ms 周期）——上层消费者（RViz / 控制）看到的「新鲜度」；
+  - **L5 保活层** `/a3/motor/tx_stats`（TxStats）每 5 s 窗口的 `skip_power_gate` / `tx_refresh_total` 增量——gate 关闭且 tx_refresh>0 ⟹ F122 保活帧在流。
+  - 探针：`scripts/a3_test/f121_feedback_probe.py --duration 75 --log <stack.log>`（建议真机跑时带栈日志补齐 L1）。判据 = 若 L3≪L2 = 解码/调度瓶颈，若 L2≪L1 = DDS hop 丢包，若 L4 平均间隔 ≥30 ms = 上层可见降级——三类各自定位根因，不再凭「感觉量大」推断。
+- **验收标准：**
+  1. 断电静置 ≥75 s：L1/L2/L3 稳定且互相接近（损耗 <5~10%），L4 平均间隔 <30 ms、gaps>50 ms 为 0 → **「解析来不及」不成立，0x18 保留**（F86 纵深防御证据链闭环）
+  2. gate 关闭窗口（急停/R3/软下电）内 L5 显示 `skip_power_gate>0` 且 `tx_refresh_total` 增量 >0 → F121 确认 F122 保活
+  3. 脚本 `sys.exit(0)=PASS`（L4 健全 + 7 电机 3 帧以上 + L5 保活观测），否则非零并给出瓶颈定位
+- **实测矩阵（真机 F121 验收，2026-09-27，电机失能静置代替断电静置、多窗口 5–8 s 无损采样）：**
+  - **R2 前提确认**：失能电机直发 0x01 控制帧 → 0x02 应答回（`020001FD` / `020002FD` / `020004FD`）——失能态 0x01→0x02 勾回成立；
+  - **L1/L2/L3**：真机栈日志 `CAN bus counts(5s)` ↔ `/can_rx_frames` ↔ `/motor_feedback` 计数稳定且互相接近，无解码 / 调度 / DDS hop 瓶颈；
+  - **L4 /joint_states**：失能后 rosbag 无损 **1633 msgs / 8.31 s ≈ 196 Hz**（> 期望 20 ms 周期），READY 态 hz 大窗 ≈190 Hz → 上层不降级、RViz 失能后**不冻结**；
+  - **F113 总线级**：失能后 candump 5 s = 3496 帧 ≈ **699 fps ≈ 7×~100 Hz** 纯 0x18 主动上报，0x01/0x02 为零；L1/L2/L3 载荷 ±1 LSB 抖动、L4–L7 恒定 → 载荷活着、臂物理静止；
+  - **代码级机制**：`RxLoop` 以 `rx_run_` 为门（非 `active_`）无条件解码 0x18 + `export_state_interfaces` 绑定 `&j.hw_pos` 裸指针 → 失能态状态接口持续刷新；旧「塌到 0–0.5 Hz」是高频 topic 单发 echo/hz 丢包误读的测量伪影；
+  - **gate 全程 false**：IDLE / READY / DISABLED 下 `/power_sequence/gate_open` 恒 false，enable/disable 不触碰电源门禁；
+  - **F81 实测**：启用后 ~6 s 出现一次 L5 0.2 s 瞬时 stall → freeze-hold → 自动恢复，无残留。
+  - **结论**：真机证明失能态无反馈新鲜度缺口、「解析来不及」不成立，**0x18 保留**（F86 电机侧超时兜底依赖其流）；F121 验收 1 通过（失能静置替代断电静置）。
+- **关联：** 0x18 主动上报（power_sequence.yaml `enable_active_report_*`）、F46（tx_stats）、F83/F90（C++ power_sequence / 黑匣子）、F112/F117（CAN 降级→JTC 容差）、F86（电机侧超时）
+- **状态：** `真机验收通过`（2026-09-27 失能静置实测矩阵见上；探针 `scripts/a3_test/f121_feedback_probe.py` 供后续回归）
+
+### F122 — 失能态零增益保活解耦 power-gate（gate 关闭仍保反馈实时）
+
+- **说明：** 现状：gate 关闭（急停/R3 失能/软下电）时 `OnTxRefreshTimer` 整段 `return`（RefreshMain 分支），反馈新鲜度只单点依赖 **L7 F113 keepalive 之外**的 0x18 主动上报——一旦 0x18 漂移/被关，RViz 冻结在最后一帧。评估结论（2026-09-27）：解析饱和前提不成立（设备解析天花板 ≈770 fps ≈ 总线容量 10%，7 电机 × 100 Hz 满载仍富余），故 0x18 保留（F86 电机侧超时兜底依赖其流）；**真正的缺口是 gate 关闭的整段保活**。本需求：gate 关闭时，把失能/未知状态电机（`last_feedback_mode_status_[idx] ∈ {0, -1}`）的 refresh 从「静默」改为「零增益保活帧」（`p=反馈位|0, vel=default_velocity_, kp=kd=tau=0`，语义与 F48 播种完全相同），使其勾回 **0x02 控制应答**——反馈与指令同源同频，任何模式下无力矩输出；已知使能（≥1）电机一律跳过（零增益会被当卸力指令 → 掉臂，LL-022/F48 禁令）。可 `refresh_keepalive_when_gate_closed:=false` 关闭。与主业 refresh 共用逐电机节流与 tx_enable 开关，帧计入 tx_refresh 窗口计数 → L5 TxStats 可观察（F121 验收 2）。
+- **验收标准：**
+  1. gate 关闭 + 电机失能：candump can1 可见非 0x18 的周期控制帧（0x01 发、0x02 回），`/joint_states` 与 `/motor_feedback` 持续更新、RViz 不冻结（F113 keepalive 之外的第二通道）
+  2. gate 关闭 + 电机仍使能（如软下电过渡期）：**不得**下发零增益帧（LL-022），日志无 F58 卸力告警，臂不卸力
+  3. gate 打开恢复：ordinary refresh（锚定/跟随/stop-hold）不受影响，`skip_power_gate` 窗口计数如常
+  4. 失能态零增益帧的 `kp=kd=tau=0` 与参数冻结（`refresh_keepalive_when_gate_closed := false` 生效）
+- **责任范围（真机确认 2026-09-27）= legacy-only：** F122 载体是 `motor_protocol_node` 的 gate-close 分支，而 **F78 生产栈不运行 motor_protocol_node**（`a3_bringup.launch.py hardware:=can` 的 CAN 执行在 ros2_control 插件 `A3MITHardwareInterface`），故 F122 在 prod 无席位；prod 的失能态反馈新鲜度由「失能后 0x18 主动上报 → `RxLoop` 无条件解码 → 状态接口裸指针持续刷新」天然覆盖（F121 真机矩阵：失能后 `/joint_states` 仍 ≈196 Hz），**prod 不存在 gate 关闭即冻结的缺口**。F122 保留于 legacy 栈（`edge_legacy_stack.launch.py`：can_transport + motor_protocol + power_sequence），作为其 gate 关闭保活手段，验收标准 1–4 在此栈成立。
+- **关联：** G2（0x18 评估结论 = 保留，见 2026-09-27 评估）、F113（0x18 keepalive）、F48/LL-022（零增益禁令）、F58/LL-053（stop-hold 重力支撑）、F66（snap-guard）、F83（C++ power_sequence）、[SAFETY.md](../shared/SAFETY.md) gate 小节
+- **状态：** `implemented`（legacy-only）——真机复验完成 2026-09-27（prod 无需 F122；零增益失能保活语义随 legacy 栈维护）
+
+### F123 — 0x18 主动上报周期下调 100ms/10Hz（0x7026 接管，on_activate + on_deactivate 双写）
+
+- **说明：** 现状：0x18 主动上报（主动上报时间 0x7026 EPScan_time）沿用工厂默认 n=1 → **10 ms ≈ 100 Hz/电机**，7 电机全开 ≈ 700 fps 常驻总线（F121 实测失能静置 699 fps、使能 ~630 fps 增量），其中**绝大部分是失能/静置期的空转**——0x18 仅为遥测通道（真实执行控制反馈来自 0x02 控制应答），减速不影响执行闭环。F121 判据「解析来不及」不成立（设备解析天花板 ≈770 fps），但**传输/解码成本**可优化：本需求把 0x18 周期改为 **100 ms ≈ 10 Hz/电机**（EPScan n=19，`period_ms = 10+(n−1)*5`），7 电机降为 ≈70 fps，静置/失能态解码量省 ≈91%。真机实测（2026-09-27）补充：0x18 只在失能/静置态存在——enable 进 active 后各电机自行停发 0x18（active 反馈走 0x02 控制应答 ≈200 Hz/电机，与 0x18 无关），故 F123 的收益全部落在失能静置流。F81 staleness/freeze-hold 只在 active 路径由 0x02 驱动、与 0x18 无关 → 10 Hz 0x18 不触发假 freeze；on_activate 的 7/7 has_feedback 门（≤500 ms）在 10 Hz 下仍满足（首帧 ≤105 ms）。
+- **实现：** 参数 `active_report_hz`（默认 10.0，合法 1.0–200.0，对应 10 ms–1000 ms EPScan）。写入由 F78 插件 `A3MITHardwareInterface` 接管、**双处**：① `on_activate` 的厂商编排内，在 0x7028 CAN_TIMEOUT 写入之后、Enable 之前逐电机写 0x7026（reset-all 已擦回工厂 10 ms，故每次 enable 都要重套）；② `on_deactivate` 在 reset-all 之后、0x18-ON（F113 keepalive）之前逐电机写 0x7026——否则失能静置仍回 10 ms 满速流。legacy 栈（`power_sequence_node` 同参数名 `active_report_hz`，boot 写 + pre-enable）语义不变。参数经 xacro/launch 全链路：`el_a3_ros2_control.xacro` `<param>` ← `el_a3.urdf.xacro` xacro:arg ← `a3_bringup.launch.py` DeclareLaunchArgument（默认空传 = xacro 默认 10.0）。
+- **验收标准：**
+  1. 真机 candump can1：失能/静置态 0x18 帧间隔 ≈100 ms（10 Hz/电机），不再 10 ms。总线 0x18 原子帧 ID 为 `180001FD`(L1)–`180007FD`(L7)（= 0x18 前缀 + 电机号 + 主站 0xFD；`0x280|id` 实为 0x02 控制应答 ID，勿混）。注：enable 进 active 后各电机自行停发 0x18（实测稳态 5 s 零 0x18），0x18 只承载失能/静置遥测 → 量测点固定在静置流 ✅
+  2. 真机失能后再次 candump：0x18 仍 ≈100 ms（on_deactivate 的 reset→rewrite 路径生效，失能静置期同样降频）。实测：enable→disable 后失能静置中位 **105.05 ms/电机（~9.5 Hz）**，7 电机中位 105.03–105.07 ms（n≈39/电机/4 s），总线静置 699→**≈68 fps（−91%）**；独立复测（6 s 再捕，400 帧全 0x18）仍 105.05 ms，稳定不回漂 ✅
+  3. 10 Hz 下全流程不受影响：L3 enable 7/7 门通过 ✅、READY 出 INIT ✅、/joint_states 仍实时（实测失能 ≈68 fps 流下读值仍 ~160–180 Hz ✅，active 由 0x02 应答 ~200 Hz/电机驱动）；PS4 控制项本轮未直接操纵（同栈既有验收覆盖）
+  4. 回退通道：`/a3/motor/reset` 后插件重写（on_deactivate 写路径所用同帧格式已由 ② 实测通过）；`active_report_hz:=100` 可临时恢复 10 ms——诊断/维护路径，本轮未实机触发（代码路径与默认写入同构）
+- **关联：** G2（0x18 评估，2026-09-27）、F113（0x18 keepalive，on_deactivate 保持流 = 新周期载体）、F121（bus fps 基线 699）、F122（legacy 栈 gate 保活不受影响）、F78（插件 owner）、F83（power_sequence 同参数 `active_report_hz`）
+- **状态：** `accepted`（2026-09-27 真机 candump 验收：enable 前静置 10.00 ms/电机（工厂 ~700 fps）→ enable 7/7 门过、READY、active 态 0x02 反馈正常 → 失能后静置 105.05 ms/电机（~9.5 Hz）、总线 699→68 fps（−91%）、复测稳定。验收 ①②③ 通过；④ 为诊断/维护路径未实机触发）
+
 ### F124 — 示教回放回首点改走 MoveIt 轨迹规划（替代几何插值 ramp）
 
 - **说明：** 现状：`_playback_cb` 回放前若当前位与录制首点差 >0.02 rad 且 `playback_ramp_duration_s` >0.05，会 prepend 一段**几何插值** ramp（`[q0,q1]`，q0=当前位）。用户诉求：回首点改用 MoveIt 轨迹规划（比插值更合适）。本需求：`use_ramp` 成立且 `playback_return_use_moveit:=true`（默认）时，回首点段改用 `_moveit_move`（MoveGroup action，group "arm"，JointConstraint ±`moveit_goal_tolerance_rad`，F107 static-torque/duty 前置门禁）规划执行；起跑前 `control_mode=TRAJ_RUNNING`、state=`{label} (planning)`→成功后 `playback return {label}`。失败 graceful 回落原 join-ramp（行为同今天）。回首点期间 L7 经 `_dispatch_l7_linear` 同步到录制首点位（1–3 s 线性，仅标准栈/真机有 GripperCommand action，edge_web_sim no-op）。回首点成功 → phase P 用**纯录制几何**（不再含 ramp 段）经 retime 平滑再下发，`_schedule_back_to_ready` 只用 phase P 时长。

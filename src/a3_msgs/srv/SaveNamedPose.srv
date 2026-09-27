@@ -1,5 +1,7 @@
-# 把命名点位保存到用户层 ~/.a3/poses.yaml（同名覆盖，运行时即时生效）。
+# 把命名点位保存到包内 a3_description/config/named_poses.yaml（同名覆盖，运行时即时生效）。
+# F114：写入目标从用户层 ~/.a3/poses.yaml 收敛到包内（F113 弃用用户层覆盖）。
 # positions 留空 = 取当前 /joint_states 位姿（F39）。
+# name 留空 = 服务端自动命名 snap_YYYYMMDD_HHMMSS（F114，手柄无法输入文本）。
 string name
 float64[] positions
 ---

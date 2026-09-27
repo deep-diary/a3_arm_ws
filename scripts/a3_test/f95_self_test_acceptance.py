@@ -7,7 +7,7 @@ F95 标准自检服务验收（mock 模式全自动，机械臂断电可跑）�
   B. mock 全栈、未 enable：passed=true；≥3 个 status；joint_states rate ≥40 Hz；
      joint_state_broadcaster=active；arm_controller=inactive；id 非空
   C. /a3/arm/enable 后：仍 passed=true，arm_controller=active（状态写入 message/键值）
-  D. 回归：/a3/arm/disable safe-park 成功，最终位姿在 home 0.15 rad 内
+  D. 回归：/a3/arm/disable safe-park 成功，最终位姿在 idle 0.15 rad 内
 
 hardware:=mock 不触碰 CAN。
 """
@@ -103,7 +103,7 @@ for st in res.status:
 rclpy.shutdown()
 '''
 
-# disable 后读取最终位姿（复用 F94 的 home 加载规则）
+# disable 后读取最终位姿（复用 F94 的 idle 加载规则）
 POSE_PROBE = r'''
 import os, time, sys, yaml
 import rclpy
@@ -121,23 +121,23 @@ end = time.time() + 5
 while time.time() < end and len(latest) < 7:
     rclpy.spin_once(n, timeout_sec=0.1)
 
-home = [0.0] * 7
+idle = [0.0] * 7
 from ament_index_python.packages import get_package_share_directory
 p = os.path.join(get_package_share_directory("a3_description"),
                  "config", "named_poses.yaml")
 data = yaml.safe_load(open(p, encoding="utf-8"))
-h = (data.get("poses") or {}).get("home")
+h = (data.get("poses") or {}).get("idle")
 if h is not None:
-    home = list(h["positions"] if isinstance(h, dict) else h)
+    idle = list(h["positions"] if isinstance(h, dict) else h)
 up = os.path.expanduser("~/.a3/poses.yaml")
 if os.path.exists(up):
     udata = yaml.safe_load(open(up, encoding="utf-8")) or {}
-    h = (udata.get("poses") or {}).get("home")
+    h = (udata.get("poses") or {}).get("idle")
     if h is not None:
-        home = list(h["positions"] if isinstance(h, dict) else h)
+        idle = list(h["positions"] if isinstance(h, dict) else h)
 
 q = [latest.get(j, 0.0) for j in ORDER]
-worst = max(abs(a - b) for a, b in zip(q, home))
+worst = max(abs(a - b) for a, b in zip(q, idle))
 print("POSE|worst=%.4f" % worst)
 rclpy.shutdown()
 sys.exit(0 if worst <= 0.15 else 1)
@@ -261,7 +261,7 @@ def main():
         )
         pline = [l for l in r.stdout.splitlines() if l.startswith("POSE|")]
         worst = float(pline[0].split("=")[1]) if pline else 9.9
-        check("safe-park 最终位姿在 home 0.15 rad 内", worst <= 0.15,
+        check("safe-park 最终位姿在 idle 0.15 rad 内", worst <= 0.15,
               f"worst={worst:.3f} rad")
     finally:
         try:

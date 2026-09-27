@@ -28,8 +28,8 @@ HALT_SETTLE_S = 0.6
 MIN_AXIS_MOVE_M = 0.008   # 位移判定阈值（远大于 halt 漂移噪声 ~0）
 
 # sim_executor 启动为全零位，但 L2(0~3.67)/L3(-4.01~0) 的零位在限位边界+奇异，
-# IK 无法运动。jog 前先把仿真臂预定位到非奇异的 home 抬臂位姿。
-HOME_JOINTS = [0.0, 0.785, -0.785, 0.0, 0.0, 0.0, 0.0]
+# IK 无法运动。jog 前先把仿真臂预定位到非奇异的抬臂位姿。
+RAISED_JOINTS = [0.0, 0.785, -0.785, 0.0, 0.0, 0.0, 0.0]  # 抬臂位（旧 EDULITE home 值，仅作非奇异预定位）
 
 # (标签, frame 轴索引, 符号)
 DIRECTIONS = [
@@ -110,13 +110,13 @@ class ServoSimTest(Node):
         rep.check("start_servo 服务成功", start is not None and start.success,
                   start.message if start else "无应答")
 
-        # 预定位到 home 抬臂位姿（脱离全零奇异/限位），再进行笛卡尔 jog
-        rep.info("预定位仿真臂到 home 位姿（脱离全零奇异）...")
+        # 预定位到抬臂位姿（脱离全零奇异/限位），再进行笛卡尔 jog
+        rep.info("预定位仿真臂到抬臂位姿（脱离全零奇异）...")
         traj = JointTrajectory()
         traj.joint_names = ["L1_joint", "L2_joint", "L3_joint", "L4_joint",
                             "L5_joint", "L6_joint", "L7_joint"]
         p = JointTrajectoryPoint()
-        p.positions = list(HOME_JOINTS)
+        p.positions = list(RAISED_JOINTS)
         p.time_from_start.sec = 3
         traj.points.append(p)
         # servo 运行时会拒绝轨迹（SERVO 模式），先 pause servo 再发定位轨迹

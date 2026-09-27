@@ -10,7 +10,7 @@
 
 验收链（全程无自研节点参与，机械臂保持断电，vcan0 闭环）：
   1. zero_torque_controller 以 inactive 状态常驻（list_controllers）
-  2. 多姿态（home / ready / 中间姿态）标准 switch_controllers 互斥切换：
+  2. 多姿态（seed / ready / 中间姿态）标准 switch_controllers 互斥切换：
      arm_controller(deactivate) + zero_torque_controller(activate) 原子完成
      CAN 抓包：kp≈0、kd≈zero_torque_kd(0.3 固定兜底，F85 adaptive 关闭)、vel=0、位置字段=当前测量位、
      torque_ff = 独立 Python-Pinocchio RNEA 重力矩 × direction（≤0.02 Nm）
@@ -18,7 +18,7 @@
      全程 kp≈0、torque_ff 实时跟随 RNEA；撤力后在新位姿零力矩保持（漂移≤0.03）
   4. 切回 arm_controller：kp≈80、kd≈2、torque_ff=RNEA×dir
      （F108 位置模式重力前馈默认开启，与 F49 标定模型同源）
-  5. 切回后 JTC home→ready→home 仍 ALL PASS（落位误差 ≤0.02）
+  5. 切回后 JTC seed→ready→seed 仍 ALL PASS（落位误差 ≤0.02）
 """
 
 import json
@@ -56,7 +56,7 @@ KD_EFFORT = 0.3
 KP_POSITION = 80.0
 KD_POSITION = 2.0
 
-# 中间姿态（L1–L6），提供与 home/ready 不同的重力矩工况
+# 中间姿态（L1–L6），提供与 seed/ready 不同的重力矩工况
 MID = [0.30, -0.40, 0.60, -0.35, 0.25, 0.45]
 MID_TARGET_TOL = 0.03
 
@@ -288,11 +288,10 @@ def main():
 
     spin_s(rec, 1.0)
     poses = load_package_poses()
-    home = poses["home"][:6]
+    seed = [0.0, 0.785, -0.785, 0.0, 0.0, 0.0]  # vcan_motor_sim 播种位（非命名点位）
     ready = poses["ready"][:6]
-
-    if max(abs(angdiff(rec.current()[j], home[j])) for j in range(6)) > 0.02:
-        print(f"当前位不是包内 home，先核对栈/模拟器：{rec.current()}")
+    if max(abs(angdiff(rec.current()[j], seed[j])) for j in range(6)) > 0.02:
+        print(f"当前位不是 vcan 播种位，先核对栈/模拟器：{rec.current()}")
         return 1
 
     urdf = render_urdf()
@@ -303,7 +302,7 @@ def main():
         states.get(FREE_DRIVE) == "inactive" and states.get(ARM_CTRL) == "active",
         f"[初始控制器状态] arm={states.get(ARM_CTRL)}, free_drive={states.get(FREE_DRIVE)}"))
 
-    test_poses = [("home", home, None), ("ready", ready, GOTO_S),
+    test_poses = [("seed", seed, None), ("ready", ready, GOTO_S),
                   ("mid", MID, GOTO_S)]
     for label, pose, move_dur in test_poses:
         if move_dur is not None:
@@ -338,11 +337,11 @@ def main():
             results.append((tff_err <= TORQUE_TOL,
                             f"[切回 @{label} torque_ff=RNEA×dir] 最大偏差 {tff_err:.4f}"))
 
-    # 切换回归：标准 JTC home→ready→home 仍正常
+    # 切换回归：标准 JTC seed→ready→seed 仍正常
     ok, msg, _ = move_and_settle(rec, ready, GOTO_S, 0.02, "回归 ready")
-    results.append((ok, f"[切回后 JTC home→ready] {msg}"))
-    ok, msg, _ = move_and_settle(rec, home, GOTO_S, 0.02, "回归 home")
-    results.append((ok, f"[切回后 JTC ready→home] {msg}"))
+    results.append((ok, f"[切回后 JTC seed→ready] {msg}"))
+    ok, msg, _ = move_and_settle(rec, seed, GOTO_S, 0.02, "回归 seed")
+    results.append((ok, f"[切回后 JTC ready→seed] {msg}"))
 
     sniffer.stop()
 

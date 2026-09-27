@@ -18,6 +18,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -60,6 +61,10 @@ constexpr bool kDefaultMotorCanTimeoutEnabled = true;
 constexpr double kDefaultMotorCanTimeoutS = 0.2;
 // 0x7028 is uint32 with ~50 us per count (20000 ≈ 1 s)
 constexpr double kCanTimeoutCountsPerSec = 20000.0;
+// F123: 0x18 active-report period (0x7026 EPScan_time). Factory default is
+// n=1 → 10 ms (100 Hz/motor). Re-armed to 100 ms (10 Hz) every activate and
+// again after deactivate's reset, because MIT reset wipes the write back.
+constexpr double kDefaultActiveReportHz = 10.0;
 
 double ParseDouble(const std::string & value, double fallback)
 {
@@ -216,6 +221,12 @@ public:
     motor_can_timeout_s_ = ParseDouble(
       GetParam(hp, "motor_can_timeout_s", ""), kDefaultMotorCanTimeoutS);
     motor_can_timeout_s_ = std::clamp(motor_can_timeout_s_, 0.05, 10.0);
+    // F123: 0x18 active-report period (EPScan n; 10 Hz → 100 ms → n=19).
+    active_report_hz_ = ParseDouble(
+      GetParam(hp, "active_report_hz", ""), kDefaultActiveReportHz);
+    active_report_hz_ = std::clamp(active_report_hz_, 1.0, 200.0);
+    active_report_epscan_n_ = ProtocolCodec::PeriodMsToEpScanN(
+      static_cast<uint32_t>(std::llround(1000.0 / active_report_hz_)));
     feedback_timeout_s_ = ParseDouble(
       GetParam(hp, "feedback_timeout_s", ""), kDefaultFeedbackTimeoutS);
     feedback_timeout_s_ = std::clamp(feedback_timeout_s_, 0.02, 5.0);
@@ -356,6 +367,20 @@ public:
       return nullptr;
     };
 
+    // Joints (re)claimed as effort by an incoming controller in this same
+    // switch. These must not be reverted to position mode by their outgoing
+    // stop interface — F127 swaps gripper_controller's L7/effort release into
+    // zero_torque's L7/effort claim atomically. Keyed off start_interfaces,
+    // not `started`: L7 is already in effort mode under the gripper, so the
+    // started loop skips it and it would never appear in `started`.
+    std::set<std::string> start_effort;
+    for (const auto & iface : start_interfaces) {
+      const auto [joint_name, iface_name] = split(iface);
+      if (iface_name == "effort") {
+        start_effort.insert(joint_name);
+      }
+    }
+
     // Modes are per-joint: zero_torque claims effort on all 7, but
     // GripperActionController claims effort only on L7 while the arm JTC
     // keeps position on L1-L6.
@@ -386,7 +411,8 @@ public:
     for (const auto & iface : stop_interfaces) {
       const auto [joint_name, iface_name] = split(iface);
       JointMapping * j = find_joint(joint_name);
-      if (j == nullptr || iface_name != "effort" || !j->effort_mode) {
+      if (j == nullptr || iface_name != "effort" || !j->effort_mode ||
+          start_effort.count(joint_name) > 0) {
         continue;
       }
       j->effort_mode = false;
@@ -572,6 +598,15 @@ public:
           TimeoutCountsRaw(can_timeout_counts)),
         nullptr);
       std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      // F123: re-arm the 0x18 period to 100 ms (10 Hz, n=19). Params are
+      // volatile and MIT reset wiped this back to the 10 ms factory default
+      // at the top of activate, so the write must run on every enable.
+      transport_.Send(
+        ProtocolCodec::BuildSetParamRawFrame(
+          bus_, j.motor_id, ProtocolCodec::kParamEpScanTime,
+          {active_report_epscan_n_, 0, 0, 0}),
+        nullptr);
+      std::this_thread::sleep_for(std::chrono::milliseconds(30));
       transport_.Send(ProtocolCodec::BuildEnableFrame(bus_, j.motor_id), nullptr);
       std::this_thread::sleep_for(std::chrono::milliseconds(30));
     }
@@ -664,11 +699,23 @@ public:
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
+    // F123: the reset just above wiped 0x7026 back to the 10 ms factory
+    // default; re-arm 100 ms (10 Hz) before the F113 0x18-ON so the disabled/
+    // idle stream does not snap back to 100 Hz/motor during the hold.
+    for (const auto & j : joints_) {
+      transport_.Send(
+        ProtocolCodec::BuildSetParamRawFrame(
+          bus_, j.motor_id, ProtocolCodec::kParamEpScanTime,
+          {active_report_epscan_n_, 0, 0, 0}),
+        nullptr);
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
     // F113: keep the 0x18 active-report stream open after deactivate so
     // /joint_states stays live in RViz and the next enable's 7/7 gate has
-    // data. Always-on by design: the ~9% constant load buys telemetry that
-    // survives plug-in reloads/crashes, matching power_sequence's intent of
-    // never sending 0x18-OFF.
+    // data. Always-on by design: the ~1% constant load (10 Hz/motor since
+    // F123) buys telemetry that survives plug-in reloads/crashes, matching
+    // power_sequence's intent of never sending 0x18-OFF.
     for (const auto & j : joints_) {
       transport_.Send(ProtocolCodec::BuildActiveReportFrame(bus_, j.motor_id, true), nullptr);
     }
@@ -1239,6 +1286,10 @@ private:
   double kd_smoothing_alpha_{kDefaultKdSmoothingAlpha};
   bool motor_can_timeout_enabled_{kDefaultMotorCanTimeoutEnabled};
   double motor_can_timeout_s_{kDefaultMotorCanTimeoutS};
+  // F123: 0x18 active-report period. active_report_hz_ is the config knob;
+  // active_report_epscan_n_ is the baked EPScan byte (n=19 @ 10 Hz).
+  double active_report_hz_{kDefaultActiveReportHz};
+  uint8_t active_report_epscan_n_{19};
   double feedback_timeout_s_{kDefaultFeedbackTimeoutS};
   double startup_kd_{kDefaultStartupKd};
   double temp_warn_c_{kDefaultTempWarnC};

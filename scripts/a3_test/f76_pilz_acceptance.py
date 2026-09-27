@@ -8,7 +8,7 @@
   0. 双规划管线 + Sequence action 端点齐全
   1. enable -> 两 JTC active、FSM READY
   2. OMPL 管线 zero→ready 规划+执行落点 ≤0.02
-  3. Pilz PTP（ready→home→ready）落点 ≤0.02
+  3. Pilz PTP（ready→idle→ready）落点 ≤0.02
   4. LIN 末端直线度偏差 ≤2 mm
   5. CIRC 圆弧半径恒定 ≤2 mm
   6. 3×LIN 三角形 Sequence（blend）连续通过拐角、几何偏差 ≤4 mm
@@ -422,7 +422,7 @@ def main():
         return 1
 
     poses = poses_yaml()
-    home, ready = poses["home"], poses["ready"]
+    idle, ready = poses["idle"], poses["ready"]
 
     # ---- 2. OMPL zero->ready ----
     code, traj = plan(make_request("", "ompl", joint_goal_constraints(ready)))
@@ -436,15 +436,15 @@ def main():
             landed, err = False, 9.9
         check("2b OMPL execute land ready", ok_exec and landed, f"ec={ec} err={err:.4f}")
 
-    # ---- 3. Pilz PTP ready->home->ready ----
-    for k, (a, b) in enumerate(((ready, home), (home, ready))):
+    # ---- 3. Pilz PTP ready->idle->ready ----
+    for k, (a, b) in enumerate(((ready, idle), (idle, ready))):
         code, traj = plan(make_request("PTP", "pilz", joint_goal_constraints(b)))
         if code != 1:
-            check(f"3.{k} Pilz PTP plan {('to home','to ready')[k]}", False, f"code={code}")
+            check(f"3.{k} Pilz PTP plan {('to idle','to ready')[k]}", False, f"code={code}")
             continue
         ok_exec, ec = execute(traj)
         landed, err = wait_land(b)
-        check(f"3.{k} Pilz PTP land {('home','ready')[k]}", ok_exec and landed,
+        check(f"3.{k} Pilz PTP land {('idle','ready')[k]}", ok_exec and landed,
               f"ec={ec} err={err:.4f}")
 
     # ---- 4. LIN ----

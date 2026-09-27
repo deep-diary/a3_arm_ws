@@ -9,7 +9,7 @@ F94 两点轨迹统一速度限幅验收（mock 模式全自动）。
   3. 保守请求 Δq=0.1 rad、duration=2.0 s → duration 不被修改
   4. joint_velocity_scale:=0.5（ros2 param set 运行时生效）
      → 同超限请求地板 0.40 s、实测峰值 ≤ 16.5 rad/s（容差 5%）
-  5. 回归：/a3/arm/disable safe-park 正常完成，最终位姿在 home 容差 0.15 rad 内
+  5. 回归：/a3/arm/disable safe-park 正常完成，最终位姿在 idle 容差 0.15 rad 内
 
 hardware:=mock 不触碰 CAN，可在机械臂断电下运行。
 """
@@ -162,36 +162,36 @@ report("scale=0.5 实测峰值 ≤ 16.5 rad/s（+5%）", peak <= 16.5 * 1.05,
 report("恢复 scale=1.0", set_scale(1.0))
 spin(0.3)
 
-# --- 5. 回归：disable safe-park 回 home ---
+# --- 5. 回归：disable safe-park 回 idle ---
 f = dis.call_async(Trigger.Request())
 rclpy.spin_until_future_complete(n, f, timeout_sec=30)
 dr = f.result()
 report("/a3/arm/disable 成功", dr is not None and dr.success,
        dr.message if dr else "no response")
 
-# home：包级 named_poses.yaml + ~/.a3/poses.yaml 覆盖（与 arm_controller 同规则）
+# idle：包级 named_poses.yaml（F113 起 ~/.a3/poses.yaml 覆盖弃用，留兜底路径无害）
 import os, yaml
-home = [0.0] * 7
+idle = [0.0] * 7
 try:
     from ament_index_python.packages import get_package_share_directory
     p = os.path.join(get_package_share_directory("a3_description"),
                      "config", "named_poses.yaml")
     data = yaml.safe_load(open(p, encoding="utf-8"))
-    h = (data.get("poses") or {}).get("home")
+    h = (data.get("poses") or {}).get("idle")
     if h is not None:
-        home = list(h["positions"] if isinstance(h, dict) else h)
+        idle = list(h["positions"] if isinstance(h, dict) else h)
 except Exception as e:
     print("named poses load failed:", e)
 up = os.path.expanduser("~/.a3/poses.yaml")
 if os.path.exists(up):
     udata = yaml.safe_load(open(up, encoding="utf-8")) or {}
-    h = (udata.get("poses") or {}).get("home")
+    h = (udata.get("poses") or {}).get("idle")
     if h is not None:
-        home = list(h["positions"] if isinstance(h, dict) else h)
+        idle = list(h["positions"] if isinstance(h, dict) else h)
 spin(1.0)
 q = cur_pose()
-worst = max(abs(a - b) for a, b in zip(q, home))
-report("safe-park 最终位姿在 home 0.15 rad 内", worst <= 0.15,
+worst = max(abs(a - b) for a, b in zip(q, idle))
+report("safe-park 最终位姿在 idle 0.15 rad 内", worst <= 0.15,
        f"worst={worst:.3f} rad")
 
 rclpy.shutdown()
@@ -257,7 +257,7 @@ def main():
     if failures:
         print(f"F94 验收失败：{len(failures)} 项 -- {failures}")
         return 1
-    print("F94 验收通过：两点轨迹 URDF velocity 地板限幅（超限/保守/scale/回 home 回归）")
+    print("F94 验收通过：两点轨迹 URDF velocity 地板限幅（超限/保守/scale/回 idle 回归）")
     return 0
 
 

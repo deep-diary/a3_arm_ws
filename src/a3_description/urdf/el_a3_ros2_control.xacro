@@ -2,7 +2,7 @@
 <!-- EL-A3 ros2_control configuration -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-  <xacro:macro name="el_a3_ros2_control" params="use_mock_hardware use_real_hardware can_interface host_can_id wrist_motor_type adaptive_kd_enabled motor_can_timeout_enabled motor_can_timeout_s">
+  <xacro:macro name="el_a3_ros2_control" params="use_mock_hardware use_real_hardware can_interface host_can_id wrist_motor_type adaptive_kd_enabled motor_can_timeout_enabled motor_can_timeout_s active_report_hz">
 
     <!-- Wrist motor effort limits based on motor type -->
     <xacro:property name="wrist_effort_max" value="${5.5 if wrist_motor_type == 'RS05' else 6.0}"/>
@@ -39,6 +39,10 @@
                  0 / false disarms; firmware write is volatile, re-armed every on_activate. -->
             <param name="motor_can_timeout_enabled">${motor_can_timeout_enabled}</param>
             <param name="motor_can_timeout_s">${motor_can_timeout_s}</param>
+            <!-- F123: 0x18 active-report period (0x7026 EPScan_time), Hz.
+                 10 Hz → 100 ms → n=19 (factory default is 10 ms/100 Hz).
+                 Re-armed on every activate and after deactivate's reset. -->
+            <param name="active_report_hz">${active_report_hz}</param>
             <!-- F108: position-mode gravity feedforward (EDULITE
                  gravity_feedforward_ratio): t_ff = ratio * tau_scale * RNEA(q)
                  so the arm holds pose without sag. Model reuses the F49 fitted

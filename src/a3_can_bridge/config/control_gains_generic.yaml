@@ -25,6 +25,8 @@
     can_tx_frames_qos_depth: 4000
     enable_power_sequence_gate: true
     power_sequence_gate_topic: /power_sequence/gate_open
+    # F122: gate 关闭时对失能/未知电机补发零增益控制帧→勾回 0x02；已知使能电机绝不碰（LL-022）
+    refresh_keepalive_when_gate_closed: true
     publish_feedback_joint_states: true
     feedback_joint_states_topic: /joint_states
     feedback_joint_states_timer_hz: 50.0

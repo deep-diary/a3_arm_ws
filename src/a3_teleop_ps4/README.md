@@ -2,7 +2,7 @@
 
 > **查键位看这里。改键位只编 `config/mappings/default.yaml`，零代码。**
 > 操作员手册（流程/灯/震动）：[docs/edge/PS4_OPERATOR_GUIDE.md](../../docs/edge/PS4_OPERATOR_GUIDE.md)
-> 需求与验收：[docs/edge/REQUIREMENTS.md](../../docs/edge/REQUIREMENTS.md) F60–F64；
+> 需求与验收：[docs/edge/REQUIREMENTS.md](../../docs/edge/REQUIREMENTS.md) F60–F64、F119/F120；
 > 安全合同：[docs/shared/SAFETY.md](../../docs/shared/SAFETY.md)。
 
 ## 完整映射表（`mapping:=default`，F60 + F64）
@@ -10,10 +10,10 @@
 | 键 | 边沿 | 动作 | 底层调用 |
 |----|------|------|----------|
 | **L3** | 短按 | 一键开门禁 + 使能 | `power start` → `/a3/arm/enable`（幂等） |
-| **R3** | 短按 | safe-park 后失能 | `/a3/arm/disable`（F40：离 home 先 park） |
+| **R3** | 短按 | 任意模式软失能 | `/a3/arm/disable`（F119：先从 SERVO/示教/重力补偿退出当前模式 → F40 safe-park 回 idle → 保电失能） |
 | **Cross（✕）** | 长按 1 s | **硬急停**（断电、关闸；恢复需 L3） | `/power_sequence/command shutdown` |
-| **Triangle（▲）** | 按下即触发 | goto ready | `/a3/arm/goto_named_pose {name: ready}` |
-| **Circle（●）** | 按下即触发 | goto home（非机械零位） | `/a3/arm/goto_named_pose {name: home}` |
+| **Triangle（▲）** | 按下即触发 | goto home | `/a3/arm/goto_named_pose {name: home}` |
+| **Circle（●）** | 按下即触发 | goto idle（自然趴着位，非机械零位） | `/a3/arm/goto_named_pose {name: idle}` |
 | **Share** | 短按 | 开始示教 | `/a3/arm/start_teach`（零力矩拖动 + 记录） |
 | **Options** | 短按 | 结束示教（自动保存 latest） | `/a3/arm/stop_teach` |
 | **Square（■）** | 短按 | 回放最新轨迹 | `/a3/arm/playback {name: ""}` ≡ latest |
@@ -23,11 +23,14 @@
 | **R2** | 模拟 | 夹爪力控（**不需要 L1/R1**），松开全开 | gripper_force |
 | 左摇杆 X / Y | 模拟（L1） | 平移 Y（左右）/ Z（上下） | servo_lin_y / servo_lin_z |
 | 右摇杆 Y / X | 模拟 | 平移 X（前后，gate l1）/ 偏航（gate r1） | servo_lin_x / servo_ang_z |
-| **D-pad 上 / 下** | 点按 | 平移速度 ±0.15（0.10–1.0，按住不连发） | step_linear_scale |
-| **D-pad 右 / 左** | 点按 | 旋转速度 ±0.15（独立于平移档） | step_angular_scale |
-| touchpad / L2 | — | **预留不绑**（蓝牙触摸板无键事件，LL-052） | — |
+| **D-pad 上 / 下** | 点按 | goto home_up（home 上 15cm）/ home_down（下 10cm），F115 | `goto_named_pose {name: home_up/home_down}` |
+| **D-pad 左 / 右** | 点按 | goto home_back（home 后 20cm）/ home_front（前 15cm），F115 | `goto_named_pose {name: home_back/home_front}` |
+| **L2** | 短按 | 保存当前位姿为 snap_YYYYMMDD_HHMMSS（F114，写包内 named_poses.yaml） | `/a3/arm/save_named_pose {name: ""}` |
+| touchpad | — | **预留不绑**（蓝牙触摸板无键事件，LL-052） | — |
 
-口诀：**L3 开工、R3 收工、✕ 长按急停；▲ ready、● home；Share-Options-■ = 示教-保存-回放；PS 初始化；L1 平移、R1 旋转、十字键调两速。**
+> F115 起 D-pad 不再调速，平移/旋转恒用 `speed_normal`（默认 0.35）；`step_linear_scale/step_angular_scale` 动作函数保留，自定义映射可自行绑定。
+
+口诀：**L3 开工、R3 收工、✕ 长按急停；▲ home、● idle（F120）；Share-Options-■ = 示教-保存-回放；PS 初始化；L1 平移、R1 旋转、十字键直达 home 四周四点。**
 
 ## DS4 灯带 / 震动（F61，`ds4_feedback_node`）
 

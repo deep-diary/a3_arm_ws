@@ -254,6 +254,8 @@ public:
     enable_rx_decode_log_ = this->declare_parameter<bool>("enable_rx_decode_log", true);
     prefer_joint_name_mapping_ = this->declare_parameter<bool>("prefer_joint_name_mapping", true);
     enable_power_sequence_gate_ = this->declare_parameter<bool>("enable_power_sequence_gate", true);
+    refresh_keepalive_when_gate_closed_ = this->declare_parameter<bool>(
+      "refresh_keepalive_when_gate_closed", true);
     power_sequence_gate_topic_ = this->declare_parameter<std::string>("power_sequence_gate_topic", "/power_sequence/gate_open");
     tx_enable_can0_ = this->declare_parameter<bool>("tx_enable_can0", true);
     tx_enable_can1_ = this->declare_parameter<bool>("tx_enable_can1", true);
@@ -920,7 +922,7 @@ private:
     }
 
     // LL-026: 新轨迹 = 新意图，清空全部力矩钳位 latch。残留 latch 会把目标钉在
-    // 上一次 trip 的反馈位：若新轨迹（如 F40/F44 safe-park 回 home）要往钉住侧
+    // 上一次 trip 的反馈位：若新轨迹（如 F40/F44 safe-park 回 idle）要往钉住侧
     // 运动，关节会卡到 park 超时 → FAULT。保护不减弱：阻力仍在时钳位会在一个
     // tick 内按反馈力矩重新触发。
     torque_latch_active_.fill(false);
@@ -1302,11 +1304,15 @@ private:
     if (!enable_min_tx_refresh_ || min_tx_refresh_interval_s_ <= 1e-6) {
       return;
     }
-    if (enable_power_sequence_gate_ && !power_gate_open_) {
-      return;
-    }
+    // F122: gate 关闭（急停/R3 失能/软下电）时，运动主路径（轨迹/保持/stop-hold）整段
+    // 静默——但失能/未知电机仍发零增益保活帧 0x01 → 勾回 0x02 → RViz 恒实时，反馈不再
+    // 单点依赖 0x18 主动上报。已知使能电机的失能由 power_sequence 负 AWAY，此处绝不触碰。
     const int64_t now_ns = this->now().nanoseconds();
     const int64_t refresh_ns = static_cast<int64_t>(min_tx_refresh_interval_s_ * 1e9);
+    if (enable_power_sequence_gate_ && !power_gate_open_) {
+      SendGateClosedKeepalive(now_ns, refresh_ns);
+      return;
+    }
     for (const auto & route : ArmRoutes()) {
       const size_t idx = std::min(route.trajectory_index, static_cast<size_t>(NumArmJoints() - 1));
       if (idx >= last_refresh_stamp_ns_.size()) {
@@ -1455,6 +1461,60 @@ private:
         static_cast<float>(use_kp),
         static_cast<float>(use_kd),
         static_cast<float>(use_tau),
+        static_cast<float>(TorqueRangeNmFor(route.motor_id)),
+        static_cast<float>(SpeedRangeRadSFor(route.motor_id)));
+      auto packed = FrameCodec::Pack(frame);
+      tx_pub_->publish(packed);
+      ++tx_refresh_total_window_;
+      if (is_front) {
+        ++tx_refresh_can0_window_;
+      } else {
+        ++tx_refresh_can1_window_;
+      }
+      if (idx < tx_frame_count_per_motor_window_.size()) {
+        ++tx_frame_count_per_motor_window_[idx];
+      }
+      last_refresh_stamp_ns_[idx] = now_ns;
+    }
+  }
+
+  // F122: gate 关闭时失能/未知电机的零增益保活。仅当该电机已知失能(mode 0)或状态未知(-1)
+  // 才发 (p=反馈位|0, kp=kd=tau=0) 帧——任何模式下都无力矩输出（F48 播种同一语义）；
+  // 若电机仍被识别为使能(>=1)，一律跳过（零增益会被当成卸力指令 → 掉臂，LL-022）。
+  // 与主业 refresh 共用逐电机节流与 tx_enable 开关；帧计入 tx_hz 窗口计数，TxStats 可观察。
+  // 目标：失能态反馈保持实时（0x01 → 0x02 勾回），急停/R3/软下电后 RViz 与编排层不冻结。
+  void SendGateClosedKeepalive(int64_t now_ns, int64_t refresh_ns)
+  {
+    if (!refresh_keepalive_when_gate_closed_) {
+      return;
+    }
+    for (const auto & route : ArmRoutes()) {
+      const size_t idx = std::min(route.trajectory_index, static_cast<size_t>(NumArmJoints() - 1));
+      if (idx >= last_refresh_stamp_ns_.size()) {
+        continue;
+      }
+      if (last_refresh_stamp_ns_[idx] > 0 && (now_ns - last_refresh_stamp_ns_[idx]) < refresh_ns) {
+        continue;
+      }
+      const bool is_front = (ArmMapper::ArmBus() == CanBus::CAN0);
+      if ((is_front && !tx_enable_can0_) || (!is_front && !tx_enable_can1_)) {
+        continue;
+      }
+      const int mode =
+        idx < last_feedback_mode_status_.size() ? last_feedback_mode_status_[idx] : -1;
+      if (mode != 0 && mode != -1) {
+        continue;
+      }
+      const double p =
+        route.motor_id < last_feedback_mit_rad_.size() &&
+        std::isfinite(last_feedback_mit_rad_[route.motor_id]) ?
+        last_feedback_mit_rad_[route.motor_id] : 0.0;
+      const auto frame = ProtocolCodec::BuildMitControlFrame(
+        ArmMapper::ArmBus(),
+        route.motor_id,
+        static_cast<float>(p),
+        static_cast<float>(default_velocity_),
+        0.0f, 0.0f, 0.0f,
         static_cast<float>(TorqueRangeNmFor(route.motor_id)),
         static_cast<float>(SpeedRangeRadSFor(route.motor_id)));
       auto packed = FrameCodec::Pack(frame);
@@ -3171,6 +3231,7 @@ private:
   bool enable_rx_decode_log_{true};
   bool prefer_joint_name_mapping_{true};
   bool enable_power_sequence_gate_{true};
+  bool refresh_keepalive_when_gate_closed_{true};
   std::string power_sequence_gate_topic_;
   bool power_gate_open_{false};
   bool tx_enable_can0_{true};

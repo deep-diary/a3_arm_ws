@@ -47,7 +47,7 @@ public:
   static constexpr uint16_t kParamLocKp = 0x701E;
   static constexpr uint16_t kParamSpdKp = 0x701F;
   static constexpr uint16_t kParamSpdKi = 0x7020;
-  static constexpr uint16_t kParamEpScanTime = 0x7026;
+  static constexpr uint16_t kParamEpScanTime = 0x7026;  // 上报时间设置，1表示10ms，加1递增5ms，默认值时1
   static constexpr uint16_t kParamCanTimeout = 0x7028; // CAN 通信超时（uint32, ~50us/count, 20000≈1s）：0=电机端不超时；超时电机进 RESET 模式；写入易失
   static constexpr uint16_t kParamZeroSta = 0x7029;    // 零点标志位（uint8）：0=0~2π 重建，1=-π~π 重建
 

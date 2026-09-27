@@ -45,32 +45,44 @@ from launch.actions import (
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, LaunchConfiguration, PythonExpression
+from launch.substitutions import (
+    Command,
+    IfElseSubstitution,
+    LaunchConfiguration,
+    PythonExpression,
+)
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterFile, ParameterValue
 
 
-def make_spawner_stage(spawner_node, on_success, max_retries=2, gap=2.0):
+def make_spawner_stage(make_node, first_node, on_success, max_retries=2, gap=2.0):
     """
-    顺序 spawner 链的一级：退出码 0 → on_success；非零 → 延迟后重启同一 spawner.
+    顺序 spawner 链的一级：退出码 0 → on_success；非零 → 延迟后重启，最多 max_retries.
 
-    重启是幂等的：spawner 启动先查 is_controller_loaded，已 load 的控制器
-    会跳过 load_controller 继续 configure/activate，因此高负载下 rmw 丢失
-    load_controller 响应（重试撞上 "already loaded"）不会再杀死起栈流程。
+    重试必须新建同参数 Node：launch_ros 对同一 action 对象二次调度会抛
+    "ExecuteLocal ... executed more than once"，异常直接杀死整个 launch
+    （一次瞬时 load 竞态 = spawner FATAL + launch 崩溃 + 全栈 SIGINT）。
+    逐次重建 spawner 并各自挂退出处理：spawner 幂等（先查 is_controller_loaded，
+    已 load 的控制器会跳过 load_controller 继续 configure/activate），
+    重试撞上 "already loaded" 不会再把起栈流程打死。
     """
     attempts = {"n": 0}
 
-    def on_exit(event, _context):
-        if event.returncode == 0:
-            return on_success
-        attempts["n"] += 1
-        if attempts["n"] > max_retries:
-            return []
-        return [TimerAction(period=gap, actions=[spawner_node])]
+    def arm(node):
+        def on_exit(event, _context):
+            if event.returncode == 0:
+                return on_success
+            attempts["n"] += 1
+            if attempts["n"] > max_retries:
+                return []
+            fresh = make_node()
+            return [TimerAction(period=gap, actions=[arm(fresh), fresh])]
 
-    return RegisterEventHandler(
-        OnProcessExit(target_action=spawner_node, on_exit=on_exit)
-    )
+        return RegisterEventHandler(
+            OnProcessExit(target_action=node, on_exit=on_exit)
+        )
+
+    return arm(first_node)
 
 
 def load_yaml(package_name, file_path):
@@ -88,6 +100,7 @@ def generate_launch_description():
     can_interface = LaunchConfiguration("can_interface")
     adaptive_kd_enabled = LaunchConfiguration("adaptive_kd_enabled")
     motor_can_timeout_enabled = LaunchConfiguration("motor_can_timeout_enabled")
+    active_report_hz = LaunchConfiguration("active_report_hz")
     use_rviz = LaunchConfiguration("use_rviz")
     use_sw_render = LaunchConfiguration("use_sw_render")
     use_mqtt = LaunchConfiguration("use_mqtt")
@@ -100,6 +113,7 @@ def generate_launch_description():
     fsm_backend = LaunchConfiguration("fsm_backend")
     use_rosbag = LaunchConfiguration("use_rosbag")
     bag_dir_cfg = LaunchConfiguration("bag_dir")
+    use_servo_anchor = LaunchConfiguration("use_servo_anchor")
 
     bringup_share = get_package_share_directory("a3_bringup")
     desc_share = get_package_share_directory("a3_description")
@@ -116,7 +130,8 @@ def generate_launch_description():
         " else ' use_mock_hardware:=false use_real_hardware:=true",
         " can_interface:=", can_interface,
         " adaptive_kd_enabled:=", adaptive_kd_enabled,
-        " motor_can_timeout_enabled:=", motor_can_timeout_enabled, "'",
+        " motor_can_timeout_enabled:=", motor_can_timeout_enabled,
+        " active_report_hz:=", active_report_hz, "'",
     ])
     robot_description = ParameterValue(
         Command(["xacro ", xacro_file, hw_args]),
@@ -178,49 +193,59 @@ def generate_launch_description():
 
     # JTC --inactive：只配置不激活（不 claim 命令接口、硬件 on_activate 不触发），
     # 等编排层 enable → switch_controller 激活。
-    jtc_spawner = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=[
-            "arm_controller",
-            "gripper_controller",
-            "--inactive",
-            "--controller-manager",
-            "/controller_manager",
-            # 5 s × spawner 内部 3 次重试：单次丢响应可在链内自愈；
-            # 30 s 会让恢复（最长 90 s）远超验收/看门狗窗口。
-            "--service-call-timeout",
-            "5.0",
-        ],
-        output="screen",
-    )
+    # 三个 spawner 都用工厂函数生成：make_spawner_stage 重试时必须新建同参数
+    # Node（launch_ros 禁止同一 action 对象二次调度），否则一次瞬时 load 竞态
+    # 会把整个 launch 打死（"ExecuteLocal ... executed more than once"）。
+    def make_jtc_spawner():
+        return Node(
+            package="controller_manager",
+            executable="spawner",
+            arguments=[
+                "arm_controller",
+                "gripper_controller",
+                "--inactive",
+                "--controller-manager",
+                "/controller_manager",
+                # 5 s × spawner 内部 3 次重试：单次丢响应可在链内自愈；
+                # 30 s 会让恢复（最长 90 s）远超验收/看门狗窗口。
+                "--service-call-timeout",
+                "5.0",
+            ],
+            output="screen",
+        )
 
-    free_drive_spawner = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=[
-            "zero_torque_controller",
-            "--inactive",
-            "--controller-manager",
-            "/controller_manager",
-            "--service-call-timeout",
-            "5.0",
-        ],
-        output="screen",
-    )
+    def make_free_drive_spawner():
+        return Node(
+            package="controller_manager",
+            executable="spawner",
+            arguments=[
+                "zero_torque_controller",
+                "--inactive",
+                "--controller-manager",
+                "/controller_manager",
+                "--service-call-timeout",
+                "5.0",
+            ],
+            output="screen",
+        )
 
-    jsb_spawner = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=[
-            "joint_state_broadcaster",
-            "--controller-manager",
-            "/controller_manager",
-            "--service-call-timeout",
-            "5.0",
-        ],
-        output="screen",
-    )
+    def make_jsb_spawner():
+        return Node(
+            package="controller_manager",
+            executable="spawner",
+            arguments=[
+                "joint_state_broadcaster",
+                "--controller-manager",
+                "/controller_manager",
+                "--service-call-timeout",
+                "5.0",
+            ],
+            output="screen",
+        )
+
+    jtc0 = make_jtc_spawner()
+    fd0 = make_free_drive_spawner()
+    jsb0 = make_jsb_spawner()
 
     # ---- move_group（OMPL + Pilz 双管线；直连官方 JTC FJT action）----
     with open(os.path.join(moveit_share, "config", "el_a3.srdf"), "r", encoding="utf-8") as f:
@@ -322,7 +347,15 @@ def generate_launch_description():
             {"robot_description_semantic": robot_description_semantic},
             {"robot_description_kinematics": kinematics_yaml},
             servo_params,
-            {"moveit_servo.command_out_topic": "/arm_controller/joint_trajectory"},
+            # F118：use_servo_anchor:=true 时 servo 原始输出改道 /cmd，由
+            # a3_servo_anchor 锚定后转发回 JTC 原生话题（绝对目标/外力回弹）。
+            {
+                "moveit_servo.command_out_topic": IfElseSubstitution(
+                    use_servo_anchor,
+                    "/a3/servo/joint_trajectory/cmd",
+                    "/arm_controller/joint_trajectory",
+                )
+            },
         ],
         remappings=[
             ("~/delta_twist_cmds", "/servo_node/delta_twist_cmds"),
@@ -335,6 +368,23 @@ def generate_launch_description():
         executable="servo_mode_bridge",
         name="a3_servo_mode_bridge",
         output="screen",
+    )
+
+    # F118：薄桥接累积器（绝对目标）。downstream 在 JTC 原生话题前，非 arm 关节透传。
+    servo_anchor_node = Node(
+        package="a3_bringup",
+        executable="servo_anchor",
+        name="a3_servo_anchor",
+        output="screen",
+        parameters=[
+            {
+                "in_topic": "/a3/servo/joint_trajectory/cmd",
+                "out_topic": "/arm_controller/joint_trajectory",
+                "joint_states_topic": "/joint_states",
+                "max_joint_delta_rad": 0.05,
+            }
+        ],
+        condition=IfCondition(use_servo_anchor),
     )
 
     # ---- 编排层：F74 FJT 后端 + F75 controller_switch 使能后端 ----
@@ -529,15 +579,17 @@ def generate_launch_description():
     # 重启（最多 2 次）。顺序执行消除并发 load 突发，重启兜住 rmw 丢响应竞态。
     # 产品节点必须等 JSB 成功后再启动：8 节点并发突发曾把 list_controllers
     # 响应挤丢（rmw_response.cpp timeout），导致 /joint_states 永远不出现。
-    delay_jtc = TimerAction(period=3.0, actions=[jtc_spawner])
+    delay_jtc = TimerAction(period=3.0, actions=[jtc0])
     stage_jtc = make_spawner_stage(
-        jtc_spawner, [TimerAction(period=1.0, actions=[free_drive_spawner])]
+        make_jtc_spawner, jtc0,
+        [TimerAction(period=1.0, actions=[fd0])],
     )
     stage_free_drive = make_spawner_stage(
-        free_drive_spawner, [TimerAction(period=1.0, actions=[jsb_spawner])]
+        make_free_drive_spawner, fd0,
+        [TimerAction(period=1.0, actions=[jsb0])],
     )
     stage_jsb = make_spawner_stage(
-        jsb_spawner,
+        make_jsb_spawner, jsb0,
         [TimerAction(period=1.0, actions=[
             fsm,
             monitor,
@@ -546,6 +598,7 @@ def generate_launch_description():
             mqtt_bridge,
             servo_node,
             servo_bridge,
+            servo_anchor_node,
             self_test_node,
             teleop,
             can_bus_monitor,
@@ -575,6 +628,11 @@ def generate_launch_description():
             "motor_can_timeout_enabled",
             default_value="true",
             description="F86 电机侧 CAN 超时 0x7028 布防（false=显式写 0 撤防；与 F81 主机看门狗独立）",
+        ),
+        DeclareLaunchArgument(
+            "active_report_hz",
+            default_value="10.0",
+            description="F123 0x18 主动上报周期（Hz；10=100ms/电机；100=回退工厂 10ms 诊断观察位）",
         ),
         DeclareLaunchArgument("use_rviz", default_value="false"),
         DeclareLaunchArgument(
@@ -639,6 +697,12 @@ def generate_launch_description():
                 "~/.a3/blackbox/blackbox_" + datetime.now().strftime("%Y%m%d_%H%M%S")
             ),
             description="F90 黑匣子输出目录（默认每次启动生成带时间戳的新目录）",
+        ),
+        DeclareLaunchArgument(
+            "use_servo_anchor",
+            default_value="false",
+            description="F118: 在 servo 下游叠 a3_servo_anchor 累积器（绝对目标/外力回弹）；"
+                        "true 时 servo command_out 改道 /a3/servo/joint_trajectory/cmd 经锚定转发回 JTC",
         ),
         rsp,
         sim_power_sequence,

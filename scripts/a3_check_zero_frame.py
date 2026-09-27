@@ -35,7 +35,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import JointState
 
 # 期望位姿模板（软检查）：(关节名, [允许值列表])；L1 自由不检查。
-# L4 两个允许值：0 = URDF 零位（泡沫垫水平）；0.34 ≈ 折叠自然下垂（home 实测 0.3408）。
+# L4 两个允许值：0 = URDF 零位（泡沫垫水平）；0.34 ≈ 折叠自然下垂（idle 实测 0.3408）。
 EXPECT_TEMPLATE = {
     "L2_joint": [0.0],
     "L3_joint": [0.0],
@@ -163,10 +163,10 @@ def main() -> int:
         return 1
     if soft_warn:
         print("\n软检查 WARN（硬检查通过，可安全使能，但注意位姿语义）: " + "; ".join(soft_warn))
-        print("臂被留在模板外位姿——poses.yaml / FK 按 URDF 零位或折叠 home 语义使用前先确认实际位姿。")
+        print("臂被留在模板外位姿——poses.yaml / FK 按 URDF 零位或折叠 idle 语义使用前先确认实际位姿。")
     else:
         l4 = positions.get("L4_joint", 0.0)
-        pose = "URDF 零位" if abs(l4) <= abs(l4 - 0.34) else "折叠 home（L4 重力下垂）"
+        pose = "URDF 零位" if abs(l4) <= abs(l4 - 0.34) else "折叠 idle（L4 重力下垂）"
         print(f"\n软检查 PASS：位姿匹配「{pose}」")
     print("\nPASS：读数全部在 URDF 限位内，可以 /a3/arm/enable。")
     return 0

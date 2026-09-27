@@ -8,10 +8,10 @@
   0. boot：JTC inactive、FSM IDLE；零自研 sim 节点
   1. enable → 两控制器 active、FSM READY
   2. jog（含 L7）落点 ≤0.02；/joint_states 速度字段有效（LL-072）
-  3. goto move_group：ready / home 落点
-  4. playback：retime 回 home
+  3. goto move_group：ready / idle 落点
+  4. playback：retime 回 idle
   5. 夹爪标准 action /gripper_controller/gripper_cmd（control_msgs）→ L7 实际运动
-  6. disable safe-park → home，两控制器 inactive、FSM DISABLED
+  6. disable safe-park → idle，两控制器 inactive、FSM DISABLED
   7. MQTT 桥节点全程存活
 """
 
@@ -174,7 +174,7 @@ def load_poses():
     return poses
 
 
-def write_latest(home):
+def write_latest(idle):
     traj_dir = os.path.expanduser("~/.a3/trajectories")
     os.makedirs(traj_dir, exist_ok=True)
     path = os.path.join(traj_dir, "latest.yaml")
@@ -187,7 +187,7 @@ def write_latest(home):
         u = k / (N - 1)
         s = math.sin(math.pi * u)
         points.append({
-            "positions": [home[i] + amps[i] * s for i in range(7)],
+            "positions": [idle[i] + amps[i] * s for i in range(7)],
             "time_from_start_sec": u * T,
         })
     with open(path, "w", encoding="utf-8") as f:
@@ -254,7 +254,7 @@ def main():
         return 1
 
     poses = load_poses()
-    home, ready = poses["home"], poses["ready"]
+    idle, ready = poses["idle"], poses["ready"]
 
     # ---- 2. jog ----
     jog_targets = [
@@ -281,7 +281,7 @@ def main():
     check("2b /joint_states velocity valid", vmax > 0.05, f"max_vel={vmax:.3f}")
 
     # ---- 3. goto move_group ----
-    for k, name in enumerate(("ready", "home")):
+    for k, name in enumerate(("ready", "idle")):
         r = call(goto_cli, GotoNamedPose.Request(pose_name=name))
         if not r.success:
             check(f"3.{k} goto {name}", False, r.message)
@@ -291,13 +291,13 @@ def main():
         wait_state("READY")
 
     # ---- 4. playback ----
-    path = write_latest(home)
+    path = write_latest(idle)
     r = call(playback_cli, PlaybackTrajectory.Request(name=""))
     if not r.success:
         check("4 playback dispatch", False, r.message)
     else:
-        ok, err = wait_land(home, timeout=20.0)
-        check("4 playback retime land home", ok, f"err={err:.4f}")
+        ok, err = wait_land(idle, timeout=20.0)
+        check("4 playback retime land idle", ok, f"err={err:.4f}")
         wait_state("READY")
     if os.path.exists("/tmp/f75_latest_backup.yaml"):
         shutil.copy("/tmp/f75_latest_backup.yaml", path)
@@ -322,7 +322,7 @@ def main():
     while time.monotonic() - t0 < 18:
         spin(0.1)
         cur = recorder.current()
-        err = max(abs(cur[j] - home[i]) for i, j in enumerate(JOINTS))
+        err = max(abs(cur[j] - idle[i]) for i, j in enumerate(JOINTS))
         states = controller_states()
         if err < TOL and watcher.state == "DISABLED" and \
                 states.get("arm_controller") == "inactive" and \

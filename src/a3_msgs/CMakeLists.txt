@@ -17,6 +17,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SaveNamedPose.srv"
   "srv/SaveTrajectory.srv"
   "srv/PlaybackTrajectory.srv"
+  "srv/RandomPoseTour.srv"
   "srv/GripperCommand.srv"
   "srv/GripperSetConfig.srv"
   "srv/RetimeTrajectory.srv"

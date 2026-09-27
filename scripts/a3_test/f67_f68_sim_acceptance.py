@@ -5,8 +5,8 @@
 用法：python3 f67_f68_sim_acceptance.py
 退出码 0 = 全部验收项通过。
 
-位姿期望值不硬编码：~/.a3/poses.yaml（真机标定覆盖层）优先，缺省回退包内
-named_poses.yaml —— 与 arm_controller 的两层位姿解析保持一致。
+位姿期望值不硬编码：读包内 named_poses.yaml（F113 起 ~/.a3/poses.yaml
+覆盖层弃用；load_poses 保留同序兜底读取，文件已改名 .bak 不再命中）。
 """
 
 import math
@@ -56,7 +56,8 @@ def smoothstep(x):
 
 
 def load_poses():
-    """包内默认 + ~/.a3 覆盖（后者优先），与 arm_controller._load_poses 同序。"""
+    """包内默认 + ~/.a3 覆盖（后者优先），与 arm_controller._load_poses 同序。
+    F113 起用户层弃用（文件已 .bak），实际只剩包内层。"""
     poses = {}
     for path in (
         "/home/cat/a3_arm_ws/src/a3_description/config/named_poses.yaml",
@@ -77,9 +78,9 @@ def load_poses():
     return poses
 
 
-def write_test_trajectory(home):
-    """生成 50 Hz / 4s 稠密移动轨迹：home → A（2s smoothstep）→ B（2s smoothstep）。
-    末态 B ≠ home，便于验收后续 safe-park 必须真运动；首点 = home，验收零位移
+def write_test_trajectory(idle):
+    """生成 50 Hz / 4s 稠密移动轨迹：idle → A（2s smoothstep）→ B（2s smoothstep）。
+    末态 B ≠ idle，便于验收后续 safe-park 必须真运动；首点 = idle，验收零位移
     ramp 跳过逻辑（重复点曾导致 Ruckig 失败）。"""
     amp_a = [0.30, 0.35, -0.50, 0.25, 0.35, 0.20, 0.0]
     amp_b = [0.20, 0.15, -0.30, 0.10, 0.20, 0.10, 0.0]
@@ -90,10 +91,10 @@ def write_test_trajectory(home):
         t = i * dt
         if t <= 2.0:
             s = smoothstep(t / 2.0)
-            q = [home[j] + s * amp_a[j] for j in range(7)]
+            q = [idle[j] + s * amp_a[j] for j in range(7)]
         else:
             s = smoothstep((t - 2.0) / 2.0)
-            q = [home[j] + amp_a[j] + s * (amp_b[j] - amp_a[j]) for j in range(7)]
+            q = [idle[j] + amp_a[j] + s * (amp_b[j] - amp_a[j]) for j in range(7)]
         points.append({"time_from_start_sec": round(t, 4), "positions": q})
     data = {"joint_names": JOINTS, "points": points}
     path = os.path.expanduser(f"~/.a3/trajectories/{PLAYBACK_NAME}.yaml")
@@ -254,12 +255,12 @@ def main():
             rclpy.spin_once(rec, timeout_sec=0.1)
 
     poses = load_poses()
-    if "home" not in poses or "ready" not in poses:
+    if "idle" not in poses or "ready" not in poses:
         print(f"pose resolution failed: {sorted(poses)}")
         return 1
-    home = poses["home"][:7] + [0.0] * max(0, 7 - len(poses["home"]))
+    idle = poses["idle"][:7] + [0.0] * max(0, 7 - len(poses["idle"]))
     ready = poses["ready"][:7] + [0.0] * max(0, 7 - len(poses["ready"]))
-    recorded_pts = write_test_trajectory(home)
+    recorded_pts = write_test_trajectory(idle)
     end_b = recorded_pts[-1]
 
     results = []
@@ -271,7 +272,7 @@ def main():
     print(f"enable: {r.message}")
     spin_s(3.0)
 
-    # Triangle: goto ready（move_group + TOTG）
+    # 服务级 goto ready（move_group + TOTG；非手柄键——F120 起 Triangle 已改绑 home）
     t0 = time.monotonic()
     r = call(rec, GotoNamedPose, "/a3/arm/goto_named_pose",
              GotoNamedPose.Request(pose_name="ready"))
@@ -282,16 +283,16 @@ def main():
     results.append(analyze(rec.window(t0, time.monotonic()), ready,
                            GOTO_V_SCALE, "goto ready")[:2])
 
-    # Circle: goto home（move_group + TOTG）
+    # Circle: goto idle（move_group + TOTG）
     t0 = time.monotonic()
     r = call(rec, GotoNamedPose, "/a3/arm/goto_named_pose",
-             GotoNamedPose.Request(pose_name="home"))
-    print(f"goto home: {r.message}")
+             GotoNamedPose.Request(pose_name="idle"))
+    print(f"goto idle: {r.message}")
     if "move_group" not in r.message:
-        results.append((False, "[goto home] 未走 move_group 路径"))
+        results.append((False, "[goto idle] 未走 move_group 路径"))
     spin_s(parse_duration_s(r.message) + 2.0)
-    results.append(analyze(rec.window(t0, time.monotonic()), home,
-                           GOTO_V_SCALE, "goto home")[:2])
+    results.append(analyze(rec.window(t0, time.monotonic()), idle,
+                           GOTO_V_SCALE, "goto idle")[:2])
 
     # F67 降级链：goto_use_moveit=false → 线性兜底；再恢复走 move_group
     set_param(rec, "goto_use_moveit", False)
@@ -305,8 +306,8 @@ def main():
     set_param(rec, "goto_use_moveit", True)
     t0 = time.monotonic()
     r = call(rec, GotoNamedPose, "/a3/arm/goto_named_pose",
-             GotoNamedPose.Request(pose_name="home"))
-    print(f"goto home(restore): {r.message}")
+             GotoNamedPose.Request(pose_name="idle"))
+    print(f"goto idle(restore): {r.message}")
     restore_ok = "move_group" in r.message
     results.append((restore_ok, f"[goto restore] {r.message}"))
     spin_s(parse_duration_s(r.message) + 2.0)
@@ -347,15 +348,15 @@ def main():
                                   "playback legacy geometry", skip_s=2.5))
     set_param(rec, "playback_retime", True)
 
-    # R3: disable = safe park（move_group 回 home）→ 失能；此时臂在 B，必有运动
+    # R3: disable = safe park（move_group 回 idle）→ 失能；此时臂在 B，必有运动
     t0 = time.monotonic()
     r = call(rec, Trigger, "/a3/arm/disable", Trigger.Request(), timeout=40.0)
     print(f"disable(safe park): {r.message}")
     park_msg_ok = "disabled" in r.message
     results.append((park_msg_ok, f"[safe park result] {r.message}"))
     spin_s(3.0)
-    ok, msg, _ = analyze(rec.window(t0, time.monotonic()), home, GOTO_V_SCALE,
-                         "safe park -> home", allow_already_there=True)
+    ok, msg, _ = analyze(rec.window(t0, time.monotonic()), idle, GOTO_V_SCALE,
+                         "safe park -> idle", allow_already_there=True)
     results.append((ok and park_msg_ok, msg))
 
     print("\n===== 验收结果 =====")

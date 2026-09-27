@@ -1,4 +1,4 @@
-# 运行到命名预设点（zero/home/ready/work）
+# 运行到命名预设点（zero/idle/ready）
 string pose_name
 ---
 bool success

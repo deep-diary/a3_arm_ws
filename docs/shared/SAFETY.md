@@ -34,8 +34,8 @@ A3 Edge 与 A3 CloudEdge 共同遵守的安全设计原则。具体参数以配�
 - **L3 使能幂等（F65）：** 电源序列 EnableInit 已使能 7 电机时，L3 一键使能不再重复调 `/a3/motor/enable`（会被 F32 gate 拒绝），直接进 READY；判定要求全部电机状态新鲜且已使能。
 - 零力矩 ≠ 纯 `tau=0`：默认同重力前馈叠加，退出时恢复原 `kp`/`kd`
 - **示教/零力矩覆盖 L1–L7（F127）：** `zero_torque_controller` 重力补偿关节列表含 L7（夹爪）。`start_teach` 进 `ZERO_TORQUE` 时与 `gripper_controller` **同一原子请求互切**（`_cm_freedrive_switch` deactivate `arm_controller`+`gripper_controller`、activate `zero_torque`），夹爪随臂一体化重力补偿**释放力控**；`stop_teach` 反向恢复 gripper active。**防夹手**：示教拖动期间夹爪无保持力矩，操作者勿把手指置于夹具接触面；回放只把 L7 恢复到录制终点位（经 GripperCommand，不时间同步回放 L7 全轨迹）。
-- **手柄双模式死人开关（F60；F64 修订）：** 生产映射 `mapping:=default` 时，摇杆按动作分两个死人开关——**L1 按住** 才允许摇杆**平移** Twist（左摇杆 Y/Z、右摇杆 X），**R1 按住** 才允许摇杆**旋转** Twist（右摇杆左右=偏航）；松开立即发零速度（servo_mode_bridge 0.5 s 超时兜底停）。平移/旋转速度档相互独立，由 **D-pad 上下调平移档、左右调旋转档**（步进 0.15，clamp 0.1..1.0，F64；R1 的「全速档」绑定已删除）。**R2 夹爪力控不经 L1/R1 门控**（夹持操作需要独立于 jog 死人开关，F60 起）。`mapping:=simple` 调试档关闭门控（见 `config/mappings/simple.yaml`）。命名位姿/示教/电源键不要求 L1/R1。
-- **键位总览（F60，F64 修订，取代 F55）：** L3 短按=一键上电+使能（power start → gate → enable）、R3 短按=失能（F40 safe park）、**Cross(X) 长按 1 s=硬急停**（power shutdown，门禁关）、Triangle/Circle 短按=ready/home 命名位姿、Share/Options 短按/ Square = 示教开始/结束（自动保存）/回放、PS 短按=init、Options 长按 3 s=调零、**L1/R1 按住=平移/旋转死人开关**、D-pad 上下/左右=平移/旋转速度档。完整映射表见 `src/a3_teleop_ps4/README.md`，操作员流程见 [docs/edge/PS4_OPERATOR_GUIDE.md](../edge/PS4_OPERATOR_GUIDE.md)。
+- **手柄双模式死人开关（F60；F64 修订）：** 生产映射 `mapping:=default` 时，摇杆按动作分两个死人开关——**L1 按住** 才允许摇杆**平移** Twist（左摇杆 Y/Z、右摇杆 X），**R1 按住** 才允许摇杆**旋转** Twist（右摇杆左右=偏航）；松开立即发零速度（servo_mode_bridge 0.5 s 超时兜底停）。平移/旋转速度档相互独立（F64）；**F115 起 default 映射 D-pad 不再调速**，两通道恒用默认档 0.35（`step_*_scale` 函数保留供自定义映射；R1 的「全速档」绑定已删除）。**R2 夹爪力控不经 L1/R1 门控**（夹持操作需要独立于 jog 死人开关，F60 起）。`mapping:=simple` 调试档关闭门控（见 `config/mappings/simple.yaml`）。命名位姿/示教/电源键不要求 L1/R1。
+- **键位总览（F60，F64/F119 修订，取代 F55）：** L3 短按=一键上电+使能（power start → gate → enable）、R3 短按=失能（F119：任意模式软失能——先退出 SERVO/示教/重力补偿 → safe park 回 idle → 保电失能）、**Cross(X) 长按 1 s=硬急停**（power shutdown，门禁关）、Triangle/Circle 短按=ready/home 命名位姿、Share/Options 短按/ Square = 示教开始/结束（自动保存）/回放、PS 短按=init、Options 长按 3 s=调零、**L1/R1 按住=平移/旋转死人开关**、D-pad 上下左右=home 周边 home_up/home_down/home_back/home_front 四点一键 goto（F115；F64 的 D-pad 调速退役）。完整映射表见 `src/a3_teleop_ps4/README.md`，操作员流程见 [docs/edge/PS4_OPERATOR_GUIDE.md](../edge/PS4_OPERATOR_GUIDE.md)。
 - **R2 力控扳机（F36，F60 起不门控）：** 松开 → 夹爪全开（`release`）；按过 0.22 → 目标力矩 0.1..1.0 Nm（上限 = 硬限 1.0 Nm）；迟滞 0.15 防抖动。F60 起 R2 与 L1/R1 无关——无需按住 L1 即可开合夹爪。臂运动中（TRAJ_RUNNING/SERVO/ZERO_TORQUE/GRAVITY_COMP）力控被互锁拒绝 → 每 0.5 s 重试、松手即停。力控本身仍受抓取超时/看门狗/超硬限三重保护（见下节）。
 
 ## 轨迹门控（gate）
@@ -68,9 +68,11 @@ A3 Edge 与 A3 CloudEdge 共同遵守的安全设计原则。具体参数以配�
 |------|---------------|------|
 | 启动+使能 | PS4 **L3 短按**（一键：start → gate → enable，F60）/ `start` | `/power_sequence/command` + `/a3/arm/enable` |
 | 硬急停（关机） | PS4 **Cross(X) 长按 1 s**（F60；F55 的 Triangle 长按与原 L1+R1+Share 三键组合均已废弃） | `shutdown` |
-| 失能（保电） | PS4 **R3 短按**（F40：离 home 先 safe park） | `/a3/arm/disable` |
+| 失能（保电） | PS4 **R3 短按**（F119：任意模式软失能——先从 SERVO/示教/重力补偿退出当前模式，再 F40 safe park 回 idle，最后保电失能） | `/a3/arm/disable` |
 | 调零 | PS4 **Options 长按 3 s**（短按是结束示教） | `set_zero` |
-| Servo jog | PS4 **L1 按住**（平移）/ **R1 按住**（旋转）+ 摇杆（F64；D-pad 上下/左右分调两通道速度档） | Twist |
+| Servo jog | PS4 **L1 按住**（平移）/ **R1 按住**（旋转）+ 摇杆（F64；F115 起速度恒定默认档 0.35，D-pad 改绑 home 周边点位） | Twist |
+| 命名点位 goto | PS4 **Triangle/Circle**（ready/idle）、**D-pad 上下左右**（F115：home_up/down/back/front 四点） | `/a3/arm/goto_named_pose`（MoveIt） |
+| 随机点位巡游 | 服务 `/a3/arm/random_pose_tour`（F116；默认排除 `zero`，不绑手柄） | 逐点 `/a3/arm/goto_named_pose` 同链 MoveIt |
 | 夹爪力控 | PS4 **R2**（F60 起不需 L1） | 夹爪 force-release（F36） |
 
 CloudEdge 须在 ESP32 固件中实现等效逻辑；网络侧 `shutdown` 命令可作为补充，**不能**作为唯一安全手段。
@@ -116,7 +118,9 @@ Web 端单电机调试（CAN 扫描 / MIT 直驱 / 保持）的安全边界：
 
 ## 失能保护（F40）
 
-`/a3/arm/disable` 不在 home 容差（`disable_home_tol_rad: 0.15`）内时，先自动平滑回 home（`SAFE_PARK`，3 s/150 点轨迹）并连续确认收敛（`disable_home_confirm_s: 0.5`）再失能，防止 ready 位直接掉臂：
+`/a3/arm/disable` 不在 idle 容差（`disable_home_tol_rad: 0.15`）内时，先自动平滑回 idle（`SAFE_PARK`，3 s/150 点轨迹）并连续确认收敛（`disable_home_confirm_s: 0.5`）再失能，防止 ready 位直接掉臂（安全位 `home` 于 F113 改名 `idle`，点位值不变）：
+
+**F119（2026-09-26）：任意模式软失能。** 失能前先退出当前功能模式（示教 TEACH → 结束示教存储；SERVO / ZERO_TORQUE / 重力补偿 → 各模式 stop 服务），等 `_mode` 退出阻塞模式（`disable_mode_exit_timeout_s: 2.0`）再走 F40 safe-park → idle → reset。超时（如操作员仍按着 servo 死人开关）→ 拒绝 + 可执行文案（松开手柄再试 / 直接 `/a3/motor/reset`），不改状态。之前的语义缺口：SERVO/示教/重力补偿模式下按 R3 被直接拒绝无反应，servo 测试完只能靠辅助手段失能。硬急停（X 长按）与 `/a3/motor/reset` 直达链路依旧绕过此 prelude 即时生效。
 
 1. **park 超时 → FAULT 且不 reset**：保持使能、停在半途，需人工介入——宁停在半途也不盲目失能掉臂。
 2. **reset 受 gate 互锁**：电源序列 Running 时 `/a3/motor/reset` 被 C++ 权威拒绝（MOTOR_DEBUG 互锁同一张表）——park 前拒绝 → `disable` 返回失败 + 原文（先 stop power sequence）；park 完成后被拒 → 回 READY（已在 home 位，安全）。
@@ -186,13 +190,15 @@ Web 端单电机调试（CAN 扫描 / MIT 直驱 / 保持）的安全边界：
 1. **检测**：插件按电机记录 last-rx，`read()` 中年龄 > `feedback_timeout_s`（默认 0.2 s，约 40 帧）即锁存 stale 并节流 ERROR（含 motor_id/关节名/年龄）。
 2. **read() 永远返回 OK**：ros2_control 2.54.0 中 read() 返回 ERROR 会触发 `System::read()→error()`，默认 on_error 把组件强制转 **unconfigured**；`System::write()` 在该态早退、插件安全写不执行，CAN TX 全灭——报错反而杀死了唯一能保位的层（LL-083）。
 3. **整臂 freeze-hold**：stale 后 `write()` 丢弃控制器新指令，全部 7 路按最后已知位置发位置保持帧（kp/kd 维持，对标 ISO 10218 protective stop）。仿真实测 895+ 保持帧窗口零位移。
-4. **标准上报**：`/diagnostics`（`a3_hardware:feedback_watchdog`，每电机年龄 KeyValue）+ 锁存 `/a3/hardware/feedback_stale`（Bool，TRANSIENT_LOCAL）。FSM 据此在 stale 期间拒绝一切新运动（goto/playback/slider jog）；disable 走 stale 快路径——home 位直接 reset，非 home 位拒绝（safe-park 在 freeze-hold 下硬件丢轨迹必超时），提示恢复反馈或人工紧急 reset。
+4. **标准上报**：`/diagnostics`（`a3_hardware:feedback_watchdog`，每电机年龄 KeyValue）+ 锁存 `/a3/hardware/feedback_stale`（Bool，TRANSIENT_LOCAL）。FSM 据此在 stale 期间拒绝一切新运动（goto/playback/slider jog）；disable 走 stale 快路径——idle 位直接 reset，非 idle 位拒绝（safe-park 在 freeze-hold 下硬件丢轨迹必超时），提示恢复反馈或人工紧急 reset。
 5. **启动门 fail-fast**：`on_activate` 先 reset-all（电机进 coast），500 ms 内验证 7/7 应答才发 enable；任一暗电机 → ERROR 且零 enable 帧。框架对激活失败的处理是 abort controller_manager 进程（整机停机），因此顺序不可颠倒。
 6. **恢复**：反馈恢复后 latch 自动清除、freeze-hold 解除，无须重启即可继续（disable/enable 与运动均已仿真验证）。
 
-## JTC 跟踪容差（F97 配置 / F112 放宽）
+## JTC 跟踪容差（F97 配置 / F112 放宽 / F117 临时定型）
 
 JTC 逐关节 `trajectory:` 跟踪容差在运动中检查 实际位置 vs 采样参考，超出即 abort（PATH_TOLERANCE_VIOLATED）。F112 将 L1–L6 从 0.05 rad 放宽到 **0.15 rad**：真机 home↔ready goto 稳态跟随滞后实测 0.050~0.055 rad（err≈TC·v_ref，巡航 v_ref≈0.46 rad/s、TC≈0.11 s），常态化越过 0.05 → 正常运动被误判为故障、中途 abort 停住（P2）且重复按键起跑-反冲（P1）。**放宽不削弱堵/卡检测**：堵转/被拽偏是单调陡增偏差，0.15 仍远小于 F81 堵转/保护性手术检测的量级门槛（0.5 rad 级），照常快速触发；`goal: 0.03`、`goal_time: 1.0`、`cmd_timeout: 2.0` 等收敛兜底全部保留；重负载/力矩类异常由 F107 额定负载门禁与 F110/F48 通道门禁覆盖，不依赖 position 跟踪容差。vcan 验收（F112）用真插件+真 JTC+真容差引擎注入实测滞后：0.05 下 A/B 均 error -4（复刻故障）、0.15 下恢复 SUCCESSFUL。
+
+**F117（2026-09-26，重要语义澄清）：** 2026-09-25 真机 goto 回 idle 途中再次 `PATH_TOLERANCE_VIOLATED`（`Position Error: 0.3073 > 0.300000`）——**根因不是容差过窄，而是 CAN 反馈降级导致机械臂零跟踪**（/joint_states 掉到 ~12.3 Hz、max gap 0.392 s、491 s 内 1255 个 >200 ms 空洞；error==恰好指令距离，desired 爬升而 actual 钉死）。当时 live 栈的 0.30 只是 `ros2 param set` 的 hot-set，**本需求把它持久化**到 `el_a3_controllers.yaml`（`trajectory: 0.30 / goal: 0.05`，L1–L6）。**JTC 轨迹容差是卡滞/零跟踪检测器，不是防撞**——防撞靠 URDF 限位 + MoveIt 碰撞 + `safety_limits.py` 限速 + 电源门禁 + F107 力矩门禁 + F110/F48 通道门禁；0.30 仍 << F81 卡滞界 0.5 rad，机械臂零跟踪时 0.30 也会中止（error 会冲到关节折叠幅 ~1.6 rad），**真实修复是 CAN 健康而非无限放大容差**。此为 **TEMPORARY**：回收紧 trigger = CAN 健康恢复后重跑 `scripts/a3_test/f117_jtc_tolerance_deg_acceptance.py` 在 `trajectory: 0.15` 配置下全绿（Case B 已含 0.15 中止探测）。
 
 ## 使能安全（F51，LL-039 事故条款）
 
@@ -209,7 +215,7 @@ JTC 逐关节 `trajectory:` 跟踪容差在运动中检查 实际位置 vs 采�
 
 **硬急停作废全部意图；任何使能路径都必须重锚。** 2026-09-22 F51 同类事故复发并第二次甩断 L6/L7：X 长按与 L3 上电走的是 `power_sequence_node` 裸 CAN 帧（disable 0x04 / enable 0x03），**不经 ROS 服务**，F51 重锚/软起步全部不执行；`enable_mode_rising_smoothing` 又在真机 yaml 被关。人工搬臂回 home 后裸使能 → refresh 续发陈旧目标（1.0839 rad，kp=80）→ 甩回失能前位姿。
 
-1. **gate 关闭沿 = 全部运动意图作废**：执行层收到 `/power_sequence/gate_open=false` 边沿，立即清插值轨迹、servo 缓存、全部 MIT 目标缓存（NaN）、LL-040 命名轨迹回退表、软起步状态，并置保持抑制——gate 关期间只发零增益保活。任何「带外失能」语义等同。
+1. **gate 关闭沿 = 全部运动意图作废**：执行层收到 `/power_sequence/gate_open=false` 边沿，立即清插值轨迹、servo 缓存、全部 MIT 目标缓存（NaN）、LL-040 命名轨迹回退表、软起步状态，并置保持抑制——gate 关期间只发零增益保活。任何「带外失能」语义等同。**F122（失能态零增益保活解耦）**：gate 关期间 refresh 不再整段静默，改为对**失能/未知状态**（`mode ∈ {0,-1}`）电机周期补发零增益控制帧（kp=kd=τ=0，p=反馈位）勾回其 0x02 应答，使反馈新鲜度不单点依赖 0x18（F113 之外的冗余通道）；**已知使能（≥1）电机一律跳过**——零增益对使能电机是卸力指令，F48/LL-022 禁令，其失能由 power_sequence 负向沿接管。可 `refresh_keepalive_when_gate_closed:=false` 复归静默。
 2. **使能模式上升沿无条件重锚（不再受参数开关控制）**：反馈中电机模式 0/未知→使能态的上升沿，无论是服务使能还是电源序列裸 0x03 使能，都执行 F51 三件套（新鲜反馈重锚 + 清回退缓存 + 0.8 s 软起步）；偏差 >0.15 rad 打 ERROR（`F66 enable rising edge`）。桥启动时电机已锁存使能（LL-042）同样在首帧反馈沿重锚。
 3. **refresh 防甩兜底**：无活动轨迹/servo 意图时，有限目标与新鲜实测位偏差 > `stale_target_snap_guard_rad`(0.25 rad) 且无软起步在身 → 拒绝发送、重锚实测位并软起步（第三道保险，正常跟踪残差 <0.02 rad 不触发）。
 4. **F32 恢复通道**：gate Running + 编排层 IDLE + 无活动轨迹时**允许 enable**（L3 从橙灯 DISABLED 恢复的唯一路径，走完整重锚+软起步）；reset/set_zero/save_param 在 gate 开时仍无条件拒绝。

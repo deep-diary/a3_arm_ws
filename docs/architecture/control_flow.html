@@ -126,7 +126,7 @@ sequenceDiagram
     PS->>CAN: 使能/标定帧
     PS->>PS: Running
     PS-->>MP: gate_open=true（transient_local）
-    PS4->>PS: shutdown（Triangle / L1+R1+Share）
+    PS4->>PS: shutdown（Cross(X) 长按 1 s，ps4_mapper 绑定）
     PS->>PS: SoftProne → ProneHold
     PS-->>MP: gate_open=false
     PS4->>PS: set_zero（Options 长按）

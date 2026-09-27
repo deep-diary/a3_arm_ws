@@ -34,8 +34,10 @@ reBot 工具链可能使用 `joint1`..`joint7`；`a3_bringup/trajectory_bridge` 
 | 名称 | 含义 | 备注 |
 |------|------|------|
 | `zero` | 上电 / 机械零（全 0） | 仿真与真机默认起点 |
-| `ready` | 悬空工作位 | 原 `work`（L2≈51°, L3≈-57°）与 `ready`（含 L5 抬腕）语义重叠，2026-09-13 统一为 `ready`；包级值为近似位，真机实测值在用户层 `~/.a3/poses.yaml` 覆盖 |
-| `home` | 半抬起（EDULITE 遗留） | L2=L3=±45° |
+| `ready` | 悬空工作位（F109 折叠竖直） | 原 `work`（L2≈51°, L3≈-57°）与 `ready`（含 L5 抬腕）语义重叠，2026-09-13 统一为 `ready` |
+| `idle` | 折叠自然下垂（重力稳定，F40 失能保护位） | F113（2026-09-26）：原真机 `~/.a3/poses.yaml` 的 `home` 标定值收回包内并改名 `idle`（L4≈0.335 下垂），EDULITE 半抬 `home`（L2=L3=±45°）退役；点位唯一定义在包内，用户层覆盖文件已弃用 |
+| `home` | EDULITE legacy 半抬位 `[0,.785,-.785,0,0,0]`（末端 base_link 系 (-0.177, 0, 0.326) m） | 保留作 F115 偏移基准与 F116 巡游池成员；无 SRDF group_state |
+| `home_up` / `home_down` / `home_front` / `home_back` | F115（2026-09-26）：以 `home` 为基准、末端姿态不变的笛卡尔偏移点，PS4 D-pad 上/下/右/左一键 goto | 偏移取物理可达包络：上 +Z 15cm、下 −Z 10cm、前 +X 15cm、后 −X 20cm；Pinocchio 严格 6D IK（200 种子+独立 FK 复核）求解，L1=L5=L6=0 平面构型，L7=0。yaml 与 SRDF group_state 双登记 |
 | `open` / `close` | 夹爪 | 仅 gripper 组 |
 
 ## 电机与 CAN

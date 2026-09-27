@@ -12,6 +12,7 @@ from __future__ import annotations
 import collections
 import math
 import os
+import random
 import re
 import threading
 import time
@@ -52,6 +53,7 @@ from a3_msgs.srv import (
     GotoNamedPose,
     MoveToJointPositions,
     PlaybackTrajectory,
+    RandomPoseTour,
     RetimeTrajectory,
     SaveNamedPose,
     SaveTrajectory,
@@ -321,6 +323,32 @@ def _traj_path_for(traj_dir: str, name: str) -> str:
     return os.path.join(traj_dir, f"{_sanitize_name(name)}.yaml")
 
 
+def _upsert_pose_lines(lines: List[str], name: str, pos_line: str) -> List[str]:
+    """F114: 文本级 upsert 包内 named_poses.yaml（yaml.safe_dump 全量重写会丢注释）.
+
+    同名点位 → 原位替换其 positions 行；否则文件末尾追加带时间戳注释的新点位块。
+    """
+    name_re = re.compile(rf"^  {re.escape(name)}:\s*$")
+    idx = next((i for i, l in enumerate(lines) if name_re.match(l)), None)
+    if idx is None:
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        return lines + [
+            f"\n  # F114: saved via /a3/arm/save_named_pose at {stamp}\n",
+            f"  {name}:\n",
+            pos_line + "\n",
+        ]
+    for j in range(idx + 1, len(lines)):
+        if re.match(r"^    positions:", lines[j]):
+            lines[j] = pos_line + "\n"
+            return lines
+        if re.match(r"^  \S", lines[j]):  # 下一个点位键：本名点缺 positions，插在其后
+            break
+    lines.insert(idx + 1, pos_line + "\n")
+    return lines
+
+
 class ArmController(Node):
     def __init__(self) -> None:
         super().__init__("a3_arm_controller")
@@ -386,6 +414,9 @@ class ArmController(Node):
         self.declare_parameter("moveit_velocity_scaling", 0.3)
         self.declare_parameter("moveit_acceleration_scaling", 0.3)
         self.declare_parameter("moveit_goal_tolerance_rad", 0.01)
+        # F116: 随机点位巡游（默认抽 5 个；zero 为上电机械零位，真机巡游排除）
+        self.declare_parameter("random_tour_count", 5)
+        self.declare_parameter("random_tour_exclude_poses", ["zero"])
         self.declare_parameter("playback_ramp_duration_s", 2.5)
         # F68: 回放（ramp + 录制点）默认调 /a3/arm/retime_trajectory 做保几何重定时
         # （Ruckig jerk-limited，失败退化 TOTG）；服务不可用/失败才走旧的
@@ -424,8 +455,8 @@ class ArmController(Node):
         self.declare_parameter("move_to_min_duration_s", 3.0)
         # F94: 两点轨迹速度限幅 = URDF velocity × scale（1.0=只堵无限速漏洞）
         self.declare_parameter("joint_velocity_scale", 1.0)
-        # F40: 失能保护（不在 home 容差内先平滑回 home 再失能）
-        self.declare_parameter("disable_home_pose_name", "home")
+        # F40: 失能保护（不在 idle 容差内先平滑回 idle 再失能）；F113 home→idle
+        self.declare_parameter("disable_home_pose_name", "idle")
         self.declare_parameter("disable_home_tol_rad", 0.15)
         self.declare_parameter("disable_home_duration_s", 3.0)
         self.declare_parameter("disable_home_confirm_s", 0.5)
@@ -433,11 +464,13 @@ class ArmController(Node):
         # F75: 工业级落定判据——位置 AND 速度同时落定才允许失能
         self.declare_parameter("disable_home_settle_tol_rad", 0.02)
         self.declare_parameter("disable_home_settle_vel_rad_s", 0.05)
+        # F119: R3 软失能前退出 BLOCKED_MODES（SERVO/零力矩/重力补偿）的等待上限
+        self.declare_parameter("disable_mode_exit_timeout_s", 2.0)
         # F43: 最大力矩持久化
         self.declare_parameter("motor_states_topic", "/a3/motor/states")
         self.declare_parameter("torque_stats_file", "~/.a3/stats/torque_stats.yaml")
         self.declare_parameter("torque_stats_save_interval_s", 10.0)
-        # F44: 温度管理（warn 仅告警；protect 自动回 home 失能降温；迟滞恢复）
+        # F44: 温度管理（warn 仅告警；protect 自动回 idle 失能降温；迟滞恢复）
         # 默认阈值 2026-09-13 调高：官方电机自带 130°C 保护兜底，初版 65°C 过低（LL-023）
         self.declare_parameter("temp_protect_enabled", True)
         self.declare_parameter("temp_warn_c", 90.0)
@@ -648,6 +681,9 @@ class ArmController(Node):
             PlaybackTrajectory, "/a3/arm/playback", self._playback_cb,
             callback_group=self._cb_group)
         self.create_service(
+            RandomPoseTour, "/a3/arm/random_pose_tour", self._random_pose_tour_cb,
+            callback_group=self._cb_group)
+        self.create_service(
             Trigger, "/a3/arm/enter_ai", self._enter_ai_cb,
             callback_group=self._cb_group)
         self.create_service(
@@ -665,6 +701,12 @@ class ArmController(Node):
             Trigger, "/a3/zero_torque/start", callback_group=self._cb_group)
         self._zt_stop_cli = self.create_client(
             Trigger, "/a3/zero_torque/stop", callback_group=self._cb_group)
+        # F119: R3 任意模式软失能——退出 SERVO / 重力补偿的 stop 客户端
+        # （stop_servo 是真 Trigger server（servo_node.h），不是 pause（会重锚定测量））
+        self._servo_stop_cli = self.create_client(
+            Trigger, "/servo_node/stop_servo", callback_group=self._cb_group)
+        self._gravity_stop_cli = self.create_client(
+            Trigger, "/a3/gravity_compensation/stop", callback_group=self._cb_group)
         # F75: 标准栈使能客户端（motor_service_backend=controller_switch 时用）
         self._switch_cli = self.create_client(
             SwitchController,
@@ -739,9 +781,10 @@ class ArmController(Node):
             })
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warn(f"cannot load named poses: {exc}")
-        # F39: 用户层点位覆盖包内点位（save_named_pose 写入，同名覆盖）。
+        # F39: 用户层点位覆盖包内点位（同名覆盖）。F113 起 ~/.a3/poses.yaml 弃用、
+        # F114 起 save_named_pose 改写包内 named_poses.yaml，此处仅为兼容旧文件保留。
         # F39 落盘格式是 {poses: {name: [q...]}}（扁平列表），包级是 {name: {positions: [..]}}，
-        # 两种都兼容，避免「list indices must be integers」误告警导致 home 点位回退全零。
+        # 两种都兼容，避免「list indices must be integers」误告警导致点位回退全零。
         try:
             user_path = self._user_poses_path()
             if os.path.exists(user_path):
@@ -757,6 +800,12 @@ class ArmController(Node):
 
     def _user_poses_path(self) -> str:
         return os.path.expanduser("~/.a3/poses.yaml")
+
+    def _named_poses_pkg_path(self) -> str:
+        """F114: 包内 named_poses.yaml 路径（symlink-install 下写入即落 src）."""
+        pkg = str(self.get_parameter("named_poses_pkg").value)
+        share = get_package_share_directory(pkg)
+        return os.path.join(share, "config", "named_poses.yaml")
 
     # ------------------------------------------------------ F43 torque stats
 
@@ -807,7 +856,7 @@ class ArmController(Node):
     # ------------------------------------------------------------ F40 helpers
 
     def _home_pose(self) -> List[float]:
-        """失能安全位：优先 poses.yaml 的 home（用户层覆盖包级），缺失回退全零."""
+        """失能安全位：按 disable_home_pose_name 取点位（F113 起默认 idle），缺失回退全零."""
         name = str(self.get_parameter("disable_home_pose_name").value)
         q = self._poses.get(name)
         if q is None:
@@ -1600,7 +1649,7 @@ class ArmController(Node):
         planned = False
         if bool(self.get_parameter("goto_use_moveit").value):
             planned, duration, msg = self._moveit_move(
-                home[:6], JOINTS[:6], "safe park -> home", state=STATE_SAFE_PARK
+                home[:6], JOINTS[:6], "safe park -> idle", state=STATE_SAFE_PARK
             )
             if not planned:
                 self.get_logger().warn(f"safe park: {msg} -- local linear fallback")
@@ -1623,11 +1672,11 @@ class ArmController(Node):
                 self._set_state(
                     STATE_FAULT, f"safe park rejected by static gate: {dmsg}")
                 return False, f"safe park rejected: {dmsg}"
-            self._set_state(STATE_SAFE_PARK, f"safe park -> home ({duration:.1f}s, 2 pts)")
+            self._set_state(STATE_SAFE_PARK, f"safe park -> idle ({duration:.1f}s, 2 pts)")
 
         self._traj_done_at = 0.0  # 防旧 TRAJ 时间戳在 SAFE_PARK 中误触发回 READY
         if planned:
-            self._set_state(STATE_SAFE_PARK, f"safe park -> home (move_group, {duration:.1f}s)")
+            self._set_state(STATE_SAFE_PARK, f"safe park -> idle (move_group, {duration:.1f}s)")
         t0 = time.monotonic()
         settle_tol = float(self.get_parameter("disable_home_settle_tol_rad").value)
         settle_vel = float(self.get_parameter("disable_home_settle_vel_rad_s").value)
@@ -1673,13 +1722,13 @@ class ArmController(Node):
             time.sleep(0.05)
 
         if not settled():
-            self._set_state(STATE_FAULT, "safe park timeout: not settled at home, still enabled")
-            return False, "safe park timeout: not settled at home, still enabled"
+            self._set_state(STATE_FAULT, "safe park timeout: not settled at idle, still enabled")
+            return False, "safe park timeout: not settled at idle, still enabled"
         ok, msg = self._motor_command(self._reset_cli, 2)
         if not ok:
-            # reset 被拒（如 gate 互锁）：臂已在 home 位（安全），回 READY 待人工
-            self._set_state(STATE_READY, f"parked at home but disable refused: {msg}")
-            return False, f"{msg} (parked at home; stop power sequence first)"
+            # reset 被拒（如 gate 互锁）：臂已在 idle 位（安全），回 READY 待人工
+            self._set_state(STATE_READY, f"parked at idle but disable refused: {msg}")
+            return False, f"{msg} (parked at idle; stop power sequence first)"
         self._set_state(STATE_DISABLED, "safe park -> disabled")
         self._publish_mode("IDLE")
         return True, f"safe park -> disabled ({time.monotonic() - t0:.1f}s)"
@@ -2104,12 +2153,47 @@ class ArmController(Node):
         """
         F40: 失能保护——不在 home 容差内先平滑回 home 再失能，避免掉臂.
 
-        服务语义：success=true ⟺ 已失能（或本就已失能）。拒绝时消息必含可执行下一步：
-        · INIT/TEACH/SERVO/AI 状态 busy → 提示 /a3/motor/reset 紧急失能；
-        · F53: mode∈BLOCKED_MODES（zero_torque/重力补偿）下执行层丢弃轨迹，safe park
-        无法回家；且直接 reset 会撤重力补偿让臂垂落——提示先 /a3/zero_torque/stop。
+        F119: 任意模式软失能——TEACH / SERVO / ZERO_TORQUE / GRAVITY_COMP 先退出
+        （stop_teach / stop_servo / zero_torque/stop / gravity_compensation/stop）再走
+        下方原流程；退出等待超时（如操作员一直按着 servo 输入）→ 拒绝并给可执行文案，
+        不改状态。此时仅 INIT/AI 视为 busy。
         """
-        if self._state in (STATE_INIT, STATE_TEACH, STATE_SERVO, STATE_AI):
+        # F119: TEACH 先停（F54 自动存档 latest.yaml 是接受的副作用），退出 ZERO_TORQUE
+        if self._state == STATE_TEACH:
+            tr_resp = self._stop_teach_cb(Trigger.Request(), Trigger.Response())
+            if not tr_resp.success:
+                resp.success = False
+                resp.message = f"cannot exit TEACH: {tr_resp.message}"
+                return resp
+        # F119: BLOCKED_MODES 先退出对应模式，再等 _mode 离开（servo 桥 0.5s 超时 /
+        # zero_torque/stop / gravity stop 各自发 IDLE）；超时 → 拒绝，不静默继续
+        if self._mode in BLOCKED_MODES:
+            mode = self._mode
+            if mode == "SERVO":
+                ok, msg = self._call_trigger(self._servo_stop_cli, "servo/stop")
+            elif mode == "ZERO_TORQUE":
+                ok, msg = self._call_trigger(self._zt_stop_cli, "zero_torque/stop")
+            else:  # GRAVITY_COMP
+                ok, msg = self._call_trigger(
+                    self._gravity_stop_cli, "gravity_compensation/stop")
+            if not ok:
+                resp.success = False
+                resp.message = (
+                    f"exit mode={mode} failed: {msg}; 紧急失能 /a3/motor/reset"
+                )
+                return resp
+            timeout = float(self.get_parameter("disable_mode_exit_timeout_s").value)
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and self._mode in BLOCKED_MODES and rclpy.ok():
+                time.sleep(0.05)
+            if self._mode in BLOCKED_MODES:
+                resp.success = False
+                resp.message = (
+                    f"mode={self._mode} 未在 {timeout:.1f}s 内退出（可能仍在操作 servo "
+                    "输入）；松开输入后再试，紧急失能 /a3/motor/reset"
+                )
+                return resp
+        if self._state in (STATE_INIT, STATE_AI):
             resp.success = False
             resp.message = f"busy in state={self._state} (use /a3/motor/reset for emergency)"
             return resp
@@ -2122,17 +2206,14 @@ class ArmController(Node):
             resp.message = "already disabled"
             return resp
 
-        # F53/LL-045（主缺口）: 零力矩/重力补偿模式下安全区——执行层会丢弃轨迹，
-        # safe park 的回家轨迹被静默丢弃，臂在悬浮中干等 ~4-5s 后看门狗 FOLLOW_STUCK
-        # →stop→3s→reset 阶梯把臂中途切断（误报「电机带外失能」→DISABLED）。
-        # 且此时 reset 会撤掉重力补偿让臂在重力下垂落。正确退出：zero_torque/stop
-        # （先恢复 kp 锚定当前位）→ 再 disable；紧急失能才直接 /a3/motor/reset
-        # （之后仍需 zero_torque/stop 清零标志，否则重使能后臂保持悬浮）。
+        # F53/LL-045 说明：BLOCKED_MODES（零力矩/重力补偿）下执行层丢弃轨迹，直接
+        # safe park 或 reset 会让臂在悬浮中干等 / 重力下垂落。F119 前序已在
+        # _state/mode 判断前退出这些模式；此处仅是防御性兜底（正常流程到不了）。
         if self._mode in BLOCKED_MODES:
             resp.success = False
             resp.message = (
-                f"mode={self._mode}: 先 /a3/zero_torque/stop 恢复闭环再 disable；"
-                f"紧急失能 /a3/motor/reset（此后需 zero_torque/stop 才能正常重使能）"
+                f"mode={self._mode} 仍处于受限模式（F119 前序退出失败）；"
+                f"先退出该模式再 disable，紧急失能 /a3/motor/reset"
             )
             return resp
 
@@ -2145,7 +2226,7 @@ class ArmController(Node):
             if at_home:
                 ok, msg = self._motor_command(self._reset_cli, 2)
                 if ok:
-                    self._set_state(STATE_DISABLED, "disabled while stale at home")
+                    self._set_state(STATE_DISABLED, "disabled while stale at idle")
                     self._publish_mode("IDLE")
                 resp.success = ok
                 resp.message = msg
@@ -2369,6 +2450,81 @@ class ArmController(Node):
         resp.message = f"goto {name} (two-point fallback, {duration:.1f}s, 2 pts)"
         return resp
 
+    def _random_pose_tour_cb(
+        self, req: RandomPoseTour.Request, resp: RandomPoseTour.Response
+    ) -> RandomPoseTour.Response:
+        """F116: 随机抽 N 个命名点位，从当前位姿起逐点 move_group 规划+执行.
+
+        允许重复、相邻不重；count=0 用参数 random_tour_count；seed=0 真随机；
+        点位池减去参数 random_tour_exclude_poses（默认 ["zero"]）。任一腿失败即中止，
+        已完成序列/时长如实回传。L7 不动（arm 组规划，点位 L7 均为 0）。
+        """
+        can, why = self._can_move()
+        if not can:
+            resp.success = False
+            resp.message = why
+            return resp
+        if not self._have_js:
+            resp.success = False
+            resp.message = "no /joint_states yet"
+            return resp
+        if not bool(self.get_parameter("goto_use_moveit").value):
+            resp.success = False
+            resp.message = "random tour requires goto_use_moveit=true (move_group)"
+            return resp
+
+        count = int(req.count) if int(req.count) > 0 else int(
+            self.get_parameter("random_tour_count").value
+        )
+        if count < 1:
+            resp.success = False
+            resp.message = f"invalid count {count}"
+            return resp
+        exclude = {
+            str(n)
+            for n in (self.get_parameter("random_tour_exclude_poses").value or [])
+        }
+        pool = [n for n in sorted(self._poses) if n not in exclude]
+        if len(pool) < 2:
+            resp.success = False
+            resp.message = f"tour pool too small ({len(pool)}), need >= 2"
+            return resp
+
+        rng = random.Random(int(req.seed) if int(req.seed) != 0 else None)
+        sequence: List[str] = []
+        total = 0.0
+        prev: Optional[str] = None
+        for i in range(count):
+            choices = [n for n in pool if n != prev]
+            name = rng.choice(choices)
+            q1 = list(self._poses[name])
+            if len(q1) < self._n_joints:
+                q1 = q1 + [0.0] * (self._n_joints - len(q1))
+            elif len(q1) > self._n_joints:
+                q1 = q1[: self._n_joints]
+            ok, dur, msg = self._moveit_move(
+                q1[:6], JOINTS[:6], f"tour {i + 1}/{count} {name}"
+            )
+            if not ok:
+                self._publish_mode("IDLE")
+                self._set_state(STATE_READY, f"tour aborted at {name}")
+                resp.success = False
+                resp.message = f"leg {i + 1}/{count} '{name}' failed: {msg}"
+                resp.sequence = sequence
+                resp.total_duration_s = total
+                return resp
+            sequence.append(name)
+            total += dur
+            prev = name
+
+        self._schedule_back_to_ready(total + 0.3)
+        resp.success = True
+        resp.message = f"tour completed: {' -> '.join(sequence)}"
+        resp.sequence = sequence
+        resp.total_duration_s = total
+        self.get_logger().info(f"random tour ({count} legs, {total:.1f}s): {sequence}")
+        return resp
+
     def _move_to_cb(
         self, req: MoveToJointPositions.Request, resp: MoveToJointPositions.Response
     ) -> MoveToJointPositions.Response:
@@ -2425,40 +2581,38 @@ class ArmController(Node):
     def _save_named_pose_cb(
         self, req: SaveNamedPose.Request, resp: SaveNamedPose.Response
     ) -> SaveNamedPose.Response:
-        """F39: 保存命名点位（positions 留空 = 当前位姿）到 ~/.a3/poses.yaml 并即时生效."""
-        name = _sanitize_name(req.name)
-        if not name:
-            resp.success = False
-            resp.message = "empty pose name"
-            return resp
+        """F39/F114: 保存命名点位（positions 留空 = 当前位姿）到包内 named_poses.yaml 并即时生效.
+
+        F114: name 留空时自动命名 snap_YYYYMMDD_HHMMSS（手柄无法输入文本）；
+        写入目标从 ~/.a3/poses.yaml 收敛到包内（F113 弃用用户层覆盖）。
+        """
+        raw = (req.name or "").strip()
+        name = (
+            _sanitize_name(raw)
+            if raw
+            else datetime.now().strftime("snap_%Y%m%d_%H%M%S")
+        )
         if req.positions:
             if len(req.positions) != self._n_joints:
                 resp.success = False
                 resp.message = f"need {self._n_joints} positions, got {len(req.positions)}"
                 return resp
-            q = [float(v) for v in req.positions]
+            q = [round(float(v), 4) for v in req.positions]
         else:
             if not self._have_js:
                 resp.success = False
                 resp.message = "no /joint_states yet"
                 return resp
-            q = [float(p) for p in self._positions]
+            q = [round(float(p), 4) for p in self._positions]
 
-        path = self._user_poses_path()
-        data: Dict[str, Any] = {}
-        if os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = yaml.safe_load(f) or {}
-            except Exception as exc:  # noqa: BLE001
-                resp.success = False
-                resp.message = f"load existing poses failed: {exc}"
-                return resp
-        data.setdefault("poses", {})[name] = q
-        os.makedirs(os.path.dirname(path), exist_ok=True)
         try:
+            path = self._named_poses_pkg_path()
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            pos_line = f"    positions: [{', '.join(f'{v:.4f}' for v in q)}]"
+            lines = _upsert_pose_lines(lines, name, pos_line)
             with open(path, "w", encoding="utf-8") as f:
-                yaml.safe_dump(data, f)
+                f.writelines(lines)
         except Exception as exc:  # noqa: BLE001
             resp.success = False
             resp.message = f"save failed: {exc}"

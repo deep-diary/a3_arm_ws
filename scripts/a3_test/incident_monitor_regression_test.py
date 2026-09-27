@@ -3,7 +3,7 @@
 
 2026-09-14 真机事故的第一环：示教拖动后退出，执行层 F38 把 MIT 目标重锚到拖动位姿
 （正确），但看门狗的保持参照 `_last_goal` 仍停在上一条轨迹末点 → 1.2 s 后误判
-HOLD_DRIFT → stop → reset → 臂失去保持 → 人工搬回 home → 使能甩断 L6。
+HOLD_DRIFT → stop → reset → 臂失去保持 → 人工搬回 idle → 使能甩断 L6。
 
 本测试在仿真栈（sim_motor_node 冒充执行层 + 真 arm_controller/arm_monitor）上跑：
 

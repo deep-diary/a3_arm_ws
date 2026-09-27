@@ -9,13 +9,13 @@
 
 本验收用 vcan 栈（真插件 + 真 JTC + 真容差引擎）复现同样的滞后量级：
   vcan_motor_sim.py --alpha 0.023 --alpha-hz 200 给虚拟电机注入一阶滞后
-  TC = 1/(alpha*200) = 0.22 s；以 home<->ready 的相对位移 Δ（L3=-1.575）为
+  TC = 1/(alpha*200) = 0.22 s；以 idle<->ready 的相对位移 Δ（L3=-1.575）为
   两点轨迹时长 11.5 s，实测 JTC spline 峰值参考速度 ≈0.35 rad/s（时长越长
   spline 越缓，3.5 s 两点会峰到 ≈2.2 rad/s = 4.8× 真机巡航而过度加载）。于是
   峰值 |ref-fbk| err ≈ TC*v ≈0.07 rad —— 落在实测 0.05 量级、新旧容差
   （0.05 旧 / 0.15 新）正中的复现窗口。
 
-  A/B 以「使能后的活锚点 q0」为基准，运动量固定为 home<->ready 的相对位移
+  A/B 以「使能后的活锚点 q0」为基准，运动量固定为 idle<->ready 的相对位移
   Δ（A: q0→q0+Δ，B: q0+Δ→q0），而不是绝对目标。原因是 sim 冷启动自带一个
   启动 artifact：vcan_motor_sim 首个控制帧到达时 dt≈栈启动的 15 s，effort
   物理分支在一个大步里积分出大速度；随后 position-mode 重锚定经常落在被
@@ -32,7 +32,7 @@
       [DOMAIN_ID] [--alpha X] [--duration D]
 
 Acceptance（docs/edge/REQUIREMENTS.md F112）:
-  A. 带实测量级跟踪滞后，从活锚点按 home->ready 的相对位移 Δ 运动 ->
+  A. 带实测量级跟踪滞后，从活锚点按 idle->ready 的相对位移 Δ 运动 ->
      SUCCESSFUL（error 0）
   B. 反向按 -Δ 回到锚点 -> SUCCESSFUL
   C. 整个摆程 |ref-fbk| 的最大值（= JTC trajectory-tolerance 引擎实际检查的
@@ -73,7 +73,7 @@ STACK_LOG = "/tmp/p1p2_stack.log"
 ARM_JOINTS = [f"L{i}_joint" for i in range(1, 7)]
 RESULTS = []
 
-# 真机 ~/.a3/poses.yaml ready（F109）；home 实测 L2≈0/L3≈0，与 URDF 零位一致
+# 包内 named_poses.yaml（F109 ready / F113 idle）；idle 实测 L2≈0/L3≈0，与 URDF 零位一致
 # （L4 下垂 0.335 等静态偏置不影响跟踪滞后复现）。sim 起点即 URDF 零位。
 READY = [0.0, 1.05, -1.575, 0.0, 0.0, 0.0]
 
@@ -261,7 +261,7 @@ def main():
                          "split need not equal the real arm: the JTC tolerance "
                          "engine only sees the resulting peak |err|.")
     ap.add_argument("--duration", type=float, default=11.5,
-                    help="home<->ready two-point trajectory duration: must be "
+                    help="idle<->ready two-point trajectory duration: must be "
                          "long enough that the JTC spline peak reference "
                          "velocity is NOT a strawman. A short 3.5 s run peaks "
                          "~2.2 rad/s = 4.8x the real goto cruise and "
@@ -297,34 +297,34 @@ def main():
         node.enable()
         assert node.fjt.wait_for_server(timeout_sec=10)
 
-        # ---- A/B move by the home<->ready DISPLACEMENT Δ from the live
+        # ---- A/B move by the idle<->ready DISPLACEMENT Δ from the live
         # anchor, not absolute targets. The sim's cool-start wind-up can land
         # the enable anchor at wrapped ±2π-ish positions (L2 +0.785→-4.831,
         # L4 ±7.88..8.51 across runs) — a sim-only artifact (the real arm's
         # multi-turn counters are zeroed at fold, F91, so it anchors near
-        # home). lag err≈TC*v depends only on Δ and duration, so relative
+        # idle). lag err≈TC*v depends only on Δ and duration, so relative
         # motion reproduces the measured 0.050-0.055 rad band regardless.
         anchor = node.arm_positions()
         rw = args.duration + 6.0
 
-        # ---- A. lagged q0 -> q0+Δ (home->ready displacement) completes ----
+        # ---- A. lagged q0 -> q0+Δ (idle->ready displacement) completes ----
         # alpha=0.023 @ 200Hz: TC = 0.22 s; the 11.5 s two-point spline's
         # measured max v_ref is ~0.35 rad/s -> peak |err| ≈ TC*v ~0.07 rad:
         # inside the new 0.15 tolerance, but above the old 0.05 (would abort).
         acc, elapsed, code = node.run_trajectory(
             [anchor[i] + READY[i] for i in range(6)],
             args.duration, result_wait_s=rw)
-        check("A lagged Δ home->ready accepted/terminated",
+        check("A lagged Δ idle->ready accepted/terminated",
               acc, f"code={code} elapsed={elapsed}")
-        check("A lagged Δ home->ready SUCCESSFUL",
+        check("A lagged Δ idle->ready SUCCESSFUL",
               acc and code == 0, f"code={code}")
 
-        # ---- B. lagged q0+Δ -> q0 (ready->home) completes ----
+        # ---- B. lagged q0+Δ -> q0 (ready->idle) completes ----
         acc, elapsed, code = node.run_trajectory(anchor,
                                                  args.duration, result_wait_s=rw)
-        check("B lagged Δ ready->home accepted/terminated",
+        check("B lagged Δ ready->idle accepted/terminated",
               acc, f"code={code} elapsed={elapsed}")
-        check("B lagged Δ ready->home SUCCESSFUL",
+        check("B lagged Δ ready->idle SUCCESSFUL",
               acc and code == 0, f"code={code}")
 
         # ---- C. the sim really reproduced the measured lag magnitude ----

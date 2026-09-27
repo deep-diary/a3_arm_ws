@@ -1,0 +1,10 @@
+# F116: 从 named_poses.yaml 随机抽点，从当前位姿起逐点 MoveIt 规划执行。
+# 允许重复，但相邻两点不相同。count=0 → 节点参数 random_tour_count（默认 5）；
+# seed=0 → 真随机，非 0 可复现。点位池由参数 random_tour_exclude_poses 过滤（默认排除 zero）。
+uint32 count
+uint64 seed
+---
+bool success
+string message
+string[] sequence       # 实际抽取并执行的点位名（顺序）
+float64 total_duration_s
