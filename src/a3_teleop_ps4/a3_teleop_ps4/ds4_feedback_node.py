@@ -62,6 +62,7 @@ COLORS = {
     "orange": (255, 96, 0),
     "green": (0, 200, 0),
     "blue": (0, 90, 255),
+    "cyan": (0, 255, 255),
     "purple": (170, 0, 255),
     "white": (255, 255, 255),
 }
@@ -297,6 +298,11 @@ class Ds4FeedbackNode(Node):
             return _Effect(CLS_TEACH, "blue", "breathe", "teach")
         if self._arm_state == "SAFE_PARK":
             return _Effect(CLS_TRAJ, "purple", "solid", "safe park")
+        # F125: 回放回首点段（MoveIt 规划，F124）灯带 cyan，与执行示教轨迹段 purple 区分。
+        # 判定前缀 `playback return`（_playback_cb phase R 的 _set_state 消息），phase P
+        # 消息为 `playback <label>` 不含前缀 → 仍走下方泛 TRAJ purple 分支。
+        if self._arm_state == "TRAJ" and self._arm_msg.startswith("playback return"):
+            return _Effect(CLS_TRAJ, "cyan", "solid", self._arm_msg or "playback return")
         if self._arm_state == "TRAJ" and self._arm_msg.strip() != "jog":
             return _Effect(CLS_TRAJ, "purple", "solid", self._arm_msg or "trajectory")
         if self._arm_state in ("READY", "SERVO"):
