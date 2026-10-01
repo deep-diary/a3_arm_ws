@@ -12,6 +12,95 @@
    - `hardware:=can can_interface:=can1`：`a3_hardware_interface/A3MITHardwareInterface` 直连 SocketCAN（真机先 `sudo systemctl start can-up.service`；vcan 验收 `can_interface:=vcan0`）。非法 hardware 值会被 launch 硬拒，mock 不触碰任何 CAN socket
    - 组件开关：`use_mqtt` / `use_teleop` 默认 true，`use_rviz` / `use_monitor` 默认 false；`teleop_mapping:=default|simple`；`use_sw_render` 默认 true（LL-027）
    - JTC 默认 **inactive 启动**，需经 `/a3/arm/enable`（或 PS4 L3）激活后才会运动
+
+#### 真机栈 启停 / 重启（手工 setsid 方式）
+
+> **一键脚本（推荐，免记多条指令）：**
+> ```bash
+> ./scripts/a3_stack.sh start      # 启动（can1 检查 → 电机 7/7 在线探测 → setsid 起栈 → 健康验证）
+> ./scripts/a3_stack.sh stop       # 优雅停（臂未失能默认拒绝；-f 跳过安全门；--keep-rviz 保留独立 RViz）
+> ./scripts/a3_stack.sh restart    # 重启（可带 --rviz）
+> ./scripts/a3_stack.sh status     # 查看 can1 / 进程 / arm_status
+> ```
+> 起栈前会无侵入探测 ID 1..7（电机有 24V 即应答，与软件门禁无关）：0/7 或缺关节会提示
+> （查动力电/急停/CAN 线束）并中止，不拉起栈；5J 降级档等场景加 `--no-probe` 跳过。
+> 脚本封装了下面全部步骤（含孤儿兜底），手工指令保留用于排查与理解进程模型。
+>
+> **不想重启栈、单独开 RViz**（另开终端）：
+> ```bash
+> source scripts/a3_shell_env.sh
+> export LIBGL_ALWAYS_SOFTWARE=1                              # LL-027 必须软件渲染
+> export LD_PRELOAD="$HOME/.a3/hide_randr/libhide_randr.so"   # LL-065
+> rviz2 -d install/a3_description/share/a3_description/config/el_a3_view.rviz
+> ```
+
+真机栈 = 一个 `ros2 launch` 主进程 + 它拉起的全部子节点（ros2_control_node / arm_controller / power_sequence_node / move_group / ps4_mapper + ds4_feedback_node / ros2mqtt_bridge / 黑匣子 rosbag …）。生产习惯是 **`setsid` 脱离会话手工启动**——不挂 agent/SSH 后台任务（内存告紧会被整栈回收），也不做 systemd 自启（F93 的 a3-arm.service 默认不启用，现场安全确认后才用）。下面指令针对当前运行的栈；先 `ps -eo pid,ppid,cmd | grep "ros2 launch a3_bringup" | grep -v grep` 复核当前形态。
+
+**停栈前提（安全）**：先确认臂**已失能**——`ros2 topic echo /a3/arm_status --once` 的 `state: DISABLED` 才继续。若处于 READY/SERVO/TRAJ/TEACH 等使能态，先 R3 软失能或 `/a3/arm/disable` 停到 DISABLED 再关栈（臂使能中被杀栈 = 看门狗与轨迹层同时消失，非预期行为；已 idle 趴着未使能可直接停）。
+
+**关闭（优雅停，勿 `kill -9`）：**
+
+```bash
+# 1) 确认栈在跑、臂已失能（新开 SSH 终端先 source 好环境再查）
+timeout 4 ros2 topic echo /a3/arm_status --once      # state: DISABLED 才继续
+
+# 2) 定位 ros2 launch 主进程 PID
+ps -eo pid,ppid,cmd | grep "ros2 launch a3_bringup" | grep -v grep
+
+# 3) 优雅关停：SIGTERM 给主进程 → ros2 launch 自行清理全部子节点
+kill -TERM <主进程PID>
+
+# 4) 等 ~10 s 确认无残留节点（反复重启前必查；名单覆盖全部子节点；
+#    RViz 若为独立手工 setsid 起的不属于栈，需单独关，详见下文一键关停）
+sleep 10
+pgrep -af "ros2 launch a3_bringup|ros2_control_node|a3_arm_controller|power_sequence_node|ps4_mapper|ds4_feedback_node|ros2mqtt_bridge|move_group|joy_node|ros2 bag|robot_state_publisher|rviz2" || echo "栈已清干净"
+
+# 5) can1 保持 UP（除非真要掐总线，否则别动 can-up.service）
+ip -details link show can1 | head -1
+```
+
+一键关停（前提：臂已失能 `state: DISABLED`；can1 保持 UP。2026-09-27 修订：补孤儿兜底、防 wrapper 自匹配、纳入独立 RViz）：
+
+```bash
+# 1) SIGTERM 主 launch（[a]3 字符类技巧：让 pkill 的命令行自身不满足该模式，
+#    避免在 bash -c / agent 环境里误杀携带本命令行的 shell wrapper；
+#    launch 已不在时 pkill 返回非 0，|| true 保证继续走兜底）
+pkill -TERM -f "ros2 launch [a]3_bringup.*hardware:=can" 2>/dev/null || true
+sleep 10
+
+# 2) 孤儿兜底：launch 异常死亡时子节点会被 init 接管（PPID=1）残留，
+#    pgrep 找出仍存活的栈节点 → grep -v 排除携带本命令行的 wrapper → 按 PID 精确 TERM
+pgrep -af "ros2 launch a3_bringup|ros2_control_node|install/a3_arm_controller/lib/a3_arm_controller/arm_controller|power_sequence_node|ps4_mapper|ds4_feedback_node|ros2mqtt_bridge|move_group|retime_trajectory_node|a3_self_test|/joy/joy_node|can_bus_monitor|topic_rate_monitor|aggregator_node|diagnostic_common_diagnostics|ros2 bag record|robot_state_publisher|a3_sim_executor|gravity_torque_node|rviz2" \
+  | grep -vE "pgrep|pkill" | awk '{print $1}' | xargs -r kill -TERM 2>/dev/null || true
+sleep 3
+
+# 3) 复核（无输出 = 干净）
+pgrep -af "ros2 launch a3_bringup|ros2_control_node|a3_arm_controller|power_sequence_node|ps4_mapper|ds4_feedback_node|ros2mqtt_bridge|move_group|joy_node|ros2 bag|robot_state_publisher|rviz2" || echo "栈已清干净"
+```
+
+> **关于 RViz**：生产启动命令固定 `use_rviz:=false`，屏上 RViz 多为**独立手工 setsid 起的**——它不是 launch 的子进程，关栈不会带走它，不代表栈没关干净。上面脚本已把 `rviz2` 纳入兜底；想保留 RViz 时自行删掉该词。
+
+**启动：**
+
+```bash
+# 1) CAN 总线（systemd 常开；未开才启动）
+sudo systemctl start can-up.service
+ip -details link show can1 | head -1
+
+# 2) setsid 脱离会话启动（& 只让当前 shell 不阻塞；setsid 使进程脱离控制终端/进程组、PPID 归 1）
+setsid bash -c 'source /home/cat/a3_arm_ws/scripts/a3_shell_env.sh && export PYTHONNOUSERSITE=1 && \
+  cd /home/cat/a3_arm_ws && ros2 launch a3_bringup a3_bringup.launch.py hardware:=can can_interface:=can1 use_rviz:=false' \
+  </dev/null >/tmp/a3_real_stack.log 2>&1 &
+
+# 3) 验证健康（等 ~15 s 起栈）
+sleep 15
+ros2 topic echo /a3/arm_status --once                 # DISABLED / IDLE、反馈新鲜
+ros2 topic echo /power_sequence/state --once          # Running
+ps aux | grep -E "ros2_control_node|a3_arm_controller|move_group" | grep -v grep   # 子节点在跑
+```
+
+**重启 = 上面「关闭」+「启动」连做。** 2026-09-27 复核：当前栈正是这条 setsid 启动命令起的（PPID=1），SIGTERM 优雅停后子节点全退、can1 保持 UP 为预期行为。systemd 托管替代方案见下文「产品栈 systemd 托管（F93）」一节（`sudo systemctl restart a3-arm`）。
+
 4. PS4 电源（F60/F119）：L3 短按 = 一键使能；R3 短按 = 任意模式软失能（先从 SERVO/示教/重力补偿退出当前模式 → safe-park 回 idle → 失能）；Cross 长按 1 s = 硬急停（恢复需重新 L3）。完整键位/灯效见第 10 节与 [PS4_OPERATOR_GUIDE.md](PS4_OPERATOR_GUIDE.md)。
 5. 冒烟测试（mock 起栈后）：
    ```bash

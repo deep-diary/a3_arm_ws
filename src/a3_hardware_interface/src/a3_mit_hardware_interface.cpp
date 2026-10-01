@@ -62,8 +62,9 @@ constexpr double kDefaultMotorCanTimeoutS = 0.2;
 // 0x7028 is uint32 with ~50 us per count (20000 ≈ 1 s)
 constexpr double kCanTimeoutCountsPerSec = 20000.0;
 // F123: 0x18 active-report period (0x7026 EPScan_time). Factory default is
-// n=1 → 10 ms (100 Hz/motor). Re-armed to 100 ms (10 Hz) every activate and
-// again after deactivate's reset, because MIT reset wipes the write back.
+// n=1 → 10 ms (100 Hz/motor). Re-armed to 100 ms (10 Hz) at cold-boot
+// configure (F128), every activate, and again after deactivate's reset,
+// because MIT reset wipes the write back.
 constexpr double kDefaultActiveReportHz = 10.0;
 
 double ParseDouble(const std::string & value, double fallback)
@@ -496,9 +497,21 @@ public:
 
     InitGravityModel();
 
+    // F128: cold-boot telemetry. The component starts INACTIVE
+    // (hardware_components_initial_state, LL-086), so on_activate does not
+    // run until the operator presses L3. Arm the pure-telemetry 0x18 stream
+    // right here: no reset/enable/torque frames are sent and the motors stay
+    // powered/coast, but RxLoop keeps feeding hw_pos → JSB → /joint_states,
+    // so RViz shows the real arm pose BEFORE enabling. power_sequence_node
+    // attempted the same at boot (OnBootActiveReportOnce) but its
+    // /can_tx_frames have no consumer in the unified stack (F111, dead
+    // letter); the plugin owns the bus, so it arms the stream itself.
+    ArmTelemetryStream();
     RCLCPP_INFO(
-      rclcpp::get_logger(kLoggerName), "CAN %s open, RX thread running",
-      can_interface_.c_str());
+      rclcpp::get_logger(kLoggerName),
+      "CAN %s open, RX thread running; F128 cold-boot telemetry armed "
+      "(0x18 %.0f Hz/motor, motors left disabled/coast)",
+      can_interface_.c_str(), active_report_hz_);
     return CallbackReturn::SUCCESS;
   }
 
@@ -699,26 +712,14 @@ public:
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
-    // F123: the reset just above wiped 0x7026 back to the 10 ms factory
-    // default; re-arm 100 ms (10 Hz) before the F113 0x18-ON so the disabled/
-    // idle stream does not snap back to 100 Hz/motor during the hold.
-    for (const auto & j : joints_) {
-      transport_.Send(
-        ProtocolCodec::BuildSetParamRawFrame(
-          bus_, j.motor_id, ProtocolCodec::kParamEpScanTime,
-          {active_report_epscan_n_, 0, 0, 0}),
-        nullptr);
-      std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
-
-    // F113: keep the 0x18 active-report stream open after deactivate so
-    // /joint_states stays live in RViz and the next enable's 7/7 gate has
-    // data. Always-on by design: the ~1% constant load (10 Hz/motor since
-    // F123) buys telemetry that survives plug-in reloads/crashes, matching
-    // power_sequence's intent of never sending 0x18-OFF.
-    for (const auto & j : joints_) {
-      transport_.Send(ProtocolCodec::BuildActiveReportFrame(bus_, j.motor_id, true), nullptr);
-    }
+    // F113/F123/F128: the reset just above wiped 0x7026 back to the 10 ms
+    // factory default. Re-arm EPScan 100 ms (10 Hz) and keep the 0x18
+    // active-report stream open after deactivate so /joint_states stays live
+    // in RViz and the next enable's 7/7 gate has data. Same helper as cold
+    // boot (on_configure): telemetry-only, motors stay reset/coast; never
+    // send 0x18-OFF (power_sequence's original intent — telemetry survives
+    // plug-in reloads/crashes).
+    ArmTelemetryStream();
 
     RCLCPP_INFO(rclcpp::get_logger(kLoggerName), "deactivated, motors reset");
     return CallbackReturn::SUCCESS;
@@ -1226,6 +1227,34 @@ private:
       }
     }
     motor_states_pub_->publish(msg);
+  }
+
+  // F128: arm the telemetry-only 0x18 active-report stream on every motor
+  // WITHOUT changing enable state (no reset/enable/MIT-torque frames). Used
+  // at cold boot (on_configure — RViz shows the real pose before L3) and
+  // after deactivate's reset (F113 keep-alive). EPScan is written first so a
+  // fresh/reset motor reports at active_report_hz_ (10 Hz) rather than the
+  // 100 Hz factory default (F123). Two idempotent rounds guard against a
+  // single dropped frame on a power-up-busy bus leaving a dark motor.
+  void ArmTelemetryStream()
+  {
+    for (int round = 0; round < 2; ++round) {
+      for (const auto & j : joints_) {
+        transport_.Send(
+          ProtocolCodec::BuildSetParamRawFrame(
+            bus_, j.motor_id, ProtocolCodec::kParamEpScanTime,
+            {active_report_epscan_n_, 0, 0, 0}),
+          nullptr);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+      for (const auto & j : joints_) {
+        transport_.Send(
+          ProtocolCodec::BuildActiveReportFrame(bus_, j.motor_id, true),
+          nullptr);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
   }
 
   void RxLoop()

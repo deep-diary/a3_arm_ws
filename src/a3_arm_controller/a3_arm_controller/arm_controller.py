@@ -21,6 +21,10 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import rclpy
 import yaml
+try:  # F129: LibYAML C loader —— 1365 点回放文件 ~0.17s vs 纯 Python SafeLoader ~1s（满载节点内 3–4s）
+    from yaml import CSafeLoader as _YamlSafeLoader
+except ImportError:  # pragma: no cover - 无 libyaml 的环境退回纯 Python
+    from yaml import SafeLoader as _YamlSafeLoader
 from ament_index_python.packages import get_package_share_directory
 from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory, GripperCommand
@@ -464,6 +468,18 @@ class ArmController(Node):
         # F75: 工业级落定判据——位置 AND 速度同时落定才允许失能
         self.declare_parameter("disable_home_settle_tol_rad", 0.02)
         self.declare_parameter("disable_home_settle_vel_rad_s", 0.05)
+        # F130: 真机 L2/L3 在 idle(~0) 存在 ~0.02–0.03 rad 自然下垂/机械止挡残差，
+        # 严格 0.02 容差永远够不到 → park 超时 FAULT。新增稳态无进展判定：静止 +
+        # 残差≤residual + 持续 plateau_s 位置不再改善（物理受限，非运动中）才放行；
+        # 残差 >residual_hard_floor 绝不失能。
+        self.declare_parameter("disable_park_residual_tol_rad", 0.08)
+        self.declare_parameter("disable_park_residual_hard_floor_rad", 0.12)
+        self.declare_parameter("disable_park_plateau_s", 0.8)
+        self.declare_parameter("disable_park_no_progress_rad", 0.01)
+        # 稳态静止速度门：独立于严格 settle_vel(0.05)。真机 idle 保持时速度反馈噪声/
+        # 微调常达 0.05–0.12，用 0.05 会让 plateau 计时反复清零（紫灯 ~11s 且偶发超时）。
+        # 0.15 容忍噪声，真正运动时速度远大于此。
+        self.declare_parameter("disable_park_plateau_vel_rad_s", 0.15)
         # F119: R3 软失能前退出 BLOCKED_MODES（SERVO/零力矩/重力补偿）的等待上限
         self.declare_parameter("disable_mode_exit_timeout_s", 2.0)
         # F43: 最大力矩持久化
@@ -1680,15 +1696,28 @@ class ArmController(Node):
         t0 = time.monotonic()
         settle_tol = float(self.get_parameter("disable_home_settle_tol_rad").value)
         settle_vel = float(self.get_parameter("disable_home_settle_vel_rad_s").value)
+        residual_tol = float(self.get_parameter("disable_park_residual_tol_rad").value)
+        hard_floor = float(self.get_parameter("disable_park_residual_hard_floor_rad").value)
+        plateau_s = float(self.get_parameter("disable_park_plateau_s").value)
+        no_progress = float(self.get_parameter("disable_park_no_progress_rad").value)
+        plateau_vel = float(self.get_parameter("disable_park_plateau_vel_rad_s").value)
+
+        def _err_speed() -> Tuple[float, float]:
+            err = max(abs(p - h) for p, h in zip(self._positions, home))
+            speed = max(abs(v) for v in self._velocities)
+            return err, speed
 
         def settled() -> bool:
             # F75: 位置 AND 速度双落定（宽 tol=0.15 会在臂仍运动时放行失能，LL-077）
-            err = max(abs(p - h) for p, h in zip(self._positions, home))
-            speed = max(abs(v) for v in self._velocities)
+            err, speed = _err_speed()
             return err <= settle_tol and speed <= settle_vel
 
         converge_start = 0.0
         corrective_sent = False
+        # F130 plateau gate：静止 + 小残差 + 持续无进展（物理止挡/下垂）才放行
+        plateau_since = 0.0
+        plateau_ref_err = -1.0
+        allow_residual = False
         while time.monotonic() - t0 < duration + timeout_s and rclpy.ok():
             # F51/LL-039: 电机已带外失能 → park 不可能收敛，立即退出（保持“已失能”事实）
             if self._pending_unexpected_disable:
@@ -1702,7 +1731,7 @@ class ArmController(Node):
             # move_group 轨迹执行异常未落定时，补一条两点纠偏轨迹（仅一次）
             if not corrective_sent and time.monotonic() - t0 > duration + 1.0 \
                     and not settled():
-                gap = max(abs(p - h) for p, h in zip(self._positions, home))
+                gap, _ = _err_speed()
                 c_dur = min(max(gap / 0.3, 2.0), 6.0)
                 c_traj = self._two_point_trajectory(
                     list(self._positions), home, c_dur)
@@ -1712,6 +1741,8 @@ class ArmController(Node):
                 if not ok:
                     self.get_logger().warn(f"park corrective not dispatched: {cmsg}")
                 corrective_sent = True
+                plateau_since = 0.0  # 纠偏后重新观测稳态，避免误判
+            err, speed = _err_speed()
             if settled():
                 if converge_start == 0.0:
                     converge_start = time.monotonic()
@@ -1719,11 +1750,36 @@ class ArmController(Node):
                     break
             else:
                 converge_start = 0.0
+                # F130: 纠偏后若已静止、残差在容限内且位置不再改善 → 物理受限的稳态。
+                # 速度用独立 plateau_vel（容忍 idle 保持时反馈噪声），非严格 settle_vel。
+                if corrective_sent and err <= residual_tol and speed <= plateau_vel:
+                    now = time.monotonic()
+                    if plateau_since == 0.0:
+                        plateau_since = now
+                        plateau_ref_err = err
+                    elif abs(plateau_ref_err - err) <= no_progress:
+                        if now - plateau_since >= plateau_s:
+                            allow_residual = True
+                            break
+                    else:  # 仍在改善（还在往 idle 走）→ 重置，继续等
+                        plateau_since = now
+                        plateau_ref_err = err
+                else:
+                    plateau_since = 0.0
             time.sleep(0.05)
 
-        if not settled():
+        err, speed = _err_speed()
+        residual_ok = allow_residual and err <= residual_tol and err <= hard_floor
+        if not (settled() or residual_ok):
+            # 残差超硬地板（明显未到位）或仍在运动 → FAULT 保持使能，需人工介入
             self._set_state(STATE_FAULT, "safe park timeout: not settled at idle, still enabled")
             return False, "safe park timeout: not settled at idle, still enabled"
+        if allow_residual and not settled():
+            worst_jn = self._joint_names[
+                max(range(len(home)), key=lambda i: abs(self._positions[i] - home[i]))]
+            self.get_logger().info(
+                f"safe park: idle physically unreachable, settle at residual "
+                f"err={err:.3f} rad speed={speed:.3f} (worst={worst_jn}); disable anyway")
         ok, msg = self._motor_command(self._reset_cli, 2)
         if not ok:
             # reset 被拒（如 gate 互锁）：臂已在 idle 位（安全），回 READY 待人工
@@ -2359,7 +2415,6 @@ class ArmController(Node):
         goal_handle = send_future.result()
         if not goal_handle.accepted:
             return False, 0.0, "move_group goal rejected"
-
         self._publish_mode("TRAJ_RUNNING")
         self._set_state(state, f"{label} (planning)")
 
@@ -2912,10 +2967,22 @@ class ArmController(Node):
             resp.message = why
             return resp
 
+        # F129: 通过门禁即发布 TRAJ_RUNNING + TRAJ 状态 → 灯带立即变色，不再等
+        # YAML 解析（纯 Python loader 在满载节点内实测 3–4s）。cyan/purple 由
+        # 回首点是否走 MoveIt 决定（灯效前缀 playback return）。
+        use_moveit = bool(self.get_parameter("playback_return_use_moveit").value)
+        self._publish_mode("TRAJ_RUNNING")
+        self._set_state(
+            STATE_TRAJ,
+            f"playback return {label}" if use_moveit else f"playback {label}",
+        )
+
         try:
             with open(path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f)
+                data = yaml.load(f, Loader=_YamlSafeLoader)
         except Exception as exc:  # noqa: BLE001
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"playback {label}: load failed")
             resp.success = False
             resp.message = f"load failed: {exc}"
             return resp
@@ -2928,6 +2995,8 @@ class ArmController(Node):
             recorded_times.append(float(p["time_from_start_sec"]))
 
         if not recorded_positions:
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"playback {label}: empty trajectory")
             resp.success = False
             resp.message = "empty trajectory"
             return resp
@@ -2947,6 +3016,25 @@ class ArmController(Node):
 
         recorded_std = [_to_std(p) for p in recorded_positions]
 
+        # F129: 轨迹本体静态重力矩 gate（与点到点 _moveit_move 同款 F107）。
+        # 静态重力矩随位形连续平滑变化，均匀抽样（≤96 点，含首末）足以捕获峰值，
+        # 属工程近似（局限已记入 SAFETY.md）。
+        n_body = len(recorded_std)
+        gate_n = min(n_body, 96)
+        gate_idxs = sorted({0, n_body - 1} | {
+            int(round(i * (n_body - 1) / max(gate_n - 1, 1)))
+            for i in range(gate_n)})
+        for bi in gate_idxs:
+            viol = self._static_torque_violations(recorded_std[bi])
+            if viol:
+                self._publish_mode("IDLE")
+                self._set_state(STATE_READY, f"playback {label}: static gate")
+                resp.success = False
+                resp.message = (
+                    f"static torque gate rejected at body point {bi}/{n_body}: "
+                    + "; ".join(viol))
+                return resp
+
         # F38/F88: 回放前从当前位姿到首记录点建一条两点几何 ramp（时间由 retime
         # 重算，保几何），避免回放起始位 ≠ 记录起始位时突然跳变。
         ramp_s = float(self.get_parameter("playback_ramp_duration_s").value)
@@ -2962,7 +3050,7 @@ class ArmController(Node):
         first_q = recorded_std[0]
         moved = False
         r_dur = 0.0
-        if use_ramp and bool(self.get_parameter("playback_return_use_moveit").value):
+        if use_ramp and use_moveit:
             ok, dur, msg = self._moveit_move(
                 first_q[:6], JOINTS[:6], f"playback return {label}")
             if ok:
@@ -3074,6 +3162,8 @@ class ArmController(Node):
             resp.message = dmsg
             return resp
         self._set_state(STATE_TRAJ, f"playback {label}")
+        # F129: 轨迹本体时长入占空比账（回首段已在 _moveit_move 内入账），与点到点对齐
+        self._duty_record(duration)
         self._schedule_back_to_ready(duration + 0.3)
 
         suffix = f"retime [{retime_msg}]" if retime_msg else "legacy chain"
