@@ -144,8 +144,14 @@ ps aux | grep -E "ros2_control_node|a3_arm_controller|move_group" | grep -v grep
 
     **(a) 全功能仿真闭环 + 双模型 RViz（无手柄、无 CAN，推荐逐键验收入口）：**
     ```bash
+    # 一键（推荐）：a3_stack.sh --sim = edge_teleop_full_sim，ROS_DOMAIN_ID=99 隔离真机栈
+    # （域 0），可共存互串无忧（LL-069）；默认 use_joy_node:=true 接真手柄。
+    ./scripts/a3_stack.sh start --sim --rviz   # 起仿真栈 + 双模型 RViz（合成测试加 --no-joy）
+    ./scripts/a3_stack.sh status --sim         # 查看仿真进程 / arm_status
+    ./scripts/a3_stack.sh stop --sim           # 停（PGID 整组 TERM + domain 过滤兜底，无安全门）
+    # 手工等价入口（排查用）：
     source scripts/a3_shell_env.sh        # 含 PYTHONNOUSERSITE=1；勿 source install/setup.bash
-    export ROS_DOMAIN_ID=45
+    export ROS_DOMAIN_ID=99
     export DISPLAY=:0
     ros2 launch a3_bringup edge_teleop_full_sim.launch.py
     # 另开终端（同域）：合成 /joy 12 场景 44 项自动验收，逐项打印 PASS/FAIL + 关节证据：
@@ -156,7 +162,7 @@ ps aux | grep -E "ros2_control_node|a3_arm_controller|move_group" | grep -v grep
     - RViz 双模型：实体色 = 实际反馈（`/joint_states`），半透明 = 目标 ghost（`target/` TF）。
     - 本机 RViz 两个必备前缀已由 launch 自动加：`LIBGL_ALWAYS_SOFTWARE=1`（LL-027）、`LD_PRELOAD=~/.a3/hide_randr/libhide_randr.so`（LL-065）。
     - S0 基线检查只能在干净栈上通过；重复跑须重启栈（编排层/位姿状态有记忆；F115 起速度档已不可调），首次干净栈结果为准。
-    - 合成全绿后，手柄实操把启动命令换成 `ros2 launch a3_bringup edge_teleop_full_sim.launch.py use_joy_node:=true`（域不变）。
+    - 合成全绿后手柄实操：`./scripts/a3_stack.sh start --sim --rviz`（默认已 `use_joy_node:=true`）；手工入口则加 `use_joy_node:=true`（域不变）。
 
     **(b) 真机 / 校准：**
     ```bash

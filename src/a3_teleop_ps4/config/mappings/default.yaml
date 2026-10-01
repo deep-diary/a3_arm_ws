@@ -6,8 +6,9 @@
 #   位姿:      Triangle 短按=home（F120）/ Circle 短按=idle（自然趴着位，非机械零位；zero 不绑定手柄）
 #              D-pad=home 周边 4 点（F115）：上=home_up / 下=home_down / 左=home_back / 右=home_front
 #   示教:      Share 短按=开始示教 / Options 短按=结束并自动保存 / Square 短按=回放 latest
+#              Options 长按 3s=F116 随机点位巡游（READY 态才执行；TEACH/TRAJ 等态被服务端拒绝）
 #   点位:      L2 短按=保存当前位姿为 snap_YYYYMMDD_HHMMSS（F114，写包内 named_poses.yaml）
-#   功能:      PS 短按=init(调零+自动使能) / Options 长按 3s=set_zero
+#   功能:      PS 短按=init(调零+自动使能)
 #   运动:      L1 按住+摇杆=末端平移死人开关 / R1 按住+摇杆=末端旋转死人开关(首批仅偏航)
 #              左摇杆=平移 Y(左右)/Z(上下)；右摇杆上下=平移 X(前后)，右摇杆左右=偏航
 #              （F115 起 D-pad 调速退役，平移/旋转恒用 speed_normal 默认档）
@@ -70,6 +71,10 @@ buttons:
     # F91: 长按调零已退役（产品栈无消费者；零点维护走 motor_maintenance 独立节点）
     - fn: teach_stop
       edge: shortpress
+      hold_s: 3.0
+    # F116: 长按 3s 随机命名点巡游；同键短按语义不变（ButtonEdgeTracker 双键义）
+    - fn: random_pose_tour
+      edge: longpress
       hold_s: 3.0
   square:
     fn: playback_latest

@@ -85,6 +85,10 @@ functions:
     kind: discrete
     description: 'Call /a3/arm/playback {name:""} (空名 ≡ 回放 latest)'
 
+  random_pose_tour:
+    kind: discrete
+    description: 'F116 Options 长按 3s: Call /a3/arm/random_pose_tour（READY 态抽命名点逐点 MoveIt 巡游；可选 kwargs count/seed）'
+
   set_gripper:
     kind: analog_01
     description: q_L7 = v * 1.79 rad (legacy alias, 0 closed .. 1 open)

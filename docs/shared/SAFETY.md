@@ -122,7 +122,7 @@ Web 端单电机调试（CAN 扫描 / MIT 直驱 / 保持）的安全边界：
 
 **F119（2026-09-26）：任意模式软失能。** 失能前先退出当前功能模式（示教 TEACH → 结束示教存储；SERVO / ZERO_TORQUE / 重力补偿 → 各模式 stop 服务），等 `_mode` 退出阻塞模式（`disable_mode_exit_timeout_s: 2.0`）再走 F40 safe-park → idle → reset。超时（如操作员仍按着 servo 死人开关）→ 拒绝 + 可执行文案（松开手柄再试 / 直接 `/a3/motor/reset`），不改状态。之前的语义缺口：SERVO/示教/重力补偿模式下按 R3 被直接拒绝无反应，servo 测试完只能靠辅助手段失能。硬急停（X 长按）与 `/a3/motor/reset` 直达链路依旧绕过此 prelude 即时生效。
 
-1. **park 超时 → FAULT 且不 reset**：保持使能、停在半途，需人工介入——宁停在半途也不盲目失能掉臂。
+1. **park 超时 → FAULT 且不 reset**：保持使能、停在半途，需人工介入——宁停在半途也不盲目失能掉臂。**F130 例外（物理残差）**：idle(~0) 在真机因 L2/L3 自然下垂/机械止挡存在 ~0.03 rad 残差、严格 0.02 到位门永远满足不了时，若已发纠偏且满足「静止（speed≤0.15 噪声门）+ err≤0.08（硬地板 0.12）+ 持续 0.8s 位置无进展」，判为物理受限稳态，允许带残差失能（日志点名 worst 关节/err）；残差 >0.12 或仍在运动依旧 FAULT。该噪声速度门独立于严格落定门，不放宽正常到位判定。
 2. **reset 受 gate 互锁**：电源序列 Running 时 `/a3/motor/reset` 被 C++ 权威拒绝（MOTOR_DEBUG 互锁同一张表）——park 前拒绝 → `disable` 返回失败 + 原文（先 stop power sequence）；park 完成后被拒 → 回 READY（已在 home 位，安全）。
 3. **紧急失能保留**：`/a3/motor/reset` 直达（通信类型 4）仍是急停链路，不经 park。
 4. **DISABLED 下运动命令被拒**：`_can_move()`/`_set_joint_positions_cb` 拒绝表含 DISABLED/COOLING/SAFE_PARK——disable 后 move_to/goto/playback/set_joint_positions 均被拒，须显式 enable（原 IDLE 允许运动的语义混乱消除）。

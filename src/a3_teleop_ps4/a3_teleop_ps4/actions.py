@@ -17,7 +17,12 @@ from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
-from a3_msgs.srv import GotoNamedPose, PlaybackTrajectory, SaveNamedPose
+from a3_msgs.srv import (
+    GotoNamedPose,
+    PlaybackTrajectory,
+    RandomPoseTour,
+    SaveNamedPose,
+)
 
 
 JOINTS = [
@@ -124,6 +129,10 @@ class ActionExecutor:
         self._teach_start = node.create_client(Trigger, "/a3/arm/start_teach")
         self._teach_stop = node.create_client(Trigger, "/a3/arm/stop_teach")
         self._playback = node.create_client(PlaybackTrajectory, "/a3/arm/playback")
+        # F116: Options 长按 3s 触发随机命名点巡游（服务端仅 READY 态放行）
+        self._random_tour = node.create_client(
+            RandomPoseTour, "/a3/arm/random_pose_tour"
+        )
         # F60：命名位姿改走编排层服务（TRAJ 态可被灯带感知；F53 显式拒绝语义）
         self._goto_pose_cli = node.create_client(GotoNamedPose, "/a3/arm/goto_named_pose")
         # F114：L2 短按保存当前位姿（空名 → 服务端时间戳名 snap_*）
@@ -459,6 +468,20 @@ class ActionExecutor:
         req.name = ""  # F54：空名 ≡ latest 槽位
         self._playback.call_async(req)
         self._n.get_logger().info("playback_latest -> /a3/arm/playback {name:''}")
+
+    def random_pose_tour(self, count: int = 0, seed: int = 0) -> None:
+        """F116: Options 长按 → 随机命名点巡游；count=0/seed=0 走服务端默认."""
+        if not self._random_tour.service_is_ready():
+            self._n.get_logger().warn("arm/random_pose_tour not available")
+            return
+        req = RandomPoseTour.Request()
+        req.count = int(count)
+        req.seed = int(seed)
+        self._random_tour.call_async(req)
+        self._n.get_logger().info(
+            f"random_pose_tour -> /a3/arm/random_pose_tour {{count:{req.count}, "
+            f"seed:{req.seed}}}"
+        )
 
     def stop_motion(self) -> None:
         self._stopped = True

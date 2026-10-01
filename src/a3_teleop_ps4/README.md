@@ -16,6 +16,7 @@
 | **Circle（●）** | 按下即触发 | goto idle（自然趴着位，非机械零位） | `/a3/arm/goto_named_pose {name: idle}` |
 | **Share** | 短按 | 开始示教 | `/a3/arm/start_teach`（零力矩拖动 + 记录） |
 | **Options** | 短按 | 结束示教（自动保存 latest） | `/a3/arm/stop_teach` |
+| **Options** | 长按 3 s | F116 随机点位巡游（仅 READY 态，TEACH/TRAJ 被安全拒绝） | `/a3/arm/random_pose_tour {count: 0, seed: 0}` |
 | **Square（■）** | 短按 | 回放最新轨迹 | `/a3/arm/playback {name: ""}` ≡ latest |
 | **PS** | 短按 | init（设零 + 到位确认 + 自动使能） | `/a3/arm/init` |
 | **L1** | 按住 | **平移死人开关**：仅放行平移轴（F64 gates） | 松开约 0.5 s servo 超时停 |
@@ -59,7 +60,7 @@ READY/SERVO（绿，进入弱震 120 ms）→ DISABLED（橙 + 弱震 120 ms）�
 - `rising`：按下瞬间触发一次。
 - `shortpress`（短按）：**释放时**判定，按住 < `hold_s` 触发一次；超过 `hold_s` 再释放作废（不误触、不连带同键其他绑定）。
 - `longpress`（长按）：按住 ≥ `hold_s` 触发一次。
-- 一个键可用 **YAML list** 绑多条，独立跟踪，互不干扰（F91 前 Options 的长按调零已退役：产品栈零点维护走独立节点 `motor_maintenance`）。
+- 一个键可用 **YAML list** 绑多条，独立跟踪，互不干扰（Options 短按=结束示教 / 长按 3 s=F116 随机点位巡游；F91 退役的长按调零走独立节点 `motor_maintenance`）。
 
 ```yaml
 buttons:
