@@ -24,6 +24,13 @@
     # F116: /a3/arm/random_pose_tour 默认抽点数与点位池黑名单（zero=机械零位，真机排除）
     random_tour_count: 10
     random_tour_exclude_poses: ["zero"]
+    # 单腿规划/门禁失败时换抽点位重试次数（2026-10 用户反馈"设 10 有时只走 2 点"：
+    # 原行为单腿失败即整体中止；重试耗尽才中止）
+    random_tour_leg_retries: 3
+    # F134: 巡游整序列一次规划/执行（pilz PTP blend，中间点不停车）；
+    # false/action 不可用/规划失败 → 回退逐腿链
+    random_tour_use_sequence: true
+    random_tour_blend_radius_m: 0.02
     # 回放前从当前位姿插值到首记录点的时长（s）；≤0.05 关闭插值（F38）
     # LL-046: 2.5s→5s——ramp 把末位→首位差（如 L4 深垂 1.18 rad 段）压缩进 2.5s 会
     # 形成 ~0.47 rad/s 的突兀下砸，肉眼即"回放开局快/不平滑"；5s 拉平该过渡。
@@ -49,18 +56,31 @@
     # F57/LL-053: 保存时轻量平滑（中心滑动平均窗口，@50Hz 采样数；0/1/2 = 不保存）。
     # latest.yaml / teach_*.yaml 落盘即干净，任何消费方受益。
     teach_save_smooth_samples: 5
+    # F133: 回放 Ruckig 重定时成功后把优化轨迹烘焙回 latest.yaml（几何不变、时间戳
+    # 为重定时结果；原文件备份 *.preretime.yaml）。仅 latest 槽，teach_*.yaml 备份不改写。
+    playback_retime_writeback: true
     # ── F131: 路点示教（Share 长按进入；L2 打点；Options 保存） ──────────────
     # 路点 < 2 不保存（两点成一段；防误触发覆盖上一条好任务）
     waypoint_min_count: 2
     # 与上一路点最大关节差 < 10 mrad 视为重复，打点跳过（防 L2 连按刷屏）
     waypoint_min_capture_delta_rad: 0.01
+    # 单段规划/执行失败重试次数（段间同步滞后 LL-103 的瞬态失败重等 current 后重试；
+    # 0=段失败即整体中止——2026-10 用户反馈"PTP 停在第一点"即段 2 瞬态失败被旧行为放大）
+    waypoint_segment_retries: 2
+    # F134: 路点任务整序列一次规划/执行（pilz Sequence，blend 过中间点不停车）；
+    # false/失败 → 回退逐段链
+    waypoint_use_sequence: true
     # 每段等待上限；0 = 复用 moveit_goto_timeout_s
     waypoint_segment_timeout_s: 0.0
-    # 段间过渡混合半径（m）；初版 0 = 到位即停；Pilz Sequence blend 阶段二启用
-    waypoint_blend_radius_m: 0.0
-    # LIN 笛卡尔速度/加速度缩放（pilz 只缩放笛卡尔剖面，关节加速度尖峰靠 v^2 压低）
-    waypoint_lin_velocity_scaling: 0.1
-    waypoint_lin_acceleration_scaling: 0.1
+    # F134: 拐角 blend 半径——轨迹在该圆盘内偏离中间点圆滑过弯（0=精确到位即停）
+    waypoint_blend_radius_m: 0.02
+    # Sequence 整序列规划+执行等待上限（含 N 段执行）
+    sequence_move_timeout_s: 90.0
+    # LIN 笛卡尔速度/加速度缩放（pilz 只缩放笛卡尔剖面，关节加速度尖峰靠 v^2 压低）。
+    # 2026-10 真机反馈"慢且抖"：0.1 过保守 → 0.2 起步实测；若近奇异段关节加速度
+    # 尖峰回潮再降回，逐段观测 /a3/motor/states。
+    waypoint_lin_velocity_scaling: 0.2
+    waypoint_lin_acceleration_scaling: 0.2
     # LIN 目标位姿容差（打点 FK 位姿盒）
     waypoint_lin_pos_tol_m: 0.002
     waypoint_lin_rot_tol_rad: 0.002

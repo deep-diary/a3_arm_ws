@@ -208,6 +208,14 @@ def generate_launch_description():
             {"robot_description_planning": robot_description_planning},
             {"robot_description_kinematics": kinematics_yaml},
             planning_pipelines_parameters,
+            # F134: 路点/巡游整序列一次规划——补 pilz Sequence action 能力
+            # （真机 a3_bringup.launch.py 早已启用；仿真栈 2026-10-01 对齐）
+            {
+                "capabilities": (
+                    "pilz_industrial_motion_planner/MoveGroupSequenceAction "
+                    "pilz_industrial_motion_planner/MoveGroupSequenceService"
+                )
+            },
             trajectory_execution,
             moveit_controllers_yaml,
             planning_scene_monitor_parameters,

@@ -14,6 +14,7 @@ import math
 import os
 import random
 import re
+import shutil
 import threading
 import time
 from datetime import datetime
@@ -42,11 +43,12 @@ from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from geometry_msgs.msg import Pose
-from moveit_msgs.action import MoveGroup
+from moveit_msgs.action import MoveGroup, MoveGroupSequence
 from moveit_msgs.msg import (
     Constraints,
     JointConstraint,
     MotionPlanRequest,
+    MotionSequenceItem,
     MoveItErrorCodes,
     OrientationConstraint,
     PlanningOptions,
@@ -418,6 +420,8 @@ class ArmController(Node):
         # move_group 不可用/规划失败/超时 → WARN 并退回下面的本地线性插值。
         self.declare_parameter("goto_use_moveit", True)
         self.declare_parameter("moveit_goto_timeout_s", 15.0)
+        # F134: Sequence 整序列规划+执行等待上限（含 N 段执行，需比单段长）
+        self.declare_parameter("sequence_move_timeout_s", 90.0)
         self.declare_parameter("moveit_action_name", "move_action")
         self.declare_parameter("moveit_planning_group", "arm")
         self.declare_parameter("moveit_allowed_planning_time_s", 3.0)
@@ -428,6 +432,12 @@ class ArmController(Node):
         # F116: 随机点位巡游（默认抽 5 个；zero 为上电机械零位，真机巡游排除）
         self.declare_parameter("random_tour_count", 5)
         self.declare_parameter("random_tour_exclude_poses", ["zero"])
+        # F116: 单腿规划/门禁失败时换抽点位重试次数（0=首次失败即中止巡游）
+        self.declare_parameter("random_tour_leg_retries", 3)
+        # F134: 巡游整序列一次规划（true，pilz PTP blend，中间点不停车）；
+        # false 或 sequence 不可用 → 回退逐腿规划。
+        self.declare_parameter("random_tour_use_sequence", True)
+        self.declare_parameter("random_tour_blend_radius_m", 0.02)
         self.declare_parameter("playback_ramp_duration_s", 2.5)
         # F68: 回放（ramp + 录制点）默认调 /a3/arm/retime_trajectory 做保几何重定时
         # （Ruckig jerk-limited，失败退化 TOTG）；服务不可用/失败才走旧的
@@ -440,6 +450,10 @@ class ArmController(Node):
         self.declare_parameter("playback_velocity_scaling", 0.2)
         self.declare_parameter("playback_acceleration_scaling", 0.2)
         self.declare_parameter("playback_retime_min_duration_s", 1.0)
+        # F133: Ruckig 重定时成功后把优化轨迹烘焙回 latest.yaml（原文件备份
+        # *.preretime.yaml）；下次回放直接复用平滑轨迹。仅 latest 槽，时间戳
+        # 备份文件永不改写。
+        self.declare_parameter("playback_retime_writeback", True)
         # F124: 回放回首点段走 move_group 轨迹规划（true，灯 cyan）；false 或规划失败
         # 回落几何 ramp 插值（F38b，无跳变）
         self.declare_parameter("playback_return_use_moveit", True)
@@ -465,10 +479,17 @@ class ArmController(Node):
         self.declare_parameter("waypoint_min_count", 2)
         # 相邻打点最小关节增量（rad），小于则视为重复点跳过（不增加计数）
         self.declare_parameter("waypoint_min_capture_delta_rad", 0.01)
+        # F131: 单段规划/执行失败重试次数（段间同步滞后的瞬态失败重等 current 后
+        # 重试；0=段失败即整体中止，2026-10 前旧行为）
+        self.declare_parameter("waypoint_segment_retries", 2)
+        # F134: 路点任务整序列一次规划/执行（true；pilz Sequence，blend 过中间点
+        # 不停车）；false 或 sequence 不可用 → 回退逐段规划。
+        self.declare_parameter("waypoint_use_sequence", True)
         # 单段规划/执行超时（s）；0 = 复用 moveit_goto_timeout_s
         self.declare_parameter("waypoint_segment_timeout_s", 0.0)
-        # F131 预留：拐角圆滑半径（阶段二 Pilz Sequence 使用；0 = 每点到位即停）
-        self.declare_parameter("waypoint_blend_radius_m", 0.0)
+        # F134: 拐角 blend 半径（pilz Sequence；0 = 每点到位即停精确过点；
+        # 默认 0.02m 圆滑过弯，轨迹在该圆盘内偏离中间点）
+        self.declare_parameter("waypoint_blend_radius_m", 0.02)
         # F131: pilz LIN 的 request 缩放只缩放笛卡尔速度剖面,不缩放关节限位检查;
         # 靠近奇异/位形翻转的直线段关节加速度尖峰需靠降低笛卡尔速度(v^2)来压住。
         self.declare_parameter("waypoint_lin_velocity_scaling", 0.1)
@@ -798,6 +819,13 @@ class ArmController(Node):
         # F68: 保几何重定时服务
         self._retime_cli = self.create_client(
             RetimeTrajectory, "/a3/arm/retime_trajectory", callback_group=self._cb_group
+        )
+        # F134: 整序列一次规划/执行 action（pilz Sequence；不可用时回退逐段链）
+        self._sequence_cli = ActionClient(
+            self,
+            MoveGroupSequence,
+            "/sequence_move_group",
+            callback_group=self._cb_group,
         )
         # F131: LL-103 段间同步——读 move_group 内部当前状态
         self._scene_cli = self.create_client(
@@ -2382,6 +2410,272 @@ class ArmController(Node):
         resp.message = msg
         return resp
 
+    # ── F134: pilz Sequence 整序列一次规划/执行 ─────────────────────────────
+    def _static_segment_violation(
+        self,
+        q0_arm: List[float],
+        qt_arm: List[float],
+        group_joints: List[str],
+        seg_i: int = 0,
+    ) -> Optional[str]:
+        """
+        F134/F107: 单段预检——目标关节须在自身限位内（pilz 拒绝越限 goal
+        constraints，error -16），再沿关节直线 21 点采样静态重力矩。
+        拒绝返原因，否则 None。
+        """
+        if not self._pin_ready:
+            try:
+                self._ensure_pin_model()
+            except Exception:  # noqa: BLE001
+                self._pin_ready = False
+        if self._pin_ready:
+            for jn, tv in zip(group_joints, qt_arm):
+                jid = self._pin_model.getJointId(jn)
+                qi = int(self._pin_model.idx_qs[jid])
+                lo = float(self._pin_model.lowerPositionLimit[qi])
+                hi = float(self._pin_model.upperPositionLimit[qi])
+                if float(tv) < lo or float(tv) > hi:
+                    return (
+                        f"goal limits gate rejected at segment {seg_i + 1}: "
+                        f"{jn} {float(tv):+.3f} outside [{lo:.3f},{hi:.3f}]")
+        samples = 21
+
+        def seg_full(frac: float) -> List[float]:
+            full = list(self._positions)
+            for jn, tv in zip(group_joints, qt_arm):
+                ci = self._joint_names.index(jn)
+                qi = q0_arm[group_joints.index(jn)]
+                full[ci] = qi + (float(tv) - qi) * frac
+            return full
+
+        for k in range(samples + 1):
+            viol = self._static_torque_violations(seg_full(k / samples))
+            if viol:
+                return (
+                    f"static torque gate rejected at segment {seg_i + 1}: "
+                    + "; ".join(viol))
+        return None
+
+    def _sequence_gate_check(
+        self, targets: List[List[float]], group_joints: List[str]
+    ) -> Optional[str]:
+        """F134: Sequence 下发前逐段 F107 预检（静态重力矩 + 占空比），拒绝返原因."""
+        if not self._have_js:
+            return None
+        qcur = [
+            self._positions[self._joint_names.index(jn)] for jn in group_joints]
+        for seg_i, qt in enumerate(targets):
+            reject = self._static_segment_violation(
+                qcur, qt, group_joints, seg_i)
+            if reject:
+                return reject
+            qcur = list(qt)
+        est_total = 0.0
+        q0 = [
+            self._positions[self._joint_names.index(jn)] for jn in group_joints]
+        for qt in targets:
+            d, _slow = self._velocity_floor_duration(q0, list(qt), group_joints)
+            est_total += d
+            q0 = list(qt)
+        allowed, used_s, cooling_s = self._duty_check(max(est_total, 0.1))
+        if not allowed:
+            return (
+                f"duty gate rejected: {used_s:.0f}s motion in window, "
+                f"wait {cooling_s:.0f}s")
+        return None
+
+    def _fk_ee_xyz(self, positions7: List[float]) -> Optional[List[float]]:
+        """F134: pinocchio end_effector 世界系 xyz；模型不可用返回 None."""
+        try:
+            if not self._pin_ready:
+                self._ensure_pin_model()
+        except Exception:  # noqa: BLE001
+            return None
+        import numpy as np  # type: ignore
+        import pinocchio as pin  # type: ignore
+
+        q = np.zeros(self._pin_model.nq)
+        for pos, qi in zip(positions7, self._pin_q_idx):
+            q[qi] = pos
+        data = self._pin_model.createData()
+        pin.forwardKinematics(self._pin_model, data, q)
+        fid = self._pin_model.getFrameId("end_effector")
+        pin.updateFramePlacement(self._pin_model, data, fid)
+        return [
+            float(data.oMf[fid].translation[0]),
+            float(data.oMf[fid].translation[1]),
+            float(data.oMf[fid].translation[2]),
+        ]
+
+    def _adaptive_blend_radii(
+        self, xyz_seq: List[List[float]], max_r: float
+    ) -> List[float]:
+        """
+        F134: pilz 要求相邻 blend 圆盘不重叠（r_{i-1}+r_i <= 中间点两侧距离）。
+        xyz_seq = [起点xyz, 目标1..目标n xyz]；返回每项 blend 半径，末项恒 0；
+        段长不足时该项降为 0（允许该处短暂停车），避免「Blending failed」。
+        """
+        import math
+
+        n = len(xyz_seq) - 1
+        radii = [0.0] * n
+        for i in range(n - 1):
+            d_prev = math.dist(xyz_seq[i], xyz_seq[i + 1])
+            d_next = math.dist(xyz_seq[i + 1], xyz_seq[i + 2])
+            r = min(max_r, 0.45 * min(d_prev, d_next))
+            radii[i] = r if r >= 0.005 else 0.0
+        return radii
+
+    def _build_ptp_sequence_item(
+        self, target6: List[float], blend_r: float,
+        v_scale: Optional[float] = None, a_scale: Optional[float] = None,
+    ) -> MotionSequenceItem:
+        """F134: pilz PTP 序列项（关节目标 + blend 半径；最后一项 blend=0）."""
+        mpr = MotionPlanRequest()
+        mpr.group_name = str(self.get_parameter("moveit_planning_group").value)
+        mpr.pipeline_id = "pilz"
+        mpr.planner_id = "PTP"
+        mpr.num_planning_attempts = 1
+        mpr.allowed_planning_time = float(
+            self.get_parameter("moveit_allowed_planning_time_s").value)
+        mpr.max_velocity_scaling_factor = (
+            float(self.get_parameter("moveit_velocity_scaling").value)
+            if v_scale is None else v_scale)
+        mpr.max_acceleration_scaling_factor = (
+            float(self.get_parameter("moveit_acceleration_scaling").value)
+            if a_scale is None else a_scale)
+        tol = float(self.get_parameter("moveit_goal_tolerance_rad").value)
+        constraints = Constraints()
+        for jn, val in zip(JOINTS[:6], target6):
+            jc = JointConstraint()
+            jc.joint_name = jn
+            jc.position = float(val)
+            jc.tolerance_above = tol
+            jc.tolerance_below = tol
+            jc.weight = 1.0
+            constraints.joint_constraints.append(jc)
+        mpr.goal_constraints = [constraints]
+        item = MotionSequenceItem()
+        item.req = mpr
+        item.blend_radius = float(blend_r)
+        return item
+
+    def _build_lin_sequence_item(
+        self, pose: dict, blend_r: float,
+    ) -> MotionSequenceItem:
+        """F134: pilz LIN 序列项（约束构造与单段 _lin_move 一致）."""
+        pos = pose.get("position") or {}
+        ori = pose.get("orientation") or {}
+        target_pose = Pose()
+        target_pose.position.x = float(pos["x"])
+        target_pose.position.y = float(pos["y"])
+        target_pose.position.z = float(pos["z"])
+        target_pose.orientation.x = float(ori["x"])
+        target_pose.orientation.y = float(ori["y"])
+        target_pose.orientation.z = float(ori["z"])
+        target_pose.orientation.w = float(ori["w"])
+
+        pos_tol = float(self.get_parameter("waypoint_lin_pos_tol_m").value)
+        rot_tol = float(self.get_parameter("waypoint_lin_rot_tol_rad").value)
+        box = SolidPrimitive(type=SolidPrimitive.BOX, dimensions=[pos_tol] * 3)
+        pc = PositionConstraint()
+        pc.header.frame_id = str(self.get_parameter("waypoint_base_link").value)
+        pc.link_name = str(self.get_parameter("waypoint_ee_link").value)
+        pc.constraint_region.primitives = [box]
+        pc.constraint_region.primitive_poses = [target_pose]
+        oc = OrientationConstraint()
+        oc.header = pc.header
+        oc.orientation = target_pose.orientation
+        oc.link_name = pc.link_name
+        oc.absolute_x_axis_tolerance = rot_tol
+        oc.absolute_y_axis_tolerance = rot_tol
+        oc.absolute_z_axis_tolerance = rot_tol
+        oc.weight = 1.0
+        constraints = Constraints()
+        constraints.position_constraints = [pc]
+        constraints.orientation_constraints = [oc]
+
+        mpr = MotionPlanRequest()
+        mpr.group_name = str(
+            self.get_parameter("waypoint_lin_planning_group").value)
+        mpr.pipeline_id = "pilz"
+        mpr.planner_id = "LIN"
+        mpr.num_planning_attempts = 1
+        mpr.allowed_planning_time = float(
+            self.get_parameter("moveit_allowed_planning_time_s").value)
+        mpr.max_velocity_scaling_factor = float(
+            self.get_parameter("waypoint_lin_velocity_scaling").value)
+        mpr.max_acceleration_scaling_factor = float(
+            self.get_parameter("waypoint_lin_acceleration_scaling").value)
+        mpr.goal_constraints = [constraints]
+        item = MotionSequenceItem()
+        item.req = mpr
+        item.blend_radius = float(blend_r)
+        return item
+
+    def _sequence_move_group(
+        self,
+        items: List[MotionSequenceItem],
+        label: str,
+        state: str = STATE_TRAJ,
+    ) -> Tuple[bool, float, str]:
+        """
+        F134: pilz Sequence —— N 段一次规划、一次执行（blend 过中间点不停车）.
+
+        返回 (成功, 总时长 s, 说明)。调用方须先完成 F107 门禁；任何不可用/失败
+        返回 False，由调用方回退逐段链。
+        """
+        if not self._sequence_cli.server_is_ready():
+            deadline = time.monotonic() + 0.5
+            while (time.monotonic() < deadline
+                   and not self._sequence_cli.server_is_ready()):
+                time.sleep(0.02)
+        if not self._sequence_cli.server_is_ready():
+            return False, 0.0, "sequence_move_group action unavailable"
+
+        goal = MoveGroupSequence.Goal()
+        goal.request.items = list(items)
+        goal.planning_options = PlanningOptions()  # plan_only=False → 规划后直接执行
+
+        timeout_s = float(self.get_parameter("sequence_move_timeout_s").value)
+        t0 = time.monotonic()
+        send_future = self._sequence_cli.send_goal_async(goal)
+        if not self._wait_future(send_future, timeout_s):
+            return False, 0.0, "sequence send timeout"
+        goal_handle = send_future.result()
+        if not goal_handle.accepted:
+            return False, 0.0, "sequence goal rejected"
+        self._publish_mode("TRAJ_RUNNING")
+        self._set_state(state, f"{label} (sequence planning)")
+
+        result_future = goal_handle.get_result_async()
+        remaining = max(0.1, timeout_s - (time.monotonic() - t0))
+        if not self._wait_future(result_future, remaining):
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"{label}: sequence result timeout")
+            return False, 0.0, "sequence result timeout"
+        seq_resp = result_future.result().result.response
+        if seq_resp.error_code.val != MoveItErrorCodes.SUCCESS:
+            self._publish_mode("IDLE")
+            self._set_state(
+                STATE_READY, f"{label}: sequence error {seq_resp.error_code.val}")
+            return False, 0.0, f"sequence error_code={seq_resp.error_code.val}"
+
+        # 轨迹（pilz 按组返回，通常单组单条）取末点时间最大值为总时长
+        total = 0.0
+        npts = 0
+        for rt in seq_resp.planned_trajectories:
+            jt = rt.joint_trajectory
+            npts += len(jt.points)
+            if jt.points:
+                last = jt.points[-1].time_from_start
+                total = max(
+                    total,
+                    float(last.sec) + float(last.nanosec) * 1e-9)
+        total = max(total, 0.1)
+        self._duty_record(total)
+        return True, total, f"{label}: sequence {npts} pts, {total:.1f}s"
+
     def _moveit_move(
         self,
         target: List[float],
@@ -2700,29 +2994,99 @@ class ArmController(Node):
             resp.message = f"need >= {min_count} waypoints, file has {n}"
             return resp
 
+        # F134: 优先整序列一次规划/执行（pilz Sequence，blend 过中间点不停车）。
+        # 不可用/被门禁拒绝/规划失败 → WARN 并回落下方逐段链（F131 行为兜底）。
+        if bool(self.get_parameter("waypoint_use_sequence").value):
+            blend = float(self.get_parameter("waypoint_blend_radius_m").value)
+            lin_poses_ok = all(
+                wp["pose"] and "position" in wp["pose"] for wp in parsed)
+            if strategy == "lin" and not lin_poses_ok:
+                self.get_logger().warn(
+                    f"playback {label}: 存在缺 FK pose 路点，无法 LIN 序列 "
+                    "-- per-segment fallback")
+            else:
+                targets = [wp["positions"][:6] for wp in parsed]
+                reject = self._sequence_gate_check(targets, JOINTS[:6])
+                if reject:
+                    self.get_logger().warn(
+                        f"playback {label}: {reject} -- per-segment fallback")
+                else:
+                    xyz_seq = [
+                        self._fk_ee_xyz(list(self._positions))]
+                    xyz_seq += [
+                        self._fk_ee_xyz(wp["positions"]) for wp in parsed]
+                    if any(x is None for x in xyz_seq):
+                        radii = [
+                            blend if i < n - 1 else 0.0 for i in range(n)]
+                    else:
+                        radii = self._adaptive_blend_radii(xyz_seq, blend)
+                    items: List[MotionSequenceItem] = []
+                    for i, wp in enumerate(parsed):
+                        br = radii[i]
+                        if strategy == "lin":
+                            items.append(
+                                self._build_lin_sequence_item(wp["pose"], br))
+                        else:
+                            items.append(
+                                self._build_ptp_sequence_item(
+                                    wp["positions"][:6], br))
+                    ok, stotal, smsg = self._sequence_move_group(
+                        items, f"waypoint {strategy} {label}")
+                    if ok:
+                        if self._n_joints >= 7:
+                            stotal = max(
+                                stotal,
+                                self._dispatch_l7_linear(
+                                    parsed[-1]["positions"][6]))
+                        self._schedule_back_to_ready(stotal + 0.3)
+                        resp.success = True
+                        resp.message = (
+                            f"waypoint task '{label}' {strategy} sequence: "
+                            f"{n} pts, {stotal:.1f}s, "
+                            f"blend r<={max(radii):.2f}m")
+                        return resp
+                    self.get_logger().warn(
+                        f"playback {label}: {smsg} -- per-segment fallback")
+
         total = 0.0
+        # F131: 单段失败重试——段间同步滞后（LL-103）引发的瞬态规划失败（IK -31 等）
+        # 重等 move_group current 后重试通常成功；门禁拒绝（静态力矩/占空比）幂等无副作用。
+        seg_retries = max(0, int(self.get_parameter("waypoint_segment_retries").value))
         for i, wp in enumerate(parsed):
             seg_label = f"waypoint {strategy} {i + 1}/{n}"
-            if strategy == "lin":
-                pose = wp["pose"]
-                if not pose or "position" not in pose:
-                    self._publish_mode("IDLE")
-                    self._set_state(STATE_READY, f"playback {label}: no FK pose")
-                    resp.success = False
-                    resp.message = (
-                        f"waypoint {i + 1}/{n} missing FK pose —— 该任务录制时"
-                        "FK 不可用，无法 LIN；请重新 Share 长按录制或改 PTP")
-                    return resp
-                ok, dur, msg = self._lin_move(
-                    pose, seg_label, gate_q=wp["positions"])
-            else:
-                ok, dur, msg = self._moveit_move(
-                    wp["positions"][:6], JOINTS[:6], seg_label)
+            pose = wp["pose"]
+            if strategy == "lin" and (not pose or "position" not in pose):
+                self._publish_mode("IDLE")
+                self._set_state(STATE_READY, f"playback {label}: no FK pose")
+                resp.success = False
+                resp.message = (
+                    f"waypoint {i + 1}/{n} missing FK pose —— 该任务录制时"
+                    "FK 不可用，无法 LIN；请重新 Share 长按录制或改 PTP")
+                return resp
+            ok = False
+            dur = 0.0
+            msg = ""
+            for attempt in range(seg_retries + 1):
+                if attempt:
+                    # 重试前补一次段间同步（current-state monitor 追上实际关节）
+                    self._wait_move_group_current(wp["positions"])
+                if strategy == "lin":
+                    ok, dur, msg = self._lin_move(
+                        pose, seg_label, gate_q=wp["positions"])
+                else:
+                    ok, dur, msg = self._moveit_move(
+                        wp["positions"][:6], JOINTS[:6], seg_label)
+                if ok:
+                    break
+                self.get_logger().warn(
+                    f"{seg_label} attempt {attempt + 1} failed: {msg}")
             if not ok:
                 self._publish_mode("IDLE")
                 self._set_state(STATE_READY, f"playback {label}: seg {i + 1} failed")
                 resp.success = False
-                resp.message = f"segment {i + 1}/{n} failed (arm stopped): {msg}"
+                resp.message = (
+                    f"segment {i + 1}/{n} failed after {seg_retries + 1} attempt(s) "
+                    f"(arm stopped): {msg}")
                 return resp
             # LL-077: arm 规划组只含 L1–L6，L7 随段末同步下发
             if self._n_joints >= 7:
@@ -2808,8 +3172,9 @@ class ArmController(Node):
         """F116: 随机抽 N 个命名点位，从当前位姿起逐点 move_group 规划+执行.
 
         允许重复、相邻不重；count=0 用参数 random_tour_count；seed=0 真随机；
-        点位池减去参数 random_tour_exclude_poses（默认 ["zero"]）。任一腿失败即中止，
-        已完成序列/时长如实回传。L7 不动（arm 组规划，点位 L7 均为 0）。
+        点位池减去参数 random_tour_exclude_poses（默认 ["zero"]）。单腿失败按
+        random_tour_leg_retries 换抽点位重试，重试耗尽才中止；已完成序列/时长
+        如实回传。L7 不动（arm 组规划，点位 L7 均为 0）。
         """
         can, why = self._can_move()
         if not can:
@@ -2843,25 +3208,146 @@ class ArmController(Node):
             return resp
 
         rng = random.Random(int(req.seed) if int(req.seed) != 0 else None)
+        # F134: 优先整序列一次规划/执行（pilz PTP + blend，中间点不停车）。
+        # 逐点构造时静态门禁拒绝 → 当场重抽点位（与逐腿链同语义）；
+        # 整条仍不可行/门禁拒绝/action 失败 → 回落下方逐腿重试链。
+        if bool(self.get_parameter("random_tour_use_sequence").value):
+            blend = float(self.get_parameter("random_tour_blend_radius_m").value)
+            seq_leg_retries = max(
+                0, int(self.get_parameter("random_tour_leg_retries").value))
+            GJ = JOINTS[:6]
+            tour_names: List[str] = []
+            targets: List[List[float]] = []
+            tprev: Optional[str] = None
+            seq_failed = False
+            while len(tour_names) < count:
+                leg_excluded = {tprev} if tprev else set()
+                got = False
+                nm = ""
+                for attempt in range(seq_leg_retries + 1):
+                    ch = [n for n in pool if n not in leg_excluded]
+                    if not ch:
+                        break
+                    nm = rng.choice(ch)
+                    q = list(self._poses[nm])
+                    if len(q) < self._n_joints:
+                        q = q + [0.0] * (self._n_joints - len(q))
+                    elif len(q) > self._n_joints:
+                        q = q[: self._n_joints]
+                    q0_arm = (
+                        [self._positions[self._joint_names.index(jn)] for jn in GJ]
+                        if not targets else list(targets[-1][:6]))
+                    reject = (
+                        self._static_segment_violation(
+                            q0_arm, q[:6], GJ, len(tour_names))
+                        if self._have_js else None)
+                    if reject:
+                        self.get_logger().warn(
+                            f"tour sequence leg {len(tour_names) + 1} '{nm}' "
+                            f"{reject} -- redraw")
+                        leg_excluded.add(nm)
+                        continue
+                    got = True
+                    break
+                if not got:
+                    seq_failed = True
+                    break
+                tour_names.append(nm)
+                targets.append(q)
+                tprev = nm
+            if seq_failed:
+                self.get_logger().warn(
+                    "tour sequence: no feasible poses after redraw "
+                    "-- per-leg fallback")
+            else:
+                est_total = 0.0
+                q0 = [
+                    self._positions[self._joint_names.index(jn)] for jn in GJ]
+                for qt in targets:
+                    d, _slow = self._velocity_floor_duration(q0, list(qt[:6]), GJ)
+                    est_total += d
+                    q0 = list(qt[:6])
+                allowed, used_s, cooling_s = self._duty_check(
+                    max(est_total, 0.1))
+                if not allowed:
+                    self.get_logger().warn(
+                        f"tour sequence duty gate rejected ({used_s:.0f}s in "
+                        f"window, wait {cooling_s:.0f}s) -- per-leg fallback")
+                else:
+                    xyz_seq = [
+                        self._fk_ee_xyz(list(self._positions))]
+                    xyz_seq += [self._fk_ee_xyz(qt) for qt in targets]
+                    if any(x is None for x in xyz_seq):
+                        radii = [
+                            blend if i < count - 1 else 0.0
+                            for i in range(count)]
+                    else:
+                        radii = self._adaptive_blend_radii(xyz_seq, blend)
+                    seq_items = [
+                        self._build_ptp_sequence_item(
+                            qt[:6], radii[i])
+                        for i, qt in enumerate(targets)
+                    ]
+                    ok, stotal, smsg = self._sequence_move_group(
+                        seq_items, f"tour {count} legs")
+                    if ok:
+                        self._schedule_back_to_ready(stotal + 0.3)
+                        resp.success = True
+                        resp.message = (
+                            f"tour sequence completed ({count} legs, {stotal:.1f}s, "
+                            f"blend r<={max(radii):.2f}): {' -> '.join(tour_names)}")
+                        resp.sequence = tour_names
+                        resp.total_duration_s = stotal
+                        self.get_logger().info(
+                            f"random tour sequence ({count} legs, {stotal:.1f}s): "
+                            f"{tour_names}")
+                        return resp
+                    self.get_logger().warn(
+                        f"tour sequence failed ({smsg}) -- per-leg fallback")
+
+        # F116: 逐腿规划+重试（回退链，行为同 2026-09 版）
+        # 单腿失败重试次数（OMPL 偶发规划失败/门禁瞬态拒绝，换抽点位重试即可恢复）
+        leg_retries = max(0, int(self.get_parameter("random_tour_leg_retries").value))
         sequence: List[str] = []
         total = 0.0
         prev: Optional[str] = None
         for i in range(count):
-            choices = [n for n in pool if n != prev]
-            name = rng.choice(choices)
-            q1 = list(self._poses[name])
-            if len(q1) < self._n_joints:
-                q1 = q1 + [0.0] * (self._n_joints - len(q1))
-            elif len(q1) > self._n_joints:
-                q1 = q1[: self._n_joints]
-            ok, dur, msg = self._moveit_move(
-                q1[:6], JOINTS[:6], f"tour {i + 1}/{count} {name}"
-            )
+            excluded = {prev} if prev else set()
+            ok = False
+            dur = 0.0
+            msg = ""
+            name = ""
+            for attempt in range(leg_retries + 1):
+                choices = [n for n in pool if n not in excluded]
+                if not choices:
+                    msg = f"tour pool exhausted ({len(pool)} poses all tried)"
+                    break
+                name = rng.choice(choices)
+                q1 = list(self._poses[name])
+                if len(q1) < self._n_joints:
+                    q1 = q1 + [0.0] * (self._n_joints - len(q1))
+                elif len(q1) > self._n_joints:
+                    q1 = q1[: self._n_joints]
+                ok, dur, msg = self._moveit_move(
+                    q1[:6], JOINTS[:6],
+                    f"tour {i + 1}/{count} {name}"
+                    + (f" (retry {attempt})" if attempt else ""),
+                )
+                if ok:
+                    break
+                self.get_logger().warn(
+                    f"tour leg {i + 1}/{count} '{name}' attempt {attempt + 1} "
+                    f"failed: {msg}"
+                )
+                excluded.add(name)
             if not ok:
                 self._publish_mode("IDLE")
-                self._set_state(STATE_READY, f"tour aborted at {name}")
+                self._set_state(STATE_READY, f"tour aborted at leg {i + 1}")
                 resp.success = False
-                resp.message = f"leg {i + 1}/{count} '{name}' failed: {msg}"
+                resp.message = (
+                    f"leg {i + 1}/{count} failed after {leg_retries + 1} attempt(s)"
+                    f" (last '{name}'): {msg}"
+                )
                 resp.sequence = sequence
                 resp.total_duration_s = total
                 return resp
@@ -2938,15 +3424,13 @@ class ArmController(Node):
         F114: name 留空时自动命名 snap_YYYYMMDD_HHMMSS（手柄无法输入文本）；
         写入目标从 ~/.a3/poses.yaml 收敛到包内（F113 弃用用户层覆盖）。
 
-        F131: 状态路由——WAYPOINT_TEACH 时本服务=打点（不写 named_poses.yaml）；
-        TEACH 拖动态显式拒绝，防误写。
+        F131: 状态路由——WAYPOINT_TEACH 时本服务=打点（不写 named_poses.yaml）。
+        F133: TEACH（短按 Share 连续示教）时允许随时保存当前位姿到 named_poses.yaml
+        且不退出示教——拖到哪里按 L2 存哪里；与 WAYPOINT_TEACH 的 L2 打点互不相干。
         """
         if self._state == STATE_WAYPOINT_TEACH:
             return self._capture_waypoint(resp)
-        if self._state == STATE_TEACH:
-            resp.success = False
-            resp.message = "save_named_pose blocked during continuous teach (Options to finish)"
-            return resp
+        in_teach = (self._state == STATE_TEACH)
         raw = (req.name or "").strip()
         name = (
             _sanitize_name(raw)
@@ -2980,8 +3464,15 @@ class ArmController(Node):
             return resp
 
         self._poses[name] = q
+        # F133: 示教中保存 → 白闪+弱震即时反馈，不退出示教（服务响应手柄侧不可见）
+        if in_teach:
+            self._emit_operator_event("named_pose_saved")
         resp.success = True
-        resp.message = f"saved pose '{name}'"
+        suffix = " (示教中保存，继续拖动)" if in_teach else ""
+        resp.message = (
+            f"saved pose '{name}' (当前位姿 → a3_description/config/named_poses.yaml)"
+            + suffix
+        )
         resp.path = path
         self.get_logger().info(f"named pose saved: {name} -> {[round(v, 4) for v in q]}")
         return resp
@@ -3364,6 +3855,44 @@ class ArmController(Node):
             self.get_logger().error(f"trajectory save failed to {path}: {exc}")
             return False
 
+    def _writeback_retimed(self, path: str, traj: Optional[JointTrajectory]) -> bool:
+        """F133: 把 Ruckig 重定时后的轨迹烘焙回录制品 YAML（latest 槽优化沉淀）.
+
+        几何路径不变、时间戳为重定时结果；写前把原文件备份为 *.preretime.yaml
+        （只保最近一代）。失败仅 WARN，不影响本次回放。
+        """
+        if traj is None or not traj.points:
+            return False
+        try:
+            if os.path.exists(path):
+                shutil.copy2(path, path.replace(".yaml", ".preretime.yaml"))
+            data = {
+                # 已优化标记：下次回放据此跳过重复烘焙（几何已含一代重采样误差）
+                "retimed": True,
+                "joint_names": list(traj.joint_names),
+                "points": [
+                    {
+                        "positions": [float(v) for v in pt.positions],
+                        "time_from_start_sec": round(
+                            float(pt.time_from_start.sec)
+                            + float(pt.time_from_start.nanosec) * 1e-9,
+                            4,
+                        ),
+                    }
+                    for pt in traj.points
+                ],
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(data, f)
+            self.get_logger().info(
+                f"retime writeback: {path} ({len(data['points'])} pts, "
+                "backup *.preretime.yaml)"
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"retime writeback failed ({path}): {exc}")
+            return False
+
     def _save_cb(
         self, req: SaveTrajectory.Request, resp: SaveTrajectory.Response
     ) -> SaveTrajectory.Response:
@@ -3499,6 +4028,10 @@ class ArmController(Node):
                 "触摸板单击/Circle 长按(LIN)回放")
             return resp
 
+        # F133: 已烘焙过 retime 的文件不再重复写回——避免每次回放对重采样几何
+        # 再烘焙造成逐代漂移，也防止原始备份被覆盖。
+        already_retimed = bool(data.get("retimed"))
+
         if is_wp:
             return self._play_waypoints(data, label, strategy, resp)
 
@@ -3618,6 +4151,18 @@ class ArmController(Node):
             if ok:
                 traj = rtraj
                 retime_msg = msg
+                # F133: 重定时成功 → 优化轨迹烘焙回 latest.yaml。仅 latest 槽
+                # （空名或显式 'latest'）；ramp 前缀（若走几何 ramp）会污染录制，
+                # 故仅当 ramp 由 MoveIt 完成（ramp_in_geo=False）或无 ramp 时写回。
+                is_latest_path = os.path.basename(path) == "latest.yaml"
+                if (is_latest_path and not ramp_in_geo and not already_retimed
+                        and bool(self.get_parameter("playback_retime_writeback").value)):
+                    if self._writeback_retimed(path, rtraj):
+                        retime_msg += f"; baked {len(rtraj.points)} pts"
+                elif is_latest_path and already_retimed:
+                    retime_msg += "; writeback skipped (already retimed)"
+                elif is_latest_path and ramp_in_geo:
+                    retime_msg += "; writeback skipped (ramp in geometry)"
             else:
                 self.get_logger().warn(
                     f"playback retime failed ({msg}) -- legacy smooth/time-warp fallback"

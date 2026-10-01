@@ -1708,14 +1708,14 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 
 ### F116 — 随机命名点位 MoveIt 巡游服务（数量可配，相邻不重，从当前点起）
 
-- **说明：** 新增服务 `/a3/arm/random_pose_tour`（`a3_msgs/RandomPoseTour`）：从包内 named_poses.yaml 已加载点位中随机抽取 N 个点（默认参数 `random_tour_count=5`，请求 `count` 可覆盖；`seed` 可复现，0=真随机），**允许重复但相邻两点不同**，然后从**当前位姿**起逐点调用现有 F67 `_moveit_move`（OMPL+TOTG，MoveGroup action）规划并执行，每条腿保留 F107 静力矩/占空比预检。点位池默认排除 `zero`（参数 `random_tour_exclude_poses`，真机机械零位风险）。任一腿规划/执行失败即中止并返回已完成序列；L7 不参与（arm 组规划，点位 L7 均为 0）。不绑手柄（无空闲键；LL-052），CLI/Web/脚本调用。
+- **说明：** 新增服务 `/a3/arm/random_pose_tour`（`a3_msgs/RandomPoseTour`）：从包内 named_poses.yaml 已加载点位中随机抽取 N 个点（默认参数 `random_tour_count=5`，请求 `count` 可覆盖；`seed` 可复现，0=真随机），**允许重复但相邻两点不同**，然后从**当前位姿**起逐点调用现有 F67 `_moveit_move`（OMPL+TOTG，MoveGroup action）规划并执行，每条腿保留 F107 静力矩/占空比预检。点位池默认排除 `zero`（参数 `random_tour_exclude_poses`，真机机械零位风险）。**2026-10-01 追加：** 单腿规划/门禁失败时按 `random_tour_leg_retries`（默认 3）换抽点位重试，重试耗尽才中止；此前任一腿失败即整体中止，导致"设 10 有时只走 2 点"。L7 不参与（arm 组规划，点位 L7 均为 0）。不绑手柄（无空闲键；LL-052），CLI/Web/脚本调用。
 - **验收标准：**
   1. 仿真 `ros2 service call /a3/arm/random_pose_tour "{count: 5, seed: 0}"` → `success=true`，`sequence` 长度 5、相邻不重、不含 `zero`；/joint_states 按序到每个点（0.02 rad 容差），`total_duration_s>0`
   2. `seed: 123` 两次调用返回相同 sequence（可复现）；`count: 2` 覆盖默认 5
   3. 非 READY 态（DISABLED/TRAJ 中）调用被 `_can_move` 拒绝；池少于 2 个点返回 success=false
   4. 某腿规划失败时：success=false、message 含失败点与原因、已完成序列如实回传、状态机回 READY 不卡死
 - **关联：** F67（MoveGroup 规划/执行链）、F107（力矩/占空比预检）、F115（新增点位扩大巡游池）、F53（状态机拒绝语义）；[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)（arm 服务表）
-- **状态：** `implemented`（2026-09-26 仿真验收；真机回归待上电；2026-10-01 追加 PS4 入口：Options 长按 3 s → `random_pose_tour`，短按仍为结束示教，READY 门外由 `_can_move` 拒绝）
+- **状态：** `implemented`（2026-09-26 仿真验收；真机回归待上电；2026-10-01 追加 PS4 入口：Options 长按 3 s → `random_pose_tour`，短按仍为结束示教，READY 门外由 `_can_move` 拒绝；2026-10-01 追加单腿失败重试机制，默认重试 3 次；2026-10-01 起默认走 F134 pilz Sequence 整序列连续执行，本链为回退链）
 
 ### F117 — JTC 跟踪容差 0.30/0.05 临时定型（持久化实测热设组合；语义=卡滞检测非防撞）
 
@@ -1895,14 +1895,16 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 ### F131 — 路点示教（Waypoint Teach）：Share 长按录制路点 → L2 打点 → Options 保存 → Square/Circle 长按 PTP/LIN 回放
 
 - **说明：** 连续全程录制（Share 短按）在复杂轨迹上数据量大且回放逐点重规划效率低。工业臂典型做法是用**少量路点**（3~10 个）+ 段间插值。新增 WAYPOINT_TEACH 状态：Share 长按 1.5s 进入零力矩拖动；L2 短按在当前位置记录一个路点（含 7 关节值 + FK 末端位姿）；Options 短按结束并保存到 `~/.a3/trajectories/waypoints/latest.yaml`；Square 长按 1.5s 触发路点 PTP 回放（关节空间 MoveJ，逐段 F107 静态门禁+段间同步）；Circle 长按 1.5s 触发路点 LIN 回放（笛卡尔空间走直线，pilz_industrial_motion_planner / arm_lin 规划组 / global pick_ik）。LIN 跨奇异/关节加速度超限时不回落 PTP，明确拒绝并提示改用 PTP。轨迹文件头加 `kind: continuous|waypoint` 双向门禁：连续回放只接受 continuous 文件，路点回放只接受 waypoint 文件，防止连续轨迹被逐段规划。初版 blend radius=0（到位即停），Pilz Sequence blend 留阶段二。L7 夹爪在段末单独线性插值。
+
+**2026-10-01 追加：** 单段失败重试 `waypoint_segment_retries`（默认 2）：段间同步滞后（LL-103）引发的瞬态规划失败（IK -31 等）重等 move_group current 后重试；此前段失败即整体中止，导致"PTP 停在第一点"。LIN 速度/加速度缩放 0.1→0.2（真机反馈"慢且抖"，0.1 过保守；若近奇异段关节加速度尖峰回潮再降回）。**连续示教中随时存 named pose：** 短按 Share 的 TEACH 态下 L2 不再被拒绝，随时把**当前位姿**保存到包内 `named_poses.yaml`（空名自动 `snap_*`，不退出示教，白闪+弱震 `named_pose_saved` 反馈）；WAYPOINT_TEACH 态 L2 仍是打点到路点文件——两种示教各存各的文件。**retime 烘焙：** 连续回放 Ruckig/TOTG 重定时成功后把优化轨迹写回 `latest.yaml`（原文件备份 `*.preretime.yaml`），写回文件带 `retimed: true` 标记，已标记文件不再重复烘焙（防几何逐代漂移、备份被覆盖）；ramp 走几何插值时跳过写回。
 - **验收标准：**
   1. 仿真栈：Share 长按 → L2 打点 3 次 → Options 保存 → YAML 含 3 路点且每路点有 FK pose
   2. PTP 回放：3 段全部收敛（末段到位后关节误差 <0.06 rad），kind 门禁拒绝 continuous 文件
   3. LIN 回放：相邻采样点直线度 <8mm；跨奇异段 LIN 明确拒绝（不回落 PTP），提示改用 PTP
   4. 真机：Share 长按进入拖动态（绿灯变 cyan 呼吸），L2 打点白闪+弱震反馈，Options 保存后回到 READY
   5. 误触防护：Square 短按仍走连续回放，Square 长按才走路点 PTP；Circle 短按=idle，长按=路点 LIN
-- **关联：** F54（连续示教/回放）、F107（静态力矩门禁）、F114（save_named_pose）、F125（playback return cyan）、Pilz LIN、[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)、[CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)（Wave A 对标）
-- **状态：** `implemented`（2026-10-01 仿真全链路 PASS）
+- **关联：** F54（连续示教/回放）、F68/F133（Ruckig retime + 写回 latest.yaml）、F107（静态力矩门禁）、F114（save_named_pose）、F125（playback return cyan）、Pilz LIN、[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)、[CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)（Wave A 对标）
+- **状态：** `implemented`（2026-10-01 仿真全链路 PASS；2026-10-01 追加段失败重试、LIN 缩放调优、TEACH 态 L2 随时存 named pose、retime 烘焙写回与防重复烘焙标记；2026-10-01 起 PTP/LIN 默认走 F134 pilz Sequence 整序列连续执行，逐段链为回退链）
 
 ### F132 — 触摸板手势：触摸板 tap 触发路点 LIN 回放（暂缓启用，Circle 长按兜底）
 
@@ -1913,6 +1915,37 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   3. 触摸板手势与鼠标光标功能共存不冲突（evdev 和 hidraw 是并行通道）
 - **关联：** F131（LIN 回放）、LL-052（触摸板点击键蓝牙不可用）、ds4_hid_node.py
 - **状态：** `implemented`（手势代码完成，触摸偏移问题待修复后启用）
+
+### F134 — 多点任务整序列一次规划/执行：pilz Sequence + blend，中间点不停车
+
+- **说明：** F116 巡游与 F131 路点回放初版均为"走一个点规划一次"（N 次独立 MoveGroup action），每段到位即停——中间点必然静止、节拍碎。升级为 **pilz_industrial_motion_planner Sequence**（action `/sequence_move_group`，`MoveGroupSequence`）：把 N 个目标构造成 `MotionSequenceItem[]`（PTP: group `arm` / planner PTP；LIN: group `arm_lin` / planner LIN），**一次下发整体规划并连续执行**。三链路（巡游、路点 PTP、路点 LIN）统一经 `_sequence_move_group` 发送/解析，结果读 `MotionSequenceResponse.planned_trajectories[]` 总时长。下发前逐段预检（`_static_segment_violation`）：① 目标关节须在 URDF 限位内（越限 pilz 报 -16 INVALID_GOAL_CONSTRAINTS，实测历史 snap 存在 L4=-1.115 < 下限 -1.047）；② 关节直线 21 点 F107 静态重力矩采样；③ 全程 F42 占空比门禁。**巡游链路预检拒绝的段不放弃整条**：当场重抽点位（沿用 `random_tour_leg_retries` 语义），重抽耗尽才回落。**自适应 blend 半径：** pilz 要求相邻 blend 圆盘不重叠（`r_{i-1}+r_i ≤ 中间点两侧距离`），固定 0.02m 在短腿上会报 "Blending failed"（99999）；按 pinocchio FK 的相邻点距把每项压到 `0.45×min(两侧段距)`，段长不足该项降为 0（允许该处短暂停车）。末项 blend 恒 0。任何 Sequence 失败/不可用 → 自动 WARN 并**回落原有逐段链**（F116 逐腿重试、F131 逐段重试，行为完整保留）；开关 `random_tour_use_sequence` / `waypoint_use_sequence`。仿真栈 `edge_web_sim.launch.py` 补 MoveGroupSequenceAction capabilities（真机 launch 早已有之）。
+
+```mermaid
+flowchart TD
+    A[多点任务: 巡游 / 路点PTP / 路点LIN] --> B{use_sequence?}
+    B -- 否 --> Z[逐段规划链 F116/F131]
+    B -- 是 --> C[逐点构造 item]
+    C --> D{段预检: 限位/静力矩}
+    D -- 拒绝 & 巡游 --> E[重抽该点] --> C
+    D -- 拒绝 & 路点 --> F[回落逐段链]
+    D -- 通过 --> G[全程占空比门禁]
+    G -- 拒绝 --> F
+    G -- 通过 --> H[pinocchio FK → 自适应 blend 半径]
+    H --> I["/sequence_move_group 一次规划+执行"]
+    I -- 成功 --> J[末点落定 → 回 READY]
+    I -- 失败 --> F
+```
+
+> **blend 语义（工业示教器 C_DIS 一致）：** 过弯轨迹在 blend 圆盘内**不精确穿过中间点**；
+> "精确过点 + 速度非零"物理上不可能。需要精确到点的任务把对应点 blend 降 0（段长不足时自动如此）。
+- **验收标准：**
+  1. 仿真巡游 10 腿：单次 `/sequence_move_group` 完成（`tour sequence completed`，实测 12.0s），/joint_states 内部 538 采样仅 3 处 40ms 轻微减速（短腿降 blend 位置），其余全程关节速度非零
+  2. 仿真路点 PTP 5 点：单次 Sequence 完成（实测 5.1s），内部 226 采样近零速度仅 2 个（40ms 噪声级），p10 速度 0.346 rad/s
+  3. 仿真路点 LIN 5 点：单次 Sequence 完成（实测 12.7s），内部 550 采样零停止，段内保持直线
+  4. 越限/静力矩被拒点位在巡游中触发重抽（日志 `redraw`），不导致整条失败；Sequence action 失败时自动回落逐段链且行为与 F116/F131 一致
+  5. 真机回归：三链路连续过弯；观测 LIN 0.2 缩放下关节加速度/力矩尖峰与 blend 偏离量
+- **关联：** F116（随机巡游/逐腿回退链）、F131（路点示教/逐段回退链）、F107（静态力矩门禁）、F42（占空比门禁）、F68/F133（retime）、pilz MotionSequence API、[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)、[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)（Wave A 轨迹连续性对标）
+- **状态：** `implemented`（2026-10-01 仿真三链路 PASS，含连续性速度包络实测；真机回归待上电）
 
 ## 验收标准
 

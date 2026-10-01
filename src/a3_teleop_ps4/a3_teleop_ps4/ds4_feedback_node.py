@@ -273,7 +273,8 @@ class Ds4FeedbackNode(Node):
 
     def _on_operator_event(self, msg: String) -> None:
         # F131: 路点打点反馈——白闪 0.4s + 弱震 0.12s。
-        if msg.data == "waypoint_captured":
+        # F133: 连续示教中 L2 存 named pose 同效反馈（保存成功的即时确认）。
+        if msg.data in ("waypoint_captured", "named_pose_saved"):
             self._white_until = time.monotonic() + 0.4
             self._rumble_phases = [_RumblePhase(0.0, 0.12, 0.6, 0.0)]
             self._rumble_started_at = time.monotonic()
