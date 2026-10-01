@@ -127,6 +127,8 @@ class ActionExecutor:
         self._arm_enable = node.create_client(Trigger, "/a3/arm/enable")
         self._arm_disable = node.create_client(Trigger, "/a3/arm/disable")
         self._teach_start = node.create_client(Trigger, "/a3/arm/start_teach")
+        self._teach_start_waypoint = node.create_client(
+            Trigger, "/a3/arm/start_waypoint_teach")
         self._teach_stop = node.create_client(Trigger, "/a3/arm/stop_teach")
         self._playback = node.create_client(PlaybackTrajectory, "/a3/arm/playback")
         # F116: Options 长按 3s 触发随机命名点巡游（服务端仅 READY 态放行）
@@ -457,6 +459,10 @@ class ActionExecutor:
     def teach_start(self) -> None:
         self._call_trigger(self._teach_start, "arm/start_teach")
 
+    def teach_start_waypoint(self) -> None:
+        """F131: Share 长按 → 路点录制（L2 打点，Options 保存）."""
+        self._call_trigger(self._teach_start_waypoint, "arm/start_waypoint_teach")
+
     def teach_stop(self) -> None:
         self._call_trigger(self._teach_stop, "arm/stop_teach")
 
@@ -468,6 +474,26 @@ class ActionExecutor:
         req.name = ""  # F54：空名 ≡ latest 槽位
         self._playback.call_async(req)
         self._n.get_logger().info("playback_latest -> /a3/arm/playback {name:''}")
+
+    def _play_waypoints(self, strategy: str) -> None:
+        """F131: 路点任务回放（ptp=关节空间 / lin=笛卡尔直线）；服务端 kind 门禁."""
+        if not self._playback.service_is_ready():
+            self._n.get_logger().warn("arm/playback not available")
+            return
+        req = PlaybackTrajectory.Request()
+        req.name = ""
+        req.type = "waypoint"
+        req.strategy = strategy
+        self._playback.call_async(req)
+        self._n.get_logger().info(
+            f"playback_waypoints_{strategy} -> /a3/arm/playback "
+            f"{{type:'waypoint', strategy:'{strategy}'}}")
+
+    def playback_waypoints_ptp(self) -> None:
+        self._play_waypoints("ptp")
+
+    def playback_waypoints_lin(self) -> None:
+        self._play_waypoints("lin")
 
     def random_pose_tour(self, count: int = 0, seed: int = 0) -> None:
         """F116: Options 长按 → 随机命名点巡游；count=0/seed=0 走服务端默认."""

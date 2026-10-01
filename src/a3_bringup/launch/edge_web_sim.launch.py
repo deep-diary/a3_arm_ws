@@ -167,6 +167,11 @@ def generate_launch_description():
     kinematics_yaml = load_yaml("a3_moveit_config", "config/kinematics.yaml")
     joint_limits_yaml = load_yaml("a3_moveit_config", "config/joint_limits.yaml")
     ompl_planning_yaml = load_yaml("a3_moveit_config", "config/ompl_planning.yaml")
+    # F131: 仿真栈也加载 Pilz（LIN 路点回放依赖；真机栈 a3_bringup 同款 YAML）
+    pilz_planning_yaml = load_yaml(
+        "a3_moveit_config", "config/pilz_industrial_motion_planner.yaml")
+    pilz_cartesian_limits_yaml = load_yaml(
+        "a3_moveit_config", "config/pilz_cartesian_limits.yaml")
     moveit_controllers_yaml = load_yaml("a3_moveit_config", "config/moveit_controllers.yaml")
     trajectory_execution = {
         "moveit_manage_controllers": True,
@@ -182,6 +187,17 @@ def generate_launch_description():
         "publish_planning_scene_hz": 4.0,
     }
 
+    # F131: OMPL 管线沿用旧名 'move_group'（默认），新增 'pilz'
+    planning_pipelines_parameters = {
+        "planning_pipelines": ["move_group", "pilz"],
+        "default_planning_pipeline": "move_group",
+        "move_group": ompl_planning_yaml,
+        "pilz": pilz_planning_yaml,
+    }
+    robot_description_planning = dict(joint_limits_yaml or {})
+    if pilz_cartesian_limits_yaml:
+        robot_description_planning.update(pilz_cartesian_limits_yaml)
+
     move_group = Node(
         package="moveit_ros_move_group",
         executable="move_group",
@@ -189,9 +205,9 @@ def generate_launch_description():
         parameters=[
             {"robot_description": robot_description},
             {"robot_description_semantic": robot_description_semantic},
-            {"robot_description_planning": joint_limits_yaml},
+            {"robot_description_planning": robot_description_planning},
             {"robot_description_kinematics": kinematics_yaml},
-            {"move_group": ompl_planning_yaml},
+            planning_pipelines_parameters,
             trajectory_execution,
             moveit_controllers_yaml,
             planning_scene_monitor_parameters,

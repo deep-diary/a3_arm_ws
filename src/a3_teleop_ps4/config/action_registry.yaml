@@ -85,6 +85,18 @@ functions:
     kind: discrete
     description: 'Call /a3/arm/playback {name:""} (空名 ≡ 回放 latest)'
 
+  teach_start_waypoint:
+    kind: discrete
+    description: 'F131 Share 长按 1.5s: Call /a3/arm/start_waypoint_teach（零力矩拖动 + L2 打点 + Options 保存）'
+
+  playback_waypoints_ptp:
+    kind: discrete
+    description: 'F131 Square 长按 1.5s: 路点关节空间回放 {type:"waypoint", strategy:"ptp"}（服务端 kind 门禁）'
+
+  playback_waypoints_lin:
+    kind: discrete
+    description: 'F131 Circle 长按 1.5s / 触摸板单击: 路点笛卡尔直线回放 {type:"waypoint", strategy:"lin"}；直线跨奇异/超限即拒，不回落 PTP'
+
   random_pose_tour:
     kind: discrete
     description: 'F116 Options 长按 3s: Call /a3/arm/random_pose_tour（READY 态抽命名点逐点 MoveIt 巡游；可选 kwargs count/seed）'

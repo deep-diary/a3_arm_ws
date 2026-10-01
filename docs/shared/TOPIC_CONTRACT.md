@@ -125,10 +125,11 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/arm/random_pose_tour` | `a3_msgs/srv/RandomPoseTour` | F116：从 `named_poses.yaml` 点位池随机抽 `count`（0=参数 `random_tour_count` 默认 5）个点，允许重复但相邻不重，从当前位姿起逐点 MoveIt 规划执行；`seed` 非 0 可复现；池由参数 `random_tour_exclude_poses`（默认 `["zero"]`）过滤。返回 `success/message/sequence[]/total_duration_s`，任一腿失败即中止并回传已完成序列；L7 不参与 |
 | `/a3/arm/set_joint_positions` | `a3_msgs/srv/SetJointPositions` | 设 7 关节目标位置（`positions[7]` + `duration`），限位 clamp 后短插值下发；节流连续下发以覆盖语义衔接 |
 | `/a3/arm/set_payload` | `a3_msgs/srv/SetPayload` | 登记末端负载（`mass_kg` + `com_m[3]` 相对 gripper_link 质心偏移）：质量须 ≤ `rated_payload_kg`(1.5)；已使能时当前位形静态力矩门不通过则拒绝并保持旧值。静态/占空比门禁见 [SAFETY.md](SAFETY.md)「额定负载与占空比门禁」（F107） |
-| `/a3/arm/start_teach` | `std_srvs/Trigger` | 切零力矩拖动 + 开始记录 |
-| `/a3/arm/stop_teach` | `std_srvs/Trigger` | 停止记录 + 退出拖动；F54：样本 ≥ `teach_auto_save_min_samples`(默认 10) 时自动保存 `latest.yaml` + `teach_TIMESTAMP.yaml` 备份，误触发(样本不足)自动跳过不覆盖 |
+| `/a3/arm/start_teach` | `std_srvs/Trigger` | 切零力矩拖动 + 开始**连续**录制（Share 短按） |
+| `/a3/arm/start_waypoint_teach` | `std_srvs/Trigger` | 切零力矩拖动 + 开始**路点**录制（Share 长按 1.5s），L2 打点，Options 结束保存 |
+| `/a3/arm/stop_teach` | `std_srvs/Trigger` | 停止记录 + 退出拖动；按当前状态分派：连续录制走 F54 保存逻辑（样本 ≥ `teach_auto_save_min_samples` 时自动保存 `latest.yaml` + `teach_TIMESTAMP.yaml` 备份），路点录制保存到 `~/.a3/trajectories/waypoints/latest.yaml` + `teach_wp_TIMESTAMP.yaml`；误触发(样本不足)自动跳过不覆盖 |
 | `/a3/arm/save_trajectory` | `a3_msgs/srv/SaveTrajectory` | `name` → 保存为本地轨迹文件；`name` 为空 ≡ latest 槽位(`latest.yaml`) |
-| `/a3/arm/playback` | `a3_msgs/srv/PlaybackTrajectory` | `name` → 读取并回放；`name` 为空 ≡ 回放 latest，无 latest 时返回 start_teach 引导消息。F124：当前位与录制首点差 >0.02 且 `playback_return_use_moveit:=true`（默认）时，先经 MoveIt 规划回首点（state=`playback return {label}`），再执行录制轨迹（state=`playback {label}`）；规划失败回落几何 ramp |
+| `/a3/arm/playback` | `a3_msgs/srv/PlaybackTrajectory` | `name` + `type`(continuous/waypoint) + `strategy`(ptp/lin) → 读取并回放；`name` 为空 ≡ 回放 latest。F124：连续轨迹当前位与录制首点差 >0.02 且 `playback_return_use_moveit:=true`（默认）时，先经 MoveIt 规划回首点（state=`playback return {label}`），再执行录制轨迹（state=`playback {label}`）。F131：路点 PTP 逐段 MoveJ（F107 门禁+段间同步），路点 LIN 逐段 Pilz LIN（arm_lin 规划组 / global pick_ik）；跨奇异/超限明确拒绝，不回落 PTP。轨迹文件头 `kind` 双向门禁防误混用 |
 | `/a3/arm/enter_ai` | `std_srvs/Trigger` | 状态 → `AI`（LeRobot 采集/回放） |
 | `/a3/arm/exit_ai` | `std_srvs/Trigger` | 状态 → `READY` |
 
@@ -137,6 +138,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | 话题 | 类型 | 说明 |
 |------|------|------|
 | `/a3/arm_status` | `a3_msgs/msg/ArmStatus` | 聚合状态快照（`state` + `mode` + 7 关节位置 + `temperatures`（F44）+ `max_torques`（F43，无数据 0.0）+ `temp_warn`（F44）+ 时间戳），默认 10 Hz，作为前端唯一状态入口 |
+| `/a3/arm/operator_event` | `std_msgs/String` | F131 操作事件通知：`waypoint_captured`（路点打点成功）等；ds4_feedback_node 消费（白闪 0.4s + 弱震 0.12s） |
 
 ## 故障监视看门狗（a3_arm_monitor，需求 F50）
 

@@ -4,7 +4,9 @@
 > **对象：** `src/a3_arm_controller/a3_arm_controller/arm_controller.py`（编排层）及其与执行层（`a3_can_bridge/motor_protocol_node`）、看门狗（`arm_monitor_node`）的跨层契约
 > **需求：** [REQUIREMENTS.md](REQUIREMENTS.md) F40/F45/F50/F51/F52/F53
 > **踩坑：** [LL-045](../lessons_learned/LL-045-disable-in-zero-torque-dead-path.md)（F53 动因）、[LL-044](../lessons_learned/LL-044-disable-park-3s-too-fast.md)、[LL-043](../lessons_learned/LL-043-mit-zero-frame-in-startup.md)
-> **更新：** 2026-09-16（F53：指令×状态×模式全组合「不罢工」）
+> **更新：** 2026-10-01（F131：+WAYPOINT_TEACH 态，12 态；disable 在 TEACH/WAYPOINT_TEACH 先自动 stop_teach 存档）
+
+> **历史更新：** 2026-09-16（F53：指令×状态×模式全组合「不罢工」）
 
 ---
 
@@ -20,13 +22,13 @@
 
 | 层 | 节点 | 管什么 |
 |----|------|--------|
-| **编排层** | `a3_arm_controller` | 11 态状态机、指令路由、F40 park/F44 温度/F48 限位门禁、DISABLED 兜底 |
+| **编排层** | `a3_arm_controller` | 12 态状态机、指令路由、F40 park/F44 温度/F48 限位门禁、DISABLED 兜底 |
 | **执行层** | `motor_protocol_node`（C++） | 模式所有权（IDLE/TRAJ_RUNNING/SERVO/ZERO_TORQUE）、200 Hz 插值 + MIT 协议、F51 使能重锚、轨迹门（ZERO_TORQUE/SERVO 丢弃） |
 | **看门狗** | `arm_monitor_node` | 跨源比对（期望 vs 实际）、FOLLOW_STUCK/HOLD_DRIFT/STALE_JS/UNEXPECTED_DISABLE → stop→reset 阶梯、意图边界重基准 |
 
 编排层状态**唯一权威**；执行层模式经 `/a3/control_mode` **双发布方共享**（编排层 `_publish_mode` + 执行层 `PublishControlMode`），`self._mode = 最近到达的那条`。F53 之前正是这里脱钩：外部 zero_torque 沿让执行层把模式拧到 `ZERO_TORQUE`，编排层的守卫表却没把它算进去。
 
-## 3. 状态定义（11 态）
+## 3. 状态定义（12 态）
 
 | 状态 | 含义 | 臂/电机状态 | 备注 |
 |------|------|-------------|------|
@@ -34,7 +36,8 @@
 | `INIT` | set_zero→确认→enable | 使能中 | 阻塞同步 |
 | `READY` | 使能就绪 | 闭合保位（kp 软起步后额定） | 事件主战场 |
 | `TRAJ` | goto/move_to/jog/playback 运动 | 轨迹流 | 结束后自动回 READY |
-| `TEACH` | 示教拖动 | 零力矩（执行层 ZERO_TORQUE） | ⇔ zero_torque/start|
+| `TEACH` | 连续轨迹示教拖动 | 零力矩（执行层 ZERO_TORQUE） | ⇔ zero_torque/start|
+| `WAYPOINT_TEACH` | 路点示教拖动（F131） | 零力矩（执行层 ZERO_TORQUE） | L2 打点 + operator_event |
 | `AI` | AI/大模型接管 | 外部直发轨迹 | 编排层只守入口 |
 | `SERVO` | **保留/防御态** | （当前无入口） | PS4 伺服走 mode=SERVO 共享位 |
 | `SAFE_PARK` | F40 平滑回 idle | park 轨迹 | disable/超温保护中 |
@@ -63,8 +66,10 @@ stateDiagram-v2
     %% ==== 就绪态工作 ====
     READY --> TRAJ: goto / move_to / jog / playback
     TRAJ --> READY: 轨迹结束（自动）
-    READY --> TEACH: start_teach（=zero_torque/start）
+    READY --> TEACH: start_teach（=zero_torque/start，连续录制）
     TEACH --> READY: stop_teach（=zero_torque/stop）
+    READY --> WAYPOINT_TEACH: start_waypoint_teach（=zero_torque/start，L2 打点）
+    WAYPOINT_TEACH --> READY: stop_teach（按状态分派保存路点文件）
     READY --> AI: enter_ai
     AI --> READY: exit_ai
     READY --> SERVO: （保留态，当前无入口）
@@ -138,22 +143,24 @@ flowchart TD
 - **🔴** 均 F53 补的 `mode ∈ BLOCKED_MODES` 拒绝（详见 [F53](../edge/REQUIREMENTS.md)）：**状态即使在可执行态也不放行**。
 - **c** COOLING 条件放行：`enable` 前查全 fresh 关节温度 < protect − 迟滞（F44 `_check_cooling`）；init 前额外 WARN 位检不阻断（F48）；`init` 在 COOLING 也走 c 门。
 - **s** 运动指令经 `_can_move` 统一 gate：`require_gate` 且 gate 关 → 拒；**F53 前 FAULT 漏拒（静默放行、臂不动）→ F53 已补**。
-- **h** disable 的 INIT/TEACH/SERVO/AI 拒绝 → 消息带 `use /a3/motor/reset for emergency`（F40）。
+- **h** disable 的 INIT/SERVO/AI 拒绝 → 消息带 `use /a3/motor/reset for emergency`（F40）；**TEACH/WAYPOINT_TEACH 先自动 stop_teach 存档再走失能链（F119+F131）**。
 - **p** 已在 SAFE_PARK → `already safe parking`。
 - **🔲 §7** disable 在 READY/TRAJ 按 §7 分流（home 内直达 / 无 js 直达 / 否则 SAFE_PARK），但 **F53 起 mode∈BLOCKED_MODES 一律先拒**（主修复，见 [LL-045]）。
 - **jog** `set_joint_positions` 在 TRAJ 只放行 `_jogging`（web 滑动条续动），goto/playback 中拒。
-- **r** start_teach 只收 READY（F38 语义：READY = 闭合闭环才可进零力矩拖拽）。
-- **t** stop_teach 只收 TEACH（非 TEACH → not teaching）。
+- **r** start_teach / start_waypoint_teach（F131）只收 READY（F38 语义：READY = 闭合闭环才可进零力矩拖拽）。
+- **t** stop_teach 只收 TEACH / WAYPOINT_TEACH（其他态 → not teaching）。
 - **a** exit_ai 只收 AI（not in AI）。
 - **¹** SERVO 保留态无入口（§3）；此处表格仍按守卫表填，防未来接入。
 - **²** save 系列只落数据、不问臂状态；记录内容须先 stop_teach。
+- **F131（WAYPOINT_TEACH 列）：** 与 TEACH 列守卫完全一致（busy 拒所有指令、disable 先自动 stop_teach 存档、mode=ZERO_TORQUE 走 🔴），仅两点差异：`stop_teach` 也收 WAYPOINT_TEACH（保存 `~/.a3/trajectories/waypoints/` 路点文件）；`save_named_pose` 在 WAYPOINT_TEACH 下重路由为 **L2 打点**（不写 named_poses.yaml）。
 
 ## 7. disable 分流（`. /a3/arm/disable`）
 
 ```mermaid
 flowchart TD
     D["disable"] --> S1{"state?"}
-    S1 -- INIT/TEACH/SERVO/AI --> E1["⛔ busy<br/>use /a3/motor/reset"]
+    S1 -- INIT/SERVO/AI --> E1["⛔ busy<br/>use /a3/motor/reset"]
+    S1 -- TEACH/WAYPOINT_TEACH --> E1b["stop_teach 自动存档（F119+F131）<br/>→ 按 READY 分流继续"]
     S1 -- SAFE_PARK --> E2["⛔ already safe parking"]
     S1 -- DISABLED/COOLING --> E3["✅ already disabled（幂等不动）"]
     S1 -- IDLE/FAULT --> E4["直达 /a3/motor/reset → DISABLED"]

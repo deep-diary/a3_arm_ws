@@ -213,6 +213,9 @@ class Ds4FeedbackNode(Node):
         )
         self.create_subscription(String, "/power_sequence/state", self._on_power_state, latch_qos)
         self.create_subscription(Bool, "/power_sequence/gate_open", self._on_gate, latch_qos)
+        self.create_subscription(
+            String, "/a3/arm/operator_event", self._on_operator_event, 10,
+        )
         self._fb_pub = self.create_publisher(
             String, str(self.get_parameter("feedback_topic").value), 10
         )
@@ -268,6 +271,13 @@ class Ds4FeedbackNode(Node):
     def _on_gate(self, msg: Bool) -> None:
         self._gate_open = bool(msg.data)
 
+    def _on_operator_event(self, msg: String) -> None:
+        # F131: 路点打点反馈——白闪 0.4s + 弱震 0.12s。
+        if msg.data == "waypoint_captured":
+            self._white_until = time.monotonic() + 0.4
+            self._rumble_phases = [_RumblePhase(0.0, 0.12, 0.6, 0.0)]
+            self._rumble_started_at = time.monotonic()
+
     # ---- effect derivation ----
     def _derive(self, now: float) -> _Effect:
         fault = (
@@ -296,6 +306,8 @@ class Ds4FeedbackNode(Node):
             )
         if self._arm_state == "TEACH":
             return _Effect(CLS_TEACH, "blue", "breathe", "teach")
+        if self._arm_state == "WAYPOINT_TEACH":
+            return _Effect(CLS_TEACH, "cyan", "breathe", "waypoint teach")
         if self._arm_state == "SAFE_PARK":
             return _Effect(CLS_TRAJ, "purple", "solid", "safe park")
         # F125: 回放回首点段（MoveIt 规划，F124）灯带 cyan，与执行示教轨迹段 purple 区分。

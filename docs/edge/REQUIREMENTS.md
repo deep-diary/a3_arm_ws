@@ -1892,6 +1892,28 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F40（失能保护）、F113（home→idle）、F75（位置/速度双落定 LL-077）、F107（门禁）、[SAFETY.md](../shared/SAFETY.md)（残差失能口径）
 - **状态：** `implemented`（2026-10-01 真机 2 次验收通过，~4.2s 失能 err=0.033/0.039 worst=L3）
 
+### F131 — 路点示教（Waypoint Teach）：Share 长按录制路点 → L2 打点 → Options 保存 → Square/Circle 长按 PTP/LIN 回放
+
+- **说明：** 连续全程录制（Share 短按）在复杂轨迹上数据量大且回放逐点重规划效率低。工业臂典型做法是用**少量路点**（3~10 个）+ 段间插值。新增 WAYPOINT_TEACH 状态：Share 长按 1.5s 进入零力矩拖动；L2 短按在当前位置记录一个路点（含 7 关节值 + FK 末端位姿）；Options 短按结束并保存到 `~/.a3/trajectories/waypoints/latest.yaml`；Square 长按 1.5s 触发路点 PTP 回放（关节空间 MoveJ，逐段 F107 静态门禁+段间同步）；Circle 长按 1.5s 触发路点 LIN 回放（笛卡尔空间走直线，pilz_industrial_motion_planner / arm_lin 规划组 / global pick_ik）。LIN 跨奇异/关节加速度超限时不回落 PTP，明确拒绝并提示改用 PTP。轨迹文件头加 `kind: continuous|waypoint` 双向门禁：连续回放只接受 continuous 文件，路点回放只接受 waypoint 文件，防止连续轨迹被逐段规划。初版 blend radius=0（到位即停），Pilz Sequence blend 留阶段二。L7 夹爪在段末单独线性插值。
+- **验收标准：**
+  1. 仿真栈：Share 长按 → L2 打点 3 次 → Options 保存 → YAML 含 3 路点且每路点有 FK pose
+  2. PTP 回放：3 段全部收敛（末段到位后关节误差 <0.06 rad），kind 门禁拒绝 continuous 文件
+  3. LIN 回放：相邻采样点直线度 <8mm；跨奇异段 LIN 明确拒绝（不回落 PTP），提示改用 PTP
+  4. 真机：Share 长按进入拖动态（绿灯变 cyan 呼吸），L2 打点白闪+弱震反馈，Options 保存后回到 READY
+  5. 误触防护：Square 短按仍走连续回放，Square 长按才走路点 PTP；Circle 短按=idle，长按=路点 LIN
+- **关联：** F54（连续示教/回放）、F107（静态力矩门禁）、F114（save_named_pose）、F125（playback return cyan）、Pilz LIN、[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)、[CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)（Wave A 对标）
+- **状态：** `implemented`（2026-10-01 仿真全链路 PASS）
+
+### F132 — 触摸板手势：触摸板 tap 触发路点 LIN 回放（暂缓启用，Circle 长按兜底）
+
+- **说明：** 触摸板单击（接触 <0.4s 且位移 <0.08 归一化）作为路点 LIN 回放的快捷入口，与 Circle 长按等效。实现 TouchGestureTracker 订阅 `/a3/ds4/touch`（ds4_hid_node 原始 HID 数据链），抬起帧判定 tap 后触发 `playback_waypoints_lin`。蓝牙 HID 数据链实测 fingers 边沿零抖动（~50Hz），但 ds4_hid_node 的触摸板偏移在部分固件/区域下存在兼容问题（接触被误判为未接触）。当前 mapping 中 touch 配置节已注释，留 Circle 长按 1.5s 作为 LIN 入口；待 ds4_hid_node 偏移修复后 uncomment 即可启用。
+- **验收标准：**
+  1. 触摸板 tap 手势代码实现并通过单元测试（快速点击触发、长按拒绝、拖动拒绝）
+  2. ds4_hid_node 偏移修复后：真机触摸板单击可稳定触发 LIN 回放
+  3. 触摸板手势与鼠标光标功能共存不冲突（evdev 和 hidraw 是并行通道）
+- **关联：** F131（LIN 回放）、LL-052（触摸板点击键蓝牙不可用）、ds4_hid_node.py
+- **状态：** `implemented`（手势代码完成，触摸偏移问题待修复后启用）
+
 ## 验收标准
 
 1. `can-up.service` 启动后 `can1` 为 UP，1 Mbps

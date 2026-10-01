@@ -14,9 +14,11 @@ from a3_teleop_ps4.actions import ActionExecutor
 from a3_teleop_ps4.mapping import (
     ButtonEdgeTracker,
     Ds4Layout,
+    TouchGestureTracker,
     analog_01_from_axis,
     iter_axis_bindings,
     iter_button_bindings,
+    iter_touch_bindings,
     load_yaml,
     package_config_path,
     validate_mapping,
@@ -48,6 +50,15 @@ class Ps4Mapper(Node):
         self._layout = Ds4Layout(layout_cfg)
         self._mapping = mapping
         self._edges = ButtonEdgeTracker()
+        # F132: 触摸板手势跟踪器（无 touch 配置节则为空，缺省不启用）
+        self._touch_trackers: Dict[str, TouchGestureTracker] = {}
+        self._touch_specs: Dict[str, dict] = {}
+        for gesture, tspec in iter_touch_bindings(mapping):
+            self._touch_trackers[gesture] = TouchGestureTracker(
+                max_dur_s=float(tspec.get("max_dur_s", 0.4)),
+                max_move=float(tspec.get("max_move", 0.08)),
+            )
+            self._touch_specs[gesture] = tspec
         twist_frame = str(mapping.get("twist_frame", "base_link"))
         self._exec = ActionExecutor(self, twist_frame=twist_frame)
         initial_scale = float(mapping.get("speed_normal", 0.35))
@@ -91,6 +102,15 @@ class Ps4Mapper(Node):
     def _on_touch(self, msg: Vector3) -> None:
         self._extra["touch_x"] = _clamp(float(msg.x))
         self._extra["touch_y"] = _clamp(float(msg.y))
+        if not self._touch_trackers:
+            return
+        now = self.get_clock().now().nanoseconds * 1e-9
+        for gesture, tracker in self._touch_trackers.items():
+            if tracker.update(float(msg.x), float(msg.y), float(msg.z), now):
+                spec = self._touch_specs[gesture]
+                kwargs = dict(spec.get("kwargs") or {})
+                self.get_logger().info(f"touch {gesture} detected -> {spec.get('fn')}")
+                self._exec.apply_discrete(str(spec.get("fn")), kwargs)
 
     def _joy_ready(self) -> bool:
         return self._joy is not None and self._joy_alive_ticks >= self._joy_alive_threshold

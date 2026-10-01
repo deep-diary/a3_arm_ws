@@ -177,6 +177,54 @@ class ButtonEdgeTracker:
         return True
 
 
+class TouchGestureTracker:
+    """
+    F131/F132: 触摸板 tap 检测（输入 /a3/ds4/touch Vector3）。
+
+    Vector3 语义（ds4_hid_node）：x/y 归一化坐标 [-1,1]，z=fingers（1=有接触/0=抬起）。
+    tap 判定：接触时长 < max_dur_s 且接触期间位移 < max_move（归一化），抬起瞬间触发。
+    蓝牙 HID 丢帧会导致 fingers 抖动；调用方可在 update() 前自行去抖，tracker
+    对无 release 的异常中断不补发。
+    """
+
+    def __init__(self, max_dur_s: float = 0.4, max_move: float = 0.08) -> None:
+        self.max_dur_s = float(max_dur_s)
+        self.max_move = float(max_move)
+        self._active = False
+        self._t0: Optional[float] = None
+        self._x0 = 0.0
+        self._y0 = 0.0
+        self._moved = False
+
+    def reset(self) -> None:
+        self._active = False
+        self._t0 = None
+        self._moved = False
+
+    def update(self, x: float, y: float, fingers: float, now: float) -> bool:
+        """喂入一帧触摸数据；抬起帧判定为 tap 时返回 True（仅一次）."""
+        touching = fingers is not None and float(fingers) >= 0.5
+        if touching:
+            if not self._active:
+                self._active = True
+                self._t0 = now
+                self._x0 = float(x)
+                self._y0 = float(y)
+                self._moved = False
+            elif ((float(x) - self._x0) ** 2 + (float(y) - self._y0) ** 2) ** 0.5 > self.max_move:
+                self._moved = True
+            return False
+        if not self._active:
+            return False
+        self._active = False
+        t0 = self._t0
+        self._t0 = None
+        moved = self._moved
+        if t0 is None or moved or (now - t0) >= self.max_dur_s:
+            return False
+        return True
+
+
 def validate_mapping(
     mapping: Dict[str, Any], registry: Dict[str, Any]
 ) -> List[str]:
@@ -203,7 +251,16 @@ def validate_mapping(
             entry = spec.get(side) or {}
             if entry:
                 check(str(entry.get("fn")), "discrete", f"dpad[{i}].{side}")
+    for gesture, spec in (mapping.get("touch") or {}).items():
+        check(str(spec.get("fn")), "discrete", f"touch.{gesture}")
     return errors
+
+
+def iter_touch_bindings(
+    mapping: Dict[str, Any],
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """展开触摸手势绑定为 (gesture, spec)（F132；当前仅 tap）."""
+    return list((mapping.get("touch") or {}).items())
 
 
 def iter_axis_bindings(mapping: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:

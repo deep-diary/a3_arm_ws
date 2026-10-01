@@ -13,11 +13,14 @@
 | **R3** | 短按 | 任意模式软失能 | `/a3/arm/disable`（F119：先从 SERVO/示教/重力补偿退出当前模式 → F40 safe-park 回 idle → 保电失能） |
 | **Cross（✕）** | 长按 1 s | **硬急停**（断电、关闸；恢复需 L3） | `/power_sequence/command shutdown` |
 | **Triangle（▲）** | 按下即触发 | goto home | `/a3/arm/goto_named_pose {name: home}` |
-| **Circle（●）** | 按下即触发 | goto idle（自然趴着位，非机械零位） | `/a3/arm/goto_named_pose {name: idle}` |
-| **Share** | 短按 | 开始示教 | `/a3/arm/start_teach`（零力矩拖动 + 记录） |
-| **Options** | 短按 | 结束示教（自动保存 latest） | `/a3/arm/stop_teach` |
-| **Options** | 长按 3 s | F116 随机点位巡游（仅 READY 态，TEACH/TRAJ 被安全拒绝） | `/a3/arm/random_pose_tour {count: 0, seed: 0}` |
-| **Square（■）** | 短按 | 回放最新轨迹 | `/a3/arm/playback {name: ""}` ≡ latest |
+| **Share** | 短按 | 开始**连续**示教（蓝呼吸） | `/a3/arm/start_teach`（零力矩拖动 + 记录） |
+| **Share** | 长按 1.5 s | 开始**路点**示教（青呼吸，F131） | `/a3/arm/start_waypoint_teach`（零力矩拖动 + L2 打点） |
+| **Options** | 短按 | 结束示教（按当前类型自动保存 latest） | `/a3/arm/stop_teach` |
+| **Options** | 长按 3 s | F116 随机点位巡游（仅 READY 态，TEACH/WAYPOINT_TEACH/TRAJ 被安全拒绝） | `/a3/arm/random_pose_tour {count: 0, seed: 0}` |
+| **Square（■）** | 短按 | 回放最新**连续**轨迹 | `/a3/arm/playback {name: "", type: ""}` ≡ latest continuous |
+| **Square（■）** | 长按 1.5 s | 回放最新**路点** PTP（关节空间 MoveJ，F131） | `/a3/arm/playback {name: "", type: "waypoint", strategy: "ptp"}` |
+| **Circle（●）** | 短按 | goto idle | `/a3/arm/goto_named_pose {name: idle}` |
+| **Circle（●）** | 长按 1.5 s | 回放最新**路点** LIN（笛卡尔直线，F131；跨奇异拒绝不回落 PTP） | `/a3/arm/playback {name: "", type: "waypoint", strategy: "lin"}` |
 | **PS** | 短按 | init（设零 + 到位确认 + 自动使能） | `/a3/arm/init` |
 | **L1** | 按住 | **平移死人开关**：仅放行平移轴（F64 gates） | 松开约 0.5 s servo 超时停 |
 | **R1** | 按住 | **旋转死人开关**：仅放行偏航轴 | 同上 |
@@ -27,11 +30,11 @@
 | **D-pad 上 / 下** | 点按 | goto home_up（home 上 15cm）/ home_down（下 10cm），F115 | `goto_named_pose {name: home_up/home_down}` |
 | **D-pad 左 / 右** | 点按 | goto home_back（home 后 20cm）/ home_front（前 15cm），F115 | `goto_named_pose {name: home_back/home_front}` |
 | **L2** | 短按 | 保存当前位姿为 snap_YYYYMMDD_HHMMSS（F114，写包内 named_poses.yaml） | `/a3/arm/save_named_pose {name: ""}` |
-| touchpad | — | **预留不绑**（蓝牙触摸板无键事件，LL-052） | — |
+| touchpad | 单击（tap） | **预留不绑**（蓝牙无键事件 LL-052；hidraw 触摸偏移缺陷 LL-143，F132 修复后在 `default.yaml` 取消注释即绑 LIN 回放） | — |
 
 > F115 起 D-pad 不再调速，平移/旋转恒用 `speed_normal`（默认 0.35）；`step_linear_scale/step_angular_scale` 动作函数保留，自定义映射可自行绑定。
 
-口诀：**L3 开工、R3 收工、✕ 长按急停；▲ home、● idle（F120）；Share-Options-■ = 示教-保存-回放；PS 初始化；L1 平移、R1 旋转、十字键直达 home 四周四点。**
+口诀：**L3 开工、R3 收工、✕ 长按急停；▲ home、● idle（F120）；Share-Options-■ = 连续示教-保存-回放；Share 长按+L2 打点 = 路点示教（F131），■ 长按 PTP、● 长按 LIN；PS 初始化；L1 平移、R1 旋转、十字键直达 home 四周四点。**
 
 ## DS4 灯带 / 震动（F61，`ds4_feedback_node`）
 

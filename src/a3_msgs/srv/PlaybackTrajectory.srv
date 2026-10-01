@@ -1,5 +1,9 @@
 # 读取本地轨迹文件并回放
 string name
+# F131: 轨迹槽类型 — ""=连续轨迹(默认，向后兼容) / "waypoint"=路点任务
+string type
+# F131: 路点段策略 — "ptp"=关节空间自动规划(默认) / "lin"=TCP 笛卡尔走直线
+string strategy
 ---
 bool success
 string message

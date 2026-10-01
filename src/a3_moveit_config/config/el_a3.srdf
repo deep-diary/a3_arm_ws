@@ -10,6 +10,11 @@ EL-A3 Robot Arm SRDF (Semantic Robot Description Format)
         <chain base_link="base_link" tip_link="end_effector"/>
     </group>
 
+    <!-- F131: 同链第二规划组——pick_ik global 模式（路点 LIN 目标 IK 种子敏感, LL-103） -->
+    <group name="arm_lin">
+        <chain base_link="base_link" tip_link="end_effector"/>
+    </group>
+
     <!-- Gripper group: 1-DOF (L7), separate kinematic branch from l5_l6_urdf_asm -->
     <group name="gripper">
         <joint name="L7_joint"/>

@@ -41,14 +41,20 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
+from geometry_msgs.msg import Pose
 from moveit_msgs.action import MoveGroup
 from moveit_msgs.msg import (
     Constraints,
     JointConstraint,
     MotionPlanRequest,
     MoveItErrorCodes,
+    OrientationConstraint,
     PlanningOptions,
+    PositionConstraint,
 )
+from moveit_msgs.srv import GetPlanningScene
+from moveit_msgs.msg import PlanningSceneComponents
+from shape_msgs.msg import SolidPrimitive
 
 from a3_can_bridge.msg import MotorStates
 from a3_can_bridge.srv import MotorCommand
@@ -82,6 +88,7 @@ STATE_READY = "READY"
 STATE_TRAJ = "TRAJ"
 STATE_SERVO = "SERVO"
 STATE_TEACH = "TEACH"
+STATE_WAYPOINT_TEACH = "WAYPOINT_TEACH"  # F131: 路点示教（L2 打点；Options 结束）
 STATE_AI = "AI"
 STATE_SAFE_PARK = "SAFE_PARK"  # F40: 回安全位中，拒绝新运动指令
 STATE_DISABLED = "DISABLED"    # F45: 已失能，须显式 enable
@@ -453,6 +460,28 @@ class ArmController(Node):
         # F54: 示教停止自动保存的最小样本数——start 后立刻 stop 的误触发（1~2 个样本）不许
         # 用退化单点文件覆盖上一条好的 latest。~0.2s 拖动即可超过（@50Hz 10 样本）。
         self.declare_parameter("teach_auto_save_min_samples", 10)
+        # F131: 路点示教参数
+        # 停止保存的最少路点数（少于则视为误触发，保留上一条好的任务）
+        self.declare_parameter("waypoint_min_count", 2)
+        # 相邻打点最小关节增量（rad），小于则视为重复点跳过（不增加计数）
+        self.declare_parameter("waypoint_min_capture_delta_rad", 0.01)
+        # 单段规划/执行超时（s）；0 = 复用 moveit_goto_timeout_s
+        self.declare_parameter("waypoint_segment_timeout_s", 0.0)
+        # F131 预留：拐角圆滑半径（阶段二 Pilz Sequence 使用；0 = 每点到位即停）
+        self.declare_parameter("waypoint_blend_radius_m", 0.0)
+        # F131: pilz LIN 的 request 缩放只缩放笛卡尔速度剖面,不缩放关节限位检查;
+        # 靠近奇异/位形翻转的直线段关节加速度尖峰需靠降低笛卡尔速度(v^2)来压住。
+        self.declare_parameter("waypoint_lin_velocity_scaling", 0.1)
+        self.declare_parameter("waypoint_lin_acceleration_scaling", 0.1)
+        # LIN 目标位置/姿态容差（传给约束构造）
+        self.declare_parameter("waypoint_lin_pos_tol_m", 0.002)
+        self.declare_parameter("waypoint_lin_rot_tol_rad", 0.002)
+        self.declare_parameter("waypoint_base_link", "base_link")
+        self.declare_parameter("waypoint_ee_link", "end_effector")
+        # F131: LIN 规划组（SRDF arm_lin：pick_ik global；arm 组 local 留给 servo）
+        self.declare_parameter("waypoint_lin_planning_group", "arm_lin")
+        # 打点操作员反馈话题（ds4_feedback_node 白闪+弱震消费）
+        self.declare_parameter("operator_event_topic", "/a3/arm/operator_event")
         self.declare_parameter("trajectories_dir", "~/.a3/trajectories")
         self.declare_parameter("named_poses_pkg", "a3_description")
         # F41/F88: move_to/goto 兜底——最短时长；两点轨迹由 JTC 样条插值
@@ -585,6 +614,8 @@ class ArmController(Node):
         self._recording = False
         self._record_start = 0.0
         self._record: List[Tuple[float, List[float]]] = []
+        # F131: 路点示教——每项 {"positions": [7], "pose": {...}}（pose 供 LIN 使用）
+        self._waypoints: List[Dict[str, Any]] = []
         # F127: freedrive enter 是否真把 gripper 换出——INACTIVE 无法区分「被我们
         # 停」与「未配置」，故记标志而非 exit 再探测（LL-136）
         self._freedrive_gripper_swapped = False
@@ -592,6 +623,9 @@ class ArmController(Node):
         # 轨迹持久化目录
         self._traj_dir = os.path.expanduser(str(self.get_parameter("trajectories_dir").value))
         os.makedirs(self._traj_dir, exist_ok=True)
+        # F131: 路点任务子目录
+        self._wp_dir = os.path.join(self._traj_dir, "waypoints")
+        os.makedirs(self._wp_dir, exist_ok=True)
 
         # 命名预设点
         self._poses = self._load_poses()
@@ -653,6 +687,10 @@ class ArmController(Node):
         self._mode_pub = self.create_publisher(
             String, str(self.get_parameter("control_mode_topic").value), 10
         )
+        # F131: 打点/任务事件 → ds4_feedback_node（白闪+弱震等操作员反馈）
+        self._operator_event_pub = self.create_publisher(
+            String, str(self.get_parameter("operator_event_topic").value), 10
+        )
         # /a3/control_mode 是 VOLATILE 且仅状态变化时发布。本节点重启后须主动
         # 清掉其他节点（如夹爪力控互锁）锁存的旧 TRAJ_RUNNING：启动即发一次 +
         # 2 s 后重发一次（首次发布可能早于订阅发现、被静默丢弃）。
@@ -689,6 +727,9 @@ class ArmController(Node):
             callback_group=self._cb_group)
         self.create_service(
             Trigger, "/a3/arm/stop_teach", self._stop_teach_cb,
+            callback_group=self._cb_group)
+        self.create_service(
+            Trigger, "/a3/arm/start_waypoint_teach", self._start_waypoint_teach_cb,
             callback_group=self._cb_group)
         self.create_service(
             SaveTrajectory, "/a3/arm/save_trajectory", self._save_cb,
@@ -757,6 +798,10 @@ class ArmController(Node):
         # F68: 保几何重定时服务
         self._retime_cli = self.create_client(
             RetimeTrajectory, "/a3/arm/retime_trajectory", callback_group=self._cb_group
+        )
+        # F131: LL-103 段间同步——读 move_group 内部当前状态
+        self._scene_cli = self.create_client(
+            GetPlanningScene, "/get_planning_scene", callback_group=self._cb_group
         )
         # F74: 标准 FJT action 客户端（control_backend=fjt_action 时用）
         self._fjt_arm_cli = ActionClient(
@@ -1434,7 +1479,7 @@ class ArmController(Node):
         # F45/F53: DISABLED/COOLING/FAULT 下运动命令被拒（原 IDLE 允许 move_to 语义混乱；
         # FAULT 电机已复位关断，发轨迹只被静默接受、臂不动）
         if self._state in (
-            STATE_INIT, STATE_TEACH, STATE_AI, STATE_TRAJ, STATE_SERVO,
+            STATE_INIT, STATE_TEACH, STATE_WAYPOINT_TEACH, STATE_AI, STATE_TRAJ, STATE_SERVO,
             STATE_SAFE_PARK, STATE_DISABLED, STATE_COOLING, STATE_FAULT,
         ):
             return False, f"state={self._state}"
@@ -2052,7 +2097,7 @@ class ArmController(Node):
     # ------------------------------------------------------------------ services
 
     def _init_cb(self, req: Trigger.Request, resp: Trigger.Response) -> Trigger.Response:
-        if self._state in (STATE_TRAJ, STATE_SERVO, STATE_TEACH, STATE_AI, STATE_SAFE_PARK):
+        if self._state in (STATE_TRAJ, STATE_SERVO, STATE_TEACH, STATE_WAYPOINT_TEACH, STATE_AI, STATE_SAFE_PARK):
             resp.success = False
             resp.message = f"busy in state={self._state}"
             return resp
@@ -2138,7 +2183,7 @@ class ArmController(Node):
 
     def _enable_cb(self, req: Trigger.Request, resp: Trigger.Response) -> Trigger.Response:
         self.get_logger().info("enable service called")
-        if self._state in (STATE_TRAJ, STATE_SERVO, STATE_TEACH, STATE_AI, STATE_SAFE_PARK):
+        if self._state in (STATE_TRAJ, STATE_SERVO, STATE_TEACH, STATE_WAYPOINT_TEACH, STATE_AI, STATE_SAFE_PARK):
             resp.success = False
             resp.message = f"busy in state={self._state}"
             return resp
@@ -2214,12 +2259,12 @@ class ArmController(Node):
         下方原流程；退出等待超时（如操作员一直按着 servo 输入）→ 拒绝并给可执行文案，
         不改状态。此时仅 INIT/AI 视为 busy。
         """
-        # F119: TEACH 先停（F54 自动存档 latest.yaml 是接受的副作用），退出 ZERO_TORQUE
-        if self._state == STATE_TEACH:
+        # F119: TEACH / WAYPOINT_TEACH 先停（自动存档是接受的副作用），退出 ZERO_TORQUE
+        if self._state in (STATE_TEACH, STATE_WAYPOINT_TEACH):
             tr_resp = self._stop_teach_cb(Trigger.Request(), Trigger.Response())
             if not tr_resp.success:
                 resp.success = False
-                resp.message = f"cannot exit TEACH: {tr_resp.message}"
+                resp.message = f"cannot exit {self._state}: {tr_resp.message}"
                 return resp
         # F119: BLOCKED_MODES 先退出对应模式，再等 _mode 离开（servo 桥 0.5s 超时 /
         # zero_torque/stop / gravity stop 各自发 IDLE）；超时 → 拒绝，不静默继续
@@ -2445,6 +2490,258 @@ class ArmController(Node):
         self._duty_record(duration)
         return True, duration, f"{label}: move_group {len(pts)} pts, {duration:.1f}s"
 
+    def _wait_move_group_current(
+        self, expected_q: List[float], timeout: float = 8.0, eps: float = 0.03
+    ) -> bool:
+        """
+        LL-103: 段间等 move_group 内部当前状态追上 expected_q（实际关节）。
+
+        move_group current-state monitor 经话题异步更新；上一段刚执行完时它可能
+        仍滞后，下一段（尤其 Pilz LIN）IK 用滞后状态做种子 → -31。
+        """
+        if not self._scene_cli.wait_for_service(timeout_sec=1.0):
+            return False
+        req = GetPlanningScene.Request()
+        req.components.components = PlanningSceneComponents.ROBOT_STATE
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout:
+            time.sleep(0.1)
+            fut = self._scene_cli.call_async(req)
+            if not self._wait_future(fut, 2.0):
+                continue
+            snap = dict(zip(
+                fut.result().scene.robot_state.joint_state.name,
+                fut.result().scene.robot_state.joint_state.position))
+            worst = max(
+                abs(snap.get(jn, 0.0) - v)
+                for jn, v in zip(self._joint_names, expected_q))
+            if worst < eps:
+                return True
+        return False
+
+    def _lin_move(
+        self,
+        pose: dict,
+        label: str,
+        gate_q: Optional[List[float]] = None,
+    ) -> Tuple[bool, float, str]:
+        """
+        F131: Pilz LIN —— TCP 沿笛卡尔直线平移 + 姿态线性插值到打点 FK 位姿。
+
+        规划失败不回落 PTP（语义不同：操作员明确要直线）。
+        gate_q: 该目标路点的 7 关节位姿（打点时已记录），用于 F107 关节线性
+        采样预检；真实笛卡尔路径由 Pilz 生成，偏差属工程近似（同 _moveit_move）。
+        """
+        if not self._moveit_cli.server_is_ready():
+            ready_deadline = time.monotonic() + 0.5
+            while time.monotonic() < ready_deadline and not self._moveit_cli.server_is_ready():
+                time.sleep(0.02)
+        if not self._moveit_cli.server_is_ready():
+            return False, 0.0, "move_group action unavailable"
+
+        # F107: 静态重力矩预检（当前→目标关节线性采样；仅当目标关节位姿可得）
+        if self._have_js and gate_q is not None:
+            samples = 21
+            for k in range(samples + 1):
+                frac = k / samples
+                full = list(self._positions)
+                for j in range(min(len(gate_q), len(full))):
+                    full[j] = self._positions[j] + (gate_q[j] - self._positions[j]) * frac
+                viol = self._static_torque_violations(full)
+                if viol:
+                    return False, 0.0, "static torque gate rejected: " + "; ".join(viol)
+            q0_arm = list(self._positions[:6])
+            est_dur, _slow = self._velocity_floor_duration(
+                q0_arm, list(gate_q[:6]), JOINTS[:6])
+            allowed, used_s, cooling_s = self._duty_check(max(est_dur, 0.1))
+            if not allowed:
+                return False, 0.0, (
+                    f"duty gate rejected: {used_s:.0f}s motion in window, "
+                    f"wait {cooling_s:.0f}s")
+
+        pos = pose.get("position") or {}
+        ori = pose.get("orientation") or {}
+        try:
+            target_pose = Pose()
+            target_pose.position.x = float(pos["x"])
+            target_pose.position.y = float(pos["y"])
+            target_pose.position.z = float(pos["z"])
+            target_pose.orientation.x = float(ori["x"])
+            target_pose.orientation.y = float(ori["y"])
+            target_pose.orientation.z = float(ori["z"])
+            target_pose.orientation.w = float(ori["w"])
+        except (KeyError, TypeError) as exc:
+            return False, 0.0, f"invalid pose dict: {exc}"
+
+        pos_tol = float(self.get_parameter("waypoint_lin_pos_tol_m").value)
+        rot_tol = float(self.get_parameter("waypoint_lin_rot_tol_rad").value)
+        box = SolidPrimitive(type=SolidPrimitive.BOX, dimensions=[pos_tol] * 3)
+        pc = PositionConstraint()
+        pc.header.frame_id = str(self.get_parameter("waypoint_base_link").value)
+        pc.link_name = str(self.get_parameter("waypoint_ee_link").value)
+        pc.constraint_region.primitives = [box]
+        pc.constraint_region.primitive_poses = [target_pose]
+        oc = OrientationConstraint()
+        oc.header = pc.header
+        oc.orientation = target_pose.orientation
+        oc.link_name = pc.link_name
+        oc.absolute_x_axis_tolerance = rot_tol
+        oc.absolute_y_axis_tolerance = rot_tol
+        oc.absolute_z_axis_tolerance = rot_tol
+        oc.weight = 1.0
+        constraints = Constraints()
+        constraints.position_constraints = [pc]
+        constraints.orientation_constraints = [oc]
+
+        goal = MoveGroup.Goal()
+        mpr = MotionPlanRequest()
+        # F131: arm_lin 组（pick_ik global；arm 组 local 种子对远目标 IK -31）
+        mpr.group_name = str(
+            self.get_parameter("waypoint_lin_planning_group").value)
+        mpr.pipeline_id = "pilz"
+        mpr.planner_id = "LIN"
+        mpr.num_planning_attempts = int(self.get_parameter("moveit_num_planning_attempts").value)
+        mpr.allowed_planning_time = float(
+            self.get_parameter("moveit_allowed_planning_time_s").value
+        )
+        mpr.max_velocity_scaling_factor = float(
+            self.get_parameter("waypoint_lin_velocity_scaling").value
+        )
+        mpr.max_acceleration_scaling_factor = float(
+            self.get_parameter("waypoint_lin_acceleration_scaling").value
+        )
+        mpr.goal_constraints = [constraints]
+        goal.request = mpr
+        goal.planning_options = PlanningOptions()
+
+        timeout_s = float(self.get_parameter("moveit_goto_timeout_s").value)
+        seg_timeout = float(self.get_parameter("waypoint_segment_timeout_s").value)
+        if seg_timeout > 0.0:
+            timeout_s = seg_timeout
+        t0 = time.monotonic()
+        send_future = self._moveit_cli.send_goal_async(goal)
+        if not self._wait_future(send_future, timeout_s):
+            return False, 0.0, "move_group send timeout"
+        goal_handle = send_future.result()
+        if not goal_handle.accepted:
+            return False, 0.0, "move_group goal rejected"
+        self._publish_mode("TRAJ_RUNNING")
+        self._set_state(STATE_TRAJ, f"{label} (planning LIN)")
+
+        result_future = goal_handle.get_result_async()
+        remaining = max(0.1, timeout_s - (time.monotonic() - t0))
+        if not self._wait_future(result_future, remaining):
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"{label}: result timeout")
+            return False, 0.0, "move_group result timeout"
+        result = result_future.result().result
+        if result.error_code.val != MoveItErrorCodes.SUCCESS:
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"{label}: error {result.error_code.val}")
+            return False, 0.0, f"pilz LIN error_code={result.error_code.val} (no PTP fallback)"
+
+        rt = result.executed_trajectory
+        if not rt.joint_trajectory.points:
+            rt = result.planned_trajectory
+        pts = rt.joint_trajectory.points
+        if not pts:
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"{label}: empty trajectory")
+            return False, 0.0, "pilz LIN returned empty trajectory"
+        last = pts[-1]
+        duration = float(last.time_from_start.sec) + float(last.time_from_start.nanosec) * 1e-9
+        duration = max(duration, 0.1)
+        self._duty_record(duration)
+        return True, duration, f"{label}: LIN {len(pts)} pts, {duration:.1f}s"
+
+    def _play_waypoints(
+        self,
+        data: dict,
+        label: str,
+        strategy: str,
+        resp: PlaybackTrajectory.Response,
+    ) -> PlaybackTrajectory.Response:
+        """
+        F131: 路点任务逐段回放（每段到位即停，blend=0；阶段二再上 Pilz blend）。
+
+        PTP: 逐段关节空间规划（_moveit_move，OMPL/TOTG）；
+        LIN: 逐段 Pilz 笛卡尔直线（_lin_move，失败即停，不回落）。
+        每段：F107 静态重力矩 + duty 门禁；L7（夹爪）随段末同步。
+        """
+        file_joint_names = list(data.get("joint_names") or self._joint_names)
+
+        def _to_std(positions: List[float]) -> List[float]:
+            if file_joint_names == self._joint_names:
+                return [float(v) for v in positions]
+            out = []
+            for jn in self._joint_names:
+                if jn in file_joint_names:
+                    out.append(float(positions[file_joint_names.index(jn)]))
+                else:
+                    out.append(0.0)
+            return out
+
+        parsed: List[Dict[str, Any]] = []
+        for w in data.get("waypoints") or []:
+            if "positions" not in w:
+                self._publish_mode("IDLE")
+                self._set_state(STATE_READY, f"playback {label}: bad waypoint")
+                resp.success = False
+                resp.message = "waypoint entry missing positions"
+                return resp
+            parsed.append({"positions": _to_std(w["positions"]), "pose": w.get("pose") or {}})
+
+        n = len(parsed)
+        min_count = int(self.get_parameter("waypoint_min_count").value)
+        if n < min_count:
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"playback {label}: too few")
+            resp.success = False
+            resp.message = f"need >= {min_count} waypoints, file has {n}"
+            return resp
+
+        total = 0.0
+        for i, wp in enumerate(parsed):
+            seg_label = f"waypoint {strategy} {i + 1}/{n}"
+            if strategy == "lin":
+                pose = wp["pose"]
+                if not pose or "position" not in pose:
+                    self._publish_mode("IDLE")
+                    self._set_state(STATE_READY, f"playback {label}: no FK pose")
+                    resp.success = False
+                    resp.message = (
+                        f"waypoint {i + 1}/{n} missing FK pose —— 该任务录制时"
+                        "FK 不可用，无法 LIN；请重新 Share 长按录制或改 PTP")
+                    return resp
+                ok, dur, msg = self._lin_move(
+                    pose, seg_label, gate_q=wp["positions"])
+            else:
+                ok, dur, msg = self._moveit_move(
+                    wp["positions"][:6], JOINTS[:6], seg_label)
+            if not ok:
+                self._publish_mode("IDLE")
+                self._set_state(STATE_READY, f"playback {label}: seg {i + 1} failed")
+                resp.success = False
+                resp.message = f"segment {i + 1}/{n} failed (arm stopped): {msg}"
+                return resp
+            # LL-077: arm 规划组只含 L1–L6，L7 随段末同步下发
+            if self._n_joints >= 7:
+                dur = max(dur, self._dispatch_l7_linear(wp["positions"][6]))
+            total += dur
+            # LL-103: 段间等 move_group 内部状态追上实际关节（防下段 LIN IK -31）；
+            # 同步超时不阻断，交给下段规划结果裁决。
+            if i < n - 1 and not self._wait_move_group_current(wp["positions"]):
+                self.get_logger().warn(
+                    f"after segment {i + 1}/{n}: move_group current sync timeout "
+                    "(continue; next segment may fail IK)")
+
+        self._schedule_back_to_ready(total + 0.3)
+        resp.success = True
+        resp.message = (
+            f"waypoint task '{label}' {strategy}: {n} points, "
+            f"{n - 1} segments, {total:.1f}s")
+        return resp
+
     def _goto_cb(
         self, req: GotoNamedPose.Request, resp: GotoNamedPose.Response
     ) -> GotoNamedPose.Response:
@@ -2640,7 +2937,16 @@ class ArmController(Node):
 
         F114: name 留空时自动命名 snap_YYYYMMDD_HHMMSS（手柄无法输入文本）；
         写入目标从 ~/.a3/poses.yaml 收敛到包内（F113 弃用用户层覆盖）。
+
+        F131: 状态路由——WAYPOINT_TEACH 时本服务=打点（不写 named_poses.yaml）；
+        TEACH 拖动态显式拒绝，防误写。
         """
+        if self._state == STATE_WAYPOINT_TEACH:
+            return self._capture_waypoint(resp)
+        if self._state == STATE_TEACH:
+            resp.success = False
+            resp.message = "save_named_pose blocked during continuous teach (Options to finish)"
+            return resp
         raw = (req.name or "").strip()
         name = (
             _sanitize_name(raw)
@@ -2689,7 +2995,7 @@ class ArmController(Node):
             resp.message = "no /joint_states yet"
             return resp
         if self._state in (
-            STATE_INIT, STATE_TEACH, STATE_AI, STATE_FAULT, STATE_SERVO,
+            STATE_INIT, STATE_TEACH, STATE_WAYPOINT_TEACH, STATE_AI, STATE_FAULT, STATE_SERVO,
             STATE_SAFE_PARK, STATE_DISABLED, STATE_COOLING,
         ):
             resp.success = False
@@ -2754,22 +3060,110 @@ class ArmController(Node):
         resp.message = msg
         return resp
 
+    def _teach_guard(self) -> Optional[str]:
+        """F131: 进入任一示教模式的共同前置；None=通过，否则=拒绝原因."""
+        if self._state not in (STATE_READY,):
+            return f"require READY (now {self._state})"
+        if self._mode in BLOCKED_MODES:
+            return f"mode={self._mode}"
+        return None
+
+    def _enter_freedrive(self) -> Tuple[bool, str]:
+        """F131: 进入自由拖动（标准栈原子 controller swap / 旧栈 zero_torque 服务）."""
+        if self._using_controller_switch():
+            return self._cm_freedrive_switch(True)
+        return self._call_trigger(self._zt_start_cli, "zero_torque/start")
+
+    def _exit_freedrive(self) -> Tuple[bool, str]:
+        """F131: 退出自由拖动（恢复位置闭环）."""
+        if self._using_controller_switch():
+            return self._cm_freedrive_switch(False)
+        return self._call_trigger(self._zt_stop_cli, "zero_torque/stop")
+
+    def _emit_operator_event(self, event: str) -> None:
+        """F131: 发操作员事件（ds4_feedback_node 白闪+弱震消费）."""
+        msg = String()
+        msg.data = event
+        self._operator_event_pub.publish(msg)
+
+    def _fk_pose(self, positions: List[float]) -> Optional[dict]:
+        """
+        F131: pinocchio FK → end_effector 相对 base_link 的位姿（YAML-ready dict）.
+
+        模型不可用时返回 None（打点不阻断，但该路点无法走 LIN 段）。
+        """
+        try:
+            if not self._pin_ready:
+                self._ensure_pin_model()
+            import numpy as np  # type: ignore
+            import pinocchio as pin  # type: ignore
+
+            model = self._pin_model
+            q = np.zeros(model.nq)
+            for pos, qi in zip(positions, self._pin_q_idx):
+                q[qi] = pos
+            data = model.createData()
+            ee = str(self.get_parameter("waypoint_ee_link").value)
+            fid = model.getFrameId(ee)
+            pin.framesForwardKinematics(model, data, q)
+            placement = data.oMf[fid]
+            # eigenpy ≥3（pinocchio 4.0）coeffs 是方法而非属性，须调用
+            coeffs = pin.Quaternion(placement.rotation).coeffs()  # [x, y, z, w]
+            return {
+                "position": {
+                    "x": float(placement.translation[0]),
+                    "y": float(placement.translation[1]),
+                    "z": float(placement.translation[2]),
+                },
+                "orientation": {
+                    "x": float(coeffs[0]),
+                    "y": float(coeffs[1]),
+                    "z": float(coeffs[2]),
+                    "w": float(coeffs[3]),
+                },
+            }
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(
+                f"F131 FK pose failed: {exc}", throttle_duration_sec=30.0)
+            return None
+
+    def _capture_waypoint(
+        self, resp: SaveNamedPose.Response
+    ) -> SaveNamedPose.Response:
+        """F131: L2 打点——追加当前 7 关节位姿 + FK 位姿（去重 + 灯效反馈）."""
+        if not self._have_js:
+            resp.success = False
+            resp.message = "no /joint_states yet"
+            return resp
+        q = [round(float(p), 4) for p in self._positions]
+        min_d = float(self.get_parameter("waypoint_min_capture_delta_rad").value)
+        if self._waypoints:
+            last = self._waypoints[-1]["positions"]
+            if max(abs(a - b) for a, b in zip(q, last)) < min_d:
+                resp.success = True
+                resp.message = (
+                    f"waypoint unchanged (still {len(self._waypoints)}), skip")
+                return resp
+        pose = self._fk_pose(q)
+        self._waypoints.append({"positions": q, "pose": pose})
+        idx = len(self._waypoints)
+        self._emit_operator_event("waypoint_captured")
+        resp.success = True
+        resp.message = f"waypoint {idx} captured" + (
+            "" if pose else " (FK unavailable; LIN disabled for this task)")
+        self.get_logger().info(f"waypoint {idx} captured: {q}")
+        return resp
+
     def _start_teach_cb(
         self, req: Trigger.Request, resp: Trigger.Response
     ) -> Trigger.Response:
-        if self._state not in (STATE_READY,):
+        why = self._teach_guard()
+        if why is not None:
             resp.success = False
-            resp.message = f"require READY (now {self._state})"
-            return resp
-        if self._mode in BLOCKED_MODES:
-            resp.success = False
-            resp.message = f"mode={self._mode}"
+            resp.message = why
             return resp
 
-        if self._using_controller_switch():
-            ok, msg = self._cm_freedrive_switch(True)
-        else:
-            ok, msg = self._call_trigger(self._zt_start_cli, "zero_torque/start")
+        ok, msg = self._enter_freedrive()
         if not ok:
             resp.success = False
             resp.message = msg
@@ -2786,9 +3180,35 @@ class ArmController(Node):
         resp.message = "teach started"
         return resp
 
+    def _start_waypoint_teach_cb(
+        self, req: Trigger.Request, resp: Trigger.Response
+    ) -> Trigger.Response:
+        """F131（Share 长按 1.5s）：路点示教——L2 打点，Options 结束保存."""
+        why = self._teach_guard()
+        if why is not None:
+            resp.success = False
+            resp.message = why
+            return resp
+
+        ok, msg = self._enter_freedrive()
+        if not ok:
+            resp.success = False
+            resp.message = msg
+            return resp
+
+        self._waypoints = []
+        if self._using_controller_switch():
+            self._publish_mode("ZERO_TORQUE")
+        self._set_state(STATE_WAYPOINT_TEACH, "waypoint teaching (L2=mark)")
+        resp.success = True
+        resp.message = "waypoint teach started; L2 to capture, Options to finish"
+        return resp
+
     def _stop_teach_cb(
         self, req: Trigger.Request, resp: Trigger.Response
     ) -> Trigger.Response:
+        if self._state == STATE_WAYPOINT_TEACH:
+            return self._stop_waypoint_teach(resp)
         if self._state != STATE_TEACH:
             resp.success = False
             resp.message = f"not teaching (state={self._state})"
@@ -2797,7 +3217,7 @@ class ArmController(Node):
         if self._using_controller_switch():
             # 先恢复位置闭环：失败则保持 TEACH（重力补偿仍在），由操作员重试，
             # 不许报成功后臂还在自由态。
-            ok, msg = self._cm_freedrive_switch(False)
+            ok, msg = self._exit_freedrive()
             if not ok:
                 self._recording = True
                 resp.success = False
@@ -2807,7 +3227,7 @@ class ArmController(Node):
                 return resp
             self._publish_mode("READY")
         else:
-            ok, msg = self._call_trigger(self._zt_stop_cli, "zero_torque/stop")
+            ok, msg = self._exit_freedrive()
         n = len(self._record)
         # F54: 停止即自动保存 —— latest.yaml（滚动最新槽）+ 时间戳备份（防覆盖丢失）。
         # 样本 < teach_auto_save_min_samples 时认为是误触发（start 后立刻 stop），
@@ -2831,6 +3251,68 @@ class ArmController(Node):
         self._set_state(STATE_READY, f"teach stopped ({n} samples)")
         resp.success = True
         resp.message = f"recorded {n} samples; " + ", ".join(auto_msgs) + (
+            f" (zero_torque/stop: {msg})" if not ok else ""
+        )
+        return resp
+
+    def _dump_waypoints(self) -> dict:
+        """F131: 路点任务序列化（含 FK 位姿，供 LIN 段使用）."""
+        return {
+            "kind": "waypoint",
+            "joint_names": list(self._joint_names),
+            "waypoints": [
+                {
+                    "positions": [float(v) for v in wp["positions"]],
+                    "pose": wp.get("pose") or {},
+                }
+                for wp in self._waypoints
+            ],
+        }
+
+    def _save_waypoints_to(self, path: str) -> bool:
+        """把当前路点任务写到 path，返回是否成功（异常已记录，不抛）."""
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(self._dump_waypoints(), f)
+            self.get_logger().info(f"waypoint task saved to {path}")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f"waypoint save failed to {path}: {exc}")
+            return False
+
+    def _stop_waypoint_teach(self, resp: Trigger.Response) -> Trigger.Response:
+        """F131: Options 结束路点示教 → 退出 free-drive → 自动落盘."""
+        if self._using_controller_switch():
+            ok, msg = self._exit_freedrive()
+            if not ok:
+                resp.success = False
+                resp.message = (
+                    f"free-drive exit failed: {msg}; arm still in "
+                    "WAYPOINT_TEACH, retry Options")
+                return resp
+            self._publish_mode("READY")
+        else:
+            ok, msg = self._exit_freedrive()
+        n = len(self._waypoints)
+        min_count = int(self.get_parameter("waypoint_min_count").value)
+        auto_msgs: List[str] = []
+        if n >= min_count:
+            latest = os.path.join(self._wp_dir, "latest.yaml")
+            if self._save_waypoints_to(latest):
+                auto_msgs.append("auto-saved waypoints/latest.yaml")
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                hist = os.path.join(self._wp_dir, f"teach_wp_{ts}.yaml")
+                if self._save_waypoints_to(hist):
+                    auto_msgs.append(f"backup teach_wp_{ts}.yaml")
+            else:
+                auto_msgs.append("auto-save FAILED (see log)")
+        else:
+            auto_msgs.append(
+                f"auto-save skipped ({n} waypoints < {min_count}, keep previous latest)"
+            )
+        self._set_state(STATE_READY, f"waypoint teach stopped ({n} points)")
+        resp.success = True
+        resp.message = f"recorded {n} waypoints; " + ", ".join(auto_msgs) + (
             f" (zero_torque/stop: {msg})" if not ok else ""
         )
         return resp
@@ -2946,17 +3428,27 @@ class ArmController(Node):
     def _playback_cb(
         self, req: PlaybackTrajectory.Request, resp: PlaybackTrajectory.Response
     ) -> PlaybackTrajectory.Response:
+        # F131: type=waypoint 走路点任务子目录；strategy=ptp/lin
+        is_wp = (req.type or "").strip().lower() == "waypoint"
+        strategy = (req.strategy or "ptp").strip().lower()
+        if is_wp and strategy not in ("ptp", "lin"):
+            resp.success = False
+            resp.message = f"unknown strategy '{strategy}' (ptp/lin)"
+            return resp
         # F54: 空名 = 回放 latest 槽（分支在 sanitize 之前，_sanitize_name("")→"trajectory" 会撞纸面名）
         is_latest = not (req.name or "").strip()
-        label = "latest" if is_latest else _sanitize_name(req.name)
-        path = _traj_path_for(self._traj_dir, req.name)
+        label = (("wp_" if is_wp else "") + ("latest" if is_latest else _sanitize_name(req.name)))
+        base_dir = self._wp_dir if is_wp else self._traj_dir
+        path = _traj_path_for(base_dir, req.name)
         if not os.path.exists(path):
             if is_latest:
                 resp.success = False
                 resp.message = (
-                    "no latest trajectory yet —— 先 start_teach → 拖动 → stop_teach 录制,"
-                    "或显式指定 name (如 teach_jog2)"
-                )
+                    ("no latest waypoint task yet —— Share 长按进入路点示教 → "
+                     "L2 打点 → Options 保存, ") if is_wp
+                    else ("no latest trajectory yet —— 先 start_teach → 拖动 → "
+                          "stop_teach 录制, ")
+                    + "或显式指定 name")
             else:
                 resp.success = False
                 resp.message = f"trajectory not found: {path}"
@@ -2974,7 +3466,8 @@ class ArmController(Node):
         self._publish_mode("TRAJ_RUNNING")
         self._set_state(
             STATE_TRAJ,
-            f"playback return {label}" if use_moveit else f"playback {label}",
+            (f"waypoint {strategy} {label}" if is_wp
+             else (f"playback return {label}" if use_moveit else f"playback {label}")),
         )
 
         try:
@@ -2986,6 +3479,28 @@ class ArmController(Node):
             resp.success = False
             resp.message = f"load failed: {exc}"
             return resp
+
+        # F131: kind 双向门禁——杜绝连续轨迹被逐段规划、路点任务被短按原样回放
+        file_kind = str(data.get("kind") or "continuous")
+        if is_wp and file_kind != "waypoint":
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"playback {label}: kind gate")
+            resp.success = False
+            resp.message = (
+                f"'{label}' is {file_kind}, not a waypoint task —— "
+                "Square 短按回放连续轨迹；路点回放请先 Share 长按录制")
+            return resp
+        if not is_wp and file_kind == "waypoint":
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"playback {label}: kind gate")
+            resp.success = False
+            resp.message = (
+                f"'{label}' is a waypoint task —— 用 Square 长按(PTP)或"
+                "触摸板单击/Circle 长按(LIN)回放")
+            return resp
+
+        if is_wp:
+            return self._play_waypoints(data, label, strategy, resp)
 
         file_joint_names = list(data.get("joint_names") or self._joint_names)
         recorded_positions: List[List[float]] = []
@@ -3174,7 +3689,7 @@ class ArmController(Node):
         return resp
 
     def _enter_ai_cb(self, req: Trigger.Request, resp: Trigger.Response) -> Trigger.Response:
-        if self._state in (STATE_TRAJ, STATE_SERVO, STATE_TEACH, STATE_AI):
+        if self._state in (STATE_TRAJ, STATE_SERVO, STATE_TEACH, STATE_WAYPOINT_TEACH, STATE_AI):
             resp.success = False
             resp.message = f"busy in state={self._state}"
             return resp

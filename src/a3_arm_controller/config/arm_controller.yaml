@@ -22,7 +22,7 @@
     moveit_velocity_scaling: 0.15
     moveit_acceleration_scaling: 0.15
     # F116: /a3/arm/random_pose_tour 默认抽点数与点位池黑名单（zero=机械零位，真机排除）
-    random_tour_count: 5
+    random_tour_count: 10
     random_tour_exclude_poses: ["zero"]
     # 回放前从当前位姿插值到首记录点的时长（s）；≤0.05 关闭插值（F38）
     # LL-046: 2.5s→5s——ramp 把末位→首位差（如 L4 深垂 1.18 rad 段）压缩进 2.5s 会
@@ -49,6 +49,28 @@
     # F57/LL-053: 保存时轻量平滑（中心滑动平均窗口，@50Hz 采样数；0/1/2 = 不保存）。
     # latest.yaml / teach_*.yaml 落盘即干净，任何消费方受益。
     teach_save_smooth_samples: 5
+    # ── F131: 路点示教（Share 长按进入；L2 打点；Options 保存） ──────────────
+    # 路点 < 2 不保存（两点成一段；防误触发覆盖上一条好任务）
+    waypoint_min_count: 2
+    # 与上一路点最大关节差 < 10 mrad 视为重复，打点跳过（防 L2 连按刷屏）
+    waypoint_min_capture_delta_rad: 0.01
+    # 每段等待上限；0 = 复用 moveit_goto_timeout_s
+    waypoint_segment_timeout_s: 0.0
+    # 段间过渡混合半径（m）；初版 0 = 到位即停；Pilz Sequence blend 阶段二启用
+    waypoint_blend_radius_m: 0.0
+    # LIN 笛卡尔速度/加速度缩放（pilz 只缩放笛卡尔剖面，关节加速度尖峰靠 v^2 压低）
+    waypoint_lin_velocity_scaling: 0.1
+    waypoint_lin_acceleration_scaling: 0.1
+    # LIN 目标位姿容差（打点 FK 位姿盒）
+    waypoint_lin_pos_tol_m: 0.002
+    waypoint_lin_rot_tol_rad: 0.002
+    # LIN FK 参考坐标系（Pilz 在 base_link 下规划）
+    waypoint_base_link: base_link
+    waypoint_ee_link: end_effector
+    # LIN 规划组：arm_lin（SRDF 同链组，pick_ik global；arm 组 local 种子对远目标 IK -31）
+    waypoint_lin_planning_group: arm_lin
+    # 操作员事件（打点白闪反馈由 ds4_feedback_node 消费）
+    operator_event_topic: /a3/arm/operator_event
     # F41/F88: move_to/goto 兜底——最短时长；两点轨迹由 JTC splines 插值
     move_to_min_duration_s: 3.0
     # F40: 失能保护（不在 idle 容差内先平滑回 idle 再失能，防掉臂）；F113 home→idle
