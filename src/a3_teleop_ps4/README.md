@@ -2,7 +2,7 @@
 
 > **查键位看这里。改键位只编 `config/mappings/default.yaml`，零代码。**
 > 操作员手册（流程/灯/震动）：[docs/edge/PS4_OPERATOR_GUIDE.md](../../docs/edge/PS4_OPERATOR_GUIDE.md)
-> 需求与验收：[docs/edge/REQUIREMENTS.md](../../docs/edge/REQUIREMENTS.md) F60–F64、F119/F120；
+> 需求与验收：[docs/edge/REQUIREMENTS.md](../../docs/edge/REQUIREMENTS.md) F60–F64、F119/F120/F135；
 > 安全合同：[docs/shared/SAFETY.md](../../docs/shared/SAFETY.md)。
 
 ## 完整映射表（`mapping:=default`，F60 + F64）
@@ -21,7 +21,7 @@
 | **Square（■）** | 长按 1.5 s | 回放最新**路点** PTP（关节空间 MoveJ，F131） | `/a3/arm/playback {name: "", type: "waypoint", strategy: "ptp"}` |
 | **Circle（●）** | 短按 | goto idle | `/a3/arm/goto_named_pose {name: idle}` |
 | **Circle（●）** | 长按 1.5 s | 回放最新**路点** LIN（笛卡尔直线，F131；跨奇异拒绝不回落 PTP） | `/a3/arm/playback {name: "", type: "waypoint", strategy: "lin"}` |
-| **PS** | 短按 | init（设零 + 到位确认 + 自动使能） | `/a3/arm/init` |
+| **L1+R1 同按** | 长按 2 s | init（设零 + 到位确认 + 自动使能；F135 起 PS 键解绑——PS 是开机键易误触） | `/a3/arm/init` |
 | **L1** | 按住 | **平移死人开关**：仅放行平移轴（F64 gates） | 松开约 0.5 s servo 超时停 |
 | **R1** | 按住 | **旋转死人开关**：仅放行偏航轴 | 同上 |
 | **R2** | 模拟 | 夹爪力控（**不需要 L1/R1**），松开全开 | gripper_force |
@@ -34,7 +34,7 @@
 
 > F115 起 D-pad 不再调速，平移/旋转恒用 `speed_normal`（默认 0.35）；`step_linear_scale/step_angular_scale` 动作函数保留，自定义映射可自行绑定。
 
-口诀：**L3 开工、R3 收工、✕ 长按急停；▲ home、● idle（F120）；Share-Options-■ = 连续示教-保存-回放；Share 长按+L2 打点 = 路点示教（F131），■ 长按 PTP、● 长按 LIN；PS 初始化；L1 平移、R1 旋转、十字键直达 home 四周四点。**
+口诀：**L3 开工、R3 收工、✕ 长按急停；▲ home、● idle（F120）；Share-Options-■ = 连续示教-保存-回放；Share 长按+L2 打点 = 路点示教（F131），■ 长按 PTP、● 长按 LIN；L1+R1 同按 2 s 初始化（F135，PS 已解绑）；L1 平移、R1 旋转、十字键直达 home 四周四点。**
 
 ## DS4 灯带 / 震动（F61，`ds4_feedback_node`）
 

@@ -54,6 +54,9 @@ axes:
 
 # 十字键虚拟按钮（/joy 空间 hat：上=+1、下=-1、左=+1、右=-1，与蓝牙布局符号相反）
 virtual_buttons:
+  # F135: 组合键 L1+R1 同时按住，防止 PS 键误触
+  l1_r1:
+    buttons: [l1, r1]
   dpad_up:
     axis: dpad_y
     op: gt

@@ -293,13 +293,23 @@ def main():
         rep.info("S0 窗口内无 feedback（启动前已稳态），按 Running/gate/IDLE 推断橙灯")
     rep.check("S0 灯态橙色（已上电未使能）", orange_idle)
 
-    # ---- 场景 1：PS init → READY + 白闪 ----
+    # ---- 场景 1：L1+R1 长按 init → READY + 白闪（F135；PS 已解绑，先回归断言 PS 无效）----
     t0 = node.marker()
-    print("[INFO] 场景1: PS 短按（arm_init）", flush=True)
+    print("[INFO] 场景1a: PS 短按不应触发 init（F135 回归）", flush=True)
     node.tap(B_PS, 0.30)
+    node.sleep(1.0)
+    rep.check("S1a PS 短按后仍 IDLE（已解绑）", node.arm_state() == "IDLE",
+              f"state={node.arm_state()} msg={node.arm_msg()!r}")
+    t0 = node.marker()
+    print("[INFO] 场景1b: L1+R1 长按 2.5s（arm_init）", flush=True)
+    node.press(B_L1)
+    node.press(B_R1)
+    node.sleep(2.5)
+    node.release(B_R1)
+    node.release(B_L1)
     ok_init = node.wait_arm("READY", 12.0)
     q = node.joints()
-    rep.check("S1 PS init 后 READY（自动 enable）", ok_init,
+    rep.check("S1 L1+R1 init 后 READY（自动 enable）", ok_init,
               f"state={node.arm_state()} msg={node.arm_msg()!r}")
     white = fb_any(t0, lambda d: d.get("color") == "white")
     rep.check("S1 白闪一次（init 完成）", white)

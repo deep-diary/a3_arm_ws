@@ -44,6 +44,9 @@ axes:
 
 # Virtual buttons from D-pad axes (Linux: -1 left/up, +1 right/down).
 virtual_buttons:
+  # F135: 组合键 L1+R1 同时按住，防止 PS 键误触
+  l1_r1:
+    buttons: [l1, r1]
   dpad_up:
     axis: dpad_y
     op: lt

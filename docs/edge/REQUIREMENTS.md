@@ -91,7 +91,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   2. 开启且 `/a3/gravity_torque` 新鲜时：`τ_mit[i] ≈ gravity_ff_scale * joint_signs[i] * τ_g[i]`
   3. 可运行时 `ros2 param set /motor_protocol_node enable_gravity_compensation true|false`
 - **关联：** [shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md) C3；`control_gains.yaml`
-- **状态：** `implemented`（接线 + 开关；真机标定/拖动板测中）
+- **状态：** `implemented`（2026-10-02 真机验收通过：idle 位姿 τ_g 抑制生效（L3 实测 +1.29 Nm vs 理论 -3.37 Nm，接触分担），goto home 两次往返 L3 峰值 4.46 Nm（去程）/3.54 Nm（回程），方向正确；idle 抑制逻辑（`idle_pose` + `idle_threshold_rad`）已集成至 `gravity_torque_node`；F49 标定惯性经 `gravity_torque_node` 发布 `/a3/gravity_torque`，`motor_protocol_node` 叠加至 MIT tau）
 
 ### F15 — JTC 兼容样条插值（C2 增强）
 
@@ -665,7 +665,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   | Share | 短按 | `teach_start` |
   | Options | 短按 / 长按 3 s | `teach_stop`（自动保存 latest，F54）/ `power_set_zero` |
   | Square | 短按 | `playback_latest`（空名 ≡ latest 槽位） |
-  | PS | 短按 | `arm_init`（set_zero + 到位校验 + 自动 enable） |
+  | PS | 短按 | `arm_init`（set_zero + 到位校验 + 自动 enable）（**F135 起改绑 L1+R1 同按长按 2 s，PS 解绑**） |
   | L1 | 按住 | deadman，**仅门控摇杆平移/偏航轴**（applies_to=analog_n11） |
   | R2 | 模拟量 | 夹爪力控，**不经 L1 门控**（kind=analog_01，F36 迟滞/力矩映射不变） |
   | R1 | 按住 | 速度档 0.35 ↔ 1.0 |
@@ -710,7 +710,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   1. `a3_bringup/launch/edge_teleop_full_sim.launch.py`：include `edge_web_sim`（use_rviz:=false, use_target_ghost:=true, use_gripper:=true）+ 内联 MoveIt Servo 块（复用 a3_bringup.launch.py 的 servo_mode_bridge + servo_node_main 写法，禁止叠加会双 RSP/双 /joint_states 的 servo.launch）+ ps4_teleop（use_joy_node:=false, mapping:=default, enable_feedback:=true）+ 双模型 RViz（软件渲染，LL-027）。
   2. `scripts/a3_test/ps4_sim_test.py`：50 Hz 合成 `sensor_msgs/Joy`（axes[8]/buttons[14]，ds4_linux 索引；开场 ≥25 拍全零基线满足 mapper alive 计数，每步回零）；BEST_EFFORT 订阅 /joint_states；纯 rclpy 计时（LL-050，不用 ros2 CLI 做时序断言）；Reporter 风格逐步打印 PASS/FAIL + 关节位移证据。
   3. 隔离域 ROS_DOMAIN_ID=45。
-  12 场景：基线橙 → PS init → Triangle ready → L3 幂等 → R2 脱离 L1 开合 L7 → 摇杆 deadman 逐轴方向表 + R1 速度档 → Circle home → 示教三件套（断言 latest.yaml mtime）→ R3 失能 → L3 恢复 → X 长按硬急停+恢复 → Options 长按 set_zero。
+  12 场景：基线橙 → PS init（**F135 起改为 L1+R1 长按 init，前置 PS 解绑回归断言**）→ Triangle ready → L3 幂等 → R2 脱离 L1 开合 L7 → 摇杆 deadman 逐轴方向表 + R1 速度档 → Circle home → 示教三件套（断言 latest.yaml mtime）→ R3 失能 → L3 恢复 → X 长按硬急停+恢复 → Options 长按 set_zero。
   仿真与真机已知差异**只记录不断言**：sim_power shutdown 无 SoftProne 动画/无 F51 联动；sim 不校验 set_zero 状态前提；sim /joint_states 为 RELIABLE（F60 的 QoS 修复在仿真不可复现，仅代码审查）；sim 不强制门禁。
 - **验收标准：**
   1. `ros2 launch a3_bringup edge_teleop_full_sim.launch.py`（DOMAIN 45）起栈无致命错误，双模型 RViz 可见
@@ -1946,6 +1946,20 @@ flowchart TD
   5. 真机回归：三链路连续过弯；观测 LIN 0.2 缩放下关节加速度/力矩尖峰与 blend 偏离量
 - **关联：** F116（随机巡游/逐腿回退链）、F131（路点示教/逐段回退链）、F107（静态力矩门禁）、F42（占空比门禁）、F68/F133（retime）、pilz MotionSequence API、[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)、[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)（Wave A 轨迹连续性对标）
 - **状态：** `implemented`（2026-10-01 仿真三链路 PASS，含连续性速度包络实测；真机回归待上电）
+
+### F135 — init 键改绑 L1+R1 长按 2 s，PS 解绑防开机误触
+
+- **说明：** 当前 `default.yaml` 将 `arm_init` 绑在 **PS 键短按**。PS 键是手柄开机/唤醒键，开机过程中极易误触导致重复 init（状态机虽会拒绝，但操作员感受是「按了没反应/报错」）。改为 **同时按住 L1+R1 再长按 2 s** 触发 init，大幅抬升误触门槛；PS 键不再绑定任何操作。
+
+- **实现方式：** 新增虚拟按钮 `l1_r1`（组合键），以 `and` 逻辑对 L1/R1 两个物理按钮做采样，注册到 `ds4_linux.yaml` / `ds4_linux_usb.yaml`。mapping 引擎当前已有 `virtual_buttons`（轴阈值方式），新增 `type: combo` 语义，支持 `buttons: [l1, r1]` 列表。`default.yaml` 取消 `ps` 绑定，新增 `l1_r1` 绑定 `arm_init`（longpress，2 s）。
+
+- **验证与追溯：**
+  - `validate_mapping` 零报错；sim 脚本场景 S1 改发 L1+R1 同时按下 2.5 s（含 0.5 s 裕量）并断言 READY+白闪
+  - PS 键单独短按不再触发任何动作（回归断言）
+  - 手册/SAFETY 键位总览同步替换 PS→L1+R1
+
+- **关联：** F60（键位总览）、F62（仿真验收脚本）、F134（上一条需求，后续编号连续）；[PS4_OPERATOR_GUIDE.md](PS4_OPERATOR_GUIDE.md)、[src/a3_teleop_ps4/README.md](../../src/a3_teleop_ps4/README.md)
+- **状态：** `implemented`（2026-10-03：mapping.py 组合键 + 双 layout 注册 l1_r1 + default.yaml 改绑 + sim S1 全绿——PS 解绑回归断言通过、L1+R1 长按 2 s init → READY + 白闪；S4/S10 4 项 FAIL 为仿真已知差异，与本改动无关；真机实操待复测）
 
 ## 验收标准
 

@@ -11,7 +11,7 @@
 #              Circle 短按=idle / Circle 长按 1.5s=路点 LIN 直线回放
 #              Options 长按 3s=F116 随机点位巡游（READY 态才执行；TEACH/WAYPOINT_TEACH 等态被服务端拒绝）
 #   点位:      L2 短按=保存当前位姿为 snap_YYYYMMDD_HHMMSS（F114，写包内 named_poses.yaml）
-#   功能:      PS 短按=init(调零+自动使能)
+#   功能:      L1+R1 同按长按 2s=init(调零+自动使能)（F135：PS 为开机键易误触，已解绑）
 #   运动:      L1 按住+摇杆=末端平移死人开关 / R1 按住+摇杆=末端旋转死人开关(首批仅偏航)
 #              左摇杆=平移 Y(左右)/Z(上下)；右摇杆上下=平移 X(前后)，右摇杆左右=偏航
 #              （F115 起 D-pad 调速退役，平移/旋转恒用 speed_normal 默认档）
@@ -97,10 +97,13 @@ buttons:
     - fn: playback_waypoints_ptp
       edge: longpress
       hold_s: 1.5
-  ps:
+  # F135: init 从 PS 键迁到 L1+R1 组合键长按（PS 是手柄开机/唤醒键，开机过程易误触）。
+  # 用 longpress 而非 shortpress：必须双键持续同按 2s，避免 jog 时 L1/R1 短暂交叠误触发；
+  # 即使误触发，SERVO/TRAJ/TEACH 等 busy 态下 init 会被编排层状态机拒绝（双保险）。
+  l1_r1:
     fn: arm_init
-    edge: shortpress
-    hold_s: 3.0
+    edge: longpress
+    hold_s: 2.0
   l3:
     fn: arm_power_enable
     edge: shortpress

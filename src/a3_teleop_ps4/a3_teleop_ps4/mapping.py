@@ -72,6 +72,9 @@ class Ds4Layout:
     def button(self, joy: Joy, name: str) -> bool:
         if name in self.virtual_buttons:
             return self._virtual(joy, name)
+        return self._physical(joy, name)
+
+    def _physical(self, joy: Joy, name: str) -> bool:
         idx = self.buttons.get(name)
         if idx is None or idx < 0 or idx >= len(joy.buttons):
             return False
@@ -79,6 +82,10 @@ class Ds4Layout:
 
     def _virtual(self, joy: Joy, name: str) -> bool:
         spec = self.virtual_buttons[name]
+        # 组合键（F135）：列表内物理按钮全部按住才算 held（不嵌套虚拟按钮）
+        combo = spec.get("buttons")
+        if combo:
+            return all(self._physical(joy, str(b)) for b in combo)
         axis = str(spec.get("axis", ""))
         v = self.axis_raw(joy, axis)
         th_on = float(spec.get("threshold", 0.5))
