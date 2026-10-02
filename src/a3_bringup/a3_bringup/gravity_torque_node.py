@@ -66,6 +66,16 @@ class GravityTorqueNode(Node):
             "tau_scale",
             [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
         )
+        # idle 位姿（堆叠自稳定）重力前馈抑制：
+        # idle 位姿连杆物理接触自稳定，Pinocchio 算出的 τ_g（如 L3 ~3.4 Nm）
+        # 实为「纯悬臂假设」的结果——若施加前馈，电机对抗堆叠接触纯发热不做功。
+        # 当所有关节角与 idle_pose 的差绝对值均 < idle_threshold_rad 时，
+        # τ_g 输出全零，让臂自然堆叠、电机不出力。
+        self.declare_parameter(
+            "idle_pose",
+            [-0.0002, 0.0006, 0.0002, 0.3351, 0.0121, -0.0002, -0.0002],
+        )
+        self.declare_parameter("idle_threshold_rad", 0.1)
 
         self._joint_names: List[str] = list(
             self.get_parameter("joint_names").get_parameter_value().string_array_value
@@ -91,6 +101,15 @@ class GravityTorqueNode(Node):
         self._mode = "IDLE"  # IDLE | TRAJ_RUNNING | GRAVITY_COMP
         self._external_mode = "IDLE"
         self._traj_end_time: Optional[rclpy.time.Time] = None
+
+        idle_pose_raw = self.get_parameter("idle_pose").value
+        try:
+            self._idle_pose = np.array(idle_pose_raw, dtype=np.float64)
+        except (TypeError, ValueError):
+            self._idle_pose = np.zeros(n, dtype=np.float64)
+        if self._idle_pose.size != n:
+            self._idle_pose = np.zeros(n, dtype=np.float64)
+        self._idle_threshold = float(self.get_parameter("idle_threshold_rad").value)
 
         self._inertia = self._load_inertia()
         self._pin_model = None
@@ -282,6 +301,12 @@ class GravityTorqueNode(Node):
                     self._q[i] = float(msg.position[idx])
 
     def _compute_tau(self) -> List[float]:
+        # idle 堆叠自稳定位姿：连杆接触已承担重力，前馈会让电机对抗接触纯发热。
+        # 所有关节角与 idle_pose 差绝对值 < 阈值时输出全零。
+        if self._idle_pose.size == len(self._q) and self._idle_threshold > 0.0:
+            if float(np.max(np.abs(self._q - self._idle_pose))) < self._idle_threshold:
+                return [0.0] * len(self._joint_names)
+
         if self._backend == "pinocchio" and self._pin_model is not None:
             pin = self._pin
             q = pin.neutral(self._pin_model)

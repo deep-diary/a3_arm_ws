@@ -370,6 +370,22 @@ def generate_launch_description():
         output="screen",
     )
 
+    # F9/F49：Pinocchio 重力力矩发布（JTC/位置控制模式下的重力前馈源）。
+    # 订阅 /joint_states（URDF frame，joint_direction 全 1），加载 F49 标定的
+    # inertia_params.yaml（apply_calibrated_inertia=true），发布 /a3/gravity_torque。
+    # motor_protocol_node 在 enable_gravity_compensation=true 时叠加到 MIT tau 前馈。
+    gravity_torque_node = Node(
+        package="a3_bringup",
+        executable="gravity_torque_node",
+        name="a3_gravity_torque",
+        output="screen",
+        parameters=[{
+            "enabled": True,
+            "apply_calibrated_inertia": True,
+            "joint_direction": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        }],
+    )
+
     # F118：薄桥接累积器（绝对目标）。downstream 在 JTC 原生话题前，非 arm 关节透传。
     servo_anchor_node = Node(
         package="a3_bringup",
@@ -598,6 +614,7 @@ def generate_launch_description():
             mqtt_bridge,
             servo_node,
             servo_bridge,
+            gravity_torque_node,
             servo_anchor_node,
             self_test_node,
             teleop,

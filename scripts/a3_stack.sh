@@ -10,6 +10,7 @@
 #   a3_stack.sh stop                  优雅停栈（臂未失能会拒绝，-f 跳过）
 #   a3_stack.sh restart               重启 = stop + start
 #   a3_stack.sh status                查看 can1 / 进程 / arm_status
+#   a3_stack.sh free [on|off]         零重力矩补偿自由拖动（on=进入，off=退出恢复闭环）
 #   可选参数：-f|--force（停栈跳过臂状态安全门）
 #             --rviz（启动/重启时随栈打开 RViz）
 #             --no-probe（跳过起栈前电机在线探测；降级档/确认无硬件时用）
@@ -102,12 +103,43 @@ sim_stack_pids() {
 
 # 读 /a3/arm_status 的 state 字段；读不到输出空
 arm_state() {
-  timeout 4 ros2 topic echo /a3/arm_status --once 2>/dev/null \
+  # --no-daemon：绕过 ros2 daemon 的过期发现缓存（栈重启后 daemon 可能仍持有
+  # 旧节点列表，导致 ros2 topic echo 直接返回空）。代价是首次发现慢 ~1-2s。
+  timeout 8 ros2 topic echo /a3/arm_status --once --no-daemon 2>/dev/null \
     | awk '/^state:/{print $2; exit}'
 }
 
 can1_up() {
   ip -details link show can1 2>/dev/null | head -1 | grep -q 'state UP'
+}
+
+# 读取 can1 的 CAN 控制器状态：ERROR-ACTIVE / ERROR-PASSIVE / BUS-OFF / STOPPED
+# 仅 ERROR-ACTIVE 可保证正常收发；ERROR-PASSIVE 虽能收发但已退化，BUS-OFF 完全静默。
+can1_bus_state() {
+  ip -details link show can1 2>/dev/null \
+    | grep -oE 'can state [A-Z-]+' | awk '{print $3}'
+}
+
+# 主动恢复 can1：bus-off/error-passive 时尝试重置接口（需 net_admin，用 sudo）。
+# 若 sudo 不可用则跳过，依赖 restart-ms 100 的自动恢复（最多等 ~300ms）。
+recover_can1() {
+  local st
+  st="$(can1_bus_state)"
+  case "$st" in
+    BUS-OFF|ERROR-PASSIVE)
+      warn "can1 状态=$st，尝试重置接口恢复…"
+      if sudo -n ip link set can1 down 2>/dev/null && \
+         sudo -n ip link set can1 up 2>/dev/null; then
+        sleep 0.3
+        ok "can1 已重置，当前状态=$(can1_bus_state)"
+        return 0
+      fi
+      warn "无 sudo 权限重置 can1，等待 restart-ms 100 自动恢复（~0.3s）…"
+      sleep 0.3
+      return 1
+      ;;
+    *) return 0 ;;
+  esac
 }
 
 # 期望在线的电机（权威：a3_can_bridge config/motor_map.yaml 的 motor_ids_by_index）
@@ -117,25 +149,39 @@ EXPECTED_MOTOR_COUNT=7
 # 起栈前无侵入探测电机：成功（7/7）返回 0；0 个或部分应答返回 1
 # 原理：MIT 电机只要有 24V 动力电就应答 get_device_id(cmd 0)，与软件 gate/enable 无关。
 # 此时栈未启动、can1 无占用者，探测安全。
+# 鲁棒性：探测前先看 can1 控制器状态，BUS-OFF/ERROR-PASSIVE 则重置接口；
+#         探测失败（含 0 应答）最多重试 PROBE_RETRIES 次，每次前 recover_can1。
+PROBE_RETRIES=3
 probe_motors() {
   info "探测 can1 在线电机（ID 1..7，get_device_id 无侵入，不使能）…"
-  local out cnt answered missing
-  out="$(timeout 30 python3 "$SCRIPT_DIR/mit_noenable_stream.py" probe \
-           --iface can1 --ids 1..7 2>/dev/null \
-           | grep -E '发现 [0-9]+ 个电机|motor_id=|无任何应答')"
+  local attempt out cnt answered missing
+  for attempt in $(seq 1 "$PROBE_RETRIES"); do
+    recover_can1   # BUS-OFF/ERROR-PASSIVE 时重置接口；ERROR-ACTIVE 直接返回
 
-  cnt="$(printf '%s' "$out" | sed -n 's/.*发现 \([0-9]\+\) 个电机.*/\1/p')"
-  answered="$(printf '%s' "$out" | sed -n 's/.*motor_id= *\([0-9]\+\).*/\1/p' | sort -n | tr '\n' ' ')"
-  [ -z "$cnt" ] && cnt=0
+    out="$(timeout 30 python3 "$SCRIPT_DIR/mit_noenable_stream.py" probe \
+             --iface can1 --ids 1..7 2>/dev/null \
+             | grep -E '发现 [0-9]+ 个电机|motor_id=|无任何应答')"
 
-  if [ "$cnt" -eq "$EXPECTED_MOTOR_COUNT" ]; then
-    ok "电机探测通过 $cnt/$EXPECTED_MOTOR_COUNT（ID: $answered）"
-    return 0
-  fi
+    cnt="$(printf '%s' "$out" | sed -n 's/.*发现 \([0-9]\+\) 个电机.*/\1/p')"
+    answered="$(printf '%s' "$out" | sed -n 's/.*motor_id= *\([0-9]\+\).*/\1/p' | sort -n | tr '\n' ' ')"
+    [ -z "$cnt" ] && cnt=0
+
+    if [ "$cnt" -eq "$EXPECTED_MOTOR_COUNT" ]; then
+      [ "$attempt" -gt 1 ] && ok "电机探测通过（第 $attempt 次尝试）$cnt/$EXPECTED_MOTOR_COUNT（ID: $answered）" \
+                            || ok "电机探测通过 $cnt/$EXPECTED_MOTOR_COUNT（ID: $answered）"
+      return 0
+    fi
+
+    if [ "$attempt" -lt "$PROBE_RETRIES" ]; then
+      warn "第 $attempt/$PROBE_RETRIES 次探测仅 $cnt/$EXPECTED_MOTOR_COUNT（can1=$(can1_bus_state)），重试…"
+      sleep 0.5
+    fi
+  done
 
   if [ "$cnt" -eq 0 ]; then
-    err "电机探测 0/$EXPECTED_MOTOR_COUNT：can1 上无任何应答"
+    err "电机探测 0/$EXPECTED_MOTOR_COUNT：can1 上无任何应答（can1=$(can1_bus_state)）"
     err "请检查：① 24V 动力电是否开启  ② 急停按钮是否弹起  ③ CAN 线束是否接在 can1 / 终端电阻"
+    err "终端电阻应为 60Ω（两端 120Ω 并联）；当前若偏低会触发 bus-off"
   else
     missing=""
     local id
@@ -257,6 +303,54 @@ do_stop_sim() {
   ok "仿真栈已清干净（domain $SIM_DOMAIN）"
 }
 
+# 兼容 ros2 CLI 两种 Trigger 应答输出：
+#   YAML 多行：success: true / message: 'xxx'
+#   单行：     Trigger_Response(success=True, message='xxx')
+_srv_trigger_msg() {
+  printf '%s\n' "$1" | grep -oE "message='[^']*'|message=\"[^\"]*\"|message: .*" | head -1 \
+    | sed -E "s/^message=[\"']//; s/^message:[ ]*//; s/[\"']$//; s/^'//; s/'$//"
+}
+
+# 零重力矩补偿自由拖动：直接调执行层 /a3/zero_torque/start|stop（软 kp + 重力前馈），
+# 与 PS4 mapper 的 zero_torque action 同路，不经过 arm_controller 门面 → 不启动示教
+# 记录。退出时执行层自动把目标重锚到当前反馈位（F38 防弹回）。
+do_free() {
+  local turn_off="$1"
+
+  if ! stack_alive; then
+    if [ "$SIM" = 1 ]; then
+      err "仿真栈未在运行"
+    else
+      err "真机栈未在运行"
+    fi
+    return 1
+  fi
+
+  local srv out state
+  if [ "$turn_off" = 1 ]; then
+    info "退出零力矩，恢复位置闭环…"
+    srv="/a3/zero_torque/stop"
+  else
+    state="$(arm_state)"
+    if [ -n "$state" ] && [ "$state" != "READY" ]; then
+      warn "臂 state=$state（未使能）：零力矩拖动需电机已使能（PS4 L3 或 /a3/arm/enable）"
+    fi
+    warn "即将进入零力矩（软 kp + 重力前馈），请扶住手臂…"
+    srv="/a3/zero_torque/start"
+  fi
+
+  out="$(timeout 8 ros2 service call "$srv" std_srvs/srv/Trigger 2>&1)"
+  if printf '%s' "$out" | grep -qE 'success: true|success=True'; then
+    ok "$(_srv_trigger_msg "$out")"
+    [ "$turn_off" = 0 ] && info "拖动完成后退出：$0 free off$([ "$SIM" = 1 ] && echo ' --sim')"
+    return 0
+  fi
+  local msg
+  msg="$(_srv_trigger_msg "$out")"
+  err "零力矩操作失败：${msg:-$(printf '%s' "$out" | tr '\n' ' ')}"
+  return 1
+}
+
 do_start() {
   local with_rviz="${1:-0}" do_probe="${2:-1}" do_joy="${3:-1}"
   if [ "$SIM" = 1 ]; then
@@ -309,7 +403,7 @@ do_start() {
 
   local state power
   state="$(arm_state)"
-  power="$(timeout 4 ros2 topic echo /power_sequence/state --once 2>/dev/null \
+  power="$(timeout 8 ros2 topic echo /power_sequence/state --once --no-daemon 2>/dev/null \
             | awk '/^data:|^state:/{print $2; exit}')"
 
   if [ -n "$state" ]; then
@@ -395,7 +489,7 @@ do_status() {
 
   echo "── arm_status ──────────────────────"
   if stack_alive; then
-    timeout 4 ros2 topic echo /a3/arm_status --once 2>/dev/null \
+    timeout 8 ros2 topic echo /a3/arm_status --once --no-daemon 2>/dev/null \
       | awk '/^(state|mode|message):/{print "  "$0}' || echo "  （读不到）"
   else
     echo "  栈未运行"
@@ -429,7 +523,7 @@ do_status_sim() {
 
   echo "── arm_status ──────────────────────"
   if stack_alive; then
-    timeout 4 ros2 topic echo /a3/arm_status --once 2>/dev/null \
+    timeout 8 ros2 topic echo /a3/arm_status --once --no-daemon 2>/dev/null \
       | awk '/^(state|mode|message):/{print "  "$0}' || echo "  （读不到）"
   else
     echo "  仿真栈未运行"
@@ -438,11 +532,13 @@ do_status_sim() {
 
 usage() {
   cat <<EOF
-用法：$0 {start|stop|restart|status} [-f|--force] [--rviz] [--no-probe] [--keep-rviz] [--sim] [--no-joy]
+用法：$0 {start|stop|restart|status|free} [-f|--force] [--rviz] [--no-probe] [--keep-rviz] [--sim] [--no-joy]
   start    启动真机栈（先探测电机 7/7 在线，setsid 起栈，日志 $LOG_FILE）
   stop     优雅停栈（臂未失能默认拒绝）
   restart  重启
   status   查看状态
+  free     零重力矩补偿自由拖动：free / free on 进入（软 kp + 重力前馈），
+           free off 退出恢复位置闭环；需栈已运行且电机已使能（READY）
   -f, --force    停栈时跳过臂状态安全门
   --rviz         启动/重启时随栈一起打开 RViz
   --no-probe     跳过起栈前电机在线探测（5J 降级档/确认无硬件时）
@@ -454,6 +550,7 @@ usage() {
   $0 start --sim           # 起仿真栈 + 真手柄（默认 use_joy_node:=true），日志 $SIM_LOG_FILE
   $0 start --sim --rviz    # 同上 + 双模型 RViz
   $0 stop --sim            # 停仿真栈（无臂失能安全门）
+  $0 free off --sim        # 退出仿真栈零力矩
   本机 ros2 CLI 旁听：export ROS_DOMAIN_ID=$SIM_DOMAIN
 EOF
 }
@@ -478,7 +575,7 @@ main() {
   esac
   local action="$1"; shift
 
-  local force=0 keep_rviz=0 with_rviz=0 do_probe=1 do_joy=1
+  local force=0 keep_rviz=0 with_rviz=0 do_probe=1 do_joy=1 turn_off=0
   while [ $# -gt 0 ]; do
     case "$1" in
       -f|--force) force=1 ;;
@@ -486,6 +583,8 @@ main() {
       --no-probe) do_probe=0 ;;
       --keep-rviz) keep_rviz=1 ;;
       --no-joy) do_joy=0 ;;
+      on|start) turn_off=0 ;;
+      off|stop) turn_off=1 ;;
       -h|--help) usage; exit 0 ;;
       *) err "未知参数：$1"; usage; exit 1 ;;
     esac
@@ -495,6 +594,7 @@ main() {
   case "$action" in
     start)   do_start "$with_rviz" "$do_probe" "$do_joy" ;;
     stop)    do_stop "$force" "$keep_rviz" ;;
+    free)    do_free "$turn_off" ;;
     restart) do_stop "$force" "$keep_rviz" || exit 1
              do_start "$with_rviz" "$do_probe" "$do_joy" ;;
     status)  do_status ;;

@@ -21,6 +21,7 @@
 > ./scripts/a3_stack.sh stop       # 优雅停（臂未失能默认拒绝；-f 跳过安全门；--keep-rviz 保留独立 RViz）
 > ./scripts/a3_stack.sh restart    # 重启（可带 --rviz）
 > ./scripts/a3_stack.sh status     # 查看 can1 / 进程 / arm_status
+> ./scripts/a3_stack.sh free       # 零重力矩补偿自由拖动（free off 退出恢复闭环；需栈在跑且已使能 READY）
 > ```
 > 起栈前会无侵入探测 ID 1..7（电机有 24V 即应答，与软件门禁无关）：0/7 或缺关节会提示
 > （查动力电/急停/CAN 线束）并中止，不拉起栈；5J 降级档等场景加 `--no-probe` 跳过。
