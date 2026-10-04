@@ -10,7 +10,7 @@ A3 机械臂唯一产品入口（F78）：hardware:=mock|can，两种模式拓�
     ├ gripper_controller effort GAC L7（**inactive 启动**，标准 /gripper_cmd，F87）
     └ zero_torque_controller（inactive 常驻，F73 示教自由拖动时互斥切换）
   move_group（OMPL + Pilz PTP/LIN/CIRC 双规划管线 + Sequence，直连 JTC FJT action）
-  a3_trajectory_processing/retime_trajectory_node（保几何重定时，arm_with_gripper）
+  a3_trajectory_processing/retime_trajectory_node（保几何重定时，arm L1–L6，排除 L7）
   moveit_servo servo_node（TwistStamped + JointJog 双输入，输出 → arm JTC 原生话题）
     + servo_mode_bridge
   a3_arm_controller 编排层（control_backend=fjt_action，
@@ -330,7 +330,7 @@ def generate_launch_description():
         ],
     )
 
-    # ---- retime（F68 保几何重定时服务，arm_with_gripper 7 关节）----
+    # ---- retime（F68 保几何重定时服务，arm L1–L6；L7 由编排层原始时间戳下发）----
     jl_map = (joint_limits_yaml or {}).get("joint_limits", {})
     velocity_limits = {
         name: float(d["max_velocity"])
@@ -350,7 +350,7 @@ def generate_launch_description():
         parameters=[
             {"robot_description": robot_description},
             {"robot_description_semantic": robot_description_semantic},
-            {"group_name": "arm_with_gripper"},
+            {"group_name": "arm"},
             {"velocity_limits": velocity_limits},
             {"acceleration_limits": acceleration_limits},
         ],

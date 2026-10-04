@@ -46,7 +46,7 @@ public:
     // 下发的同名参数，这里直接 declare 会抛 ParameterAlreadyDeclaredException
     group_name_ = has_parameter("group_name")
                       ? get_parameter("group_name").as_string()
-                      : declare_parameter<std::string>("group_name", "arm_with_gripper");
+                      : declare_parameter<std::string>("group_name", "arm");
     default_jerk_scale_ = has_parameter("default_jerk_scale")
                               ? get_parameter("default_jerk_scale").as_double()
                               : declare_parameter<double>("default_jerk_scale", 5.0);

@@ -10,7 +10,7 @@ F75 全产品 mock-hardware 标准栈（无电机 / 无 CAN / 零自研 sim 节�
         ├ arm_controller JTC L1–L6（**inactive 启动，enable 才激活**）
         └ gripper_controller JTC L7（**inactive 启动**）
   move_group（moveit_simple_controller_manager 直连 JTC FJT action）
-  a3_trajectory_processing/retime_trajectory_node（保几何重定时，arm_with_gripper）
+  a3_trajectory_processing/retime_trajectory_node（保几何重定时，arm L1–L6，排除 L7）
   a3_arm_controller 编排层：
     control_backend=fjt_action（F74 双 JTC action 拆分）
     motor_service_backend=controller_switch（F75：enable/disable 经标准
@@ -203,7 +203,7 @@ def generate_launch_description():
         parameters=[
             {"robot_description": robot_description},
             {"robot_description_semantic": robot_description_semantic},
-            {"group_name": "arm_with_gripper"},
+            {"group_name": "arm"},
             {"velocity_limits": velocity_limits},
             {"acceleration_limits": acceleration_limits},
         ],

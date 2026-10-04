@@ -249,7 +249,7 @@ def generate_launch_description():
         parameters=[
             {"robot_description": robot_description},
             {"robot_description_semantic": robot_description_semantic},
-            {"group_name": "arm_with_gripper"},
+            {"group_name": "arm"},
             {"velocity_limits": velocity_limits},
             {"acceleration_limits": acceleration_limits},
         ],

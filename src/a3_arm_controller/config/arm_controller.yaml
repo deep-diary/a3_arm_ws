@@ -108,6 +108,12 @@
     motor_states_topic: /a3/motor/states
     torque_stats_file: "~/.a3/stats/torque_stats.yaml"
     torque_stats_save_interval_s: 10.0
+    # F107 静态重力矩门禁上限 = joint_rated_torque × static_torque_margin_ratio。
+    # 0.8→0.9：示教回放大臂高位形 L2 静态力矩 ~4.2 Nm 会被 0.8(4.0) 拦截；0.9(4.5)
+    # 放行，仍留 10% 动态余量（L2 连续额定 5.0、峰值 14）。
+    static_torque_margin_ratio: 0.9
+    # F107: 电机连续额定力矩（N·m），L1-L3 RS00=5.0、L4-L7 EL05=1.8（原代码默认值）
+    joint_rated_torque: [5.0, 5.0, 5.0, 1.8, 1.8, 1.8, 1.8]
     # F44: 温度管理（warn 仅告警；protect 自动回 idle 失能降温；迟滞恢复）
     # 阈值 2026-09-13 真机调高：官方电机自带 130°C 保护兜底，初版 65°C 过低
     # （ready 位 L3 保位 1.26 Nm 几分钟即触发 overtemp park，LL-023）
@@ -137,3 +143,8 @@
     named_poses_pkg: a3_description
     # F127: 示教自由拖动（ZERO_TORQUE）时随 arm 一并互切的夹爪控制器（LL-136 原子 swap）
     freedrive_gripper_controller: gripper_controller
+    # 回放 L7 夹爪按录制时间序列步进下发（GripperCommand 抢占式）：
+    # 20ms 步进 + 相邻点线性插值消除阶梯跳变；l7_max_velocity_rad_s 硬限速。
+    l7_seq_tick_s: 0.02
+    l7_seq_min_delta_rad: 0.01
+    l7_max_velocity_rad_s: 0.6

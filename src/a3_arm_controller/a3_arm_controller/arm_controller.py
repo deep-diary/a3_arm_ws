@@ -9,6 +9,7 @@ A3 arm orchestration layer (facade).
 
 from __future__ import annotations
 
+import bisect
 import collections
 import math
 import os
@@ -110,6 +111,22 @@ def _duration(sec: float) -> Duration:
 
 def _tfs_seconds(tfs: Duration) -> float:
     return float(tfs.sec) + tfs.nanosec * 1e-9
+
+
+def _interp_series(values: List[float], times: List[float], t: float) -> float:
+    """对严格递增时间序列做线性插值（用于 L7 重采样到 retime 时间轴写回）。"""
+    if not values:
+        return 0.0
+    if t <= times[0]:
+        return float(values[0])
+    if t >= times[-1]:
+        return float(values[-1])
+    i = bisect.bisect_right(times, t) - 1
+    t0, t1 = times[i], times[i + 1]
+    if t1 <= t0:
+        return float(values[i])
+    f = (t - t0) / (t1 - t0)
+    return values[i] + (values[i + 1] - values[i]) * f
 
 
 # F94: JTC VARIABLE_DEGREE_SPLINE 两点（端点 v/a=0）实测峰值速度/平均速度≈2.0–2.09
@@ -536,6 +553,15 @@ class ArmController(Node):
         self.declare_parameter("motor_states_topic", "/a3/motor/states")
         self.declare_parameter("torque_stats_file", "~/.a3/stats/torque_stats.yaml")
         self.declare_parameter("torque_stats_save_interval_s", 10.0)
+        # F43 防护：超量程/非有限力矩判定为异常反馈，不污染历史峰值统计
+        # （历史 L7 曾记下 23.8 Nm 脏值——超 EL05 ±6 量程 4 倍）
+        self.declare_parameter("torque_stats_max_nm", 20.0)
+        # 回放 L7 夹爪按录制时间序列步进下发（GripperCommand 抢占式），复现录制时
+        # 的张合时序，而非只取末点（GAC 无轨迹接口，见 _dispatch_trajectory）。
+        # 20ms 步进 + 相邻点线性插值消除阶梯跳变；l7_max_velocity_rad_s 硬限速。
+        self.declare_parameter("l7_seq_tick_s", 0.02)
+        self.declare_parameter("l7_seq_min_delta_rad", 0.01)
+        self.declare_parameter("l7_max_velocity_rad_s", 0.6)
         # F44: 温度管理（warn 仅告警；protect 自动回 idle 失能降温；迟滞恢复）
         # 默认阈值 2026-09-13 调高：官方电机自带 130°C 保护兜底，初版 65°C 过低（LL-023）
         self.declare_parameter("temp_protect_enabled", True)
@@ -640,6 +666,15 @@ class ArmController(Node):
         # F127: freedrive enter 是否真把 gripper 换出——INACTIVE 无法区分「被我们
         # 停」与「未配置」，故记标志而非 exit 再探测（LL-136）
         self._freedrive_gripper_swapped = False
+
+        # 回放 L7 夹爪时间序列下发（GripperCommand 抢占式步进）
+        self._l7_seq: List[Tuple[float, float]] = []
+        self._l7_seq_idx = 0
+        self._l7_seq_t0 = 0.0
+        self._l7_seq_timer = None
+        # L7 目标流硬限速（l7_max_velocity_rad_s）状态
+        self._l7_last_cmd_pos: Optional[float] = None
+        self._l7_last_cmd_t = 0.0
 
         # 轨迹持久化目录
         self._traj_dir = os.path.expanduser(str(self.get_parameter("trajectories_dir").value))
@@ -925,6 +960,9 @@ class ArmController(Node):
             self.get_logger().warn(f"cannot save torque stats: {exc}")
 
     def _update_torque_stats(self, jn: str, tau: float) -> None:
+        max_nm = float(self.get_parameter("torque_stats_max_nm").value)
+        if not math.isfinite(tau) or abs(tau) > max_nm:
+            return  # 超量程/非有限值：异常反馈，不污染 F43 历史峰值统计
         st = self._torque_stats.setdefault(
             jn, {"max_abs": 0.0, "max_pos": 0.0, "max_neg": 0.0, "ts": ""}
         )
@@ -1556,7 +1594,8 @@ class ArmController(Node):
         return traj
 
     def _dispatch_trajectory(
-        self, traj: JointTrajectory, duty_exempt: bool = False
+        self, traj: JointTrajectory, duty_exempt: bool = False,
+        l7_traj: Optional[JointTrajectory] = None,
     ) -> Tuple[bool, str]:
         """
         按 control_backend 下发轨迹：旧栈话题直发 / 标准栈 action.
@@ -1565,6 +1604,9 @@ class ArmController(Node):
         gripper_controller GripperCommand（取末点位置；末点 effort 非 0
         时作为 max_effort，否则用 gripper_default_effort）。新 goal 抢占
         旧 goal，与旧栈话题替换语义一致；异步发送，不阻塞服务回调。
+
+        l7_traj 非空时（retime 排除 L7）：L7 用该独立序列（原始录制时间戳），
+        而非从 traj 的 L7 列取点。
 
         F107: 下发前逐点静态重力矩门禁 + 占空比门禁。duty_exempt 用于
         SAFE_PARK 等安全回零路径（静态力矩门禁仍生效）。
@@ -1628,11 +1670,10 @@ class ArmController(Node):
         arm_traj = project(JOINTS[:6])
         if arm_traj is not None:
             self._send_fjt_goal(self._fjt_arm_cli, arm_traj, "arm")
-        if "L7_joint" in names:
-            li = names.index("L7_joint")
-            last = traj.points[-1]
-            effort = last.effort[li] if last.effort else 0.0
-            self._send_gripper_goal(last.positions[li], effort)
+        if "L7_joint" in names or l7_traj is not None:
+            # L7 夹爪按录制时间序列步进下发（GAC 抢占式），复现张合时序而非只取末点。
+            # retime 排除 L7 时用独立 l7_traj（原始录制时间戳）。
+            self._start_l7_sequence(l7_traj if l7_traj is not None else traj)
         return True, "dispatched (fjt_action)"
 
     def _send_gripper_goal(self, position: float, max_effort: float = 0.0) -> None:
@@ -1650,6 +1691,30 @@ class ArmController(Node):
         goal.command.max_effort = float(max_effort)
         future = self._gripper_cli.send_goal_async(goal)
         future.add_done_callback(self._on_gripper_goal_response)
+
+    def _send_gripper_goal_limited(self, target: float) -> None:
+        """L7 单目标下发 + 硬限速（≤ l7_max_velocity_rad_s）。
+
+        GAC 无轨迹接口也没有速度上限，目标流由本层生成；对相邻 tick 目标做
+        速率限幅，防止录制异常或外部目标造成的夹爪超速跳变。
+        """
+        max_v = float(self.get_parameter("l7_max_velocity_rad_s").value)
+        now = time.monotonic()
+        if self._l7_last_cmd_pos is None or max_v <= 0.0:
+            self._l7_last_cmd_pos = float(target)
+            self._l7_last_cmd_t = now
+            self._send_gripper_goal(target)
+            return
+        dt = now - self._l7_last_cmd_t
+        if dt <= 0.0:
+            return
+        delta = float(target) - self._l7_last_cmd_pos
+        step = max_v * dt
+        if abs(delta) > step:
+            target = self._l7_last_cmd_pos + math.copysign(step, delta)
+        self._l7_last_cmd_pos = float(target)
+        self._l7_last_cmd_t = now
+        self._send_gripper_goal(target)
 
     def _on_gripper_goal_response(self, future) -> None:
         handle = future.result()
@@ -1720,6 +1785,70 @@ class ArmController(Node):
             self.get_logger().warn(f"L7 linear to {target:+.3f} not dispatched: {msg}")
             return 0.0
         return g_dur
+
+    def _start_l7_sequence(self, traj: JointTrajectory) -> None:
+        """按录制时间序列步进下发 L7 GripperCommand，复现夹爪张合时序。
+
+        GAC（GripperActionController）无轨迹接口，只能发单目标；新 goal 抢占旧
+        goal。故用一个周期定时器按轨迹点时间戳依次发目标，取代「只取末点」。
+        相邻点线性插值 + l7_max_velocity_rad_s 硬限速，消除阶梯跳变。
+        """
+        if "L7_joint" not in traj.joint_names:
+            return
+        li = traj.joint_names.index("L7_joint")
+        min_delta = float(self.get_parameter("l7_seq_min_delta_rad").value)
+        seq: List[Tuple[float, float]] = []
+        prev: Optional[float] = None
+        n = len(traj.points)
+        for i, p in enumerate(traj.points):
+            if not p.positions or li >= len(p.positions):
+                continue
+            pos = float(p.positions[li])
+            t = _tfs_seconds(p.time_from_start)
+            if prev is None or abs(pos - prev) >= min_delta or i == n - 1:
+                seq.append((t, pos))
+                prev = pos
+        if not seq:
+            return
+        self._stop_l7_sequence()
+        self._l7_seq = seq
+        self._l7_seq_idx = 0
+        self._l7_seq_t0 = time.monotonic()
+        self._l7_last_cmd_pos = None
+        self._l7_last_cmd_t = 0.0
+        tick = float(self.get_parameter("l7_seq_tick_s").value)
+        self._l7_seq_timer = self.create_timer(
+            tick, self._on_l7_seq_tick, callback_group=self._cb_group)
+
+    def _stop_l7_sequence(self) -> None:
+        if self._l7_seq_timer is not None:
+            self._l7_seq_timer.cancel()
+            self._l7_seq_timer = None
+        self._l7_seq = []
+        self._l7_seq_idx = 0
+
+    def _on_l7_seq_tick(self) -> None:
+        if not self._l7_seq:
+            self._stop_l7_sequence()
+            return
+        seq = self._l7_seq
+        elapsed = time.monotonic() - self._l7_seq_t0
+        if elapsed >= seq[-1][0]:
+            self._send_gripper_goal_limited(seq[-1][1])
+            self._stop_l7_sequence()
+            return
+        # 相邻点线性插值：目标连续移动，消除阶梯跳变（夹爪无需 Ruckig）。
+        i = self._l7_seq_idx
+        while i + 1 < len(seq) and seq[i + 1][0] <= elapsed:
+            i += 1
+        self._l7_seq_idx = i
+        t0, p0 = seq[i]
+        if i + 1 < len(seq):
+            t1, p1 = seq[i + 1]
+            target = p0 + (p1 - p0) * (elapsed - t0) / max(t1 - t0, 1e-6)
+        else:
+            target = p0
+        self._send_gripper_goal_limited(target)
 
     def _safe_park_then_disable(self) -> Tuple[bool, str]:
         """
@@ -3910,6 +4039,45 @@ class ArmController(Node):
         resp.path = path
         return resp
 
+    def _l7_recorded_traj(
+        self, geo: List[List[float]], geo_times: List[float]
+    ) -> JointTrajectory:
+        """L7 原始录制时间戳轨迹（retime 排除 L7 后单独下发，不做 Ruckig）。"""
+        li = self._joint_names.index("L7_joint")
+        traj = JointTrajectory()
+        traj.joint_names = [JOINTS[6]]
+        for pos, t in zip(geo, geo_times):
+            pt = JointTrajectoryPoint()
+            pt.positions = [float(pos[li])]
+            pt.time_from_start = _duration(t)
+            traj.points.append(pt)
+        return traj
+
+    def _merge_retimed_with_l7(
+        self, arm_traj: JointTrajectory, geo: List[List[float]], geo_times: List[float]
+    ) -> JointTrajectory:
+        """把 retime 后的 L1–L6 与原始录制的 L7 拼成 7 关节单时间轴轨迹。
+
+        用于 writeback 落盘（文件格式要求单时间轴 7 关节）；下发仍走独立 l7_traj
+        （保留原始录制时间戳）。L7 线性重采样到 retime 时间轴。
+        """
+        li = self._joint_names.index("L7_joint")
+        l7_vals = [float(pos[li]) for pos in geo]
+        out = JointTrajectory()
+        out.joint_names = list(self._joint_names)
+        for pt in arm_traj.points:
+            t = _tfs_seconds(pt.time_from_start)
+            row = [0.0] * len(self._joint_names)
+            for k, name in enumerate(arm_traj.joint_names):
+                if name in self._joint_names:
+                    row[self._joint_names.index(name)] = float(pt.positions[k])
+            row[li] = _interp_series(l7_vals, geo_times, t)
+            np = JointTrajectoryPoint()
+            np.positions = row
+            np.time_from_start = pt.time_from_start
+            out.points.append(np)
+        return out
+
     def _call_retime(
         self,
         geo_points: List[List[float]],
@@ -4132,6 +4300,7 @@ class ArmController(Node):
         # F68: Ruckig（加加速度受限）/ TOTG 重新定时 —— 保几何路径，速度加速度由
         # 关节限值算出。失败（节点未起/求解失败）再退回旧的 smooth + time-warp 链。
         traj: Optional[JointTrajectory] = None
+        l7_traj: Optional[JointTrajectory] = None
         retime_msg = ""
         if bool(self.get_parameter("playback_retime").value):
             backend = str(self.get_parameter("playback_retime_backend").value)
@@ -4144,12 +4313,15 @@ class ArmController(Node):
                 # target_duration 驱动服务端迭代缩放限值。
                 # R5/F124: MoveIt 回首点已另耗 r_dur，此处排除 ramp_s 防重定时拖长
                 target = max(recorded_duration, ramp_s if ramp_in_geo else 0.0, min_dur)
+            # retime 只处理 L1–L6（夹爪无需 Ruckig）；L7 用原始录制时间戳单独下发。
+            geo_arm = [p[:6] for p in geo]
             ok, rtraj, msg = self._call_retime(
-                geo, self._joint_names, backend, v_scale, a_scale,
+                geo_arm, JOINTS[:6], backend, v_scale, a_scale,
                 geo_times=geo_times, target_duration=target,
             )
             if ok:
                 traj = rtraj
+                l7_traj = self._l7_recorded_traj(geo, geo_times)
                 retime_msg = msg
                 # F133: 重定时成功 → 优化轨迹烘焙回 latest.yaml。仅 latest 槽
                 # （空名或显式 'latest'）；ramp 前缀（若走几何 ramp）会污染录制，
@@ -4157,8 +4329,9 @@ class ArmController(Node):
                 is_latest_path = os.path.basename(path) == "latest.yaml"
                 if (is_latest_path and not ramp_in_geo and not already_retimed
                         and bool(self.get_parameter("playback_retime_writeback").value)):
-                    if self._writeback_retimed(path, rtraj):
-                        retime_msg += f"; baked {len(rtraj.points)} pts"
+                    merged = self._merge_retimed_with_l7(rtraj, geo, geo_times)
+                    if self._writeback_retimed(path, merged):
+                        retime_msg += f"; baked {len(merged.points)} pts"
                 elif is_latest_path and already_retimed:
                     retime_msg += "; writeback skipped (already retimed)"
                 elif is_latest_path and ramp_in_geo:
@@ -4212,7 +4385,7 @@ class ArmController(Node):
 
         duration = self._traj_duration(traj)
         self._publish_mode("TRAJ_RUNNING")
-        ok, dmsg = self._dispatch_trajectory(traj)
+        ok, dmsg = self._dispatch_trajectory(traj, l7_traj=l7_traj)
         if not ok:
             self._publish_mode("IDLE")
             # R6/F124: phase R（MoveIt 回首点）已把 state 置于 TRAJ，此处失败必须
