@@ -1,0 +1,44 @@
+zero_torque_controller:
+  ros__parameters:
+    tau_scale:
+    - 1.0
+    - 1.0695199284751284
+    - 0.9963520405079651
+    - 0.9570098511789986
+    - 1.0
+    - 1.0
+    - 1.0
+gravity_calibration_metadata:
+  ros__parameters:
+    date: '2026-10-04 16:26:53'
+    tool: scripts/gravity_scale_calibration.py
+    joints:
+    - L1_joint
+    - L2_joint
+    - L3_joint
+    - L4_joint
+    - L5_joint
+    - L6_joint
+    - L7_joint
+    num_poses: 22
+    r_squared:
+    - -1.0
+    - 0.9756712666792896
+    - 0.9074434553490252
+    - 0.561378485124845
+    - -1.0
+    - -1.0
+    rmse_nm:
+    - 0.23501006368646515
+    - 0.1905928239095101
+    - 0.171014903118116
+    - 0.08718770639780031
+    - 0.0459383115857398
+    - 0.04003085738457048
+    low_excitation:
+    - true
+    - false
+    - false
+    - false
+    - true
+    - true

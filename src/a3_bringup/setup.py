@@ -30,6 +30,7 @@ setup(
             "sim_power_sequence_node = a3_bringup.sim_power_sequence_node:main",
             "zero_to_ready_publisher = a3_bringup.zero_to_ready_publisher:main",
             "gravity_torque_node = a3_bringup.gravity_torque_node:main",
+            "gravity_scale_calibration = a3_bringup.gravity_scale_calibration:main",
             "follow_joint_trajectory_action = a3_bringup.follow_joint_trajectory_action:main",
             "move_to_pose_ik_node = a3_bringup.move_to_pose_ik_node:main",
             "draw_rectangle_demo = a3_bringup.draw_rectangle_demo:main",

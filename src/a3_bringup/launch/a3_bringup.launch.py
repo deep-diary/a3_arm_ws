@@ -141,10 +141,30 @@ def generate_launch_description():
     controllers_yaml = os.path.join(desc_share, "config", "el_a3_controllers.yaml")
 
     # F89: gravity scales produced by scripts/gravity_scale_calibration.py.
-    # Auto-adopt semantics (same as ~/.a3/poses.yaml overrides): when the
-    # argument is left empty and ~/.a3/gravity_scales.yaml exists, use it.
-    auto_scales = os.path.expanduser("~/.a3/gravity_scales.yaml")
-    default_scales = auto_scales if os.path.exists(auto_scales) else ""
+    # Default output is now in the package config dir (same as
+    # inertia_params.yaml, version-controlled).  Legacy ~/.a3 fallback for
+    # backward compatibility.
+    pkg_scales = os.path.join(desc_share, "config", "gravity_scales.yaml")
+    legacy_scales = os.path.expanduser("~/.a3/gravity_scales.yaml")
+    default_scales = (
+        pkg_scales if os.path.exists(pkg_scales) else
+        legacy_scales if os.path.exists(legacy_scales) else
+        ""
+    )
+
+    # F89: JTC 前馈链（gravity_torque_node）同样应用标定的 tau_scale。
+    # 标定文件 tau_scale 为 L1-L7 七值（前 6 有效、L7 占位 1.0），直接整体传入。
+    gravity_tau_scale = [1.0] * 7
+    if default_scales and os.path.exists(default_scales):
+        try:
+            with open(default_scales, "r", encoding="utf-8") as _f:
+                _scales_doc = yaml.safe_load(_f)
+            _ts = (_scales_doc.get("zero_torque_controller", {})
+                   .get("ros__parameters", {}).get("tau_scale"))
+            if isinstance(_ts, list) and _ts:
+                gravity_tau_scale = [float(v) for v in _ts]
+        except Exception:
+            gravity_tau_scale = [1.0] * 7
 
     rsp = Node(
         package="robot_state_publisher",
@@ -383,6 +403,7 @@ def generate_launch_description():
             "enabled": True,
             "apply_calibrated_inertia": True,
             "joint_direction": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            "tau_scale": gravity_tau_scale,
         }],
     )
 

@@ -1107,7 +1107,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   3. B 段：加载产出文件后，zero_torque_controller 在 home/ready 姿态下发（`~/gravity_torque`）的力矩与 `scale × 独立 RNEA` 一致（≤0.03 Nm，实测 0.0000）；切模式 settle 1 s 后稳态 1 s 位姿漂移 ≤ 0.02 rad（实测最差 0.0038）
   4. 默认（无 scales 文件）行为不变：C++ 控制器 tau_scale=1.0、bringup 不追加文件；legacy 栈 gravity_torque_node 不受影响
 - **关联：** F49（十二参数惯性标定，本项默认套用其结果并修正残余）、F73（RNEA 自由拖动控制器）、F88（两点 FJT 规约）、F85（自由拖动阻尼）；参考 `EDULITE_A3/el_a3_ros/scripts/pinocchio_gravity_calibration.py`
-- **状态：** 已完成（2026-09-23，仿真 20/20：`scripts/a3_test/f89_gravity_scale_acceptance.py` A/B/C 三段全绿，vcan89 闭环，脚本退出码 0；LL-097～LL-099）。真机验收待通电。
+- **状态：** 已实现（仿真 20/20，2026-09-23；真机验收 2026-10-04）。真机 full 标定 22 姿态（接触污染符号判据自动剔除 1 点，LL-145），得 tau_scale L2=1.0695 / L3=0.9964 / L4=0.9570（L1/L5/L6 低激励保持 1.0），示教态实测无下坠/上飘。输出收敛到包内 `src/a3_description/config/gravity_scales.yaml`（`~/.a3` 仅向后兼容回退），工具注册为 `ros2 run a3_bringup gravity_scale_calibration`。
 
 ### F89b — FSM 自由拖动走标准控制器切换（switch_controller：arm_controller ↔ zero_torque_controller；PS4 示教经同一 FSM 服务）
 

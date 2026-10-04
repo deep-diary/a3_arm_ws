@@ -65,7 +65,7 @@ ros2 service call /a3/arm/set_joint_positions a3_msgs/srv/SetJointPositions "{po
 ## 5. 状态与排障
 
 ```bash
-ros2 topic echo /a3/arm_status                  # state/mode/message 唯一状态入口
+ros2 topic echo /a3/arm_status                  # 状态/温度唯一入口：state/mode/message + temperatures(7关节°C)+positions/efforts/max_torques/temp_warn
 ros2 topic echo /power_sequence/state           # Running / Idle
 ros2 topic echo /power_sequence/gate_open       # 门禁（TRANSIENT_LOCAL）
 ros2 topic echo /a3/ds4/feedback                # DS4 灯/震动派生态 JSON（无手柄也能查）
@@ -88,6 +88,7 @@ ros2 doctor
 | `gate closed` | 先 L3 开门禁 |
 | `position check failed` | 关节在 URDF 限位外，手动抬回（勿放宽限位） |
 | `stale` / 数据旧 | `/joint_states` 不新鲜，查执行层/CAN |
+| `temp_warn=true` | 电机温度 ≥90°C（F44），冷却后再操作；看 `temperatures` 定位哪个关节 |
 
 ## 6. 轨迹测试
 
