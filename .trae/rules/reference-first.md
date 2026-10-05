@@ -11,8 +11,8 @@
 |------|------|------|
 | **长远功能参考项目** | [Seeed-Projects/reBot-DevArm](https://github.com/Seeed-Projects/reBot-DevArm) | reBot 生态入口：Python SDK、ROS1/2 + MoveIt2、Pinocchio 正逆运动学/重力补偿、LeRobot、Isaac Sim、深度相机视觉抓取、语音控制、Web UI 等教程与关联实现 |
 | **机械臂本体参考项目** | [RobStride/EDULITE_A3](https://github.com/RobStride/EDULITE_A3/tree/main) | 结构/URDF/MoveIt 起点：`a3_description`、`a3_moveit_config` 来源；重力方向约定同源 |
-| ROS2 控制壳（本地克隆） | `../a3_arm_vendor/reBotArmController_ROS2` | MoveIt、FJT Action、service/action 接口、demo；经 `trajectory_bridge` 对接 |
-| Python/Pinocchio（本地克隆） | `../a3_arm_vendor/reBotArm_control_py` | FK/IK、轨迹、重力补偿参考实现 |
+| ROS2 控制壳（约定克隆） | 约定 `../a3_arm_vendor/reBotArmController_ROS2`（**先探测，本机不存在则查上游**：[Seeed-Projects/reBotArmController_ROS2](https://github.com/Seeed-Projects/reBotArmController_ROS2)） | MoveIt、FJT Action、service/action 接口、demo；经 `trajectory_bridge` 对接 |
+| Python/Pinocchio（约定克隆） | 约定 `../a3_arm_vendor/reBotArm_control_py`（**先探测，本机不存在则查上游**：[vectorBH6/reBotArm_control_py](https://github.com/vectorBH6/reBotArm_control_py)） | FK/IK、轨迹、重力补偿参考实现 |
 | 生产执行层 | trotbot 派生 → `a3_can_bridge`、`a3_teleop_ps4` | RK3588 / SocketCAN / MIT / PS4 |
 | Wiki | [Seeed robotics hub](https://wiki.seeedstudio.com/robotics_page/) · [B601-RS ROS2 集成](https://wiki.seeedstudio.com/rebot_arm_b601_rs_ros2_integration/) | 官方联调说明 |
 
@@ -24,7 +24,7 @@
 1. 新功能需求确认后（见 `requirements-first.md`），先在参考项目中检索对应实现：
    - 长远功能 → `reBot-DevArm`（含其关联的 `reBotArmController_ROS2` / `reBotArm_control_py` / wiki 教程）
    - 结构 / URDF / 限位 / 重力 → `EDULITE_A3`
-   - 本地克隆优先看 `../a3_arm_vendor/`
+   - 本地克隆约定放 `../a3_arm_vendor/`，**引用前先 `ls` 探测**（本机截至 2026-10 未克隆）；不存在时直接检索 GitHub 上游，勿把约定路径当既存文件读
 2. **有现成实现** → 优先借鉴：
    - 评估移植/适配成本，说明借鉴来源（仓库 + 文件/提交）
    - 尽量保留上游结构再适配，不重写

@@ -261,6 +261,9 @@ public:
       GetParam(hp, "inertia_params_file", ""));
     gravity_scales_file_ =
       GetParam(hp, "gravity_scales_file", ExpandHome("~/.a3/gravity_scales.yaml"));
+    // F138: default empty = no gains YAML; the xacro passes the in-repo
+    // config (a3_description/config/kp_kd_gains.yaml) explicitly.
+    gains_config_file_ = ExpandHome(GetParam(hp, "gains_config_file", ""));
     robot_description_ = GetParam(hp, "robot_description", "");
     urdf_path_ = GetParam(hp, "urdf_path", "");
     bus_ = (can_interface_ == "can0") ? CanBus::CAN0 : CanBus::CAN1;
@@ -305,6 +308,51 @@ public:
       }
       j.cmd_pos = j.hw_pos;
       joints_.push_back(std::move(j));
+    }
+
+    // F138: gains YAML overrides the per-joint kp/kd parsed from URDF above.
+    // Operators tune gains by editing the file and restarting the stack —
+    // no xacro edit / rebuild. Runtime /a3_hardware_health set_parameters
+    // still wins for live tuning. Accepted formats:
+    //   joints: {L1_joint: {kp: 150.0, kd: 2.5}, ...}
+    //   L1_joint: {kp: 150.0, kd: 2.5}
+    std::ifstream gains_in(gains_config_file_);
+    if (gains_in.good()) {
+      try {
+        YAML::Node gy = YAML::Load(gains_in);
+        YAML::Node root = gy["joints"].IsMap() ? gy["joints"] : gy;
+        int applied = 0;
+        for (auto & j : joints_) {
+          const YAML::Node n = root[j.name];
+          if (!n || !n.IsMap()) {
+            continue;
+          }
+          if (n["kp"]) {
+            j.kp = n["kp"].as<double>();
+          }
+          if (n["kd"]) {
+            j.kd = n["kd"].as<double>();
+          }
+          ++applied;
+          RCLCPP_INFO(
+            rclcpp::get_logger(kLoggerName), "gains file: %s kp=%.1f kd=%.2f",
+            j.name.c_str(), j.kp, j.kd);
+        }
+        RCLCPP_INFO(
+          rclcpp::get_logger(kLoggerName),
+          "gains overrides applied to %d/%zu joints from %s",
+          applied, joints_.size(), gains_config_file_.c_str());
+      } catch (const std::exception & e) {
+        RCLCPP_ERROR(
+          rclcpp::get_logger(kLoggerName),
+          "gains file %s parse failed (%s); keeping URDF gains",
+          gains_config_file_.c_str(), e.what());
+      }
+    } else {
+      RCLCPP_INFO(
+        rclcpp::get_logger(kLoggerName),
+        "gains file %s not found; keeping URDF gains",
+        gains_config_file_.c_str());
     }
 
     for (const auto & j : joints_) {
@@ -1361,6 +1409,7 @@ private:
   bool use_calibrated_inertia_{true};
   std::string inertia_params_file_;
   std::string gravity_scales_file_;
+  std::string gains_config_file_;
   std::string robot_description_;
   std::string urdf_path_;
   bool gravity_ff_ready_{false};

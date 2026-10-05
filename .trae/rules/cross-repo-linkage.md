@@ -11,7 +11,7 @@
 |---|---|---|
 | Web 前端/后端（deep-trace） | RK3588 板 `/home/cat/deep-trace`，分支 `rk3588` | 遥测 Web 展示；WSL 开发机通常**没有**该仓 |
 | CloudEdge 固件（xiaozhi-esp32） | 外置仓库，路径随机器变化，先探测（见 `iot-firmware-path.md`） | ESP32-S3 micro-ROS，板级 `main/boards/deep-dog/` |
-| reBot 软件克隆 | 兄弟目录 `../a3_arm_vendor/` | `reBotArm_control_py`、`reBotArmController_ROS2` |
+| reBot 软件克隆 | 约定兄弟目录 `../a3_arm_vendor/`（**使用前先 `ls` 探测；本机截至 2026-10 不存在**，不存在时直接查 GitHub 上游，勿假设可读） | `reBotArm_control_py`、`reBotArmController_ROS2` |
 | 生产执行层来源 | trotbot 派生 | `a3_can_bridge`、`a3_teleop_ps4` |
 | 参考开源项目 | 见 `reference-first.md` | reBot-DevArm / EDULITE_A3 等 |
 

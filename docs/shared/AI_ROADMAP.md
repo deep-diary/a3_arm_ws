@@ -139,7 +139,7 @@ AI 策略/VLA 输出的动作仍需经过 [SAFETY.md](SAFETY.md) 的软限位、
 
 ## 3. reBot AI 功能全清单（Step 1 复刻核对源）
 
-> 来源：reBot-DevArm 官方 README「Roadmap & Status」表 + Seeed Wiki。状态为官方口径（截至 2026-07）。
+> 来源：reBot-DevArm 官方 README「Roadmap & Status」表 + Seeed Wiki。状态为官方口径（截至 2026-10；Isaac Sim 已 DM/RS 双机型 Done，新增 Embodied Agent/WRC 与浏览器 MuJoCo 孪生）。
 
 | # | 功能 | 状态 | 关键组件 / 命令 | 硬件依赖 | 来源 |
 |---|------|------|-----------------|----------|------|
@@ -155,8 +155,10 @@ AI 策略/VLA 输出的动作仍需经过 [SAFETY.md](SAFETY.md) 的软限位、
 | 10 | **语音控制（全本地）** | ✅ 完成 | 唤醒词 + Qwen3 流式 ASR + MOSS-TTS-Nano + Qwen3.5-4B（TensorRT-Edge-LLM MTP 投机解码） | Jetson Orin NX | [Voice-Controlled Grasping](https://www.seeed.cc/solutions/reference-designs/voice_rebot_arm) |
 | 11 | **语音控制（Whisper + Ollama + OpenWebUI）** | ✅ 完成 | Whisper ASR + Ollama 本地 LLM + OpenWebUI + GraspNet；Robot Arm Tools 桥接 HTTP API | Jetson Thor | [Voice Control](https://wiki.seeedstudio.com/voice_control_rebot_arm/) |
 | 12 | **reSpeaker 语音阵列** | ✅ 完成 | reSpeaker Flex 4-mic 阵列 + 空间感知 DoA | reSpeaker 麦克风阵列 | [reSpeaker Voice Control](https://wiki.seeedstudio.com/control_rebot_arm_using_voice_with_respeaker_flex/) |
-| 13 | **Isaac Sim 仿真** | 🚧 进行中（DM）/ ⏳ 规划（RS） | USD 模型 + 仿真遥操作 + 合成数据 | NVIDIA GPU | [reBot-Isaacsim](https://github.com/Seeed-Projects/reBot-Isaacsim) |
+| 13 | **Isaac Sim 仿真** | ✅ 完成（DM + RS 双机型，2026-10 口径） | USD 模型 + 仿真遥操作 + 合成数据；NVIDIA DLI 课程 | NVIDIA GPU | [reBot-Isaacsim](https://github.com/Seeed-Projects/reBot-Isaacsim) · [DLI 课程](https://www.seeedstudio.com/sim-to-real-with-seeed-rebot-and-nvidia-isaac) |
 | 14 | **社区贡献** | ※ 非官方 | 被动诊断 monitor、safe park、gamepad teleop IK/FK、D405 eye-in-hand TF | — | [rebotarm_monitor_ros2](https://github.com/danieldoradotalaveron-rb/rebotarm_monitor_ros2) |
+| 15 | **Embodied Agent（自然语言抓取编排）** | ✅ 完成（RS 官方表） | 自然语言（如 "pick up the red block"）→ 自动规划 → 抓取执行；WRC 架构 | 视觉栈 | [WRC 教程](https://wiki.seeedstudio.com/wrc_demo_tutorial/) · [TheMoonAstronaut/wrc](https://github.com/TheMoonAstronaut/wrc) |
+| 16 | **浏览器 MuJoCo 数字孪生** | ✅ 在线可用 | WebAssembly MuJoCo：标准臂/AGV 配置、关节/TCP 控制、顶视+腕部 D405 相机、归位/码垛 demo，免安装 | 仅浏览器 | [在线 Demo](https://yang-ci.github.io/Rebot_Arm_AGV/) |
 
 **关键约束（复刻时须注意）：**
 
@@ -176,7 +178,7 @@ flowchart LR
     A2 --> A3[A3 VLA] --> A4[A4 语音] --> A5[A5 仿真]
 
     subgraph rebotPos [reBot 生态约位]
-        R["A0-A4 已齐 / A5 Isaac Sim 进行中"]
+        R["A0-A5 已齐（Isaac Sim DM/RS Done）/ WRC 语言 Agent + MuJoCo 孪生"]
     end
 
     subgraph a3Pos [A3 Edge 约位]
@@ -191,7 +193,7 @@ flowchart LR
 | A2 模仿学习 | ✅ | ✅ ACT/Diffusion 训练 + 部署 | ❌ |
 | A3 VLA | ✅ | ✅ SmolVLA/Pi0/GR00T + PEFT + Async | ❌ |
 | A4 语音多模态 | ✅ | ✅ 全本地语音栈 / Whisper+Ollama | ❌ |
-| A5 仿真 | ✅ | 🚧 Isaac Sim 进行中 | ❌ |
+| A5 仿真 | ✅ | ✅ Isaac Sim 双机型 Done；另有浏览器 MuJoCo 孪生 | ❌ |
 
 ### 4.2 能力明细对照（对齐 checklist）
 
@@ -200,24 +202,26 @@ flowchart LR
 
 | 能力 | reBot | A3 Edge | 对齐步次 | 对应项 |
 |------|-------|---------|----------|--------|
-| LeRobot robot 类接入 | ✅ 原生 `rebot_b601_*_follower` | ⚠️ 脚手架 `a3_robot.yaml` | Step 1 | A0 / F21 |
-| 电机标定 `lerobot-calibrate` | ✅ | ❌ | Step 1 | A0 |
+| LeRobot robot 类接入 | ✅ 原生 `rebot_b601_*_follower` | ⚠️ 脚手架 `a3_robot.yaml` | Step 1 | A0 / **F149** |
+| 电机标定 `lerobot-calibrate` | ✅ | ❌ | Step 1 | A0 / F149 |
 | 遥操作采集（leader） | ✅ StarArm102 | ✅ 用 PS4（F16）替代 | Step 1 复用 | A0 / F16 |
-| 数据集采集/可视化/回放 | ✅ | ❌ | Step 1 | A0 |
-| ACT / Diffusion 训练 | ✅ | ❌（服务器可训） | Step 1 | A2 |
-| VLA（SmolVLA/Pi0/GR00T） | ✅ | ❌（服务器可训） | Step 2 | A3 |
-| PEFT / LoRA 微调 | ✅ | ❌ | Step 2 | A3 |
-| Async Inference（PolicyServer/RobotClient） | ✅ | ❌ | Step 1（服务器推理） | A2/A3 |
-| 深度相机接入（RGB-D） | ✅ Orbbec/RealSense | ❌ | Step 1 | A1 |
-| YOLO 检测/分割 | ✅ TensorRT | ❌（RKNN 待适配） | Step 1 | A1 |
-| GraspNet 6-DoF 抓取 | ✅ | ❌ | Step 1 | A1 |
-| 手眼标定（TSAI） | ✅ | ❌ | Step 1 | A1 |
-| 视觉抓取闭环 | ✅ | ❌ | Step 1 | A1 / C1 |
-| 语音 ASR + LLM + TTS | ✅ 全本地 | ❌（服务器 LLM） | Step 1/2 | A4 |
-| reSpeaker 阵列 / DoA | ✅ | ❌ | Step 2 可选 | A4 |
-| Isaac Sim 仿真 | 🚧 | ❌ | Step 2 可选 | A5 |
+| 数据集采集/可视化/回放 | ✅ | ❌ | Step 1 | A0 / F149 |
+| ACT / Diffusion 训练 | ✅ | ❌（服务器可训） | Step 1 | A2 / F153 |
+| VLA（SmolVLA/Pi0/GR00T） | ✅ | ❌（服务器可训） | Step 2 | A3 / F155 |
+| PEFT / LoRA 微调 | ✅ | ❌ | Step 2 | A3 / F155 |
+| Async Inference（PolicyServer/RobotClient） | ✅ | ❌ | Step 1（服务器推理） | A2/A3 / F154 |
+| 深度相机接入（RGB-D） | ✅ Orbbec/RealSense | ❌ | Step 1 | A1 / F150 |
+| YOLO 检测/分割 | ✅ TensorRT | ❌（RKNN 待适配） | Step 1 | A1 / F151 |
+| GraspNet 6-DoF 抓取 | ✅ | ❌ | Step 1 | A1 / F152 |
+| 手眼标定（TSAI） | ✅ | ❌ | Step 1 | A1 / F150 |
+| 视觉抓取闭环 | ✅ | ❌ | Step 1 | A1 / F152 |
+| 语音 ASR + LLM + TTS | ✅ 全本地 | ❌（服务器 LLM） | Step 1/2 | A4 / F156/F157 |
+| reSpeaker 阵列 / DoA | ✅ | ❌ | Step 2 可选 | A4 / F158 |
+| Isaac Sim 仿真 | ✅ DM+RS Done | ❌ | Step 2 | A5 / F159 |
 | 多臂 AI 调度（MCP） | ※ | 🔜 结合 CloudEdge P3 | Step 2 | CloudEdge S5 |
 | Web 远程 AI 任务 | ※ | 🔜 结合 deep-trace | Step 2 | F18/F20 |
+| 自然语言 Embodied Agent（WRC） | ✅ RS 官方 | ❌ | Step 1 | A4 / **F156** |
+| 浏览器 MuJoCo 数字孪生 | ✅ 在线 demo | ❌ | Step 2（轻演示） | A5 / **F147** |
 
 **reBot AI 源码不在 DevArm 主仓：**
 
@@ -277,7 +281,7 @@ flowchart TD
 | **做法** | 复用 `a3_lerobot_config/config/a3_robot.yaml`；采集经 ROS2 后端话题（勿与 `a3_can_bridge` 抢 `can1`）；PS4（F16）替代 leader arm 做遥操作采集 |
 | **主要包** | `a3_lerobot_config`（脚手架→可用） |
 | **验收** | 稳定采集 ≥50 episode；标定文件跨机复用；`/joint_states` + 相机帧同步入数据集 |
-| **需求 ID 草案** | `F21` LeRobot 数据采集接入（正式编号以 REQUIREMENTS 为准） |
+| **需求 ID** | `F149` LeRobot A3 follower robot 类 + 采集全链路（已入 REQUIREMENTS backlog，`proposed`） |
 
 #### A1 — 视觉抓取（P0/P1，依赖深度相机）
 
@@ -290,7 +294,7 @@ flowchart TD
 | **与 reBot** | 对齐 GraspNet Demo / `reBot-DevArm-Grasp` 流程；不照抄 TensorRT |
 | **主要包** | 新增视觉包（`a3_vision` 或外置）；`a3_moveit_config` IK |
 | **验收** | 指定目标识别并抓取到位；手眼标定误差达标 |
-| **需求 ID 草案** | `F22` 深度相机接入 + 视觉抓取 |
+| **需求 ID** | `F150` RGB-D 相机 + TSAI 手眼标定；`F151` YOLO/RKNN；`F152` GraspNet/OBB 视觉抓取闭环（均 `proposed`） |
 
 #### A2 — 模仿学习策略训练与部署（P0/P1）
 
@@ -301,7 +305,7 @@ flowchart TD
 | **做法** | 训练放**内网/云 GPU 服务器**（复用 CloudEdge 服务器侧）；推理先走 **async inference 服务器模式**（PolicyServer 在服务器，RobotClient 在 RK3588），再评估 NPU 轻策略 |
 | **主要包** | `a3_lerobot_config` + 服务器 LeRobot |
 | **验收** | 单任务策略推理驱动机械臂到位；action chunk 经 FJT/执行层；延迟可接受 |
-| **需求 ID 草案** | `F23` 模仿学习训练 + 推理闭环 |
+| **需求 ID** | `F153` ACT/Diffusion 训练管线；`F154` 异步推理 PolicyServer/RobotClient（均 `proposed`） |
 
 #### A4 — 语音控制（P1，服务器 LLM 版）
 
@@ -312,7 +316,7 @@ flowchart TD
 | **做法** | LLM 语义放服务器（Qwen3.5 或 Ollama）；ASR/TTS 先服务器、后评估 RK3588 轻量中文模型；任务接口对接控制栈 + 视觉抓取（复用 CloudEdge MCP S5 语义）；接口鉴权 |
 | **主要包** | CloudEdge 服务器侧 MCP + 语音服务 |
 | **验收** | 语音指令完成一次抓取闭环并播报；公网不暴露未鉴权接口 |
-| **需求 ID 草案** | `F24` 语音多模态控制（服务器侧） |
+| **需求 ID** | `F156` 自然语言 Embodied Agent（WRC 对标）；`F157` 语音 ASR/TTS + LLM 任务桥（均 `proposed`） |
 
 **Step 1 复刻验收（规划用 DoD）：**
 
@@ -320,7 +324,7 @@ flowchart TD
 - [ ] A1：视觉抓取桌面目标闭环
 - [ ] A2：ACT 策略训练 + 服务器推理驱动真机
 - [ ] A4：语音指令 → 抓取 → 播报全链路
-- [ ] 相关需求已写入 `docs/edge/REQUIREMENTS.md`（F21–F24）
+- [ ] 相关需求已写入 `docs/edge/REQUIREMENTS.md`（F149–F154、F156、F157，状态 `proposed`，待逐条立项）
 - [ ] AI 输出始终经门控/限位（SAFETY 不绕过）
 
 ### 5.3 Step 2 — 自研迭代（对齐之后）
@@ -332,7 +336,7 @@ flowchart TD
 | **目标** | 语言条件 VLA（SmolVLA/Pi0/GR00T）+ PEFT 微调 + async inference 云模式，**超出** reBot 单机 |
 | **做法** | 服务器训练 VLA；RK3588 走 async inference 客户端；结合 CloudEdge MCP 做多臂语言任务 |
 | **验收** | 自然语言跨任务；async 动作块不空转 |
-| **需求 ID 草案** | `F25` VLA + Async 推理 |
+| **需求 ID** | `F155` VLA + PEFT（Async 推理见 F154）（`proposed`） |
 
 #### MCP 多臂 AI 调度 + Web 远程任务（P2）
 
@@ -341,7 +345,7 @@ flowchart TD
 | **目标** | 结合 CloudEdge P3 多臂 MCP，做多臂 AI 任务编排；结合 deep-trace Web（F18/F20）做远程 AI 任务下发与 3D 状态回显 |
 | **做法** | CloudEdge MCP 封装 move/grasp/归位等任务级 API；deep-trace 预留 `cmd` 下行接 AI 任务 |
 | **验收** | MCP 一次「规划+执行」闭环；Web 下发 AI 任务并回显 |
-| **需求 ID 草案** | `F26` 多臂 MCP AI 调度（CloudEdge 侧） |
+| **需求 ID** | CloudEdge 侧需求（`docs/cloud_edge/REQUIREMENTS.md` 另行编号，不在 Edge F 序列） |
 
 #### NPU 本地轻推理 + 服务器大模型分层（P2）
 
@@ -358,7 +362,7 @@ flowchart TD
 | **目标** | Isaac Sim 合成数据与 S²E；针对 7-DOF 冗余的自研抓取策略；本地轻量中文 ASR/TTS |
 | **做法** | 选型 Isaac Sim（需 NVIDIA GPU 或云）；自研 7-DOF 抓取采样；RK3588 中文轻量语音模型评估 |
 | **验收** | 仿真策略迁移真机；自研抓取优于基线；本地中文语音可用 |
-| **需求 ID 草案** | `F27` 仿真/自研抓取/中文语音（可选） |
+| **需求 ID** | `F159` Isaac Sim USD/sim-to-real；`F147` 浏览器 MuJoCo 孪生（轻演示）；中文 ASR/TTS 并入 F157（均 `proposed`） |
 
 ### 5.4 下一步规划怎么用本表
 
@@ -433,6 +437,8 @@ deep-trace（外部仓库）已打通 F18 MQTT 遥测 + F20 3D 渲染；Step 2 �
 | [reSpeaker Voice Control](https://wiki.seeedstudio.com/control_rebot_arm_using_voice_with_respeaker_flex/) | 麦克风阵列 + DoA |
 | [HuggingFace LeRobot](https://github.com/huggingface/lerobot) | 端到端机器人学习框架 |
 | [HuggingFace Async Inference](https://huggingface.co/docs/lerobot/main/async) | 异步推理范式 |
-| [reBot-Isaacsim](https://github.com/Seeed-Projects/reBot-Isaacsim) | 仿真与合成数据 |
+| [reBot-Isaacsim](https://github.com/Seeed-Projects/reBot-Isaacsim) | 仿真与合成数据（DM/RS 双机型 Done） |
 | [reBot-DevArm-Grasp](https://github.com/EclipseaHime017/reBot-DevArm-Grasp) | 视觉抓取源码 |
 | [reBotArm_control_py](https://github.com/vectorBH6/reBotArm_control_py) | AI 执行后端 SDK |
+| [TheMoonAstronaut/wrc](https://github.com/TheMoonAstronaut/wrc) · [WRC 教程](https://wiki.seeedstudio.com/wrc_demo_tutorial/) | 自然语言 Embodied Agent（F156 对标） |
+| [reBot MuJoCo 在线孪生](https://yang-ci.github.io/Rebot_Arm_AGV/) | 浏览器数字孪生（F147 对标） |

@@ -1975,7 +1975,7 @@ flowchart TD
   3. 纯离线、无 ROS 依赖，`python3 scripts/traj_smoothness_calibration.py` 秒级完成
 
 - **关联：** F68/F133（Ruckig retime/写回）、F57/F59（回放平滑/warp）、F88（两点标准轨迹）、F38（示教/回放）；[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)；`scripts/traj_smoothness_calibration.py`
-- **状态：** `in-progress`（2026-10-04：离线脚手架落地；伺服层 kp/kd 扫描已由 F138 承接）
+- **状态：** `in-progress`（2026-10-05：F138 真机整定完成，定稿增益见仓库内 `src/a3_description/config/kp_kd_gains.yaml`（启动时覆盖 xacro）：L1 150/2.5、L2 150/2.5、L3 150/2.5、L4 150/4.5、L5 150/2.5、L6 100/2.5；待实际运行验证）
 
 ### F137 — 录制轨迹几何去噪 + 平滑重规划（五次 B 样条光顺 + quintic 重定时）
 
@@ -1998,8 +1998,9 @@ flowchart TD
 
 - **实现方式：**
   1. `A3MITHardwareInterface`：`JointMapping` 增加逐关节 kp/kd（回退全局）；`on_init` 解析关节级 kp/kd（激活 xacro 死参数）；`write()` 位置模式改用逐关节增益；`on_configure` 的 `on_set_parameters_callback` 增加 `kp_<joint>`/`kd_<joint>` 运行时写入（沿用 `gravity_feedforward_ratio` 同款模式，LL-126 保留句柄）。
-  2. `el_a3_ros2_control.xacro`：L1–L6 关节块显式 `kp/kd`（起始统一 80/2，与当前有效值一致，避免激活即改行为）。
-  3. `scripts/kp_kd_autotune.py`：rclpy 脚本，connect/mock/real 三模式；enable→READY→逐关节坐标下降（kp 粗→kd 粗→kp 细→kd 细）→每格「设参数(运行时)→跑激励→采 /joint_states→算指标→记表」→输出最优并写 `~/.a3/kp_kd_tuned.yaml` + 报告。安全护栏：振荡检测（速度/effort 发散）、力矩/温度/限位越界、fault 即中止并回落名义增益。
+  2. `el_a3_ros2_control.xacro`：L1–L6 关节块显式 `kp/kd`（仅兜底默认值）；新增 `gains_config_file` 参数指向仓库内 `$(find a3_description)/config/kp_kd_gains.yaml`——启动时 YAML 逐关节覆盖 xacro 值，**调增益只需改仓库内 YAML + 重启栈，无需改 xacro/rebuild**（历史演进备注含在 YAML 头部：名义默认 80/2 → 两轮整定）。
+  3. `scripts/kp_kd_autotune.py`：rclpy 脚本，connect/mock/real 三模式；enable→READY→逐关节坐标下降（kp 粗→kd 粗→kp 细→kd 细）→每格「设参数(运行时)→跑激励→采 /joint_states→算指标→记表」→输出最优并写 `~/.a3/kp_kd_tuned.yaml` + 报告。安全护栏：振荡检测（速度/effort 发散）、力矩/温度/限位越界、fault 即中止并回落名义增益；FSM 状态+温度监护、断点续跑（LL-146）。
+  4. 运维增益文件 `src/a3_description/config/kp_kd_gains.yaml`（入仓维护，头部备注 kp/kd 演进历史：名义默认 80/2 沿自 reBot/EDULITE 参考起始 → 第 1 轮 KP120 → 第 2 轮 KP150+实测修正）：2026-10-05 实测定稿 L1 150/2.5、L2 150/2.5、L3 150/2.5、L4 150/4.5、L5 150/2.5、L6 100/2.5（kd 随 √kp 增长保持阻尼比，见 LL-146 第三轮追加）。
 
 - **验收标准：**
   1. vcan 闭环（真插件 + vcan_motor_sim + 真 JTC）：运行时 set kp/kd 生效（抓帧断言逐关节 kp/kd 正确）、逐关节扫出指标表、无人工干预自循环收敛、注入过高 kp 能自动中止并回落名义
@@ -2008,7 +2009,208 @@ flowchart TD
   4. 最优逐关节 kp/kd 写回 xacro 后，FJT home↔ready、示教回放、MoveIt 规划执行三条链路回归不劣化
 
 - **关联：** F136（轨迹生成层标定，指标 J 扩展为伺服层指标）、F85（自适应 kd 示教阻尼，与本项位置环分离）、F108（重力前馈，整定时保持开）、F107/F44/F81（安全护栏）、P1/P2（跟踪滞后测量经验）、[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)、[shared/SAFETY.md](../shared/SAFETY.md)
-- **状态：** `in-progress`（2026-10-05：P0 硬件接口逐关节+运行时 kp/kd 与 xacro 落地，`f138_kp_kd_acceptance.py` vcan 验收 **4/4**——默认 80/2 → 设 `kp_L1_joint=60`/`kd_L1_joint=3` 逐关节 CAN 帧级生效 → 回落 80/2；整定脚本 `scripts/kp_kd_autotune.py` 就绪，真机整定待栈重启加载新二进制后跑）
+- **状态：** `in-progress`（2026-10-05：真机两轮整定 + 真实行程 kd 验证完成，定稿增益见仓库内 `src/a3_description/config/kp_kd_gains.yaml`（启动时覆盖 xacro）；待实际运行（示教/MoveIt/FJT）回归验证后关闭。遗留：整定器激励/落定窗偏小导致 kd 系统性偏小（LL-146），后续改进整定器考核项）
+
+## reBot-DevArm 对标潜在需求（2026-10-05 盘点 backlog）
+
+> 来源：[reBot-DevArm](https://github.com/Seeed-Projects/reBot-DevArm) Roadmap & Status（2026-10 口径）+ [reBotArmController_ROS2](https://github.com/Seeed-Projects/reBotArmController_ROS2) v0.3.0 + [reBotArm_control_py](https://github.com/vectorBH6/reBotArm_control_py) + 社区 fork。
+> 以下条目均为**潜在需求（状态 `proposed`）**，用于把 reBot 已具备、本仓尚缺的功能/技术栈登记入册，后续**逐条立项 → 补验收细节 → 再开发**（见 requirements-first）。优先级 P0>P1>P2>P3 仅为建议排序；立项时可调整。控制栈本仓已反超项（ros2_control 真机 HAL、Servo、编排 FSM、PS4、MQTT）不再登记。
+
+### F139 — 重力补偿平滑退出（MIT ramp-out，消除模式切换 clack/jerk）【P0】
+
+- **说明：** 退出重力补偿/自由拖动、与位置模式交接时，MIT `kp/kd/tau` 不做瞬时切换，按可配时长（如 0.3–0.5 s）斜坡退出并同步重锚当前位姿，消除「咔哒」声与冲击。对标社区 fork `rebotarm_monitor_ros2` 的 gravity compensation smooth stop；补齐 C3/F89b 遗留的「退出 ramp-out」真机待办。
+- **验收标准：**
+  1. 重力补偿/自由拖动 → 位置模式交接过程中关节无可见阶跃、无 clack 声响（真机）
+  2. ramp 时长可配；ramp 中途触发急停时立即失能，不等待斜坡走完
+  3. vcan 仿真可断言切换前后指令增益/力矩连续（逐 tick 变化量有界）
+- **关联：** [shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md) C3；F89b（STRICT 控制器切换）；F66（使能沿重锚/软起步）；[rebotarm_monitor_ros2](https://github.com/danieldoradotalaveron-rb/rebotarm_monitor_ros2)
+- **状态：** `proposed`
+
+### F140 — Safe Park & Shutdown（连接捕获休息位姿；shutdown/park 慢速回位再失能）【P0】
+
+- **说明：** 驱动连接时记录 rest pose；提供 `/a3/arm/park` 服务与 shutdown 序列选项：以限速轨迹慢速回到安全休息位姿后再失能（可选 park 后保持使能）。对标 reBot 社区 Safe park & shutdown 与官方 SDK `safe_home` 服务语义。与 F130（R3 safe-park 残差判定）互补：F130 解决「到没到」，本项补「产品级 park 服务与 shutdown 自动回位」。
+- **验收标准：**
+  1. `/a3/arm/park` 从任意 READY 位姿以 URDF 速度地板时长（F94）回 `idle`/休息位，到位后按参数决定保持/失能
+  2. shutdown 流程可选自动 park；park 轨迹受 gate/急停/F97 容差约束，失败则保持当前位姿并报错（不允许自由落体）
+  3. 未使能/FAULT 态调用 park 被显式拒绝并返回原因
+- **关联：** F130（safe-park 稳态无进展判定）、F94（两点轨迹限速）、F119（任意模式软失能）、F2（shutdown 序列）；[CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md) 3.2「诊断 / Safe Park」
+- **状态：** `proposed`
+
+### F141 — 参数化 pick & place MoveIt demo（规划场景物体 + 全 YAML 参数）【P1】
+
+- **说明：** 对标 `rebotarm_moveit_demos` 的 `pick_place`：ready/pick/place 位姿、TCP RPY、物体尺寸全部 YAML 参数化，MoveIt 规划场景加入碰撞物体，完成「接近→下降→合爪→抬起→转移→放置→开爪」整链；与画矩形 demo 同级，作为真机 Plan+Execute 回归与演示基线。A3 现有 `draw_rectangle_demo.py` 仅覆盖画线。
+- **验收标准：**
+  1. mock 栈一键启动 demo 并全程成功，RViz 可见规划场景物体与抓取路径
+  2. 参数（位姿/尺寸/夹爪开合）改 YAML 即可适配不同桌面布局，无需改代码
+  3. 真机执行受 gate/限位/容差约束；回归脚本可跑
+- **关联：** F11（统一 MoveIt Execute launch + 矩形 demo）、F76（Pilz PTP/LIN）、F98（夹爪限位标定）；[reBotArmController_ROS2](https://github.com/Seeed-Projects/reBotArmController_ROS2) `rebotarm_moveit_demos`
+- **状态：** `proposed`
+
+### F142 — 关节状态发布率提升至 100 Hz（带宽评估后默认）【P1】
+
+- **说明：** reBot 官方 `joint_state_rate` 默认 100 Hz，本仓 `/joint_states` 为 50 Hz（F123 后电机 0x18 主动上报 10 Hz、控制环内部 200 Hz）。AI 采集/策略观测（F149/F153）对观测帧率敏感。先做 CAN 总线带宽与 RK3588 负载评估，再将对外发布率提升至 100 Hz（内部重采样或请求电机提帧），保持 50 Hz 兼容选项。
+- **验收标准：**
+  1. `/joint_states` 实测发布率 100 Hz ± 5%，持续运行无丢帧/无 CAN 错误帧增长（F103 诊断可见）
+  2. CPU 占用增量可接受（F96 host 诊断无 WARN）；MQTT 遥测侧不被高频拖垮（桥内降采样）
+  3. 提供参数切回 50 Hz；现有消费方（MoveIt/编排/示教）回归正常
+- **关联：** F123（0x18 上报周期）、F104（话题频率诊断）、F103（CAN 物理层诊断）、F149（LeRobot 观测帧率）
+- **状态：** `proposed`
+
+### F143 — rqt_robot_monitor 诊断值班视图与排障 SOP【P2】
+
+- **说明：** F71/F82/F96/F102–F104 已把硬件、主机、CAN、MQTT、话题速率全部汇入 `/diagnostics` 与 `/diagnostics_agg`，但缺面向现场值班的统一视图与排障手册。对标社区 fork 的 `/diagnostics` overlay for `rqt_robot_monitor`：提供预配置 rqt 布局 + 一页「告警级别→含义→处置」SOP（QUICKSTART/ROS_COMMANDS），不新增自研监控节点。
+- **验收标准：**
+  1. 一条命令/一个 rqt preset 打开全系统诊断树，各分组（Hardware/Host/Comms/Topic Rates）正确归类
+  2. 文档列出每个 ERROR/STALE 项的含义与首步处置；拔 CAN/断 MQTT/停话题可在视图复现对应告警
+- **关联：** F82（diagnostic_aggregator）、F96（主机诊断）、F102/F103/F104（链路诊断）、F95（自检）
+- **状态：** `proposed`
+
+### F144 — SE(3) 笛卡尔测地线轨迹 + CLIK 跟踪【P2】
+
+- **说明：** 对标 `reBotArm_control_py` 的 trajectory 模块：位姿目标走 SE(3) 测地线（位置线性、姿态四元数球面插值）+ CLIK（闭环逆解）实时跟踪，生成平滑笛卡尔路径。本仓 F76 Pilz LIN 提供直线工业路径，本项补「自由姿态插值 + 速度级 IK 跟踪」的轻量实现/评估，用于手柄笛卡尔连续运动与笛卡尔示教。
+- **验收标准：**
+  1. 给定起止位姿生成 SE(3) 测地线采样，姿态无翻滚跳变、路径误差有界
+  2. CLIK 跟踪在奇异点附近降速/报错而不是发散；与 Servo/FJT 路径的仲裁明确
+  3. 先仿真（vcan/mock）验收，真机列为后续
+- **关联：** F76（Pilz LIN/CIRC，工业路径基线）、C4（Servo 笛卡尔）、F12（MoveToPoseIK）；[reBotArm_control_py](https://github.com/vectorBH6/reBotArm_control_py) `trajectory/`
+- **状态：** `proposed`
+
+### F145 — Pinocchio + MeshCat 运动学/重力可视化工具【P2】
+
+- **说明：** 对标 reBot Pinocchio+MeshCat 教程：浏览器 3D 显示 A3 模型、FK/IK 结果、各关节重力矩向量与 tau_scale 标定前后对比，辅助 F89 重力标定、示教调试与教学。复用本仓 URDF 与 `inertia_params.yaml`/`gravity_scales.yaml`，只读工具、不接 CAN。
+- **验收标准：**
+  1. 一条命令在浏览器打开 A3 MeshCat 视图，关节角与 `/joint_states`（或日志回放）一致
+  2. 可可视化 RNEA 重力矩（标定前/后叠加对比）；FK/IK 示例可交互
+- **关联：** F89（tau_scale 标定）、F49（惯性标定）、F8（重力力矩）；[Pinocchio Guide](https://wiki.seeedstudio.com/rebot_arm_b601_dm_pinocchio_meshcat/)
+- **状态：** `proposed`
+
+### F146 — 多厂商电机/多传输抽象层评估（motorbridge 兼容）【P3】
+
+- **说明：** reBot 经 motorbridge 一套 API 支持 Robstride/Damiao/Mota/Gaoqing/Hexfellow 及串口桥/SocketCAN。本仓仅 MIT over SocketCAN。仅在未来引入非 MIT 电机（如 RS 私有总线）或串口 CAN 桥时立项：评估直接采用 motorbridge 或在 `a3_hardware_interface` 内做传输/协议抽象，避免届时重写编解码。**当前无硬件需求，不预先开发。**
+- **验收标准：**
+  1. 输出选型评估（motorbridge 直接集成 vs 自研抽象）与对 ros2_control read/write 语义、延迟（<10 ms）的影响
+  2. 若实施：新增电机型号仅改配置/YAML 即可在同一 bringup 下切换
+- **关联：** F72（SystemInterface 插件）、[CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md) L0；[motorbridge](https://motorbridge.seeedstudio.com)
+- **状态：** `proposed`（条件触发，无硬件计划前冻结）
+
+### F147 — 浏览器 MuJoCo 数字孪生（免安装演示/远程验收）【P3】
+
+- **说明：** 对标 reBot 在线 MuJoCo 孪生（标准臂/AGV 配置、关节与 TCP 控制、顶视/腕部相机、归位/码垛自动 demo）。RK3588 无 NVIDIA 生态，MuJoCo（CPU/WebAssembly）是比 Isaac Sim 更轻的演示与远程验收手段：基于 A3 URDF/mesh 生成 MJCF，浏览器可视关节状态（订阅经 Web 侧转发）与简单轨迹。与 deep-trace 3D 渲染（F20）定位区分：本项为物理仿真孪生，F20 为实时状态渲染。
+- **验收标准：**
+  1. 浏览器打开即可见 A3 模型并可拖动关节/发简单位姿目标，零本地安装
+  2. 模型姿态与 URDF 一致；可回放录制轨迹（F54）做离线演示
+- **关联：** F20（Web 3D 实时渲染）、F159（Isaac Sim，重方案）；[reBot online demo](https://yang-ci.github.io/Rebot_Arm_AGV/)
+- **状态：** `proposed`
+
+### F148 — 编排层单关节调试 passthrough 服务统一【P3】
+
+- **说明：** 对标 reBot `/rebotarm` 命名空间下的 `JointMitCmd`/`JointPosVelCmd` 单关节调试服务：本仓单电机服务分散在 `a3_can_bridge`（MotorCommand/MotorMitCommand/SetMotorParam 等），标准栈（F78）后缺少对应的统一调试入口。在编排层/维护命名空间提供受控的单关节 MIT/位置速度直通服务（仅维护态可调，运动态互斥），并补一页 API 速查。
+- **验收标准：**
+  1. 维护模式下可对指定单关节发 MIT（pos/vel/kp/kd/tau）或 posvel 指令并收到反馈；READY/运动/示教态调用被拒
+  2. 与 F91 电机零点/参数维护节点、F138 整定工具的权限模型一致（控制器活动联锁）
+- **关联：** F91（电机维护节点）、F53（指令×状态×模式矩阵）、`a3_can_bridge/srv`
+- **状态：** `proposed`
+
+### F149 — LeRobot 原生 A3 follower robot 类 + 采集全链路（A0）【P0】
+
+- **说明：** reBot 的 `rebot_b601_dm/rs_follower` 已原生合入 HuggingFace LeRobot（calibrate / teleoperate / record / dataset-viz / replay）。A3 需自写 7-DOF follower robot 类（`L1_joint`..`L7_joint`，复用 `a3_lerobot_config/config/a3_robot.yaml`），经 ROS 2 后端对接标准栈（**不得**与硬件接口抢 CAN），用 PS4（F16）替代 StarArm102 leader；打通标定、采集、可视化、回放。
+- **验收标准：**
+  1. `lerobot-calibrate` 可完成 A3 关节标定，标定文件可跨机复用
+  2. PS4 遥操作下 `lerobot-record` 稳定采集 ≥50 episode，`/joint_states` 与相机帧时间同步
+  3. `lerobot-dataset-viz`/`lerobot-replay` 可查看与回放数据集（回放经 FJT/编排层落地，受门控约束）
+- **关联：** [AI_ROADMAP.md](../shared/AI_ROADMAP.md) A0/Step 1；F16（PS4 遥操作）、F21（编排层 AI 模式）、F142（观测帧率）；[B601 LeRobot Wiki](https://wiki.seeedstudio.com/rebot_arm_b601_rs_lerobot/)
+- **状态：** `proposed`
+
+### F150 — RGB-D 深度相机接入与 TSAI 手眼标定（A1）【P0】
+
+- **说明：** 对标 reBot 深度相机集成（Orbbec Gemini2 / RealSense D405/D435i；eye-to-hand 与 D405 eye-in-hand）。接入相机驱动、完成 TSAI 手眼标定并发布相机→基座 TF，提供标定精度验收；腕部相机 TF 可先做 RViz 可视化（对标社区 D405 eye-in-hand TF）。
+- **验收标准：**
+  1. RGB-D 画面与深度流稳定（USB 供电/带宽不掉帧），相机系→`base_link` TF 发布
+  2. 手眼标定重投影/位姿误差在文档容差内，标定文件可复用
+- **关联：** [AI_ROADMAP.md](../shared/AI_ROADMAP.md) A1；F151/F152（检测/抓取消费方）
+- **状态：** `proposed`
+
+### F151 — YOLO/YOLOE 目标检测分割与 RKNN 适配（A1）【P1】
+
+- **说明：** 对标 reBot YOLO/YOLOE 检测分割（官方走 Jetson TensorRT）。A3 在 RK3588 NPU 上以 RKNN 落地轻量检测/分割与开放词汇提示，输出目标 2D mask/bbox + 深度投影，作为抓取姿态与 WRC 语言定位（F156）的感知输入。
+- **验收标准：**
+  1. NPU 推理可对桌面常见物体输出检测/分割，帧率满足抓取节拍，CPU 卸载明显
+  2. 输出坐标经 F150 TF 转到基座系可复现；模型/标签可配置
+- **关联：** [AI_ROADMAP.md](../shared/AI_ROADMAP.md) A1/NPU 分层决策；F150（相机/TF）、F152（抓取姿态）
+- **状态：** `proposed`
+
+### F152 — GraspNet 6-DoF / OBB 抓取姿态估计与视觉抓取闭环（A1）【P1】
+
+- **说明：** 对标 reBot 两条抓取路径：① YOLO 分割 + OBB 最小外接矩形抓取姿态（轻）；② YOLO11n-seg 过滤 + GraspNet 6-DoF（重，服务器跑）。抓取姿态经本仓 IK/FJT（或 F141 pick_place 链）执行，形成「看见→抓→放」闭环；重推理放服务器、轻姿态边缘。
+- **验收标准：**
+  1. 指定桌面目标可给出可达抓取位姿并完成抓取放置（先服务器 GraspNet，后评估 NPU 轻量）
+  2. 不可达/无抓取点时显式失败，不发运动指令；全程受 SAFETY 门控
+- **关联：** [AI_ROADMAP.md](../shared/AI_ROADMAP.md) A1；F150/F151、F141、C1；[reBot-DevArm-Grasp](https://github.com/EclipseaHime017/reBot-DevArm-Grasp)
+- **状态：** `proposed`
+
+### F153 — ACT / Diffusion 模仿学习训练管线（服务器训练 + action chunk 落地）（A2）【P1】
+
+- **说明：** 对标 reBot `lerobot-train`（act/diffusion/sac 等）。用 F149 数据集在内网 GPU 服务器训练单任务策略，RK3588 侧推理输出 action chunk 经编排层/FJT 执行（AI 不直写 CAN）；建立数据集→训练→评估→部署的版本化管线。
+- **验收标准：**
+  1. 服务器可用 F149 数据复现 ACT 训练并产出 checkpoint，评估指标可查
+  2. 真机/仿真推理驱动单任务到位，动作块经标准执行层落地且受门控/限位
+- **关联：** [AI_ROADMAP.md](../shared/AI_ROADMAP.md) A2/算力分工；F149（数据）、F154（异步推理）、F21（AI 模式）
+- **状态：** `proposed`
+
+### F154 — LeRobot 异步推理（PolicyServer / RobotClient gRPC）（A2/A3）【P1】
+
+- **说明：** 对标 LeRobot 官方 async inference（单机/LAN/云三模式）：大策略在 GPU 服务器跑 PolicyServer，RK3588 作 RobotClient，动作块流水化避免空转。gRPC/pickle 接口**仅限内网**（VPN/SSH/安全组限源），不暴露公网；断线时执行层进安全态。
+- **验收标准：**
+  1. LAN 模式下服务器推理、边缘执行连续不卡 chunk；断网/服务不可用时机械臂安全停车
+  2. 接口默认绑定内网 + 鉴权/限源配置；延迟与抖动有实测记录
+- **关联：** [AI_ROADMAP.md](../shared/AI_ROADMAP.md) A2/A3/6.4 安全边界；F153/F155
+- **状态：** `proposed`
+
+### F155 — VLA 策略与 PEFT 微调（SmolVLA / Pi0.5 / GR00T）（A3）【P2】
+
+- **说明：** 对标 reBot 已验证的 SmolVLA、Pi0/Pi0.5、GR00T N1.5、OpenVLA + LoRA/PEFT。在服务器上以 F149 数据做语言条件微调，经 F154 异步推理部署，实现跨任务自然语言指令；RK3588 不本地跑大模型。
+- **验收标准：**
+  1. 至少一种 VLA 经 PEFT 在 A3 数据上微调成功，语言指令可区分 ≥2 个任务
+  2. 策略执行成功率有基线记录；所有输出经门控/限位
+- **关联：** [AI_ROADMAP.md](../shared/AI_ROADMAP.md) A3/Step 2；F153/F154、F156（语言任务编排）
+- **状态：** `proposed`
+
+### F156 — 自然语言 Embodied Agent 任务编排（对标 WRC）（A4）【P0】
+
+- **说明：** reBot B601-RS 已有官方「Embodied Agent Architecture」（自然语言如"pick up the red block"→视觉定位→自动规划抓取执行，源码 TheMoonAstronaut/wrc）。本项实现 A3 版语言→任务编排：ASR/文本 → LLM 解析为受限任务 API（move/grasp/goto/夹爪/归位）→ 调用 F151 感知 + MoveIt/编排执行 → 结果反馈；任务接口白名单化、LLM 不能直接发原始运动指令。
+- **验收标准：**
+  1. 一条自然语言指令可完成「定位→抓取→放置/归位」全链（先接 F152，未就绪时可用 Mock 感知）
+  2. 任务 API 有白名单与参数校验；越界/不可达被安全拒绝；全过程可审计
+  3. 服务端 LLM，接口内网鉴权
+- **关联：** [AI_ROADMAP.md](../shared/AI_ROADMAP.md) A4；F151/F152（感知）、F141（抓取链）、F157（语音出入口）、CloudEdge MCP；[WRC demo](https://wiki.seeedstudio.com/wrc_demo_tutorial/) · [wrc 源码](https://github.com/TheMoonAstronaut/wrc)
+- **状态：** `proposed`
+
+### F157 — 语音 ASR/TTS 链路与 LLM 任务桥（A4）【P1】
+
+- **说明：** 对标 reBot 两条语音栈（全本地 Qwen3 ASR + MOSS-TTS + 4B LLM；Whisper + Ollama + OpenWebUI）。A3 按算力分层：LLM 语义走服务器（F156），ASR/TTS 先服务器、后评估 RK3588 轻量中文模型；定义语音会话→任务 API→播报的状态与超时。
+- **验收标准：**
+  1. 语音指令 → 任务执行 → 语音结果播报全链路打通一条
+  2. ASR/TTS 部署位置（本地/服务器）可配置；接口鉴权、公网不暴露
+- **关联：** [AI_ROADMAP.md](../shared/AI_ROADMAP.md) A4/1.2 算力分工；F156
+- **状态：** `proposed`
+
+### F158 — reSpeaker 麦克风阵列与 DoA 空间感知（A4，可选硬件）【P3】
+
+- **说明：** 对标 reBot reSpeaker Flex 4-mic 阵列：唤醒词、波束成形与声源方向（DoA）感知，可用于「看向说话人/朝向声源抓取」。依赖麦克风阵列硬件采购。
+- **验收标准：**
+  1. 阵列在 RK3588 上可出唤醒事件与 DoA 方位角
+  2. 方位角可作为 F156 任务参数（如转向/选取同侧目标），不阻断无硬件时的语音文本链路
+- **关联：** [AI_ROADMAP.md](../shared/AI_ROADMAP.md) A4；F157
+- **状态：** `proposed`（硬件采购后立项）
+
+### F159 — Isaac Sim USD 数字孪生与 sim-to-real（A5）【P2】
+
+- **说明：** reBot 的 Isaac Sim 集成（USD 模型 + 仿真遥操作 + 合成数据）已对 DM/RS 双机型 **Done**（DLI 课程 + reBot-Isaacsim）。A3 需在带 NVIDIA GPU 的服务器/云上构建 USD 模型与仿真遥操作，用于合成数据与策略 sim-to-real（RK3588 本地不跑）；与 F147（轻量浏览器孪生）按算力分工并存。
+- **验收标准：**
+  1. A3 USD 模型在 Isaac Sim 中与 URDF 关节/惯量一致，可仿真遥操作
+  2. 产出一批合成数据并验证至少一个感知/策略环节的 sim-to-real 迁移
+- **关联：** [AI_ROADMAP.md](../shared/AI_ROADMAP.md) A5/6.1；F147（MuJoCo 轻方案）；[reBot-Isaacsim](https://github.com/Seeed-Projects/reBot-Isaacsim)
+- **状态：** `proposed`
 
 ## 验收标准
 

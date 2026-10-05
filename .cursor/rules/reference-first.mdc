@@ -14,14 +14,14 @@ alwaysApply: true
 |------|------|------|
 | **长远功能参考项目** | https://github.com/Seeed-Projects/reBot-DevArm | reBot 生态入口：Python SDK、ROS2 + MoveIt2、Pinocchio、LeRobot、Isaac Sim、视觉抓取、语音控制、Web UI 等 |
 | **机械臂本体参考项目** | https://github.com/RobStride/EDULITE_A3 | 结构 / URDF / MoveIt 起点：`a3_description`、`a3_moveit_config` 来源 |
-| ROS2 控制壳（本地克隆） | `../a3_arm_vendor/reBotArmController_ROS2` | MoveIt、FJT Action、service/action 接口 |
-| Python/Pinocchio（本地克隆） | `../a3_arm_vendor/reBotArm_control_py` | FK/IK、轨迹、重力补偿 |
+| ROS2 控制壳（约定克隆） | 约定 `../a3_arm_vendor/reBotArmController_ROS2`（**先探测，本机不存在则查上游** https://github.com/Seeed-Projects/reBotArmController_ROS2） | MoveIt、FJT Action、service/action 接口 |
+| Python/Pinocchio（约定克隆） | 约定 `../a3_arm_vendor/reBotArm_control_py`（**先探测，本机不存在则查上游** https://github.com/vectorBH6/reBotArm_control_py） | FK/IK、轨迹、重力补偿 |
 | 生产执行层 | trotbot 派生 → `a3_can_bridge`、`a3_teleop_ps4` | RK3588 / SocketCAN / MIT / PS4 |
 | Wiki | https://wiki.seeedstudio.com/robotics_page/ | 官方联调说明 |
 
 ## 借鉴流程（开发前必做）
 
-1. 新功能需求确认后（`requirements-first.mdc`），先在参考项目中检索对应实现
+1. 新功能需求确认后（`requirements-first.mdc`），先在参考项目中检索对应实现；本地克隆约定放 `../a3_arm_vendor/`，**引用前先 `ls` 探测**（本机截至 2026-10 未克隆），不存在时直接查 GitHub 上游
 2. **有现成实现** → 优先借鉴，说明来源（仓库 + 文件/提交），保留上游结构再适配，不重写
 3. **找不到或无法复用** → 在需求文档和 `docs/shared/CONTROL_ROADMAP.md` 标注「对标缺口」，再自行实现
 4. 适配注意：关节名 `L1_joint`..`L7_joint`（L7 为夹爪）；URDF/mesh 指向 `a3_description`；

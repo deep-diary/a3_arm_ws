@@ -22,8 +22,14 @@
                  Per-joint motor_id/direction/position_offset read from joint params below. -->
             <plugin>a3_hardware_interface/A3MITHardwareInterface</plugin>
             <param name="can_interface">${can_interface}</param>
+            <!-- F138: MIT position-loop global fallback (per-joint overrides below,
+                 further overridden at startup by gains_config_file YAML). -->
             <param name="kp">80.0</param>
             <param name="kd">2.0</param>
+            <!-- F138: operational gains live in config/kp_kd_gains.yaml (in-repo) —
+                 edit that file and restart the stack to change kp/kd; xacro values
+                 are only the fallback when the YAML is missing. -->
+            <param name="gains_config_file">$(find a3_description)/config/kp_kd_gains.yaml</param>
             <param name="temp_warn_c">90.0</param>
             <param name="temp_protect_c">100.0</param>
             <!-- F85: velocity-adaptive free-drive damping (el_a3_hardware computeAdaptiveKd);
@@ -134,8 +140,9 @@
         <param name="motor_type">RS00</param>
         <param name="position_offset">0.0</param>
         <param name="direction">-1.0</param>
-        <param name="kp">80.0</param>
-        <param name="kd">2.0</param>
+        <!-- F138: tuned 2026-10-05, amp=0.2rad, kp=150.0 kd=2.5 -->
+        <param name="kp">150.0</param>
+        <param name="kd">2.5</param>
         <command_interface name="position">
           <param name="min">-2.79253</param>
           <param name="max">2.79253</param>
@@ -162,8 +169,12 @@
         <param name="motor_type">RS00</param>
         <param name="position_offset">0.0</param>
         <param name="direction">1.0</param>
-        <param name="kp">80.0</param>
-        <param name="kd">2.0</param>
+        <!-- F138: tuned 2026-10-05, kp=150.0 kd=2.5 (kd verified on full
+             idle->home move: 0.5->2.5 cuts post-arrival sway 3.8x) -->
+        <param name="kp">150.0</param>
+        <param name="kd">2.5</param>
+        <!-- L2 torque cap 8 Nm (RS00 hw default 14; session max observed 7.86). -->
+        <param name="torque_max">8.0</param>
         <command_interface name="position">
           <param name="min">0</param>
           <param name="max">3.66519</param>
@@ -192,8 +203,9 @@
         <param name="motor_type">RS00</param>
         <param name="position_offset">0.0</param>
         <param name="direction">-1.0</param>
-        <param name="kp">80.0</param>
-        <param name="kd">2.0</param>
+        <!-- F138 fallback (runtime gains from config/kp_kd_gains.yaml) -->
+        <param name="kp">150.0</param>
+        <param name="kd">2.5</param>
         <command_interface name="position">
           <param name="min">-4.01426</param>
           <param name="max">0</param>
@@ -222,8 +234,9 @@
         <param name="motor_type">${wrist_motor_type}</param>
         <param name="position_offset">0.0</param>
         <param name="direction">1.0</param>
-        <param name="kp">80.0</param>
-        <param name="kd">2.0</param>
+        <!-- F138: tuned 2026-10-05, kp=150.0 kd=4.5 -->
+        <param name="kp">150.0</param>
+        <param name="kd">4.5</param>
         <param name="zero_torque_kd_min">0.005</param>
         <param name="zero_torque_kd_max">0.1</param>
         <command_interface name="position">
@@ -252,8 +265,9 @@
         <param name="motor_type">${wrist_motor_type}</param>
         <param name="position_offset">0.0</param>
         <param name="direction">-1.0</param>
-        <param name="kp">80.0</param>
-        <param name="kd">2.0</param>
+        <!-- F138 fallback (runtime gains from config/kp_kd_gains.yaml) -->
+        <param name="kp">150.0</param>
+        <param name="kd">2.5</param>
         <param name="zero_torque_kd_min">0.005</param>
         <param name="zero_torque_kd_max">0.05</param>
         <command_interface name="position">
@@ -282,8 +296,9 @@
         <param name="motor_type">${wrist_motor_type}</param>
         <param name="position_offset">0.0</param>
         <param name="direction">1.0</param>
-        <param name="kp">80.0</param>
-        <param name="kd">2.0</param>
+        <!-- F138 fallback (runtime gains from config/kp_kd_gains.yaml) -->
+        <param name="kp">100.0</param>
+        <param name="kd">2.5</param>
         <param name="zero_torque_kd_min">0.005</param>
         <param name="zero_torque_kd_max">0.05</param>
         <command_interface name="position">

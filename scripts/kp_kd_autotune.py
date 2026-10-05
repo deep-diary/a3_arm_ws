@@ -38,10 +38,10 @@ ARM_JOINTS = ["L1_joint", "L2_joint", "L3_joint",
               "L4_joint", "L5_joint", "L6_joint"]
 
 # F138 逐关节激励幅值（rad，相对当前基位）。幅值带符号 = 摆动方向，须朝关节行程
-# 内部摆、避开贴限位的边界。idle/home 折叠位下：L2≈0 贴下限(0)→向正(抬臂)；L3≈0
-# 贴上限(0)→向负(折前臂)；L1 严格限幅「不过度旋转」。腕部 ±1.57 内任意方向皆可。
+# 内部摆、避开贴限位的边界。home 半抬位下：L2≈0.785 向正(抬臂)空间充裕；L3≈-0.785
+# 向负(折前臂)空间充裕。L1 用户确认 ±0.2 rad（±12°）无干涉。腕部 ±1.57 内任意方向皆可。
 DEFAULT_AMP = {
-    "L1_joint": 0.05,
+    "L1_joint": 0.20,
     "L2_joint": 0.20,
     "L3_joint": -0.20,
     "L4_joint": 0.15,
@@ -66,9 +66,9 @@ JOINT_LIMITS = {
 LIMIT_MARGIN = 0.05
 
 # 扫参范围与坐标下降网格（粗→细）。
-KP_MIN, KP_MAX = 40.0, 120.0
+KP_MIN, KP_MAX = 40.0, 150.0
 KD_MIN, KD_MAX = 0.5, 5.0
-KP_COARSE = [40.0, 60.0, 80.0, 100.0, 120.0]
+KP_COARSE = [40.0, 60.0, 80.0, 100.0, 120.0, 135.0, 150.0]
 KD_COARSE = [0.5, 1.5, 2.5, 4.0, 5.0]
 
 MOVE_DT = 0.8          # 单点 FJT 斜坡时长（快斜坡暴露超调/ringing）
@@ -734,6 +734,13 @@ def main():
         if st_rec.get() != "READY":
             print("ERROR: FSM not READY", flush=True)
             sys.exit(1)
+
+        # 必须先回 home 位姿（上次标定位），避免 idle 折叠碰撞。
+        if not goto_named_pose(node, "home"):
+            print("ERROR: goto home 失败", flush=True)
+            sys.exit(1)
+        # 等落定稳定后再采基位。
+        time.sleep(1.5)
 
         # 读当前位姿作为基位。
         rec = Recorder(node, {})

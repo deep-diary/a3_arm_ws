@@ -323,7 +323,7 @@ flowchart LR
 | 样条插值（JTC 语义） | ✅ JTC | ✅ F15 | Wave B / C2 增强 | F15 |
 | 主从示教 | 🔜 | ❌ | Wave B | C6 |
 | 末端六维力 / 导纳 | ❌ | ❌ | 硬件后 | C8 |
-| 诊断 / Safe Park | ※ | ❌ | Wave B 可选 | 参考社区 |
+| 诊断 / Safe Park | ※ | ❌（backlog：F140 Safe Park、F143 诊断视图） | Wave B 可选 | F140 / F143 |
 | LeRobot / AI | ✅ 另栈 | 🔜 脚手架 | 控制后 | 第 7 章 |
 
 **reBot 控制源码不在 DevArm 主仓：**

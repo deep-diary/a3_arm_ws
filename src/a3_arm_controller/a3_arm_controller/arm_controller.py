@@ -1977,14 +1977,11 @@ class ArmController(Node):
         plateau_ref_err = -1.0
         allow_residual = False
         while time.monotonic() - t0 < duration + timeout_s and rclpy.ok():
-            # F51/LL-039: 电机已带外失能 → park 不可能收敛，立即退出（保持“已失能”事实）
+            # F51/LL-039: 电机已带外失能 → park 不可能收敛，立即退出并同步
+            # ros2_control teardown（保持"已失能"事实，避免控制器残留 active）
             if self._pending_unexpected_disable:
                 why = self._pending_unexpected_disable
-                self._pending_unexpected_disable = ""
-                self._all_disabled_since = 0.0
-                self._publish_mode("IDLE")
-                self._set_state(STATE_DISABLED, f"safe park aborted：{why}")
-                self.get_logger().error(f"[arm_controller] safe park aborted: {why}")
+                self._handle_oob_disable(f"safe park aborted：{why}")
                 return False, f"safe park aborted: {why}"
             # move_group 轨迹执行异常未落定时，补一条两点纠偏轨迹（仅一次）
             if not corrective_sent and time.monotonic() - t0 > duration + 1.0 \
@@ -2046,6 +2043,28 @@ class ArmController(Node):
         self._set_state(STATE_DISABLED, "safe park -> disabled")
         self._publish_mode("IDLE")
         return True, f"safe park -> disabled ({time.monotonic() - t0:.1f}s)"
+
+    def _handle_oob_disable(self, why: str) -> None:
+        """F51/LL-039：带外失能收敛——FSM 置 DISABLED 的同时必须同步 ros2_control
+        实际状态：deactivate 残余 active 的控制器 + 硬件退回 INACTIVE。
+
+        否则状态簿与 controller_manager 不一致（控制器仍 active、电机已离线），
+        下次 enable 的 STRICT activate 会因 "is not inactive" 被整体拒绝并回退
+        硬件，形成「DISABLED 但无法重新使能」死锁。电机已带外失能时复位帧可能
+        无响应，teardown 全程 best-effort，失败只告警、不改变 DISABLED 事实。"""
+        self._pending_unexpected_disable = ""
+        self._all_disabled_since = 0.0
+        self._traj_done_at = 0.0
+        self._jogging = False
+        self._publish_mode("IDLE")
+        self._set_state(
+            STATE_DISABLED,
+            f"{why} → DISABLED（恢复：/a3/arm/enable；执行层 F51 使能会重锚到当前位姿）")
+        self.get_logger().error(f"[arm_controller] {why} → state=DISABLED")
+        ok, msg = self._motor_command(self._reset_cli, 2)
+        if not ok:
+            self.get_logger().warn(
+                f"oob disable teardown best-effort failed: {msg}")
 
     def _check_cooling(self) -> Tuple[bool, str]:
         """
@@ -2292,19 +2311,11 @@ class ArmController(Node):
             self._traj_done_at = 0.0
             self._back_to_ready()
 
-        # F51/LL-039: 电机被带外失能 → 立刻离开 READY/TRAJ（不再保留保持目标与后续指令）
+        # F51/LL-039: 电机被带外失能 → 立刻离开 READY/TRAJ，并同步 ros2_control
+        # teardown（不再保留保持目标与后续指令）
         if self._pending_unexpected_disable and self._state in (
                 STATE_READY, STATE_TRAJ, STATE_SAFE_PARK):
-            why = self._pending_unexpected_disable
-            self._pending_unexpected_disable = ""
-            self._all_disabled_since = 0.0
-            self._traj_done_at = 0.0
-            self._jogging = False
-            self._publish_mode("IDLE")
-            self._set_state(
-                STATE_DISABLED,
-                f"{why} → DISABLED（恢复：/a3/arm/enable；执行层 F51 使能会重锚到当前位姿）")
-            self.get_logger().error(f"[arm_controller] {why} → state=DISABLED")
+            self._handle_oob_disable(self._pending_unexpected_disable)
 
         # F44: 超温/故障保护在状态节拍执行（订阅回调只置 pending 标记）
         if self._temp_protect_pending:
