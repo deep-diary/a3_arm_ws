@@ -140,9 +140,10 @@
         <param name="motor_type">RS00</param>
         <param name="position_offset">0.0</param>
         <param name="direction">-1.0</param>
-        <!-- F138: tuned 2026-10-05, amp=0.2rad, kp=150.0 kd=2.5 -->
-        <param name="kp">150.0</param>
-        <param name="kd">2.5</param>
+        <!-- F138 user-verified best 2026-10-05 (fallback; runtime gains from
+             config/kp_kd_gains.yaml): kp=100 kd=4.0, smoothest on real arm -->
+        <param name="kp">100.0</param>
+        <param name="kd">4.0</param>
         <command_interface name="position">
           <param name="min">-2.79253</param>
           <param name="max">2.79253</param>
@@ -169,10 +170,10 @@
         <param name="motor_type">RS00</param>
         <param name="position_offset">0.0</param>
         <param name="direction">1.0</param>
-        <!-- F138: tuned 2026-10-05, kp=150.0 kd=2.5 (kd verified on full
-             idle->home move: 0.5->2.5 cuts post-arrival sway 3.8x) -->
-        <param name="kp">150.0</param>
-        <param name="kd">2.5</param>
+        <!-- F138 user-verified best 2026-10-05 (fallback; runtime gains from
+             config/kp_kd_gains.yaml): kp=100 kd=4.0, smoothest on real arm -->
+        <param name="kp">100.0</param>
+        <param name="kd">4.0</param>
         <!-- L2 torque cap 8 Nm (RS00 hw default 14; session max observed 7.86). -->
         <param name="torque_max">8.0</param>
         <command_interface name="position">
@@ -203,9 +204,10 @@
         <param name="motor_type">RS00</param>
         <param name="position_offset">0.0</param>
         <param name="direction">-1.0</param>
-        <!-- F138 fallback (runtime gains from config/kp_kd_gains.yaml) -->
-        <param name="kp">150.0</param>
-        <param name="kd">2.5</param>
+        <!-- F138 user-verified best 2026-10-05 (fallback; runtime gains from
+             config/kp_kd_gains.yaml): kp=100 kd=4.0, smoothest on real arm -->
+        <param name="kp">100.0</param>
+        <param name="kd">4.0</param>
         <command_interface name="position">
           <param name="min">-4.01426</param>
           <param name="max">0</param>
@@ -234,9 +236,10 @@
         <param name="motor_type">${wrist_motor_type}</param>
         <param name="position_offset">0.0</param>
         <param name="direction">1.0</param>
-        <!-- F138: tuned 2026-10-05, kp=150.0 kd=4.5 -->
-        <param name="kp">150.0</param>
-        <param name="kd">4.5</param>
+        <!-- F138 user-verified best 2026-10-05 (fallback; runtime gains from
+             config/kp_kd_gains.yaml): kp=100 kd=4.0, smoothest on real arm -->
+        <param name="kp">100.0</param>
+        <param name="kd">4.0</param>
         <param name="zero_torque_kd_min">0.005</param>
         <param name="zero_torque_kd_max">0.1</param>
         <command_interface name="position">
@@ -265,9 +268,10 @@
         <param name="motor_type">${wrist_motor_type}</param>
         <param name="position_offset">0.0</param>
         <param name="direction">-1.0</param>
-        <!-- F138 fallback (runtime gains from config/kp_kd_gains.yaml) -->
-        <param name="kp">150.0</param>
-        <param name="kd">2.5</param>
+        <!-- F138 user-verified best 2026-10-05 (fallback; runtime gains from
+             config/kp_kd_gains.yaml): kp=100 kd=4.0, smoothest on real arm -->
+        <param name="kp">100.0</param>
+        <param name="kd">4.0</param>
         <param name="zero_torque_kd_min">0.005</param>
         <param name="zero_torque_kd_max">0.05</param>
         <command_interface name="position">
@@ -296,9 +300,10 @@
         <param name="motor_type">${wrist_motor_type}</param>
         <param name="position_offset">0.0</param>
         <param name="direction">1.0</param>
-        <!-- F138 fallback (runtime gains from config/kp_kd_gains.yaml) -->
+        <!-- F138 user-verified best 2026-10-05 (fallback; runtime gains from
+             config/kp_kd_gains.yaml): kp=100 kd=4.0, smoothest on real arm -->
         <param name="kp">100.0</param>
-        <param name="kd">2.5</param>
+        <param name="kd">4.0</param>
         <param name="zero_torque_kd_min">0.005</param>
         <param name="zero_torque_kd_max">0.05</param>
         <command_interface name="position">

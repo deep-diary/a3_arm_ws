@@ -1975,7 +1975,7 @@ flowchart TD
   3. 纯离线、无 ROS 依赖，`python3 scripts/traj_smoothness_calibration.py` 秒级完成
 
 - **关联：** F68/F133（Ruckig retime/写回）、F57/F59（回放平滑/warp）、F88（两点标准轨迹）、F38（示教/回放）；[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)；`scripts/traj_smoothness_calibration.py`
-- **状态：** `in-progress`（2026-10-05：F138 真机整定完成，定稿增益见仓库内 `src/a3_description/config/kp_kd_gains.yaml`（启动时覆盖 xacro）：L1 150/2.5、L2 150/2.5、L3 150/2.5、L4 150/4.5、L5 150/2.5、L6 100/2.5；待实际运行验证）
+- **状态：** `in-progress`（2026-10-05：F138 真机整定 + 用户 A/B 实测定稿——全关节统一 100/4.0，见仓库内 `src/a3_description/config/kp_kd_gains.yaml`（启动时覆盖 xacro）；待实际运行验证）
 
 ### F137 — 录制轨迹几何去噪 + 平滑重规划（五次 B 样条光顺 + quintic 重定时）
 
@@ -2000,7 +2000,7 @@ flowchart TD
   1. `A3MITHardwareInterface`：`JointMapping` 增加逐关节 kp/kd（回退全局）；`on_init` 解析关节级 kp/kd（激活 xacro 死参数）；`write()` 位置模式改用逐关节增益；`on_configure` 的 `on_set_parameters_callback` 增加 `kp_<joint>`/`kd_<joint>` 运行时写入（沿用 `gravity_feedforward_ratio` 同款模式，LL-126 保留句柄）。
   2. `el_a3_ros2_control.xacro`：L1–L6 关节块显式 `kp/kd`（仅兜底默认值）；新增 `gains_config_file` 参数指向仓库内 `$(find a3_description)/config/kp_kd_gains.yaml`——启动时 YAML 逐关节覆盖 xacro 值，**调增益只需改仓库内 YAML + 重启栈，无需改 xacro/rebuild**（历史演进备注含在 YAML 头部：名义默认 80/2 → 两轮整定）。
   3. `scripts/kp_kd_autotune.py`：rclpy 脚本，connect/mock/real 三模式；enable→READY→逐关节坐标下降（kp 粗→kd 粗→kp 细→kd 细）→每格「设参数(运行时)→跑激励→采 /joint_states→算指标→记表」→输出最优并写 `~/.a3/kp_kd_tuned.yaml` + 报告。安全护栏：振荡检测（速度/effort 发散）、力矩/温度/限位越界、fault 即中止并回落名义增益；FSM 状态+温度监护、断点续跑（LL-146）。
-  4. 运维增益文件 `src/a3_description/config/kp_kd_gains.yaml`（入仓维护，头部备注 kp/kd 演进历史：名义默认 80/2 沿自 reBot/EDULITE 参考起始 → 第 1 轮 KP120 → 第 2 轮 KP150+实测修正）：2026-10-05 实测定稿 L1 150/2.5、L2 150/2.5、L3 150/2.5、L4 150/4.5、L5 150/2.5、L6 100/2.5（kd 随 √kp 增长保持阻尼比，见 LL-146 第三轮追加）。
+  4. 运维增益文件 `src/a3_description/config/kp_kd_gains.yaml`（入仓维护，头部备注 kp/kd 演进历史：名义默认 80/2 沿自 reBot/EDULITE 参考起始 → 第 1 轮 KP120 → 第 2 轮 KP150+实测修正 → 用户真机 A/B 实测定稿）：**2026-10-05 用户实测定稿全关节统一 100/4.0**（初始 xacro 腕部死参数值首次真跑；对比 150/2.5 体感更平稳、抖动最少；xacro 关节级兜底值已同步）。
 
 - **验收标准：**
   1. vcan 闭环（真插件 + vcan_motor_sim + 真 JTC）：运行时 set kp/kd 生效（抓帧断言逐关节 kp/kd 正确）、逐关节扫出指标表、无人工干预自循环收敛、注入过高 kp 能自动中止并回落名义
@@ -2009,7 +2009,7 @@ flowchart TD
   4. 最优逐关节 kp/kd 写回 xacro 后，FJT home↔ready、示教回放、MoveIt 规划执行三条链路回归不劣化
 
 - **关联：** F136（轨迹生成层标定，指标 J 扩展为伺服层指标）、F85（自适应 kd 示教阻尼，与本项位置环分离）、F108（重力前馈，整定时保持开）、F107/F44/F81（安全护栏）、P1/P2（跟踪滞后测量经验）、[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)、[shared/SAFETY.md](../shared/SAFETY.md)
-- **状态：** `in-progress`（2026-10-05：真机两轮整定 + 真实行程 kd 验证完成，定稿增益见仓库内 `src/a3_description/config/kp_kd_gains.yaml`（启动时覆盖 xacro）；待实际运行（示教/MoveIt/FJT）回归验证后关闭。遗留：整定器激励/落定窗偏小导致 kd 系统性偏小（LL-146），后续改进整定器考核项）
+- **状态：** `in-progress`（2026-10-05：真机两轮整定 + 真实行程 kd 验证 + 用户 A/B 实测定稿完成——全关节统一 100/4.0（`src/a3_description/config/kp_kd_gains.yaml` 启动时覆盖 xacro，兜底值已同步）；待示教/MoveIt/FJT 长期回归后关闭。遗留：整定器激励/落定窗偏小导致 kd 系统性偏小（LL-146），后续改进整定器考核项）
 
 ## reBot-DevArm 对标潜在需求（2026-10-05 盘点 backlog）
 
