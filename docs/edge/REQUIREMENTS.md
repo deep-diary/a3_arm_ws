@@ -1124,9 +1124,9 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 - **关联：** F89（同一 STRICT 切换与漂移判据）、F73/F85（zero_torque 控制器与阻尼）、F75（后端分流范式）、F54（停止自动保存）
 - **状态：** 已完成（2026-09-23，仿真 20/20：`scripts/a3_test/f89b_freedrive_switch_acceptance.py` 全绿，vcan89b 闭环，脚本退出码 0；稳态漂移实测最差 0.0023 rad；LL-100）。真机验收待通电。
 
-### F90 — 故障触发有界 rosbag2 黑匣子（snapshot-mode 循环缓冲，FAULT 边沿自动落盘）
+### F90 — 故障触发有界 rosbag2 黑匣子（snapshot-mode 循环缓冲，FAULT/COOLING 边沿自动落盘）
 
-- **说明：** 工业控制器标配故障黑匣子（事件前后一段历史自动留存供复盘）。不手搓录制器：ROS 2 官方 `rosbag2_transport` 提供 snapshot mode——常驻进程只把消息留在固定大小的内存循环缓冲（不落盘、无磁盘增长），被调 `/rosbag2_recorder/snapshot`（**服务类型 `rosbag2_interfaces/srv/Snapshot`，不是 std_srvs/Trigger**）时把当前缓冲写成分片 bag（每次触发一个独立分片文件，天然有界）。产品 bringup 默认经 `ros2 bag record --snapshot-mode` 起该录制器（`use_rosbag` 可关），FSM 在**进入 FAULT 的边沿**（电机故障/安全停车超时/过热保护失败等所有 FAULT 入口都汇聚于 `_set_state`）异步触发一次 snapshot：fire-and-forget，不阻塞故障处置路径；录制器不在（use_rosbag:=false / 尚未发现）则静默跳过。录制话题最小集：`/joint_states`、`/a3/arm_status`、`/a3/control_mode`、`/diagnostics`、`/diagnostics_toplevel_state`、`/arm_controller/joint_trajectory`。
+- **说明：** 工业控制器标配故障黑匣子（事件前后一段历史自动留存供复盘）。不手搓录制器：ROS 2 官方 `rosbag2_transport` 提供 snapshot mode——常驻进程只把消息留在固定大小的内存循环缓冲（不落盘、无磁盘增长），被调 `/rosbag2_recorder/snapshot`（**服务类型 `rosbag2_interfaces/srv/Snapshot`，不是 std_srvs/Trigger**）时把当前缓冲写成分片 bag（每次触发一个独立分片文件，天然有界）。产品 bringup 默认经 `ros2 bag record --snapshot-mode` 起该录制器（`use_rosbag` 可关），FSM 在**进入 FAULT/COOLING 的边沿**（电机故障/安全停车超时/过热保护等所有故障入口都汇聚于 `_set_state`，含过温保护走 COOLING 的路径）异步触发一次 snapshot：fire-and-forget，不阻塞故障处置路径；录制器不在（use_rosbag:=false / 尚未发现）则静默跳过。录制话题最小集：`/joint_states`、`/a3/arm_status`、`/a3/control_mode`、`/diagnostics`、`/diagnostics_toplevel_state`、`/arm_controller/joint_trajectory`。
 - **改动：**
   1. `a3_bringup.launch.py` 增参 `use_rosbag`（默认 true）、`bag_dir`（默认 `~/.a3/blackbox`）；`ExecuteProcess` 起 `ros2 bag record --snapshot-mode --max-cache-size 33554432 --max-bag-size 67108864 --storage mcap -o <bag_dir>/blackbox_<启动时间戳>`（时间戳在 launch 生成期取本地时间，每次启动唯一目录）。
   2. `arm_controller.py` 新增 `rosbag2_interfaces/srv/Snapshot` 客户端 `/rosbag2_recorder/snapshot`；`_set_state` 检测到旧态≠FAULT、新态=FAULT 且 `service_is_ready()` 时 `call_async`（响应回调仅记日志），不满足就绪条件直接跳过。
@@ -1136,7 +1136,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   3. 有界性：循环缓冲 32 MiB / 分片 64 MiB 参数生效（bag info / 文件大小验证）；重复故障每次只多一个分片
   4. `use_rosbag:=false` 时无录制器进程，FSM 照常进 FAULT，不报错不阻塞
 - **关联：** F44/F84（电机故障→FAULT）、F81（冻结保持，事件源之一）、F82（诊断话题）；对标工业控制器事件黑匣子
-- **状态：** 已完成（2026-09-23，仿真 17/17：`scripts/a3_test/f90_blackbox_acceptance.py` 全绿，vcan90 闭环，脚本退出码 0；LL-101）。真机验收待通电。
+- **状态：** `implemented`（2026-09-23 仿真 17/17 全绿；2026-10-05 真机验收通过：过温保护触发 COOLING 边沿自动 snapshot 落盘 `blackbox_20261005_160138_0.mcap` 28.6MB，日志 `blackbox snapshot flushed` 确认）
 
 ### F92 — 全仓质量门禁接线（lint 真跑 + 一键 CI 门脚本）
 
@@ -1611,13 +1611,13 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 
 ### F44 — 温度管理（warn / protect / COOLING）
 
-- **说明：** 参数 `temp_protect_enabled: true`、`temp_warn_c: 90.0`、`temp_protect_c: 95.0`（2026-09-13 由 65 上调——官方电机自带 130°C 兜底，65 使 ready 位保位发热几分钟即误触，LL-023）、`temp_hysteresis_c: 5.0`。warn（≥90，fresh 门控）：置 `temp_warn` + WARN 日志 + `arm_temp_warn` 遥测，不动状态机。protect（≥95 任一 fresh 关节）：READY/TRAJ → 复用 F40 流程 safe park → **COOLING**（message 带关节与温度）；IDLE/DISABLED/COOLING → 直接 COOLING；SAFE_PARK 进行中不打断；reset 被 gate 拒 → **FAULT**(overtemp reset refused)（温度保护不可放弃）。重新使能：COOLING 下 `_enable_cb`/`_init_cb` 先查全 fresh 关节 < protect−hysteresis 才放行；无 fresh 关节不阻碍 + WARN。顺带电机故障监视：fault_mask≠0（含固件过温锁存 bit3）→ reset 广播 + FAULT。`ArmStatus.msg` 追加 `float64[] temperatures`、`bool temp_warn`；MQTT scalar rule fields 扩展 `temp_warn` → `arm_temp_warn`。
+- **说明：** 参数 `temp_protect_enabled: true`、`temp_warn_c: 90.0`、`temp_protect_c: 95.0`（2026-09-13 由 65 上调——官方电机自带 130°C 兜底，65 使 ready 位保位发热几分钟即误触，LL-023）、`temp_hysteresis_c: 5.0`。warn（≥90，fresh 门控）：置 `temp_warn` + WARN 日志 + `arm_temp_warn` 遥测，不动状态机。protect（≥95 任一 fresh 关节）：READY/TRAJ → 复用 F40 流程 safe park → **COOLING**（message 带关节与温度）；IDLE/DISABLED/COOLING → 直接 COOLING；SAFE_PARK 进行中不打断；reset 被 gate 拒 → **FAULT**(overtemp reset refused)（温度保护不可放弃）。COOLING 下全 fresh 关节 < protect−hysteresis 时**自动转 DISABLED**（实时反映已降温、灯效红闪→橙）。重新使能：COOLING 下 `_enable_cb`/`_init_cb` 先查全 fresh 关节 < protect−hysteresis 才放行；无 fresh 关节不阻碍 + WARN。顺带电机故障监视：fault_mask≠0（含固件过温锁存 bit3）→ reset 广播 + FAULT。`ArmStatus.msg` 追加 `float64[] temperatures`、`bool temp_warn`；MQTT scalar rule fields 扩展 `temp_warn` → `arm_temp_warn`。
 - **验收标准：**
   1. 超保护阈 → 自动回 home → 失能 → COOLING；降温至保护阈−迟滞前 enable 被拒
   2. warn 级仅告警不打断运动
   3. 无反馈（fresh=false）时温度判读不生效——温度=0.0 不是 NaN，断连不得被误判「已冷却」放行使能（LL-011 教训）
 - **关联：** F40（复用 safe park）、F45（COOLING 态）；[shared/SAFETY.md](../shared/SAFETY.md)（温度策略）；LL-023（阈值放宽）
-- **状态：** `completed`（2026-09-13：阈值上调后两 yaml + 代码默认值同步、重编重启回读 95.0/90.0 确认；保护路径（overtemp → safe park 回 home 落点误差 <0.003 rad → 7/7 失能 → COOLING → L3 卸力快速降温）已于 65°C 旧阈值时代真机触发并二次复现，状态转移与遥测一致）
+- **状态：** `completed`（2026-09-13 保护路径真机触发并复现；2026-10-05 增补：COOLING 降温后自动转 DISABLED（灯效红闪→橙）+ COOLING 边沿触发黑匣子，真机验证通过）
 
 ### F45 — 状态机增强（11 态）
 

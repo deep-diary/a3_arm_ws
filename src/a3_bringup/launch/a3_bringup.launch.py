@@ -14,7 +14,7 @@ A3 机械臂唯一产品入口（F78）：hardware:=mock|can，两种模式拓�
   moveit_servo servo_node（TwistStamped + JointJog 双输入，输出 → arm JTC 原生话题）
     + servo_mode_bridge
   a3_arm_controller 编排层（control_backend=fjt_action，
-    motor_service_backend=controller_switch，require_gate:=false）
+    motor_service_backend=controller_switch，require_gate 由 yaml 决定）
   a3_mqtt_bridge（默认包含；broker 不可达自行重连，节点不退出）
   diagnostic_aggregator（F82，默认包含；/diagnostics_agg + /diagnostics_toplevel_state）
   rosbag2 黑匣子（F90，默认包含；snapshot-mode 循环缓冲，FAULT 边沿自动落盘 mcap）
@@ -433,7 +433,8 @@ def generate_launch_description():
         parameters=[
             os.path.join(arm_share, "config", "arm_controller.yaml"),
             {
-                "require_gate": False,
+                # require_gate 由 arm_controller.yaml 决定（真机 true / 仿真 false）；
+                # 不再在 launch 里硬编码覆盖。
                 "control_backend": fsm_backend,
                 "motor_service_backend": "controller_switch",
             },

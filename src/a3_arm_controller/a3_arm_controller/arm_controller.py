@@ -680,6 +680,8 @@ class ArmController(Node):
         self._torque_stats: Dict[str, Dict[str, Any]] = self._load_torque_stats()
         self._torque_stats_dirty = False
         self._torque_stats_saved_at = 0.0
+        # 本次运行峰值（仅内存，重启清零，不进历史持久化文件）
+        self._torque_session_max: Dict[str, float] = {}
         # F44: 温度/故障监视（fresh 门控；无反馈温度=0.0，勿当 NaN 判读）
         self._temperatures: List[float] = [0.0] * self._n_joints
         self._temp_fresh: List[bool] = [False] * self._n_joints
@@ -999,6 +1001,10 @@ class ArmController(Node):
         max_nm = float(self.get_parameter("torque_stats_max_nm").value)
         if not math.isfinite(tau) or abs(tau) > max_nm:
             return  # 超量程/非有限值：异常反馈，不污染 F43 历史峰值统计
+        # 本次运行峰值（仅内存，重启清零）
+        prev = self._torque_session_max.get(jn, 0.0)
+        if abs(tau) > prev:
+            self._torque_session_max[jn] = abs(tau)
         st = self._torque_stats.setdefault(
             jn, {"max_abs": 0.0, "max_pos": 0.0, "max_neg": 0.0, "ts": ""}
         )
@@ -1315,9 +1321,9 @@ class ArmController(Node):
         # status_hz 节拍间生灭，下游（DS4 白闪/ web / MQTT）永远收不到。LL-064。
         if hasattr(self, "_arm_status_pub"):
             self._arm_status_pub.publish(self._build_status_msg())
-        # F90: 所有 FAULT 入口（电机故障/过热/停车超时/使能失败）都汇聚于此，
-        # 只在进入 FAULT 的边沿触发一次黑匣子落盘
-        if state == STATE_FAULT and prev != STATE_FAULT:
+        # F90: 所有故障入口（FAULT 及过温保护 COOLING）都汇聚于此，
+        # 只在进入 FAULT/COOLING 的边沿触发一次黑匣子落盘
+        if state in (STATE_FAULT, STATE_COOLING) and prev != state:
             self._fire_blackbox_snapshot()
 
     def _fire_blackbox_snapshot(self) -> None:
@@ -1356,6 +1362,10 @@ class ArmController(Node):
         st.temperatures = [float(t) for t in self._temperatures]
         st.max_torques = [
             float(self._torque_stats.get(jn, {}).get("max_abs", 0.0))
+            for jn in self._joint_names
+        ]
+        st.session_max_torques = [
+            float(self._torque_session_max.get(jn, 0.0))
             for jn in self._joint_names
         ]
         st.temp_warn = bool(self._temp_warn)
@@ -2182,6 +2192,13 @@ class ArmController(Node):
         if any(fr and math.isfinite(t) and t >= protect_c for t, fr in zip(temps, fresh)):
             if self._state in (STATE_READY, STATE_TRAJ, STATE_IDLE, STATE_DISABLED, STATE_COOLING):
                 self._temp_protect_pending = True
+
+        # COOLING 降温恢复：全 fresh 关节 < protect−hysteresis 时自动转 DISABLED
+        # （实时反映已降温、可重新使能；灯效红双闪 → 橙）。
+        if self._state == STATE_COOLING:
+            cooled, _ = self._check_cooling()
+            if cooled:
+                self._set_state(STATE_DISABLED, "overtemp cooled down")
 
         # 电机故障监视（fault_mask 非零，含固件过温锁存 bit3）
         if self.get_parameter("fault_mask_reset_on_fault").value and self._state in (

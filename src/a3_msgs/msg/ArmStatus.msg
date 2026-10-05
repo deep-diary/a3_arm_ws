@@ -22,5 +22,8 @@ float64[] temperatures
 # 每关节历史最大力矩绝对值（Nm，持久化 ~/.a3/stats/torque_stats.yaml，重启恢复——需求 F43）
 float64[] max_torques
 
+# 每关节本次运行峰值力矩绝对值（Nm，仅内存，重启清零——需求 F43 补充）
+float64[] session_max_torques
+
 # 温度告警（≥ temp_warn_c 但未达保护阈值——需求 F44）
 bool temp_warn

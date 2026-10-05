@@ -13,8 +13,9 @@
     status_hz: 10.0
     init_zero_tol_rad: 0.05
     init_timeout_s: 5.0
-    # 运动命令是否要求 gate_open（仿真/无电源序列时设 false）
-    require_gate: false
+    # 运动命令是否要求 gate_open（电源门联锁）。真机 power_sequence 在跑 → true；
+    # 仿真/无电源序列才设 false。2026-10 真机开启。
+    require_gate: true
 
     # ═══════════════════════════════════════════════════════════════════
     # 2. goto / MoveIt 点位规划
@@ -130,6 +131,7 @@
     # 11. 温度管理（F44）
     # ═══════════════════════════════════════════════════════════════════
     temp_protect_enabled: true
+    # 生产阈值 90(warn)/95(protect)（LL-023 调高值）；临时改 60/65 做过温保护验证。
     temp_warn_c: 90.0
     temp_protect_c: 95.0
     temp_hysteresis_c: 5.0
