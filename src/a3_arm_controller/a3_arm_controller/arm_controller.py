@@ -129,6 +129,38 @@ def _interp_series(values: List[float], times: List[float], t: float) -> float:
     return values[i] + (values[i + 1] - values[i]) * f
 
 
+def _geometric_smooth_positions(
+    positions: List[List[float]], times: List[float], eps: float
+) -> List[List[float]]:
+    """
+    F137: 逐关节五次 B 样条几何去噪（平滑因子 s = N·ε²，RMS 残差 ≈ ε）。
+
+    去除录制点的编码器量化锯齿（几何噪声），位置包络不变、时间轴不动。ε>0 启用，
+    典型 0.005（保形）~0.02（更平滑）。scipy 缺失/拟合失败时逐关节退化为原值，
+    保证回放链路不被去噪卡死。
+    """
+    if eps <= 0 or len(positions) < 6:
+        return list(positions)
+    try:
+        import numpy as np
+        from scipy.interpolate import UnivariateSpline
+    except Exception:
+        return list(positions)
+    raw = np.asarray(positions, dtype=float)
+    n, m = raw.shape
+    t0, t1 = times[0], times[-1]
+    span = (t1 - t0) if t1 > t0 else 1.0
+    u = np.asarray([(t - t0) / span for t in times], dtype=float)
+    s = float(n) * eps * eps
+    out = np.empty_like(raw)
+    for j in range(m):
+        try:
+            out[:, j] = UnivariateSpline(u, raw[:, j], k=5, s=s)(u)
+        except Exception:
+            out[:, j] = raw[:, j]
+    return [list(row) for row in out]
+
+
 # F94: JTC VARIABLE_DEGREE_SPLINE 两点（端点 v/a=0）实测峰值速度/平均速度≈2.0–2.09
 # （mock 全栈 200 Hz 实测），地板时长须按该形状系数放大，否则只约束了平均值。
 _SPLINE_PEAK_FACTOR = 2.2
@@ -467,6 +499,10 @@ class ArmController(Node):
         self.declare_parameter("playback_velocity_scaling", 0.2)
         self.declare_parameter("playback_acceleration_scaling", 0.2)
         self.declare_parameter("playback_retime_min_duration_s", 1.0)
+        # F137: 回放前对录制点做几何去噪（逐关节五次 B 样条，RMS 残差 ≈ ε rad）。
+        # ε=0 关闭；0.005 保形、0.02 更平滑。去噪在 F68 重定时之前，L1-L6 进 retime、
+        # L7 进序列下发，均为去噪后几何；重定时成功烘焙时落盘即 F137+F68 结果。
+        self.declare_parameter("playback_geometric_smoothing_eps", 0.01)
         # F133: Ruckig 重定时成功后把优化轨迹烘焙回 latest.yaml（原文件备份
         # *.preretime.yaml）；下次回放直接复用平滑轨迹。仅 latest 槽，时间戳
         # 备份文件永不改写。
@@ -3984,7 +4020,9 @@ class ArmController(Node):
             self.get_logger().error(f"trajectory save failed to {path}: {exc}")
             return False
 
-    def _writeback_retimed(self, path: str, traj: Optional[JointTrajectory]) -> bool:
+    def _writeback_retimed(
+        self, path: str, traj: Optional[JointTrajectory], f137_eps: float = 0.0
+    ) -> bool:
         """F133: 把 Ruckig 重定时后的轨迹烘焙回录制品 YAML（latest 槽优化沉淀）.
 
         几何路径不变、时间戳为重定时结果；写前把原文件备份为 *.preretime.yaml
@@ -3998,6 +4036,8 @@ class ArmController(Node):
             data = {
                 # 已优化标记：下次回放据此跳过重复烘焙（几何已含一代重采样误差）
                 "retimed": True,
+                # F137 已去噪标记：下次回放据此跳过二次 B 样条去噪（几何已含去噪结果）
+                "f137_smoothed": f137_eps > 0,
                 "joint_names": list(traj.joint_names),
                 "points": [
                     {
@@ -4251,6 +4291,14 @@ class ArmController(Node):
                     + "; ".join(viol))
                 return resp
 
+        # F137: 几何去噪（B 样条平滑）——在 F68 重定时前把录制点几何光顺，去编码器
+        # 量化锯齿。ε>0 启用；文件已带 f137_smoothed 标记（已烘焙过去噪结果）则跳过，
+        # 避免对已去噪几何二次去噪。
+        f137_smoothed = bool(data.get("f137_smoothed"))
+        eps = float(self.get_parameter("playback_geometric_smoothing_eps").value)
+        if eps > 0 and not f137_smoothed and len(recorded_std) >= 6:
+            recorded_std = _geometric_smooth_positions(recorded_std, recorded_times, eps)
+
         # F38/F88: 回放前从当前位姿到首记录点建一条两点几何 ramp（时间由 retime
         # 重算，保几何），避免回放起始位 ≠ 记录起始位时突然跳变。
         ramp_s = float(self.get_parameter("playback_ramp_duration_s").value)
@@ -4330,7 +4378,7 @@ class ArmController(Node):
                 if (is_latest_path and not ramp_in_geo and not already_retimed
                         and bool(self.get_parameter("playback_retime_writeback").value)):
                     merged = self._merge_retimed_with_l7(rtraj, geo, geo_times)
-                    if self._writeback_retimed(path, merged):
+                    if self._writeback_retimed(path, merged, eps):
                         retime_msg += f"; baked {len(merged.points)} pts"
                 elif is_latest_path and already_retimed:
                     retime_msg += "; writeback skipped (already retimed)"

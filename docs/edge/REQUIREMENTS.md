@@ -809,7 +809,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
   3. ruckig 失败自动降级 totg；retime 节点/服务不可用 → 回退旧链路（WARN），回放不中断
   4. 录制 yaml 仍只存 positions + time_from_start_sec（格式不变，旧文件可直接回放）
 - **关联：** F67（goto 同体系）、F22（示教/回放门面）、F38b（ramp 段）；[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)；LL-071
-- **状态：** `done（仿真）`（2026-09-22，14/14 ALL PASS：Ruckig 回放 4.41s vs 录制 4.0s，101/101 几何点匹配、最大偏差 0.0034 rad、端点误差 0.0001 rad，无超速/超加速；旧链路几何 0.0045 rad 作回归对照；Ruckig 单步 jerk 绑定致 29.6s 拉伸的根因与修复见 LL-071 坑 5；真机验收待上电。2026-10-04：retime 排除 L7——组改 `arm`(L1–L6)，L7 原始时间戳 + 20ms 线性插值 + ≤0.6 rad/s 限速）
+- **状态：** `done（仿真）`（2026-09-22，14/14 ALL PASS：Ruckig 回放 4.41s vs 录制 4.0s，101/101 几何点匹配、最大偏差 0.0034 rad、端点误差 0.0001 rad，无超速/超加速；旧链路几何 0.0045 rad 作回归对照；Ruckig 单步 jerk 绑定致 29.6s 拉伸的根因与修复见 LL-071 坑 5；真机验收待上电。2026-10-04：retime 排除 L7——组改 `arm`(L1–L6)，L7 原始时间戳 + 20ms 线性插值 + ≤0.6 rad/s 限速。2026-10-05 真机：backend 默认切 `totg`——ruckig 对去噪/均匀时间轨迹仍拉长（14.65s→61s），totg 匹配录制时长且 JTC splines 兜最终平滑；`playback_retime_backend: totg`、`velocity/acceleration_scaling: 0.5`）
 
 ## F69 ready 点位改为非腕奇异形（修复伺服 L1 驱动整臂变软下坠）
 
@@ -1960,6 +1960,37 @@ flowchart TD
 
 - **关联：** F60（键位总览）、F62（仿真验收脚本）、F134（上一条需求，后续编号连续）；[PS4_OPERATOR_GUIDE.md](PS4_OPERATOR_GUIDE.md)、[src/a3_teleop_ps4/README.md](../../src/a3_teleop_ps4/README.md)
 - **状态：** `implemented`（2026-10-03：mapping.py 组合键 + 双 layout 注册 l1_r1 + default.yaml 改绑 + sim S1 全绿——PS 解绑回归断言通过、L1+R1 长按 2 s init → READY + 白闪；S4/S10 4 项 FAIL 为仿真已知差异，与本改动无关；真机实操待复测）
+
+### F136 — 轨迹平滑度标定脚手架（标准轨迹 vs 录制轨迹 + 指标 J + 参数扫描，先仿真）
+
+- **说明：** 回放"不够丝滑"难以归因——是录制轨迹本身有噪声、伺服增益（kp/kd）不合适、还是轨迹生成层（Ruckig/jerk、warp、平滑窗口）参数没调好。为解耦变量，新增离线标定脚手架，**同时准备两条对照轨迹**：①「标准轨迹」= 两点间 quintic 规划（起止零速/零加速度、加加速度连续，作为"理论平滑"基准）；②「最新录制轨迹」= `~/.a3/trajectories/latest.yaml`（实机/仿真录制，作为真实输入）。对两条轨迹算同一套平滑度指标 J（速度/加速度/jerk 的 RMS+峰值 + 几何保持），再对轨迹生成层参数（`velocity_scaling`、加速度缩放、平滑窗口、warp `vmax/amax` 等）做有界扫描，输出「参数→J」表并自动选最优。**先离线跑**（不碰电机、不依赖 ROS），后续再接真机做伺服层（kp/kd）扫描——分层解耦：生成层是主杠杆且零风险，伺服层是次杠杆且有发散风险。
+
+- **指标 J（初版，权重可配）：** 逐关节有限差分求 vel/acc/jerk，聚合为 RMS+峰值；`J = w_v·|v|rms + w_a·|a|rms + w_j·|jerk|rms + w_apk·a_peak + w_jpk·jerk_peak + w_geom·几何偏离`（各归一化后加权）。平滑度由 acc/jerk 主导，几何保持由 geom 约束（避免为平滑把路径改没）。
+
+- **实现方式：** 新增 `scripts/traj_smoothness_calibration.py`（纯 Python + PyYAML，无 ROS/无 numpy）：`build_standard_trajectory()`（quintic 两点）、`load_recorded_trajectory()`、`compute_metrics()`、`scan()`（velocity_scaling / smooth window 一维网格）。CLI 输出 J 分解与参数扫描表。后续扩展 `--live` 走 `/a3/arm/retime_trajectory` 服务做在线扫描。
+
+- **验收标准：**
+  1. 离线跑通：给定两点 q0/q1 与 `latest.yaml`，打印两条轨迹各自的 J 分解；标准轨迹的 acc/jerk 指标应显著优于带噪轨迹
+  2. 扫描 `velocity_scaling ∈ [0.2,1.5]`：J 随 v_scaling 单调变化，自动选出最优并输出表
+  3. 纯离线、无 ROS 依赖，`python3 scripts/traj_smoothness_calibration.py` 秒级完成
+
+- **关联：** F68/F133（Ruckig retime/写回）、F57/F59（回放平滑/warp）、F88（两点标准轨迹）、F38（示教/回放）；[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)；`scripts/traj_smoothness_calibration.py`
+- **状态：** `in-progress`（2026-10-04：离线脚手架落地；真机 kp/kd 伺服层扫描待后续）
+
+### F137 — 录制轨迹几何去噪 + 平滑重规划（五次 B 样条光顺 + quintic 重定时）
+
+- **说明：** F68 Ruckig 只做「保几何重定时」（去时间噪声），不动几何路径——录制点里的编码器量化锯齿几何仍原样保留，重定时后在这些锯齿上仍会产生高 jerk（实测 `latest.yaml` `j_rms≈3.4e4`，标准 quintic 两点仅 `0.25`）。本需求在 retime **之前**加一道**几何去噪**前置，把密集带噪录制点重规划成接近标准 quintic 的光滑路径，再交给 F68 重定时。工业对标：CNC/NURBS B 样条最小二乘光顺（Piegl&Tiller）+ 机器人控制器转角 blend（ABB z / KUKA C_DIS / Pilz blend）。做法：**逐关节五次 B 样条平滑**（时间参数化 `u=(t−t0)/T`，平滑因子 `s=N·ε²`，ε≈RMS 残差目标）→ **quintic 时间重定时**（起止零速零加速度，对标标准 quintic）→ 稠密重采样。**先离线仿真验证**，真机后续接 F68 Ruckig 服务。
+
+- **实现方式：** 新增 `scripts/traj_smooth.py`（numpy+scipy，离线无 ROS）：`fit_smoothing_splines()`（`scipy.interpolate.UnivariateSpline(k=5, s=N·ε²)`）、`smooth_path()`（quintic 时间剖线重采样）、`time_matched_deviation()`（保形偏离），复用 `traj_smoothness_calibration.compute_metrics` 算 J。CLI 对若干条录制轨迹跑「原始 / F137 平滑 / 标准 quintic」三列对比 + ε 扫描（平滑度 vs 保形 Pareto），输出 CSV + `docs/dev/F137_TRAJ_SMOOTHING_REPORT.md`。
+
+- **验收标准：**
+  1. 离线跑通：`python3 scripts/traj_smooth.py --dir ~/.a3/trajectories --latest 3 --eps 0.01`，对最近 3 条录制轨迹产出三列 J 对比
+  2. 平滑后 `j_rms`/`a_rms` 相对原始**下降 ≥ 2 个数量级**（去几何量化噪声；`a_rms` 降到「真实运动」量级，证明非只靠放慢）
+  3. 几何保持：平滑路径对原始点的最大偏离受 ε 控制（RMS≈ε、max≈数倍 ε）
+  4. 生成对比报告（优化前/后轨迹与参数、via 点数、ε、J 分解），供真机测试前审阅
+
+- **关联：** F136（标定脚手架/指标 J）、F68/F133（Ruckig retime/写回）、F57/F59（legacy 平滑/warp 将被取代）、F88（两点标准轨迹）；[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)；`scripts/traj_smooth.py`、`docs/dev/F137_TRAJ_SMOOTHING_REPORT.md`
+- **状态：** `implemented`（2026-10-04 离线仿真验证：`scripts/traj_smooth.py` + 最近 3 条真实录制轨迹，`j_rms` 下降 ×315~4423、`a_rms` 下降 ×17~51，几何偏离 RMS≈ε/max≈0.06–0.08 rad，报告见 `docs/dev/F137_TRAJ_SMOOTHING_REPORT.md`；2026-10-05 集成进 arm_controller 回放链路：`playback_geometric_smoothing_eps`（默认 0.01，`_geometric_smooth_positions()` 逐关节五次 B 样条）在 F68 重定时**之前**在线去噪，回放路径 = F137 去噪 → F68(totg) 重定时 → JTC splines；`_writeback_retimed` 烘焙写入 `f137_smoothed` 幂等标志防二次去噪；`scipy` 已声明进 package.xml；真机 `latest.yaml` 已重生成 F137+F68）
 
 ## 验收标准
 

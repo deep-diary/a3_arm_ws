@@ -30,6 +30,8 @@
 | `gravity_calibration.py` | F49 7J 重力标定（复刻官方 dynamics_calibration.py 适配真机栈） | `python3 scripts/gravity_calibration.py` |
 | `gravity_scale_calibration.py` | F89 重力模型验证 + 逐关节重力 scale 标定 | `python3 scripts/gravity_scale_calibration.py` |
 | `mit_noenable_stream.py` | MIT 电机 CAN 无使能探测 + 零增益流式工具（纯标准库，无 ROS） | `python3 scripts/mit_noenable_stream.py probe --iface can1 --ids 1..7` |
+| `traj_smoothness_calibration.py` | F136 轨迹平滑度标定脚手架：标准 quintic 轨迹 vs 录制轨迹 + 指标 J + 参数扫描（离线，无 ROS） | `python3 scripts/traj_smoothness_calibration.py --scan v_scaling` |
+| `traj_smooth.py` | F137 录制轨迹几何去噪 + 平滑重规划：逐关节五次 B 样条光顺 + quintic 重定时，三列对比 + ε 扫描 + 报告（离线） | `python3 scripts/traj_smooth.py --dir ~/.a3/trajectories --latest 3 --eps 0.01` |
 
 ## 桥接/工具
 

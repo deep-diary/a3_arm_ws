@@ -560,7 +560,7 @@ ros2 topic pub --rate 10 /a3/display_target_joint_states sensor_msgs/msg/JointSt
 
 ### goto/回放工业轨迹验收（F67/F68，仿真全闭环）
 
-goto（Triangle→home、Circle→idle；R3=失能）走 MoveIt move_group + TOTG；示教回放走 `/a3/arm/retime_trajectory`（Ruckig 默认，TOTG 备选），只重定时不改几何。move_group/retime 不可用时分别自动回退本地线性插值 / 旧 smooth+time_warp 链路（参数 `goto_use_moveit`、`playback_retime`，默认 true）。
+goto（Triangle→home、Circle→idle；R3=失能）走 MoveIt move_group + TOTG；示教回放走 `/a3/arm/retime_trajectory`（`playback_retime_backend` 默认 **totg**，ruckig 备选——真机 ruckig 会拉长故弃用），只重定时不改几何。move_group/retime 不可用时分别自动回退本地线性插值 / 旧 smooth+time_warp 链路（参数 `goto_use_moveit`、`playback_retime`，默认 true）。
 
 ```bash
 # 全自动验收（自建域 55 闭环栈，约 3~5 分钟；结束自动收栈）

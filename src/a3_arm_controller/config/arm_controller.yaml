@@ -1,5 +1,8 @@
 /**:
   ros__parameters:
+    # ═══════════════════════════════════════════════════════════════════
+    # 1. 基础：关节、话题、初始化
+    # ═══════════════════════════════════════════════════════════════════
     joint_names: [L1_joint, L2_joint, L3_joint, L4_joint, L5_joint, L6_joint, L7_joint]
     joint_states_topic: /joint_states
     control_mode_topic: /a3/control_mode
@@ -7,144 +10,149 @@
     gate_topic: /power_sequence/gate_open
     power_state_topic: /power_sequence/state
     traj_topic: /joint_group_effort_controller/joint_trajectory
-
     status_hz: 10.0
     init_zero_tol_rad: 0.05
     init_timeout_s: 5.0
     # 运动命令是否要求 gate_open（仿真/无电源序列时设 false）
     require_gate: false
 
+    # ═══════════════════════════════════════════════════════════════════
+    # 2. goto / MoveIt 点位规划
+    # ═══════════════════════════════════════════════════════════════════
     goto_duration_s: 3.0
-    # goto position（goto_use_moveit=true 走 move_group）规划时间调慢：velocity+acc
-    # 0.30→0.15 使整条轨迹时长约翻倍，实际关节速度随之减半（2026-09-26 用户反馈
-    # "goto 规划出来挺快"；真机实测 p95 已 0.3 rad/s、p99 ~2 rad/s，减速在 L2/L3 亦有
-    # 减小 JTC 跟踪误差余量的附加收益）
+    # goto 规划时间调慢：velocity+acc 0.30→0.15 使轨迹时长约翻倍（2026-09 真机
+    # "goto 挺快"，减速亦减小 JTC 跟踪误差余量）
     moveit_velocity_scaling: 0.15
     moveit_acceleration_scaling: 0.15
-    # F116: /a3/arm/random_pose_tour 默认抽点数与点位池黑名单（zero=机械零位，真机排除）
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 3. 随机位姿巡游（F116/F134）
+    # ═══════════════════════════════════════════════════════════════════
     random_tour_count: 10
-    random_tour_exclude_poses: ["zero"]
-    # 单腿规划/门禁失败时换抽点位重试次数（2026-10 用户反馈"设 10 有时只走 2 点"：
-    # 原行为单腿失败即整体中止；重试耗尽才中止）
-    random_tour_leg_retries: 3
-    # F134: 巡游整序列一次规划/执行（pilz PTP blend，中间点不停车）；
-    # false/action 不可用/规划失败 → 回退逐腿链
+    random_tour_exclude_poses: ["zero"]   # zero=机械零位，真机排除
+    random_tour_leg_retries: 3            # 单腿失败重试次数
+    # F134: 整序列一次规划/执行（pilz PTP blend）；false/失败回退逐腿链
     random_tour_use_sequence: true
     random_tour_blend_radius_m: 0.02
-    # 回放前从当前位姿插值到首记录点的时长（s）；≤0.05 关闭插值（F38）
-    # LL-046: 2.5s→5s——ramp 把末位→首位差（如 L4 深垂 1.18 rad 段）压缩进 2.5s 会
-    # 形成 ~0.47 rad/s 的突兀下砸，肉眼即"回放开局快/不平滑"；5s 拉平该过渡。
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 4. 回放：ramp + 旧平滑链（legacy 兜底，仅 retime 关闭/失败时用）
+    # ═══════════════════════════════════════════════════════════════════
+    # 回放前从当前位姿插值到首记录点时长；LL-046 2.5s→5s 拉平回放开局下砸
     playback_ramp_duration_s: 5.0
-    # F124: 回放回首点段走 move_group 轨迹规划（true，LED cyan）；false/规划失败回落 ramp
+    # F124: 回首点段走 move_group 规划（true）；false/失败回落几何 ramp
     playback_return_use_moveit: true
-    # LL-047: 回放低通平滑窗口（中心滑动平均，@50Hz 采样数）。手拖录制 50Hz 数据天然带
-    # 加速度尖峰（实测 reBot L2 113 rad/s²），伺服忠实复现即"抖动"；7 点平滑把尖峰
-    # 砍 ~93%（→~8 rad/s²），路径几何扰动 ≤20 mrad，停点几乎不动。0/1 关闭，热设置生效。
+    # LL-047: 中心滑动平均低通（legacy 链；retime 正常路径不用）
     playback_smooth_samples: 7
-    # F57/LL-053: 回放时间轴匀速重排（弧长均匀重采样压手拖起-停停顿、保几何路径）。
-    # vmax 是单关节速度上限——实测 0.6 rad/s 跟踪干净；dt_min 是 @50Hz 网格地板。
-    # F59/LL-057: accel_max 是加速度限幅——在 0.1s 粗网格（步长 5）上做「时间膨胀」
-    # （只拉时间不动位置）消掉弧长重采样在真实拐角的速度跳变。细步差分的尖峰大部分
-    # 是「最大关节换帅」离散伪影 + 编码器噪声（非持续需求，只造成 mrad 级跟随误差
-    # 暂态，不会触发 FOLLOW_STUCK）；持续饱和（kp*err+重力 > 5Nm 限幅）才是断点根因，
-    # 故限幅只约束粗网格的持续加速度需求（实测 21.6s 输入 → 21.8s 输出，F57 版为
-    # 30.9s）；0 = 关闭膨胀。
+    # F57/LL-053: 时间轴匀速重排（legacy 链；弧长均匀重采样 + 加速度限幅膨胀）
     playback_time_warp: true
     playback_warp_vmax_rad_s: 0.6
     playback_warp_dt_min_s: 0.02
     playback_warp_accel_max_rad_s2: 2.0
-    # F57/LL-053: 保存时轻量平滑（中心滑动平均窗口，@50Hz 采样数；0/1/2 = 不保存）。
-    # latest.yaml / teach_*.yaml 落盘即干净，任何消费方受益。
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 5. 示教保存
+    # ═══════════════════════════════════════════════════════════════════
+    # F57/LL-053: 保存时轻量平滑（5 点中心滑动平均；0/1/2=不保存）
     teach_save_smooth_samples: 5
-    # F133: 回放 Ruckig 重定时成功后把优化轨迹烘焙回 latest.yaml（几何不变、时间戳
-    # 为重定时结果；原文件备份 *.preretime.yaml）。仅 latest 槽，teach_*.yaml 备份不改写。
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 6. F68 重定时 + F137 几何去噪（回放核心链路）
+    # ═══════════════════════════════════════════════════════════════════
+    # F133: 重定时成功后烘焙回 latest.yaml（retimed:true / f137_smoothed 标记）
     playback_retime_writeback: true
-    # ── F131: 路点示教（Share 长按进入；L2 打点；Options 保存） ──────────────
-    # 路点 < 2 不保存（两点成一段；防误触发覆盖上一条好任务）
-    waypoint_min_count: 2
-    # 与上一路点最大关节差 < 10 mrad 视为重复，打点跳过（防 L2 连按刷屏）
-    waypoint_min_capture_delta_rad: 0.01
-    # 单段规划/执行失败重试次数（段间同步滞后 LL-103 的瞬态失败重等 current 后重试；
-    # 0=段失败即整体中止——2026-10 用户反馈"PTP 停在第一点"即段 2 瞬态失败被旧行为放大）
-    waypoint_segment_retries: 2
-    # F134: 路点任务整序列一次规划/执行（pilz Sequence，blend 过中间点不停车）；
-    # false/失败 → 回退逐段链
-    waypoint_use_sequence: true
-    # 每段等待上限；0 = 复用 moveit_goto_timeout_s
-    waypoint_segment_timeout_s: 0.0
-    # F134: 拐角 blend 半径——轨迹在该圆盘内偏离中间点圆滑过弯（0=精确到位即停）
-    waypoint_blend_radius_m: 0.02
-    # Sequence 整序列规划+执行等待上限（含 N 段执行）
-    sequence_move_timeout_s: 90.0
-    # LIN 笛卡尔速度/加速度缩放（pilz 只缩放笛卡尔剖面，关节加速度尖峰靠 v^2 压低）。
-    # 2026-10 真机反馈"慢且抖"：0.1 过保守 → 0.2 起步实测；若近奇异段关节加速度
-    # 尖峰回潮再降回，逐段观测 /a3/motor/states。
+    # 后端：totg=时间最优（匹配录制时长）；ruckig=加加速度受限（更平滑但会拉长）。
+    # 2026-10 真机：ruckig 对去噪轨迹仍拉长（14.65s→61s，LL-071），故用 totg，
+    # JTC splines 已做最终插值平滑。
+    playback_retime_backend: totg
+    # 重定时目标时长 = max(录制时长, ramp)（true）；false 按 v/a 上限时间最优
+    playback_match_recorded_duration: true
+    # 回放速度/加速度缩放（× joint_limits.yaml 上限）。0.2→0.5 更接近示教原速
+    playback_velocity_scaling: 0.5
+    playback_acceleration_scaling: 0.5
+    # F137: 回放前几何去噪（逐关节五次 B 样条，RMS 残差 ≈ ε rad）。0=关闭；
+    # 0.005 保形、0.02 更平滑。默认 0.01（max 偏离 ~0.06 rad≈3.4°）。
+    playback_geometric_smoothing_eps: 0.01
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 7. 路点示教（F131/F134：Share 长按进入，L2 打点，Options 保存）
+    # ═══════════════════════════════════════════════════════════════════
+    waypoint_min_count: 2                   # 路点 <2 不保存
+    waypoint_min_capture_delta_rad: 0.01    # 与上一点差 <10mrad 视为重复
+    waypoint_segment_retries: 2             # 单段规划/执行失败重试
+    waypoint_use_sequence: true             # F134: 整序列 blend 过中间点
+    waypoint_segment_timeout_s: 0.0         # 0=复用 moveit_goto_timeout_s
+    waypoint_blend_radius_m: 0.02           # 拐角 blend 半径
+    sequence_move_timeout_s: 90.0           # 整序列规划+执行等待上限
+    # LIN 笛卡尔速度/加速度缩放（0.2 起步实测，近奇异段抖再降）
     waypoint_lin_velocity_scaling: 0.2
     waypoint_lin_acceleration_scaling: 0.2
-    # LIN 目标位姿容差（打点 FK 位姿盒）
-    waypoint_lin_pos_tol_m: 0.002
+    waypoint_lin_pos_tol_m: 0.002           # LIN 目标位姿容差
     waypoint_lin_rot_tol_rad: 0.002
-    # LIN FK 参考坐标系（Pilz 在 base_link 下规划）
     waypoint_base_link: base_link
     waypoint_ee_link: end_effector
-    # LIN 规划组：arm_lin（SRDF 同链组，pick_ik global；arm 组 local 种子对远目标 IK -31）
     waypoint_lin_planning_group: arm_lin
-    # 操作员事件（打点白闪反馈由 ds4_feedback_node 消费）
-    operator_event_topic: /a3/arm/operator_event
-    # F41/F88: move_to/goto 兜底——最短时长；两点轨迹由 JTC splines 插值
-    move_to_min_duration_s: 3.0
-    # F40: 失能保护（不在 idle 容差内先平滑回 idle 再失能，防掉臂）；F113 home→idle
-    disable_home_pose_name: idle
+    operator_event_topic: /a3/arm/operator_event   # 打点反馈事件
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 8. move_to / goto 兜底
+    # ═══════════════════════════════════════════════════════════════════
+    move_to_min_duration_s: 3.0             # F41/F88: 两点轨迹最短时长
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 9. 失能保护（F40 回位 / F75 落定 / F119 软失能）
+    # ═══════════════════════════════════════════════════════════════════
+    disable_home_pose_name: idle            # F113: home→idle
     disable_home_tol_rad: 0.15
     disable_home_duration_s: 5.0
     disable_home_confirm_s: 0.5
     disable_park_timeout_s: 8.0
-    # F75: 工业级落定判据——位置 AND 速度双落定连续 confirm_s 才允许失能
-    disable_home_settle_tol_rad: 0.02
-    disable_home_settle_vel_rad_s: 0.05
-    # F119: R3 任意模式软失能——退出 SERVO/零力矩/重力补偿模式的等待上限（s）
-    disable_mode_exit_timeout_s: 2.0
-    # F43: 最大力矩持久化
+    disable_home_settle_tol_rad: 0.02       # F75: 位置落定判据
+    disable_home_settle_vel_rad_s: 0.05     # F75: 速度落定判据
+    disable_mode_exit_timeout_s: 2.0        # F119: 退出模式等待上限
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 10. 力矩统计（F43）+ 静态力矩门禁（F107）
+    # ═══════════════════════════════════════════════════════════════════
     motor_states_topic: /a3/motor/states
     torque_stats_file: "~/.a3/stats/torque_stats.yaml"
     torque_stats_save_interval_s: 10.0
-    # F107 静态重力矩门禁上限 = joint_rated_torque × static_torque_margin_ratio。
-    # 0.8→0.9：示教回放大臂高位形 L2 静态力矩 ~4.2 Nm 会被 0.8(4.0) 拦截；0.9(4.5)
-    # 放行，仍留 10% 动态余量（L2 连续额定 5.0、峰值 14）。
+    # F107: 门禁上限 = joint_rated_torque × static_torque_margin_ratio。
+    # 0.8→0.9 放行 L2 高位形 ~4.2Nm（仍留 10% 动态余量）
     static_torque_margin_ratio: 0.9
-    # F107: 电机连续额定力矩（N·m），L1-L3 RS00=5.0、L4-L7 EL05=1.8（原代码默认值）
+    # F107: 电机连续额定力矩（N·m），L1-L3 RS00=5.0、L4-L7 EL05=1.8
     joint_rated_torque: [5.0, 5.0, 5.0, 1.8, 1.8, 1.8, 1.8]
-    # F44: 温度管理（warn 仅告警；protect 自动回 idle 失能降温；迟滞恢复）
-    # 阈值 2026-09-13 真机调高：官方电机自带 130°C 保护兜底，初版 65°C 过低
-    # （ready 位 L3 保位 1.26 Nm 几分钟即触发 overtemp park，LL-023）
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 11. 温度管理（F44）
+    # ═══════════════════════════════════════════════════════════════════
     temp_protect_enabled: true
     temp_warn_c: 90.0
     temp_protect_c: 95.0
     temp_hysteresis_c: 5.0
-    fault_mask_reset_on_fault: true
-    # F48: 使能前读数限位门禁（环绕读数超限时拒绝使能，见 LL-019）
-    enable_position_check: true
-    # 限位比较裕量（F48 enable 门控）：理论 URDF 边界外 2°(=0.035 rad) 内视为正常。
-    # 放行的是静差下垂/公差 1° 级；多圈环绕(LL-019)是 6.28 rad 级，不受影响。
-    # 命令侧 set_joint_positions 仍按 URDF 死 clamp，此处仅放宽实测读数门禁。
-    position_check_margin_rad: 0.035
-    # /joint_states 最大陈旧时长：桥异常时 js 冻结旧值（LL-020），超过拒绝使能
-    js_max_stale_s: 1.0
 
-    # F51/LL-039：带外失能（电机被看门狗/别人失能，编排层仍以为在跑）兜底检测。
-    # 本地兜底不依赖看门狗在跑；持续窗 1.0s 用于抑制本节点自身 park→reset 竞态。
-    # 注意：看门狗侧同名参数必须更短（arm_monitor.yaml 0.5s）——否则本节点先转
-    # DISABLED 会让看门狗的持续窗清零，UNEXPECTED_DISABLE 永远报不出来。
+    # ═══════════════════════════════════════════════════════════════════
+    # 12. 故障 / 限位（F48）
+    # ═══════════════════════════════════════════════════════════════════
+    fault_mask_reset_on_fault: true
+    enable_position_check: true             # 使能前读数限位门禁
+    position_check_margin_rad: 0.035        # 限位比较裕量（2°）
+    js_max_stale_s: 1.0                     # /joint_states 最大陈旧时长
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 13. 带外失能监视（F51/LL-039）
+    # ═══════════════════════════════════════════════════════════════════
     monitor_status_topic: /a3/monitor/status
     unexpected_disable_guard: true
-    unexpected_disable_sustain_s: 1.0
+    unexpected_disable_sustain_s: 1.0       # 须比 arm_monitor.yaml(0.5s) 长
 
+    # ═══════════════════════════════════════════════════════════════════
+    # 14. 轨迹文件 / 自由拖动 / 夹爪（F127）
+    # ═══════════════════════════════════════════════════════════════════
     trajectories_dir: "~/.a3/trajectories"
     named_poses_pkg: a3_description
-    # F127: 示教自由拖动（ZERO_TORQUE）时随 arm 一并互切的夹爪控制器（LL-136 原子 swap）
     freedrive_gripper_controller: gripper_controller
-    # 回放 L7 夹爪按录制时间序列步进下发（GripperCommand 抢占式）：
-    # 20ms 步进 + 相邻点线性插值消除阶梯跳变；l7_max_velocity_rad_s 硬限速。
+    # L7 夹爪按录制时间序列步进下发：20ms 步进 + 线性插值；l7_max_velocity 硬限速
     l7_seq_tick_s: 0.02
     l7_seq_min_delta_rad: 0.01
     l7_max_velocity_rad_s: 0.6
