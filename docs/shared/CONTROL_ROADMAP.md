@@ -191,6 +191,8 @@ flowchart LR
 
 **规划含义（已落地）：** C2 整轨时间跟踪是对齐 reBot 的硬前置——没有它，C1 真机 MoveIt Execute 也无法正确跑多点规划结果。CAN「200 Hz」仅是发送限流，**不等于**已做轨迹插值。仿真验收：`./scripts/verify_wave_a_sim.sh`。
 
+> **伺服层 kp/kd 自动整定（F138，2026-10 立项）：** 轨迹跟踪误差的底层杠杆是 MIT 位置环 kp/kd（硬件接口层，位置模式共用）。F138 打通「逐关节 + 运行时」kp/kd（`A3MITHardwareInterface` + `/a3_hardware_health` 参数）并做安全自循环坐标下降整定，见 `docs/edge/REQUIREMENTS.md` F138 / `scripts/kp_kd_autotune.py`。属 L1/L2 稳定性增强（commissioning 工具），不改变 L0–L8 分层。
+
 ### L3 — 模型与运动学（MoveIt IK vs Pinocchio）
 
 | 项 | 内容 |

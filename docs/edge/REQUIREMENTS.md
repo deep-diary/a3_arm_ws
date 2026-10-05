@@ -1975,7 +1975,7 @@ flowchart TD
   3. 纯离线、无 ROS 依赖，`python3 scripts/traj_smoothness_calibration.py` 秒级完成
 
 - **关联：** F68/F133（Ruckig retime/写回）、F57/F59（回放平滑/warp）、F88（两点标准轨迹）、F38（示教/回放）；[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)；`scripts/traj_smoothness_calibration.py`
-- **状态：** `in-progress`（2026-10-04：离线脚手架落地；真机 kp/kd 伺服层扫描待后续）
+- **状态：** `in-progress`（2026-10-04：离线脚手架落地；伺服层 kp/kd 扫描已由 F138 承接）
 
 ### F137 — 录制轨迹几何去噪 + 平滑重规划（五次 B 样条光顺 + quintic 重定时）
 
@@ -1991,6 +1991,24 @@ flowchart TD
 
 - **关联：** F136（标定脚手架/指标 J）、F68/F133（Ruckig retime/写回）、F57/F59（legacy 平滑/warp 将被取代）、F88（两点标准轨迹）；[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)；`scripts/traj_smooth.py`、`docs/dev/F137_TRAJ_SMOOTHING_REPORT.md`
 - **状态：** `implemented`（2026-10-04 离线仿真验证：`scripts/traj_smooth.py` + 最近 3 条真实录制轨迹，`j_rms` 下降 ×315~4423、`a_rms` 下降 ×17~51，几何偏离 RMS≈ε/max≈0.06–0.08 rad，报告见 `docs/dev/F137_TRAJ_SMOOTHING_REPORT.md`；2026-10-05 集成进 arm_controller 回放链路：`playback_geometric_smoothing_eps`（默认 0.01，`_geometric_smooth_positions()` 逐关节五次 B 样条）在 F68 重定时**之前**在线去噪，回放路径 = F137 去噪 → F68(totg) 重定时 → JTC splines；`_writeback_retimed` 烘焙写入 `f137_smoothed` 幂等标志防二次去噪；`scipy` 已声明进 package.xml；真机 `latest.yaml` 已重生成 F137+F68）
+
+### F138 — MIT 位置环 kp/kd 伺服层自动整定（逐关节，安全自循环）
+
+- **说明：** F136 完成轨迹生成层（离线）标定，本项承接其「真机 kp/kd 伺服层扫描待后续」。当前位置环 kp/kd 在硬件接口层 `A3MITHardwareInterface` 统一为全局 80/2（腕部 xacro 里的 100/4 是未解析的死参数，LL-088 同类），且**不可运行时调**——整定前必须先打通「逐关节 + 运行时」kp/kd。整定目标：在 home 基位附近小幅摆动各关节（L1 严格限幅不过度旋转、L2/L3 为主），用「quintic 点到点 + 单关节小阶跃」激励，采 `/joint_states` 计算跟踪误差/稳定时间/超调/ringing/力矩纹波，坐标下降（粗→细）逐关节搜最优 kp/kd。全程安全自循环：力矩钳位(F107)、软起步(startup_kd)、温度保护(F44)、位置限位、振荡/发散即时中止并回落名义增益。
+
+- **实现方式：**
+  1. `A3MITHardwareInterface`：`JointMapping` 增加逐关节 kp/kd（回退全局）；`on_init` 解析关节级 kp/kd（激活 xacro 死参数）；`write()` 位置模式改用逐关节增益；`on_configure` 的 `on_set_parameters_callback` 增加 `kp_<joint>`/`kd_<joint>` 运行时写入（沿用 `gravity_feedforward_ratio` 同款模式，LL-126 保留句柄）。
+  2. `el_a3_ros2_control.xacro`：L1–L6 关节块显式 `kp/kd`（起始统一 80/2，与当前有效值一致，避免激活即改行为）。
+  3. `scripts/kp_kd_autotune.py`：rclpy 脚本，connect/mock/real 三模式；enable→READY→逐关节坐标下降（kp 粗→kd 粗→kp 细→kd 细）→每格「设参数(运行时)→跑激励→采 /joint_states→算指标→记表」→输出最优并写 `~/.a3/kp_kd_tuned.yaml` + 报告。安全护栏：振荡检测（速度/effort 发散）、力矩/温度/限位越界、fault 即中止并回落名义增益。
+
+- **验收标准：**
+  1. vcan 闭环（真插件 + vcan_motor_sim + 真 JTC）：运行时 set kp/kd 生效（抓帧断言逐关节 kp/kd 正确）、逐关节扫出指标表、无人工干预自循环收敛、注入过高 kp 能自动中止并回落名义
+  2. 真机 home 基位：L1 全程不越过 ±0.1 rad，L2/L3 小幅摆动；整定期间任意 fault/限位/超温/发散即中止回安全位
+  3. 输出 `~/.a3/kp_kd_tuned.yaml` + `docs/dev/F138_KP_KD_AUTOTUNE_REPORT.md`（参数→指标表、最优逐关节 kp/kd、对比名义 80/2 的改善量）
+  4. 最优逐关节 kp/kd 写回 xacro 后，FJT home↔ready、示教回放、MoveIt 规划执行三条链路回归不劣化
+
+- **关联：** F136（轨迹生成层标定，指标 J 扩展为伺服层指标）、F85（自适应 kd 示教阻尼，与本项位置环分离）、F108（重力前馈，整定时保持开）、F107/F44/F81（安全护栏）、P1/P2（跟踪滞后测量经验）、[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)、[shared/SAFETY.md](../shared/SAFETY.md)
+- **状态：** `in-progress`（2026-10-05：P0 硬件接口逐关节+运行时 kp/kd 与 xacro 落地，`f138_kp_kd_acceptance.py` vcan 验收 **4/4**——默认 80/2 → 设 `kp_L1_joint=60`/`kd_L1_joint=3` 逐关节 CAN 帧级生效 → 回落 80/2；整定脚本 `scripts/kp_kd_autotune.py` 就绪，真机整定待栈重启加载新二进制后跑）
 
 ## 验收标准
 

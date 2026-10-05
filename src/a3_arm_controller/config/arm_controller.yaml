@@ -132,9 +132,10 @@
     # ═══════════════════════════════════════════════════════════════════
     temp_protect_enabled: true
     # 生产阈值 90(warn)/95(protect)（LL-023 调高值）；临时改 60/65 做过温保护验证。
+    # F138：整定 duty cycle 高，protect 95→100、hysteresis 5→10（恢复仍 90）拉长标定时长。
     temp_warn_c: 90.0
-    temp_protect_c: 95.0
-    temp_hysteresis_c: 5.0
+    temp_protect_c: 100.0
+    temp_hysteresis_c: 10.0
 
     # ═══════════════════════════════════════════════════════════════════
     # 12. 故障 / 限位（F48）

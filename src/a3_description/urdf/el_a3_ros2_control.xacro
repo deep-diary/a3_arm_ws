@@ -25,7 +25,7 @@
             <param name="kp">80.0</param>
             <param name="kd">2.0</param>
             <param name="temp_warn_c">90.0</param>
-            <param name="temp_protect_c">95.0</param>
+            <param name="temp_protect_c">100.0</param>
             <!-- F85: velocity-adaptive free-drive damping (el_a3_hardware computeAdaptiveKd);
                  per-joint zero_torque_kd_min/max below override the global values. -->
             <param name="adaptive_kd_enabled">${adaptive_kd_enabled}</param>
@@ -134,6 +134,8 @@
         <param name="motor_type">RS00</param>
         <param name="position_offset">0.0</param>
         <param name="direction">-1.0</param>
+        <param name="kp">80.0</param>
+        <param name="kd">2.0</param>
         <command_interface name="position">
           <param name="min">-2.79253</param>
           <param name="max">2.79253</param>
@@ -160,6 +162,8 @@
         <param name="motor_type">RS00</param>
         <param name="position_offset">0.0</param>
         <param name="direction">1.0</param>
+        <param name="kp">80.0</param>
+        <param name="kd">2.0</param>
         <command_interface name="position">
           <param name="min">0</param>
           <param name="max">3.66519</param>
@@ -188,6 +192,8 @@
         <param name="motor_type">RS00</param>
         <param name="position_offset">0.0</param>
         <param name="direction">-1.0</param>
+        <param name="kp">80.0</param>
+        <param name="kd">2.0</param>
         <command_interface name="position">
           <param name="min">-4.01426</param>
           <param name="max">0</param>
@@ -216,8 +222,8 @@
         <param name="motor_type">${wrist_motor_type}</param>
         <param name="position_offset">0.0</param>
         <param name="direction">1.0</param>
-        <param name="kp">100.0</param>
-        <param name="kd">4.0</param>
+        <param name="kp">80.0</param>
+        <param name="kd">2.0</param>
         <param name="zero_torque_kd_min">0.005</param>
         <param name="zero_torque_kd_max">0.1</param>
         <command_interface name="position">
@@ -246,8 +252,8 @@
         <param name="motor_type">${wrist_motor_type}</param>
         <param name="position_offset">0.0</param>
         <param name="direction">-1.0</param>
-        <param name="kp">100.0</param>
-        <param name="kd">4.0</param>
+        <param name="kp">80.0</param>
+        <param name="kd">2.0</param>
         <param name="zero_torque_kd_min">0.005</param>
         <param name="zero_torque_kd_max">0.05</param>
         <command_interface name="position">
@@ -276,8 +282,8 @@
         <param name="motor_type">${wrist_motor_type}</param>
         <param name="position_offset">0.0</param>
         <param name="direction">1.0</param>
-        <param name="kp">100.0</param>
-        <param name="kd">4.0</param>
+        <param name="kp">80.0</param>
+        <param name="kd">2.0</param>
         <param name="zero_torque_kd_min">0.005</param>
         <param name="zero_torque_kd_max">0.05</param>
         <command_interface name="position">

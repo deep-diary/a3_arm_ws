@@ -156,6 +156,10 @@ struct JointMapping
   double position_offset{0.0};
   double torque_max{6.0};
   double speed_max{50.0};
+  // F138 per-joint MIT position-loop gains (fallback to global kp_/kd_).
+  // Updated at runtime via /a3_hardware_health set_parameters (kp_<joint>/kd_<joint>).
+  double kp{kDefaultKp};
+  double kd{kDefaultKd};
 
   double hw_pos{0.0};
   double hw_vel{0.0};
@@ -270,6 +274,10 @@ public:
       j.direction = ParseDouble(GetParam(joint.parameters, "direction", "1.0"), 1.0);
       j.position_offset =
         ParseDouble(GetParam(joint.parameters, "position_offset", "0.0"), 0.0);
+      // F138: per-joint position-loop gains override the global kp/kd
+      // (xacro previously declared L4-L6 kp/kd that were never parsed).
+      j.kp = ParseDouble(GetParam(joint.parameters, "kp", ""), kp_);
+      j.kd = ParseDouble(GetParam(joint.parameters, "kd", ""), kd_);
 
       // Default ranges by motor model: RS00 (id 1-3) ±14 Nm / ±33 rad/s,
       // EL05 (id 4-7) ±6 Nm / ±50 rad/s (LL-024).
@@ -466,6 +474,12 @@ public:
       "gravity_feedforward_ratio", gravity_ff_ratio_);
     health_node_->declare_parameter(
       "use_pinocchio_gravity", use_pinocchio_gravity_);
+    // F138: per-joint position-loop gains tunable at runtime so the autotune
+    // loop can sweep kp/kd without restarting controller_manager.
+    for (const auto & j : joints_) {
+      health_node_->declare_parameter("kp_" + j.name, j.kp);
+      health_node_->declare_parameter("kd_" + j.name, j.kd);
+    }
     // Must retain the returned handle: rclcpp stores it as a weak_ptr, so a
     // dropped handle makes the parameter service accept updates while the
     // callback (and these member writes) never runs. LL-126.
@@ -482,6 +496,18 @@ public:
             p.get_type() == rclcpp::ParameterType::PARAMETER_BOOL)
           {
             use_pinocchio_gravity_ = p.as_bool();
+          } else if (p.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
+            // F138: kp_<joint> / kd_<joint> runtime gain update. Plain doubles
+            // written here and read in write() on the CM thread; updates are
+            // infrequent (once per sweep step), so a benign race on a single
+            // double matches the gravity_feedforward_ratio pattern.
+            for (auto & j : joints_) {
+              if (p.get_name() == "kp_" + j.name) {
+                j.kp = std::clamp(p.as_double(), 0.0, 200.0);
+              } else if (p.get_name() == "kd_" + j.name) {
+                j.kd = std::clamp(p.as_double(), 0.0, 10.0);
+              }
+            }
           }
         }
         return result;
@@ -906,7 +932,7 @@ public:
         }
         frame = ProtocolCodec::BuildMitControlFrame(
           bus_, j.motor_id, j.direction * j.cmd_pos + j.position_offset,
-          0.0, kp_, kd_, t_ff, j.torque_max, j.speed_max);
+          0.0, j.kp, j.kd, t_ff, j.torque_max, j.speed_max);
       }
       std::string error;
       if (!transport_.Send(frame, &error)) {

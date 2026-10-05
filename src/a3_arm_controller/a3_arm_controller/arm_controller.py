@@ -692,6 +692,10 @@ class ArmController(Node):
         self._motor_state_fresh: List[bool] = [False] * self._n_joints
         self._temp_warn = False
         self._temp_protect_pending = False
+        # LL-146: ReentrantCallbackGroup 下 _trigger_temp_protect 阻塞期间可能被再次
+        # 触发（safe-park 中 move_group error -4 会短暂置 READY，绕过 SAFE_PARK 守卫），
+        # 重入 _safe_park_then_disable 对已失能控制器再 deactivate → STRICT 拒绝。busy 锁防重入。
+        self._temp_protect_busy = False
         self._fault_reset_pending = False
         self._pending_fault: Tuple[str, int] = ("", 0)
 
@@ -1462,7 +1466,13 @@ class ArmController(Node):
                 req.activate_controllers = names
             else:
                 req.deactivate_controllers = names
-            req.strictness = SwitchController.Request.STRICT
+            # LL-146: deactivate 用 BEST_EFFORT——控制器已 inactive 时不拒绝（reset/失能
+            # 幂等，过温保护重入或 FAULT 下重复失能不再 STRICT 拒绝）；activate 保持
+            # STRICT（确保 arm+gripper 都成功激活，否则回退硬件）。
+            req.strictness = (
+                SwitchController.Request.STRICT if act
+                else SwitchController.Request.BEST_EFFORT
+            )
             self.get_logger().info(
                 f"switch_controller: {'activate' if act else 'deactivate'} {names}")
             future = self._switch_cli.call_async(req)
@@ -2058,31 +2068,39 @@ class ArmController(Node):
 
     def _trigger_temp_protect(self) -> None:
         """F44: 超温保护——平滑回 home → 失能 → COOLING（在状态发布节拍执行）."""
-        protect_c = float(self.get_parameter("temp_protect_c").value)
-        hot = ", ".join(
-            f"{jn}={t:.1f}" for jn, t, fr in zip(
-                self._joint_names, self._temperatures, self._temp_fresh
+        # LL-146: ReentrantCallbackGroup 下防重入。safe-park 阻塞期间 move_group error -4
+        # 会短暂置 READY，绕过下方 SAFE_PARK 守卫，重入会对已失能控制器再 deactivate。
+        if self._temp_protect_busy:
+            return
+        self._temp_protect_busy = True
+        try:
+            protect_c = float(self.get_parameter("temp_protect_c").value)
+            hot = ", ".join(
+                f"{jn}={t:.1f}" for jn, t, fr in zip(
+                    self._joint_names, self._temperatures, self._temp_fresh
+                )
+                if fr and math.isfinite(t) and t >= protect_c
             )
-            if fr and math.isfinite(t) and t >= protect_c
-        )
-        if self._state in (STATE_IDLE, STATE_DISABLED, STATE_COOLING):
-            self._set_state(STATE_COOLING, f"overtemp: {hot}, already disabled")
-            return
-        if self._state == STATE_SAFE_PARK:
-            return  # F40 流程进行中，不打断（同目标）
-        if not self._have_js:
-            ok, msg = self._motor_command(self._reset_cli, 2)
+            if self._state in (STATE_IDLE, STATE_DISABLED, STATE_COOLING):
+                self._set_state(STATE_COOLING, f"overtemp: {hot}, already disabled")
+                return
+            if self._state == STATE_SAFE_PARK:
+                return  # F40 流程进行中，不打断（同目标）
+            if not self._have_js:
+                ok, msg = self._motor_command(self._reset_cli, 2)
+                if ok:
+                    self._set_state(STATE_COOLING, f"overtemp: {hot}, disabled (no js)")
+                else:
+                    self._set_state(STATE_FAULT, f"overtemp: {hot}, reset refused: {msg}")
+                return
+            ok, msg = self._safe_park_then_disable()
             if ok:
-                self._set_state(STATE_COOLING, f"overtemp: {hot}, disabled (no js)")
+                self._set_state(STATE_COOLING, f"overtemp: {hot}, parked+disabled")
             else:
-                self._set_state(STATE_FAULT, f"overtemp: {hot}, reset refused: {msg}")
-            return
-        ok, msg = self._safe_park_then_disable()
-        if ok:
-            self._set_state(STATE_COOLING, f"overtemp: {hot}, parked+disabled")
-        else:
-            # park 超时已置 FAULT；reset 被拒已回 READY——温度保护不可放弃 → FAULT
-            self._set_state(STATE_FAULT, f"overtemp: {hot}, protect failed: {msg}")
+                # park 超时已置 FAULT；reset 被拒已回 READY——温度保护不可放弃 → FAULT
+                self._set_state(STATE_FAULT, f"overtemp: {hot}, protect failed: {msg}")
+        finally:
+            self._temp_protect_busy = False
 
     def _handle_motor_fault(self) -> None:
         """F44: 电机故障监视（fault_mask≠0，含固件过温锁存 bit3）→ 紧急失能 + FAULT."""
@@ -2560,12 +2578,33 @@ class ArmController(Node):
             resp.message = msg
             return resp
 
-        # IDLE（上电未使能）/FAULT：直达 reset；READY/TRAJ：home 内直达，否则先 park
-        if self._state in (STATE_IDLE, STATE_FAULT):
+        # IDLE（上电未使能）：直达 reset。FAULT：LL-146 区分「已失能/已在 idle」与
+        # 「仍使能且偏离 idle」——后者先 safe-park 再 reset，避免半抬位直接失能掉臂。
+        if self._state == STATE_IDLE:
             ok, msg = self._motor_command(self._reset_cli, 2)
             if ok:
                 self._set_state(STATE_DISABLED, "disabled")
                 self._publish_mode("IDLE")
+            resp.success = ok
+            resp.message = msg
+            return resp
+
+        if self._state == STATE_FAULT:
+            tol = float(self.get_parameter("disable_home_tol_rad").value)
+            at_home = False
+            if self._have_js:
+                at_home, _ = self._at_home(tol)
+            if not self._have_js or at_home:
+                # 读不到反馈或已在 idle → 直达 reset 安全
+                ok, msg = self._motor_command(self._reset_cli, 2)
+                if ok:
+                    self._set_state(STATE_DISABLED, "disabled")
+                    self._publish_mode("IDLE")
+                resp.success = ok
+                resp.message = msg
+                return resp
+            # 仍使能且偏离 idle → 先 safe-park（内部已处理「带外失能」与超时回 FAULT）
+            ok, msg = self._safe_park_then_disable()
             resp.success = ok
             resp.message = msg
             return resp
