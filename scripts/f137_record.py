@@ -28,11 +28,12 @@ from a3_msgs.srv import PlaybackTrajectory  # noqa: E402
 
 
 class RecordNode(Node):
-    def __init__(self, name: str, duration: float, out_csv: str):
+    def __init__(self, name: str, duration: float, out_csv: str, skip_start: float = 0.0):
         super().__init__("f137_recorder")
         self._name = name
         self._duration = duration
         self._out = out_csv
+        self._skip_start = skip_start
         self._rows = []  # (t, positions[7], velocities[7])
         self._t0 = None
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -75,7 +76,7 @@ class RecordNode(Node):
                 w.writerow([times[i]] + pos[i] + vel[i])
         self.get_logger().info(f"recorded {len(pos)} samples -> {self._out}")
 
-        t2, p2, v2 = _trim_motion(times, pos, vel)
+        t2, p2, v2 = _trim_motion(times, pos, vel, skip_start=self._skip_start)
         if p2 and len(p2) >= 3:
             print(f"\n[{self._name}] 运动段 {len(p2)}/{len(pos)} 样本, "
                   f"时长 {t2[-1]-t2[0]:.2f}s")
@@ -91,7 +92,7 @@ class RecordNode(Node):
             print(f"\n[{self._name}] 未捕获到足够运动样本")
 
 
-def _trim_motion(times, pos, vel, vel_thresh: float = 0.05):
+def _trim_motion(times, pos, vel, vel_thresh: float = 0.05, skip_start: float = 0.0):
     if len(pos) < 3:
         return times, pos, vel
     p = np.asarray(pos, dtype=float)
@@ -107,6 +108,9 @@ def _trim_motion(times, pos, vel, vel_thresh: float = 0.05):
     lo, hi = int(idx[0]), int(idx[-1])
     lo = max(0, lo - 10)
     hi = min(len(times) - 1, hi + 10)
+    # 排除开头 skip_start 秒（return 回首段 + 录制起始瞬态/样本突发）
+    if skip_start > 0:
+        lo = max(lo, int(np.searchsorted(times, times[lo] + skip_start)))
     return times[lo:hi + 1], pos[lo:hi + 1], vel[lo:hi + 1]
 
 
@@ -144,10 +148,12 @@ def main() -> int:
     ap.add_argument("--name", required=True)
     ap.add_argument("--duration", type=float, default=40.0)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--skip-start", type=float, default=0.0,
+                    help="运动段开头排除多少秒（排除 return 回首段与录制起始瞬态，如 6.0）")
     args = ap.parse_args()
 
     rclpy.init()
-    node = RecordNode(args.name, args.duration, args.out)
+    node = RecordNode(args.name, args.duration, args.out, args.skip_start)
     node.run()
     node.destroy_node()
     rclpy.shutdown()

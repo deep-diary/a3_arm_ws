@@ -624,10 +624,10 @@ class ArmController(Node):
         self.declare_parameter("payload_com_m", [0.0, 0.0, 0.0])
         self.declare_parameter("rated_payload_kg", 1.5)
         self.declare_parameter("payload_parent_link", "gripper_link")
-        # F107: 静态力矩门禁（电机连续额定，N·m；RS00 5.0、EL05 1.8）
+        # F107: 静态力矩门禁参考力矩（N·m；已从连续额定 5.0/1.8 放宽，见 yaml）
         self.declare_parameter(
-            "joint_rated_torque", [5.0, 5.0, 5.0, 1.8, 1.8, 1.8, 1.8])
-        self.declare_parameter("static_torque_margin_ratio", 0.8)
+            "joint_rated_torque", [7, 7, 7, 3, 3, 3, 2])
+        self.declare_parameter("static_torque_margin_ratio", 1.0)
         # F107: 占空比门禁（滚动窗口热保护前馈）
         self.declare_parameter("duty_gate_enabled", True)
         self.declare_parameter("duty_window_s", 600.0)
@@ -3203,7 +3203,7 @@ class ArmController(Node):
                                 stotal,
                                 self._dispatch_l7_linear(
                                     parsed[-1]["positions"][6]))
-                        self._schedule_back_to_ready(stotal + 0.3)
+                        self._schedule_back_to_ready(0.3)  # 同步已执行完，仅短缓冲
                         resp.success = True
                         resp.message = (
                             f"waypoint task '{label}' {strategy} sequence: "
@@ -3264,7 +3264,7 @@ class ArmController(Node):
                     f"after segment {i + 1}/{n}: move_group current sync timeout "
                     "(continue; next segment may fail IK)")
 
-        self._schedule_back_to_ready(total + 0.3)
+        self._schedule_back_to_ready(0.3)  # 同步已执行完，仅短缓冲
         resp.success = True
         resp.message = (
             f"waypoint task '{label}' {strategy}: {n} points, "
@@ -3456,7 +3456,7 @@ class ArmController(Node):
                     ok, stotal, smsg = self._sequence_move_group(
                         seq_items, f"tour {count} legs")
                     if ok:
-                        self._schedule_back_to_ready(stotal + 0.3)
+                        self._schedule_back_to_ready(0.3)  # 同步已执行完，仅短缓冲
                         resp.success = True
                         resp.message = (
                             f"tour sequence completed ({count} legs, {stotal:.1f}s, "
@@ -3520,7 +3520,7 @@ class ArmController(Node):
             total += dur
             prev = name
 
-        self._schedule_back_to_ready(total + 0.3)
+        self._schedule_back_to_ready(0.3)  # 同步已执行完，仅短缓冲
         resp.success = True
         resp.message = f"tour completed: {' -> '.join(sequence)}"
         resp.sequence = sequence

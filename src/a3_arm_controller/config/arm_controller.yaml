@@ -118,10 +118,13 @@
     torque_stats_file: "~/.a3/stats/torque_stats.yaml"
     torque_stats_save_interval_s: 10.0
     # F107: 门禁上限 = joint_rated_torque × static_torque_margin_ratio。
-    # 0.8→0.9 放行 L2 高位形 ~4.2Nm（仍留 10% 动态余量）
-    static_torque_margin_ratio: 0.9
-    # F107: 电机连续额定力矩（N·m），L1-L3 RS00=5.0、L4-L7 EL05=1.8
-    joint_rated_torque: [5.0, 5.0, 5.0, 1.8, 1.8, 1.8, 1.8]
+    # 0.9→1.0 放行 L2 高位形（实测 ~4.5Nm）；额定力矩同步放宽到 RS00=7 / EL05=3
+    # / EL05(L7)=2——注意 7Nm 已超 L1-L3 连续额定 5.0Nm（接近峰值 14Nm 的一半），
+    # 高位形长时间保位有发热风险（温度保护 90/95°C 兜底）。
+    static_torque_margin_ratio: 1.0
+    # F107: 静态力矩门禁参考力矩（N·m）。已从电机连续额定（5.0/1.8）放宽，
+    # 属安全门禁阈值而非真实额定——高位形保位需留意发热。
+    joint_rated_torque: [7, 7, 7, 3, 3, 3, 2]
 
     # ═══════════════════════════════════════════════════════════════════
     # 11. 温度管理（F44）
