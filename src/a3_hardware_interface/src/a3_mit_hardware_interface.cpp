@@ -155,6 +155,11 @@ struct JointMapping
   double direction{1.0};
   double position_offset{0.0};
   double torque_max{6.0};
+  // 电机固有 torque 编解码量程（RS00=14 / EL05=6，LL-024），用于 MIT 帧
+  // torque_ff 的 16bit 编码。与 torque_max 分离：torque_max 可被 xacro 覆盖
+  // 作力矩钳位上限，但编码量程必须与电机固件解码量程一致，否则补偿力矩被
+  // 按 ratio 缩放（L2 曾 torque_max=8 → 放大 14/8=1.75x，零重力 L2 回拉）。
+  double torque_encode_max{6.0};
   double speed_max{50.0};
   // F138 per-joint MIT position-loop gains (fallback to global kp_/kd_).
   // Updated at runtime via /a3_hardware_health set_parameters (kp_<joint>/kd_<joint>).
@@ -285,7 +290,9 @@ public:
       // Default ranges by motor model: RS00 (id 1-3) ±14 Nm / ±33 rad/s,
       // EL05 (id 4-7) ±6 Nm / ±50 rad/s (LL-024).
       const bool is_rs00 = j.motor_id >= 1 && j.motor_id <= 3;
-      j.torque_max = is_rs00 ? 14.0 : 6.0;
+      // 编码量程 = 电机固有值（不可覆盖）；钳位默认同值，可被 xacro torque_max 覆盖。
+      j.torque_encode_max = is_rs00 ? 14.0 : 6.0;
+      j.torque_max = j.torque_encode_max;
       j.speed_max = is_rs00 ? 33.0 : 50.0;
       j.torque_max = ParseDouble(
         GetParam(joint.parameters, "torque_max", ""), j.torque_max);
@@ -362,7 +369,8 @@ public:
           "joint %s has invalid motor_id %u", j.name.c_str(), j.motor_id);
         return CallbackReturn::ERROR;
       }
-      torque_max_by_motor_[j.motor_id] = j.torque_max;
+      // 反馈力矩解码量程用电机固有值（RS00=14/EL05=6），与 torque_max 钳位分离。
+      torque_max_by_motor_[j.motor_id] = j.torque_encode_max;
       speed_max_by_motor_[j.motor_id] = j.speed_max;
     }
 
@@ -967,7 +975,7 @@ public:
           std::clamp(j.cmd_eff, -j.torque_max, j.torque_max) * j.direction;
         frame = ProtocolCodec::BuildMitControlFrame(
           bus_, j.motor_id, motor_positions[i], 0.0, 0.0, kd,
-          motor_torque, j.torque_max, j.speed_max);
+          motor_torque, j.torque_encode_max, j.speed_max);
       } else {
         // MIT position mode: kp/kd close the loop on the motor; F108 adds the
         // static gravity torque as t_ff so joints do not sag under their own
@@ -980,7 +988,7 @@ public:
         }
         frame = ProtocolCodec::BuildMitControlFrame(
           bus_, j.motor_id, j.direction * j.cmd_pos + j.position_offset,
-          0.0, j.kp, j.kd, t_ff, j.torque_max, j.speed_max);
+          0.0, j.kp, j.kd, t_ff, j.torque_encode_max, j.speed_max);
       }
       std::string error;
       if (!transport_.Send(frame, &error)) {
