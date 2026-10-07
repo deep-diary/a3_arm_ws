@@ -18,8 +18,9 @@ poses:
   # F113: 折叠自然下垂位（重力稳定，F40/F44 safe-park 失能保护位）——原真机
   # ~/.a3/poses.yaml 的 home 标定值（2026-09-13 抽掉 L4 泡沫垫后按自然下垂实测
   # 读数保存）；改名 idle 收回包内统一定义，EDULITE 半抬 home 退役。
+  # 2026-10-05：L4 0.3351 失能后自然下垂(+0.0015)→0.3366 碰 L2，下调到 0.3 留出干涉余量。
   idle:
-    positions: [-0.0002, 0.0006, 0.0002, 0.3351, 0.0121, -0.0002, -0.0002]
+    positions: [-0.0002, 0.0006, 0.0002, 0.3, 0.0121, -0.0002, -0.0002]
 
   # F109: folded-upright ready; arm CoM projects over base center (|CoM_x|=8 mm),
   # static gravity torque sum 1.90 Nm. Real-machine value in ~/.a3/poses.yaml override
