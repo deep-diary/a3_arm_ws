@@ -58,6 +58,9 @@ def generate_launch_description():
     )
 
     controllers_yaml = os.path.join(desc_share, "config", "el_a3_controllers.yaml")
+    # F160: real-hardware arm_controller claims velocity/acceleration command
+    # interfaces for JTC splines v/a feedforward.
+    arm_ff_yaml = os.path.join(desc_share, "config", "arm_controller_ff_plugin.yaml")
 
     rsp = Node(
         package="robot_state_publisher",
@@ -73,6 +76,7 @@ def generate_launch_description():
         parameters=[
             {"robot_description": robot_description},
             controllers_yaml,
+            arm_ff_yaml,
         ],
         output="screen",
     )

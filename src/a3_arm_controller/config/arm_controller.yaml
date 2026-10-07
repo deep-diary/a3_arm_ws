@@ -7,6 +7,7 @@
     joint_states_topic: /joint_states
     control_mode_topic: /a3/control_mode
     arm_status_topic: /a3/arm_status
+    torque_components_topic: /a3/hardware/torque_components
     gate_topic: /power_sequence/gate_open
     power_state_topic: /power_sequence/state
     traj_topic: /joint_group_effort_controller/joint_trajectory

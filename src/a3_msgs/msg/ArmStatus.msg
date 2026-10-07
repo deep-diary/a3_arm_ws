@@ -25,5 +25,13 @@ float64[] max_torques
 # 每关节本次运行峰值力矩绝对值（Nm，仅内存，重启清零——需求 F43 补充）
 float64[] session_max_torques
 
+# 力矩分量分解（关节空间 N·m，L7 无前馈恒 0；F160）
+float64[] ff_gravity
+float64[] ff_coriolis
+float64[] ff_inertia
+float64[] ff_total
+float64[] pd_feedback
+float64[] command_torque
+
 # 温度告警（≥ temp_warn_c 但未达保护阈值——需求 F44）
 bool temp_warn

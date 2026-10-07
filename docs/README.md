@@ -42,7 +42,8 @@ docs/
 │   ├── CONTROL_ROADMAP.md    控制功能开发路线
 │   └── AI_ROADMAP.md         AI 功能开发路线
 ├── edge/                     A3 Edge 主线
-│   ├── REQUIREMENTS.md
+│   ├── REQUIREMENTS.md         需求总览 + 索引（正文在 requirements/）
+│   ├── requirements/           需求正文 F###-slug.md（一条一文件）
 │   ├── ARCHITECTURE.md
 │   ├── STATE_MACHINE.md       编排层状态机（指令×状态矩阵）
 │   ├── QUICKSTART.md
@@ -75,7 +76,8 @@ docs/
 
 | 文档 | 说明 |
 |------|------|
-| [edge/REQUIREMENTS.md](edge/REQUIREMENTS.md) | 边缘全栈需求 |
+| [edge/REQUIREMENTS.md](edge/REQUIREMENTS.md) | 边缘全栈需求（总览 + 索引，正文在 requirements/） |
+| [edge/requirements/](edge/requirements/) | 需求正文 F###-slug.md（一条一文件，F1–F160） |
 | [edge/ARCHITECTURE.md](edge/ARCHITECTURE.md) | 运行时分层与数据流 |
 | [edge/STATE_MACHINE.md](edge/STATE_MACHINE.md) | 编排层状态机（11 态 + 指令×状态×模式矩阵，F53） |
 | [edge/QUICKSTART.md](edge/QUICKSTART.md) | 真机快速上手清单 |

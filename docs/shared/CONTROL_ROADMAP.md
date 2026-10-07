@@ -311,6 +311,7 @@ flowchart LR
 | MoveIt Execute / zero→ready | ✅ | ✅ 仿真 | Wave A **仿真已齐**；统一 launch **F11** | C1 / F7/F11 |
 | 重力补偿服务 | ✅ | ✅ `/a3/gravity_compensation/*` | Wave A **仿真已齐** | C3 / F8 |
 | Pinocchio 全关节 `g(q)` | ✅ | ✅ | Wave A **已齐** | C3 |
+| 位置环速度/加速度前馈（VFF+AFF+科氏/离心，computed-torque） | ⚠️ 仅重力 | ✅ F160 真机插件（默认 full，真机 A/B 峰值误差 -72%/稳态滞后 -76%；可运行时回落 gravity） | Wave A **仿真+真机已齐** | F160 / F108 |
 | 轨迹↔重力模式互锁 | ✅ | ✅ `/a3/control_mode` | Wave A **仿真已齐**；扩展 ZERO_TORQUE/SERVO | C3/C5/C4 |
 | 应用 demo（画方/抓取级） | ✅ | ⚠️ 画矩形 demo | Wave B **F11** | C1 |
 | ros2_control 仿真 | ✅ | ✅ | — 已齐 | — |

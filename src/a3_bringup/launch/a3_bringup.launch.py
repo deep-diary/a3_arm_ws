@@ -196,12 +196,24 @@ def generate_launch_description():
         allow_substs=True,
     )
 
+    # F160: real-hardware arm_controller claims velocity/acceleration command
+    # interfaces (JTC splines v/a feedforward). mock GenericSystem keeps
+    # position-only, so fall back to the base controllers yaml (no-op) for mock.
+    arm_ff_plugin_file = ParameterFile(
+        PythonExpression([
+            "'", desc_share, "/config/arm_controller_ff_plugin.yaml' if '", hardware,
+            "' == 'can' else '", controllers_yaml, "'",
+        ]),
+        allow_substs=True,
+    )
+
     controller_manager = Node(
         package="controller_manager",
         executable="ros2_control_node",
         parameters=[
             {"robot_description": robot_description},
             controllers_yaml,
+            arm_ff_plugin_file,
             gravity_scales_file_param,
             # LL-103：rcl 参数文件后者覆盖，且 gravity_scales 留空时解析为
             # controllers_yaml 本身——gripper 覆盖文件必须在最后，否则 mock 的

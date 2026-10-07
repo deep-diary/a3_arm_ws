@@ -55,6 +55,11 @@
                  inertia and the F89 per-joint tau_scale file. Runtime-adjustable. -->
             <param name="gravity_feedforward_ratio">1.0</param>
             <param name="use_pinocchio_gravity">true</param>
+            <!-- F160: position-mode feedforward mode (gravity | full). Default
+                 full = computed-torque VFF+AFF+Coriolis（真机弹琴回放 A/B 改善
+                 显著：峰值误差 -72%、稳态滞后 -76%、PD 负担 -65%，2026-10-07）。
+                 异常/抖动时可运行时 ros2 param set ... gravity 回落。 -->
+            <param name="feedforward_mode">full</param>
             <!-- on_configure runs on the CM executor thread, so the plugin cannot
                  query /controller_manager for robot_description (the server is
                  blocked inside configure). Read the same kinematics from the
@@ -156,6 +161,12 @@
           <param name="min">-14.0</param>
           <param name="max">14.0</param>
         </command_interface>
+        <xacro:if value="${use_real_hardware}">
+          <command_interface name="acceleration">
+            <param name="min">-100.0</param>
+            <param name="max">100.0</param>
+          </command_interface>
+        </xacro:if>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
         <state_interface name="effort"/>
@@ -187,6 +198,12 @@
           <param name="min">-14.0</param>
           <param name="max">14.0</param>
         </command_interface>
+        <xacro:if value="${use_real_hardware}">
+          <command_interface name="acceleration">
+            <param name="min">-100.0</param>
+            <param name="max">100.0</param>
+          </command_interface>
+        </xacro:if>
         <state_interface name="position">
           <param name="initial_value">0.785</param>
         </state_interface>
@@ -219,6 +236,12 @@
           <param name="min">-14.0</param>
           <param name="max">14.0</param>
         </command_interface>
+        <xacro:if value="${use_real_hardware}">
+          <command_interface name="acceleration">
+            <param name="min">-100.0</param>
+            <param name="max">100.0</param>
+          </command_interface>
+        </xacro:if>
         <state_interface name="position">
           <param name="initial_value">-0.785</param>
         </state_interface>
@@ -253,6 +276,12 @@
           <param name="min">${wrist_effort_min}</param>
           <param name="max">${wrist_effort_max}</param>
         </command_interface>
+        <xacro:if value="${use_real_hardware}">
+          <command_interface name="acceleration">
+            <param name="min">-100.0</param>
+            <param name="max">100.0</param>
+          </command_interface>
+        </xacro:if>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
         <state_interface name="effort"/>
@@ -285,6 +314,12 @@
           <param name="min">${wrist_effort_min}</param>
           <param name="max">${wrist_effort_max}</param>
         </command_interface>
+        <xacro:if value="${use_real_hardware}">
+          <command_interface name="acceleration">
+            <param name="min">-100.0</param>
+            <param name="max">100.0</param>
+          </command_interface>
+        </xacro:if>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
         <state_interface name="effort"/>
@@ -317,6 +352,12 @@
           <param name="min">${wrist_effort_min}</param>
           <param name="max">${wrist_effort_max}</param>
         </command_interface>
+        <xacro:if value="${use_real_hardware}">
+          <command_interface name="acceleration">
+            <param name="min">-100.0</param>
+            <param name="max">100.0</param>
+          </command_interface>
+        </xacro:if>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
         <state_interface name="effort"/>
@@ -347,6 +388,12 @@
           <param name="min">${wrist_effort_min}</param>
           <param name="max">${wrist_effort_max}</param>
         </command_interface>
+        <xacro:if value="${use_real_hardware}">
+          <command_interface name="acceleration">
+            <param name="min">-100.0</param>
+            <param name="max">100.0</param>
+          </command_interface>
+        </xacro:if>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
         <state_interface name="effort"/>

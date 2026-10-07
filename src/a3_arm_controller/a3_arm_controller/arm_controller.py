@@ -33,7 +33,7 @@ from control_msgs.action import FollowJointTrajectory, GripperCommand
 from controller_manager_msgs.srv import ListControllers, SetHardwareComponentState, SwitchController
 from lifecycle_msgs.msg import State as LifecycleState
 from rclpy.action import ActionClient
-from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -61,7 +61,7 @@ from shape_msgs.msg import SolidPrimitive
 
 from a3_can_bridge.msg import MotorStates
 from a3_can_bridge.srv import MotorCommand
-from a3_msgs.msg import ArmStatus, MonitorStatus
+from a3_msgs.msg import ArmStatus, MonitorStatus, TorqueComponents
 from a3_msgs.srv import (
     GotoNamedPose,
     MoveToJointPositions,
@@ -419,11 +419,17 @@ class ArmController(Node):
         # 若用默认 MutuallyExclusiveCallbackGroup，回调阻塞期间 client 响应回调无法
         # 并发执行，导致 init/enable/disable/teach 全部死锁超时。
         self._cb_group = ReentrantCallbackGroup()
+        # 夹爪 action 独立互斥回调组：L7 时序步进高频抢占 goal（50Hz），若与其它
+        # 可重入回调并发，rclpy ActionClient 的 _goal_handles 清理会竞态抛 KeyError
+        # 打崩编排节点。单独互斥组让夹爪 goal 的 execute/result 串行化，消除竞态。
+        self._gripper_cb_group = MutuallyExclusiveCallbackGroup()
 
         self.declare_parameter("joint_names", JOINTS)
         self.declare_parameter("joint_states_topic", "/joint_states")
         self.declare_parameter("control_mode_topic", "/a3/control_mode")
         self.declare_parameter("arm_status_topic", "/a3/arm_status")
+        # F160: 力矩分量分解遥测（硬件插件发布，本节点镜像进 /a3/arm_status）
+        self.declare_parameter("torque_components_topic", "/a3/hardware/torque_components")
         # F51/LL-039：消费看门狗确认故障（电机被带外失能 → 编排层不得停在 READY/TRAJ）
         self.declare_parameter("monitor_status_topic", "/a3/monitor/status")
         self.declare_parameter("unexpected_disable_guard", True)
@@ -659,6 +665,13 @@ class ArmController(Node):
         self._velocities: List[float] = [0.0] * self._n_joints
         self._efforts: List[float] = [0.0] * self._n_joints
         self._have_js = False
+        # F160: 力矩分量分解缓存（按 self._joint_names 顺序；缺省 0）
+        self._ff_gravity: List[float] = [0.0] * self._n_joints
+        self._ff_coriolis: List[float] = [0.0] * self._n_joints
+        self._ff_inertia: List[float] = [0.0] * self._n_joints
+        self._ff_total: List[float] = [0.0] * self._n_joints
+        self._pd_feedback: List[float] = [0.0] * self._n_joints
+        self._command_torque: List[float] = [0.0] * self._n_joints
         self._last_js_stamp = None  # F48: /joint_states 新鲜度检查（LL-020）
         # F81: 硬件反馈看门狗锁存（任一电机反馈超时即 true，插件侧整臂 freeze-hold）
         self._feedback_stale = False
@@ -765,6 +778,12 @@ class ArmController(Node):
         self.create_subscription(
             MotorStates, str(self.get_parameter("motor_states_topic").value),
             self._on_motor_states,
+            js_qos, callback_group=self._cb_group,
+        )
+        # F160: 力矩分量分解（前馈 + PD + 实测）；镜像进 /a3/arm_status
+        self.create_subscription(
+            TorqueComponents, str(self.get_parameter("torque_components_topic").value),
+            self._on_torque_components,
             js_qos, callback_group=self._cb_group,
         )
         # F51/LL-039: 看门狗状态（消费 UNEXPECTED_DISABLE——本节点在电机被带外失能后
@@ -919,7 +938,7 @@ class ArmController(Node):
             self,
             GripperCommand,
             str(self.get_parameter("gripper_action").value),
-            callback_group=self._cb_group,
+            callback_group=self._gripper_cb_group,
         )
 
         # 状态发布定时器
@@ -1372,6 +1391,13 @@ class ArmController(Node):
             float(self._torque_session_max.get(jn, 0.0))
             for jn in self._joint_names
         ]
+        # F160: 力矩分量分解（缺省 0；随 /a3/hardware/torque_components 更新）
+        st.ff_gravity = [float(v) for v in self._ff_gravity]
+        st.ff_coriolis = [float(v) for v in self._ff_coriolis]
+        st.ff_inertia = [float(v) for v in self._ff_inertia]
+        st.ff_total = [float(v) for v in self._ff_total]
+        st.pd_feedback = [float(v) for v in self._pd_feedback]
+        st.command_torque = [float(v) for v in self._command_torque]
         st.temp_warn = bool(self._temp_warn)
         return st
 
@@ -2145,6 +2171,25 @@ class ArmController(Node):
             self._publish_mode("READY")
 
     # ------------------------------------------------------------ subscriptions
+
+    def _on_torque_components(self, msg: TorqueComponents) -> None:
+        name_to_idx = {n: i for i, n in enumerate(msg.joint_names)}
+        for i, jn in enumerate(self._joint_names):
+            j = name_to_idx.get(jn)
+            if j is None:
+                continue
+            if j < len(msg.gravity):
+                self._ff_gravity[i] = float(msg.gravity[j])
+            if j < len(msg.coriolis):
+                self._ff_coriolis[i] = float(msg.coriolis[j])
+            if j < len(msg.inertia):
+                self._ff_inertia[i] = float(msg.inertia[j])
+            if j < len(msg.feedforward):
+                self._ff_total[i] = float(msg.feedforward[j])
+            if j < len(msg.pd_feedback):
+                self._pd_feedback[i] = float(msg.pd_feedback[j])
+            if j < len(msg.command):
+                self._command_torque[i] = float(msg.command[j])
 
     def _on_js(self, msg: JointState) -> None:
         name_to_idx = {n: i for i, n in enumerate(msg.name)}

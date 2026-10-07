@@ -31,6 +31,7 @@
 
 #include <a3_can_bridge/msg/motor_state.hpp>
 #include <a3_can_bridge/msg/motor_states.hpp>
+#include <a3_msgs/msg/torque_components.hpp>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
 #include <diagnostic_msgs/msg/key_value.hpp>
@@ -184,6 +185,7 @@ struct JointMapping
   double cmd_pos{0.0};
   double cmd_vel{0.0};
   double cmd_eff{0.0};
+  double cmd_acc{0.0};
   // Per-joint command mode: true when an effort-interface controller claims
   // this joint (e.g. GripperActionController on L7), false for position JTC.
   bool effort_mode{false};
@@ -260,6 +262,12 @@ public:
     gravity_ff_ratio_ = std::clamp(gravity_ff_ratio_, 0.0, 1.0);
     use_pinocchio_gravity_ =
       ParseBool(GetParam(hp, "use_pinocchio_gravity", ""), true);
+    // F160: position-mode feedforward mode (gravity | full). Default gravity
+    // keeps F108 behavior; full enables computed-torque VFF+AFF+Coriolis.
+    feedforward_mode_ = GetParam(hp, "feedforward_mode", "gravity");
+    if (feedforward_mode_ != "gravity" && feedforward_mode_ != "full") {
+      feedforward_mode_ = "gravity";
+    }
     use_calibrated_inertia_ =
       ParseBool(GetParam(hp, "use_calibrated_inertia", ""), true);
     inertia_params_file_ = GetParam(hp, "inertia_config_path",
@@ -316,6 +324,15 @@ public:
       j.cmd_pos = j.hw_pos;
       joints_.push_back(std::move(j));
     }
+
+    // F160: size telemetry caches to the joint set once (realtime write()).
+    tele_gravity_.assign(joints_.size(), 0.0);
+    tele_coriolis_.assign(joints_.size(), 0.0);
+    tele_inertia_.assign(joints_.size(), 0.0);
+    tele_feedforward_.assign(joints_.size(), 0.0);
+    tele_pd_.assign(joints_.size(), 0.0);
+    tele_command_.assign(joints_.size(), 0.0);
+    tele_measured_.assign(joints_.size(), 0.0);
 
     // F138: gains YAML overrides the per-joint kp/kd parsed from URDF above.
     // Operators tune gains by editing the file and restarting the stack —
@@ -397,11 +414,12 @@ public:
   std::vector<hardware_interface::CommandInterface> export_command_interfaces() override
   {
     std::vector<hardware_interface::CommandInterface> interfaces;
-    interfaces.reserve(joints_.size() * 3);
+    interfaces.reserve(joints_.size() * 4);
     for (auto & j : joints_) {
       interfaces.emplace_back(j.name, "position", &j.cmd_pos);
       interfaces.emplace_back(j.name, "velocity", &j.cmd_vel);
       interfaces.emplace_back(j.name, "effort", &j.cmd_eff);
+      interfaces.emplace_back(j.name, "acceleration", &j.cmd_acc);
     }
     return interfaces;
   }
@@ -487,6 +505,7 @@ public:
       j->cmd_pos = j->hw_pos;
       j->cmd_vel = 0.0;
       j->cmd_eff = 0.0;
+      j->cmd_acc = 0.0;
       stopped.push_back(joint_name);
     }
     if (!stopped.empty()) {
@@ -521,6 +540,11 @@ public:
     states_qos.best_effort();
     motor_states_pub_ = health_node_->create_publisher<
       a3_can_bridge::msg::MotorStates>(motor_states_topic_, states_qos);
+    // F160: torque-component decomposition telemetry (gravity/coriolis/inertia/
+    // feedforward/pd/command/measured) mirrored into /a3/arm_status by the
+    // orchestration node. best_effort like motor_states.
+    torque_components_pub_ = health_node_->create_publisher<
+      a3_msgs::msg::TorqueComponents>("/a3/hardware/torque_components", states_qos);
     health_exec_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
     health_exec_->add_node(health_node_);
 
@@ -530,6 +554,8 @@ public:
       "gravity_feedforward_ratio", gravity_ff_ratio_);
     health_node_->declare_parameter(
       "use_pinocchio_gravity", use_pinocchio_gravity_);
+    health_node_->declare_parameter(
+      "feedforward_mode", feedforward_mode_);
     // F138: per-joint position-loop gains tunable at runtime so the autotune
     // loop can sweep kp/kd without restarting controller_manager.
     for (const auto & j : joints_) {
@@ -552,6 +578,14 @@ public:
             p.get_type() == rclcpp::ParameterType::PARAMETER_BOOL)
           {
             use_pinocchio_gravity_ = p.as_bool();
+          } else if (p.get_name() == "feedforward_mode" &&
+            p.get_type() == rclcpp::ParameterType::PARAMETER_STRING)
+          {
+            // F160: runtime-switchable feedforward mode; unknown values ignored.
+            const std::string mode = p.as_string();
+            if (mode == "gravity" || mode == "full") {
+              feedforward_mode_ = mode;
+            }
           } else if (p.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
             // F138: kp_<joint> / kd_<joint> runtime gain update. Plain doubles
             // written here and read in write() on the CM thread; updates are
@@ -572,7 +606,7 @@ public:
     motor_states_timer_ = health_node_->create_wall_timer(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::duration<double>(1.0 / motor_states_rate_hz_)),
-      [this] { PublishMotorStates(); });
+      [this] { PublishMotorStates(); PublishTorqueComponents(); });
 
     rx_run_.store(true);
     rx_thread_ = std::thread(&A3MITHardwareInterface::RxLoop, this);
@@ -713,6 +747,7 @@ public:
         j.cmd_pos = j.hw_pos;
         j.cmd_vel = 0.0;
         j.cmd_eff = 0.0;
+        j.cmd_acc = 0.0;
         ++anchored;
       }
     }
@@ -817,6 +852,7 @@ public:
     transport_.Close();
     motor_states_timer_.reset();
     motor_states_pub_.reset();
+    torque_components_pub_.reset();
     stale_pub_.reset();
     diag_pub_.reset();
     health_exec_.reset();
@@ -930,8 +966,11 @@ public:
     // on L7) get kp=0 + torque_ff; the rest get position frames.
     const bool gravity_ff_active = gravity_ff_ready_ && use_pinocchio_gravity_ &&
       gravity_ff_ratio_ > 0.0;
+    // F160: full = computed-torque feedforward (VFF velocity field + rnea(q,v,a)
+    // in t_ff); gravity = F108 static gravity only.
+    const bool full_ff_active = gravity_ff_active && feedforward_mode_ == "full";
     std::vector<double> motor_positions(joints_.size());
-    Eigen::VectorXd gravity_tau;
+    Eigen::VectorXd ff_tau;
     {
       std::lock_guard<std::mutex> lock(fb_mutex_);
       for (size_t i = 0; i < joints_.size(); ++i) {
@@ -951,6 +990,7 @@ public:
               0.0, 5.0);
         }
       }
+
       if (gravity_ff_active) {
         q_.setZero();
         for (size_t i = 0; i < joints_.size(); ++i) {
@@ -958,7 +998,64 @@ public:
             q_[q_index_[i]] = joints_[i].hw_pos;
           }
         }
-        gravity_tau = pinocchio::rnea(model_, data_, q_, v_zero_, a_zero_);
+        if (full_ff_active) {
+          // F160: q̇_des / q̈_des from JTC splines (velocity/acceleration cmd).
+          v_des_.setZero();
+          a_des_.setZero();
+          for (size_t i = 0; i < joints_.size(); ++i) {
+            if (v_index_[i] >= 0) {
+              v_des_[v_index_[i]] = joints_[i].cmd_vel;
+              a_des_[v_index_[i]] = joints_[i].cmd_acc;
+            }
+          }
+          // Decompose for telemetry: G, G+C·v, G+C·v+M·a.
+          const Eigen::VectorXd tau_g =
+            pinocchio::rnea(model_, data_, q_, v_zero_, a_zero_);
+          const Eigen::VectorXd tau_gv =
+            pinocchio::rnea(model_, data_, q_, v_des_, a_zero_);
+          ff_tau = pinocchio::rnea(model_, data_, q_, v_des_, a_des_);
+          for (size_t i = 0; i < joints_.size(); ++i) {
+            const double s = gravity_ff_ratio_ * ff_scale_[i];
+            if (v_index_[i] < 0) {
+              tele_gravity_[i] = 0.0;
+              tele_coriolis_[i] = 0.0;
+              tele_inertia_[i] = 0.0;
+              tele_feedforward_[i] = 0.0;
+              continue;
+            }
+            const Eigen::Index vi = v_index_[i];
+            tele_gravity_[i] = s * tau_g[vi];
+            tele_coriolis_[i] = s * (tau_gv[vi] - tau_g[vi]);
+            tele_inertia_[i] = s * (ff_tau[vi] - tau_gv[vi]);
+            tele_feedforward_[i] = s * ff_tau[vi];
+          }
+        } else {
+          ff_tau = pinocchio::rnea(model_, data_, q_, v_zero_, a_zero_);
+          for (size_t i = 0; i < joints_.size(); ++i) {
+            const double s = gravity_ff_ratio_ * ff_scale_[i];
+            tele_gravity_[i] = (v_index_[i] >= 0) ? s * ff_tau[v_index_[i]] : 0.0;
+            tele_coriolis_[i] = 0.0;
+            tele_inertia_[i] = 0.0;
+            tele_feedforward_[i] = tele_gravity_[i];
+          }
+        }
+      } else {
+        for (size_t i = 0; i < joints_.size(); ++i) {
+          tele_gravity_[i] = 0.0;
+          tele_coriolis_[i] = 0.0;
+          tele_inertia_[i] = 0.0;
+          tele_feedforward_[i] = 0.0;
+        }
+      }
+
+      // F160 telemetry: PD feedback estimate + total command + measured.
+      for (size_t i = 0; i < joints_.size(); ++i) {
+        const auto & jj = joints_[i];
+        const double pd = jj.effort_mode ? 0.0 :
+          (jj.kp * (jj.cmd_pos - jj.hw_pos) + jj.kd * (jj.cmd_vel - jj.hw_vel));
+        tele_pd_[i] = pd;
+        tele_command_[i] = tele_feedforward_[i] + pd;
+        tele_measured_[i] = jj.hw_eff;
       }
     }
 
@@ -977,18 +1074,19 @@ public:
           bus_, j.motor_id, motor_positions[i], 0.0, 0.0, kd,
           motor_torque, j.torque_encode_max, j.speed_max);
       } else {
-        // MIT position mode: kp/kd close the loop on the motor; F108 adds the
-        // static gravity torque as t_ff so joints do not sag under their own
-        // weight (EDULITE gravity_feedforward_ratio).
+        // MIT position mode: kp/kd close the loop on the motor; F108/F160 add
+        // feedforward torque as t_ff. full mode additionally fills the velocity
+        // field with q̇_des (VFF) so damping acts on the tracking error.
         double t_ff = 0.0;
         if (gravity_ff_active && v_index_[i] >= 0) {
           t_ff = std::clamp(
-              gravity_ff_ratio_ * ff_scale_[i] * gravity_tau[v_index_[i]],
+              gravity_ff_ratio_ * ff_scale_[i] * ff_tau[v_index_[i]],
               -j.torque_max, j.torque_max) * j.direction;
         }
+        const double v_ff = full_ff_active ? (j.direction * j.cmd_vel) : 0.0;
         frame = ProtocolCodec::BuildMitControlFrame(
           bus_, j.motor_id, j.direction * j.cmd_pos + j.position_offset,
-          0.0, j.kp, j.kd, t_ff, j.torque_encode_max, j.speed_max);
+          v_ff, j.kp, j.kd, t_ff, j.torque_encode_max, j.speed_max);
       }
       std::string error;
       if (!transport_.Send(frame, &error)) {
@@ -1043,6 +1141,8 @@ private:
     q_.setZero();
     v_zero_ = Eigen::VectorXd::Zero(model_.nv);
     a_zero_ = Eigen::VectorXd::Zero(model_.nv);
+    v_des_ = Eigen::VectorXd::Zero(model_.nv);
+    a_des_ = Eigen::VectorXd::Zero(model_.nv);
 
     q_index_.assign(joints_.size(), -1);
     v_index_.assign(joints_.size(), -1);
@@ -1311,6 +1411,40 @@ private:
     motor_states_pub_->publish(msg);
   }
 
+  // F160: publish the torque-component decomposition cached by write(). Mirrors
+  // gravity/coriolis/inertia/feedforward/pd/command/measured so the orchestration
+  // node can expose them in /a3/arm_status for recording/analysis.
+  void PublishTorqueComponents()
+  {
+    if (!torque_components_pub_) {
+      return;
+    }
+    a3_msgs::msg::TorqueComponents msg;
+    msg.header.stamp = health_node_->now();
+    {
+      std::lock_guard<std::mutex> lock(fb_mutex_);
+      msg.joint_names.reserve(joints_.size());
+      msg.gravity.resize(joints_.size());
+      msg.coriolis.resize(joints_.size());
+      msg.inertia.resize(joints_.size());
+      msg.feedforward.resize(joints_.size());
+      msg.pd_feedback.resize(joints_.size());
+      msg.command.resize(joints_.size());
+      msg.measured.resize(joints_.size());
+      for (size_t i = 0; i < joints_.size(); ++i) {
+        msg.joint_names.push_back(joints_[i].name);
+        msg.gravity[i] = tele_gravity_[i];
+        msg.coriolis[i] = tele_coriolis_[i];
+        msg.inertia[i] = tele_inertia_[i];
+        msg.feedforward[i] = tele_feedforward_[i];
+        msg.pd_feedback[i] = tele_pd_[i];
+        msg.command[i] = tele_command_[i];
+        msg.measured[i] = tele_measured_[i];
+      }
+    }
+    torque_components_pub_->publish(msg);
+  }
+
   // F128: arm the telemetry-only 0x18 active-report stream on every motor
   // WITHOUT changing enable state (no reset/enable/MIT-torque frames). Used
   // at cold boot (on_configure — RViz shows the real pose before L3) and
@@ -1415,6 +1549,7 @@ private:
   double gravity_ff_ratio_{1.0};
   bool use_pinocchio_gravity_{true};
   bool use_calibrated_inertia_{true};
+  std::string feedforward_mode_{"gravity"};  // F160: gravity | full
   std::string inertia_params_file_;
   std::string gravity_scales_file_;
   std::string gains_config_file_;
@@ -1426,9 +1561,20 @@ private:
   Eigen::VectorXd q_;
   Eigen::VectorXd v_zero_;
   Eigen::VectorXd a_zero_;
+  Eigen::VectorXd v_des_;  // F160: desired joint velocity (JTC splines)
+  Eigen::VectorXd a_des_;  // F160: desired joint acceleration (JTC splines)
   std::vector<Eigen::Index> q_index_;
   std::vector<Eigen::Index> v_index_;
   std::vector<double> ff_scale_;
+
+  // F160 torque-component telemetry caches (joint order, joint space N·m).
+  std::vector<double> tele_gravity_;
+  std::vector<double> tele_coriolis_;
+  std::vector<double> tele_inertia_;
+  std::vector<double> tele_feedforward_;
+  std::vector<double> tele_pd_;
+  std::vector<double> tele_command_;
+  std::vector<double> tele_measured_;
 
   std::vector<JointMapping> joints_;
   std::array<double, 8> torque_max_by_motor_{};
@@ -1445,6 +1591,7 @@ private:
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diag_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr stale_pub_;
   rclcpp::Publisher<a3_can_bridge::msg::MotorStates>::SharedPtr motor_states_pub_;
+  rclcpp::Publisher<a3_msgs::msg::TorqueComponents>::SharedPtr torque_components_pub_;
   rclcpp::TimerBase::SharedPtr motor_states_timer_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
     on_set_parameters_handle_;

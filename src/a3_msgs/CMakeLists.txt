@@ -26,6 +26,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ArmStatus.msg"
   "msg/GripperStatus.msg"
   "msg/MonitorStatus.msg"
+  "msg/TorqueComponents.msg"
   "action/MoveToPose.action"
   DEPENDENCIES geometry_msgs std_msgs builtin_interfaces action_msgs trajectory_msgs
 )

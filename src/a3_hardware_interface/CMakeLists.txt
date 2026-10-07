@@ -48,6 +48,7 @@ ament_target_dependencies(
   diagnostic_msgs
   std_msgs
   a3_can_bridge
+  a3_msgs
   ament_index_cpp
 )
 target_link_libraries(
@@ -102,6 +103,7 @@ ament_export_dependencies(
   diagnostic_msgs
   std_msgs
   a3_can_bridge
+  a3_msgs
   pinocchio
 )
 

@@ -137,7 +137,8 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 
 | 话题 | 类型 | 说明 |
 |------|------|------|
-| `/a3/arm_status` | `a3_msgs/msg/ArmStatus` | 聚合状态快照（`state` + `mode` + 7 关节位置 + `temperatures`（F44）+ `max_torques`（F43，无数据 0.0）+ `temp_warn`（F44）+ 时间戳），默认 10 Hz，作为前端唯一状态入口 |
+| `/a3/arm_status` | `a3_msgs/msg/ArmStatus` | 聚合状态快照（`state` + `mode` + 7 关节位置 + `temperatures`（F44）+ `max_torques`（F43，无数据 0.0）+ `temp_warn`（F44）+ 时间戳 + `ff_gravity/ff_coriolis/ff_inertia/ff_total/pd_feedback/command_torque`（F160 力矩分量分解，关节空间 N·m，L7 无前馈恒 0）），默认 10 Hz，作为前端唯一状态入口 |
+| `/a3/hardware/torque_components` | `a3_msgs/msg/TorqueComponents` | F160 力矩分量分解源（重力/科氏+离心/惯量 AFF/总前馈/PD 反馈/总指令/实测），由 `a3_hardware_interface` 插件发布，`a3_arm_controller` 订阅后镜像进 `/a3/arm_status` |
 | `/a3/arm/operator_event` | `std_msgs/String` | F131 操作事件通知：`waypoint_captured`（路点打点成功）等；ds4_feedback_node 消费（白闪 0.4s + 弱震 0.12s） |
 
 ## 故障监视看门狗（a3_arm_monitor，需求 F50）
