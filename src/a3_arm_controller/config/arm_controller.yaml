@@ -72,8 +72,8 @@
     playback_velocity_scaling: 0.5
     playback_acceleration_scaling: 0.5
     # F137: 回放前几何去噪（逐关节五次 B 样条，RMS 残差 ≈ ε rad）。0=关闭；
-    # 0.005 保形、0.02 更平滑。默认 0.01（max 偏离 ~0.06 rad≈3.4°）。
-    playback_geometric_smoothing_eps: 0.01
+    # 0.005 保形、0.02 更平滑。2026-10 钢琴弹奏精度优先 → 0.005（max 偏离 ~0.03 rad≈1.7°）。
+    playback_geometric_smoothing_eps: 0.002
 
     # ═══════════════════════════════════════════════════════════════════
     # 7. 路点示教（F131/F134：Share 长按进入，L2 打点，Options 保存）

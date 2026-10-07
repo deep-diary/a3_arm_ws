@@ -2011,6 +2011,23 @@ flowchart TD
 - **关联：** F136（轨迹生成层标定，指标 J 扩展为伺服层指标）、F85（自适应 kd 示教阻尼，与本项位置环分离）、F108（重力前馈，整定时保持开）、F107/F44/F81（安全护栏）、P1/P2（跟踪滞后测量经验）、[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)、[shared/SAFETY.md](../shared/SAFETY.md)
 - **状态：** `in-progress`（2026-10-05：真机两轮整定 + 真实行程 kd 验证 + 用户 A/B 实测定稿完成——全关节统一 100/4.0（`src/a3_description/config/kp_kd_gains.yaml` 启动时覆盖 xacro，兜底值已同步）；待示教/MoveIt/FJT 长期回归后关闭。遗留：整定器激励/落定窗偏小导致 kd 系统性偏小（LL-146），后续改进整定器考核项）
 
+### F160 — MIT 位置环速度/加速度前馈（VFF + AFF + 科氏/离心，全模型 computed-torque 前馈）
+
+- **说明：** 当前 MIT 位置环只做「PD 反馈（`v_des=0`）+ `G(q)` 重力前馈（F108）」，轨迹规划出的速度/加速度信息未进前馈，快速轨迹（弹琴等）存在跟踪滞后（稳态误差 `e≈(kd/kp)·q̇`）。工业机械臂标准是「computed-torque 前馈 + PD 反馈」：`τ = kp·(q_des−q_meas) + kd·(q̇_des−q̇_meas) + M(q)·q̈_des + C(q,q̇_des)·q̇_des + G(q)`。本项把 F108 的「只重力前馈」扩展为「全模型前馈」：**速度前馈（VFF）走 MIT velocity 字段**，**加速度前馈（AFF=`M·q̈`）与科氏/离心（`C·q̇`）并入 t_ff**。JTC splines（quintic C2）已产出干净 p/v/a，前馈输入干净；pinocchio `rnea(q, v_des, a_des)` 一次算全 `M·a+C·v+G`，与 F108 现有 `rnea(q,0,0)` 同 O(n) 成本。
+
+- **实现方式：**
+  1. 打通「JTC → 硬件接口」velocity/acceleration 命令通道（当前 JTC `command_interfaces` 仅 `position`，需新增 velocity 命令接口 + 硬件接口消费 splines 的 v/a）。
+  2. `A3MITHardwareInterface::write()`：MIT 帧 velocity 域填 `v_des`（VFF）；t_ff 由 `rnea(q, v_des, a_des)` 全模型前馈叠加/替换现有 `rnea(q,0,0)` 重力（AFF + 科氏/离心）。
+  3. 可配开关 `feedforward_mode`（gravity | full），默认 gravity 保底，full 真机验证后启用。
+
+- **验收标准：**
+  1. vcan 闭环：full 前馈下同轨迹/同 kp/kd 的跟踪误差显著低于 gravity-only，快速轨迹稳态滞后 `e` 下降
+  2. 真机弹琴/快速回放 A/B：跟踪滞后可感知改善，且无抖动/振荡（前馈不引入噪声）
+  3. 前馈开关可运行时切换；异常（fault/限位/超温）回落 gravity-only
+
+- **关联：** F108（重力前馈，本项为其全模型扩展）、F138（kp/kd 反馈增益）、F68（retime 提供干净 v/a）、F137（几何去噪）；[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)
+- **状态：** `proposed`
+
 ## reBot-DevArm 对标潜在需求（2026-10-05 盘点 backlog）
 
 > 来源：[reBot-DevArm](https://github.com/Seeed-Projects/reBot-DevArm) Roadmap & Status（2026-10 口径）+ [reBotArmController_ROS2](https://github.com/Seeed-Projects/reBotArmController_ROS2) v0.3.0 + [reBotArm_control_py](https://github.com/vectorBH6/reBotArm_control_py) + 社区 fork。

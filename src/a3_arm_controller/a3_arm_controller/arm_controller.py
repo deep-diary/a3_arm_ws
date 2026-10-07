@@ -502,7 +502,7 @@ class ArmController(Node):
         # F137: 回放前对录制点做几何去噪（逐关节五次 B 样条，RMS 残差 ≈ ε rad）。
         # ε=0 关闭；0.005 保形、0.02 更平滑。去噪在 F68 重定时之前，L1-L6 进 retime、
         # L7 进序列下发，均为去噪后几何；重定时成功烘焙时落盘即 F137+F68 结果。
-        self.declare_parameter("playback_geometric_smoothing_eps", 0.01)
+        self.declare_parameter("playback_geometric_smoothing_eps", 0.005)
         # F133: Ruckig 重定时成功后把优化轨迹烘焙回 latest.yaml（原文件备份
         # *.preretime.yaml）；下次回放直接复用平滑轨迹。仅 latest 槽，时间戳
         # 备份文件永不改写。
