@@ -175,6 +175,154 @@ def _geometric_smooth_positions(
     return [list(row) for row in out]
 
 
+def _interpolate_via_spline(
+    via_points: List[List[float]], resample_n: int
+) -> Optional[List[List[float]]]:
+    """
+    F161: 稀疏 via 点 → 过点样条稠密路径（精确过点，非 F137 的 s=N·ε² 光顺）。
+
+    首点为当前位、随后为各目标点（每点 L1–L6）。逐关节按累计弦长参数化做
+    `make_interp_spline` 插值，阶数 k = 5（n≥6）优先、少点降 3（n=4/5）、
+    n=3 退 2；n<3 返回 None（调用方回退点对点 goto）。重采样网格显式并入每个
+    via 点参数值，保证输出严格经过各 via 点（验收逐点误差 ≤0.02 rad 的关键）。
+    """
+    import numpy as np
+    from scipy.interpolate import make_interp_spline
+
+    via = np.asarray(via_points, dtype=float)
+    n, m = via.shape
+    if n < 3 or m < 1:
+        return None
+    # 去掉相邻重复点（零弦长会让 make_interp_spline 报错；固定序列可能显式重复）
+    keep = [0]
+    for i in range(1, n):
+        if float(np.max(np.abs(via[i] - via[i - 1]))) > 1e-9:
+            keep.append(i)
+    via = via[keep]
+    n = len(via)
+    if n < 3:
+        return None
+
+    seg = np.linalg.norm(np.diff(via, axis=0), axis=1)
+    u = np.concatenate([[0.0], np.cumsum(seg)])
+    if float(u[-1]) <= 0.0:
+        u = np.linspace(0.0, 1.0, n)
+    else:
+        u = u / u[-1]
+    k = 5 if n >= 6 else (3 if n >= 4 else n - 1)
+    k = max(1, min(k, n - 1))
+    grid = np.unique(np.concatenate([np.linspace(0.0, 1.0, resample_n), u]))
+    out = np.empty((len(grid), m))
+    try:
+        for j in range(m):
+            out[:, j] = make_interp_spline(u, via[:, j], k=k)(grid)
+    except Exception:
+        return None
+    return [list(row) for row in out]
+
+
+def _jerk_limited_timed_traj(
+    dense: List[List[float]], vmax: float, amax: float
+) -> Optional[Tuple[List[float], List[List[float]]]]:
+    """
+    F161: C2 样条稠密路径 → quintic 时间剖面（jerk-limited）重定时。
+
+    沿路径弧长施加 quintic 时间剖面 s(t)=S·(10τ³−15τ⁴+6τ⁵)（起止零速/零加速度、
+    加加速度有界），把稠密路径重参数化为平滑时间轴。时长先按逐关节弧长 S_j 与
+    vmax/amax 上限估算（quintic 峰值速度系数 1.875、峰值加速度系数 5.7735），再
+    数值校验峰值速度/加速度并缩放，最多 8 轮。返回 (times, positions)，退化返回 None。
+    """
+    import numpy as np
+    from scipy.interpolate import make_interp_spline
+
+    q = np.asarray(dense, dtype=float)
+    n, m = q.shape
+    if n < 3 or m < 1:
+        return None
+    seg = np.linalg.norm(np.diff(q, axis=0), axis=1)
+    s = np.concatenate([[0.0], np.cumsum(seg)])
+    S = float(s[-1])
+    if S <= 1e-9:
+        return None
+    s_j = np.sum(np.abs(np.diff(q, axis=0)), axis=0)
+    vmax = max(vmax, 1e-3)
+    amax = max(amax, 1e-3)
+    T = 0.0
+    for j in range(m):
+        T = max(T, 1.875 * float(s_j[j]) / vmax,
+                math.sqrt(5.7735 * float(s_j[j]) / amax))
+    T = max(T, 0.5)
+    # 沿弧长的 C2 三次样条（替换线性 np.interp，消除重采样 kink 带来的伪 jerk）
+    arc_splines = [make_interp_spline(s, q[:, j], k=3) for j in range(m)]
+
+    def _quintic(tau: np.ndarray) -> np.ndarray:
+        return 10.0 * tau ** 3 - 15.0 * tau ** 4 + 6.0 * tau ** 5
+
+    for _ in range(8):
+        n_t = max(20, int(round(T / 0.01)) + 1)
+        t = np.linspace(0.0, T, n_t)
+        s_t = S * _quintic(t / T)
+        q_t = np.column_stack([arc_splines[j](s_t) for j in range(m)])
+        vel = np.gradient(q_t, t, axis=0)
+        acc = np.gradient(vel, t, axis=0)
+        vpeak = float(np.max(np.abs(vel)))
+        apeak = float(np.max(np.abs(acc)))
+        scale = 1.0
+        if vpeak > vmax:
+            scale = max(scale, vpeak / vmax)
+        if apeak > amax:
+            scale = max(scale, math.sqrt(apeak / amax))
+        if scale <= 1.001:
+            break
+        T *= scale
+    return t.tolist(), [list(row) for row in q_t]
+
+
+def _finite_diff_metrics(
+    times: List[float], positions: List[List[float]]
+) -> Optional[Tuple[float, float]]:
+    """命令轨迹（噪声自由）有限差分平滑度：返回 (a_rms, j_rms)，跨关节 RMS 均值。
+
+    F161 A/B 用——/joint_states 反馈 50Hz 采样做三阶差分噪声淹没真实 jerk，故在命令
+    轨迹上算（同 traj_smoothness_calibration.compute_metrics 的 a_rms/j_rms 口径）。
+    """
+    n = len(positions)
+    m = len(positions[0]) if n else 0
+    if n < 5 or m == 0:
+        return None
+    a_rms = j_rms = 0.0
+    for j in range(m):
+        q = [p[j] for p in positions]
+        v = [0.0] * n
+        a = [0.0] * n
+        jk = [0.0] * n
+        for i in range(n):
+            if i == 0:
+                dt = times[1] - times[0]
+                v[i] = (q[1] - q[0]) / dt if n > 1 and dt > 0 else 0.0
+            elif i == n - 1:
+                dt = times[i] - times[i - 1]
+                v[i] = (q[i] - q[i - 1]) / dt if dt > 0 else 0.0
+            else:
+                dt = times[i + 1] - times[i - 1]
+                v[i] = (q[i + 1] - q[i - 1]) / dt if dt > 0 else 0.0
+        for i in range(n):
+            dt = (times[1] - times[0]) if i == 0 else (times[i] - times[i - 1])
+            if i == 0:
+                a[i] = (v[1] - v[0]) / dt if n > 1 and dt > 0 else 0.0
+            else:
+                a[i] = (v[i] - v[i - 1]) / dt if dt > 0 else 0.0
+        for i in range(n):
+            dt = (times[1] - times[0]) if i == 0 else (times[i] - times[i - 1])
+            if i == 0:
+                jk[i] = (a[1] - a[0]) / dt if n > 1 and dt > 0 else 0.0
+            else:
+                jk[i] = (a[i] - a[i - 1]) / dt if dt > 0 else 0.0
+        a_rms += math.sqrt(sum(x * x for x in a) / n)
+        j_rms += math.sqrt(sum(x * x for x in jk) / n)
+    return a_rms / m, j_rms / m
+
+
 # F94: JTC VARIABLE_DEGREE_SPLINE 两点（端点 v/a=0）实测峰值速度/平均速度≈2.0–2.09
 # （mock 全栈 200 Hz 实测），地板时长须按该形状系数放大，否则只约束了平均值。
 _SPLINE_PEAK_FACTOR = 2.2
@@ -507,6 +655,14 @@ class ArmController(Node):
         # false 或 sequence 不可用 → 回退逐腿规划。
         self.declare_parameter("random_tour_use_sequence", True)
         self.declare_parameter("random_tour_blend_radius_m", 0.02)
+        # F161: 巡游平滑链（过点样条 + jerk-limited 时间重参数化 + JTC）。true 走
+        # 新链，任一环节失败 WARN 并回退 F134 sequence / F116 逐腿链。
+        # 后端不再是 F68 totg（时间最优 = bang-bang 加速度，j_rms 反而高）；改为对
+        # C2 样条路径施加 quintic 时间剖面（加加速度有界），按 max_vel/max_acc 定长。
+        self.declare_parameter("random_tour_use_smooth", False)
+        self.declare_parameter("random_tour_smooth_max_vel_rad_s", 0.6)
+        self.declare_parameter("random_tour_smooth_max_acc_rad_s2", 2.0)
+        self.declare_parameter("random_tour_smooth_resample_n", 200)
         self.declare_parameter("playback_ramp_duration_s", 2.5)
         # F68: 回放（ramp + 录制点）默认调 /a3/arm/retime_trajectory 做保几何重定时
         # （Ruckig jerk-limited，失败退化 TOTG）；服务不可用/失败才走旧的
@@ -3024,7 +3180,16 @@ class ArmController(Node):
                     float(last.sec) + float(last.nanosec) * 1e-9)
         total = max(total, 0.1)
         self._duty_record(total)
-        return True, total, f"{label}: sequence {npts} pts, {total:.1f}s"
+        metric_s = ""
+        if seq_resp.planned_trajectories:
+            jt = seq_resp.planned_trajectories[0].joint_trajectory
+            jtimes = [
+                float(p.time_from_start.sec) + float(p.time_from_start.nanosec) * 1e-9
+                for p in jt.points]
+            m = _finite_diff_metrics(jtimes, [list(p.positions) for p in jt.points])
+            if m is not None:
+                metric_s = f" j_rms={m[1]:.4f} a_rms={m[0]:.4f}"
+        return True, total, f"{label}: sequence {npts} pts, {total:.1f}s{metric_s}"
 
     def _moveit_move(
         self,
@@ -3516,15 +3681,280 @@ class ArmController(Node):
         resp.message = f"goto {name} (two-point fallback, {duration:.1f}s, 2 pts)"
         return resp
 
+    def _pad_pose7(self, q) -> List[float]:
+        """把命名点位补齐/截断到 7 关节（L7 缺失补 0）。"""
+        q = list(q)
+        if len(q) < self._n_joints:
+            q = q + [0.0] * (self._n_joints - len(q))
+        elif len(q) > self._n_joints:
+            q = q[: self._n_joints]
+        return q
+
+    def _select_tour_targets(
+        self, rng: "random.Random", count: int, pool: List[str], leg_retries: int
+    ) -> Tuple[List[str], List[List[float]], bool]:
+        """F161: 随机抽取 count 个命名点位（固定序列不经此）。逐点静态门禁拒绝即重抽。
+
+        返回 (names, targets, seq_failed)。seq_failed=True 表示重抽后仍凑不满 count，
+        由调用方回退逐腿链。
+        """
+        GJ = JOINTS[:6]
+        names: List[str] = []
+        targets: List[List[float]] = []
+        tprev: Optional[str] = None
+        while len(names) < count:
+            leg_excluded = {tprev} if tprev else set()
+            got = False
+            nm = ""
+            for _attempt in range(leg_retries + 1):
+                ch = [n for n in pool if n not in leg_excluded]
+                if not ch:
+                    break
+                nm = rng.choice(ch)
+                q = self._pad_pose7(self._poses[nm])
+                q0_arm = (
+                    [self._positions[self._joint_names.index(jn)] for jn in GJ]
+                    if not targets else list(targets[-1][:6]))
+                reject = (
+                    self._static_segment_violation(
+                        q0_arm, q[:6], GJ, len(names))
+                    if self._have_js else None)
+                if reject:
+                    self.get_logger().warn(
+                        f"tour sequence leg {len(names) + 1} '{nm}' "
+                        f"{reject} -- redraw")
+                    leg_excluded.add(nm)
+                    continue
+                got = True
+                break
+            if not got:
+                return names, targets, True
+            names.append(nm)
+            targets.append(q)
+            tprev = nm
+        return names, targets, False
+
+    def _tour_smooth_chain(
+        self, tour_names: List[str], targets: List[List[float]]
+    ) -> Optional[RandomPoseTour.Response]:
+        """F161: 巡游平滑链（过点样条 + F68 retime(totg) + JTC）。失败返回 None（回退）。"""
+        GJ = JOINTS[:6]
+        # 单 via 点 = 点对点 goto（move_group）
+        if len(targets) == 1:
+            ok, dur, msg = self._moveit_move(
+                targets[0][:6], GJ, f"tour goto {tour_names[0]}")
+            if not ok:
+                self.get_logger().warn(f"tour goto failed ({msg}) -- fallback")
+                return None
+            self._schedule_back_to_ready(0.3)
+            resp = RandomPoseTour.Response()
+            resp.success = True
+            resp.message = f"tour goto completed ({dur:.1f}s): {tour_names[0]}"
+            resp.sequence = list(tour_names)
+            resp.total_duration_s = dur
+            return resp
+
+        # 预检：逐段静态力矩 + 占空比（沿用 F134/F107 语义，失败即回退）
+        qcur = [self._positions[self._joint_names.index(jn)] for jn in GJ]
+        for seg_i, qt in enumerate(targets):
+            reject = self._static_segment_violation(qcur, qt[:6], GJ, seg_i)
+            if reject:
+                self.get_logger().warn(f"tour smooth gate: {reject} -- fallback")
+                return None
+            qcur = list(qt[:6])
+        est_total = 0.0
+        q0 = [self._positions[self._joint_names.index(jn)] for jn in GJ]
+        for qt in targets:
+            d, _slow = self._velocity_floor_duration(q0, list(qt[:6]), GJ)
+            est_total += d
+            q0 = list(qt[:6])
+        allowed, used_s, cooling_s = self._duty_check(max(est_total, 0.1))
+        if not allowed:
+            self.get_logger().warn(
+                f"tour smooth duty gate rejected ({used_s:.0f}s in window, "
+                f"wait {cooling_s:.0f}s) -- fallback")
+            return None
+
+        # 当前位 + via 点 → 过点样条稠密 C2 路径
+        q_meas = [self._positions[self._joint_names.index(jn)] for jn in GJ]
+        resample_n = max(
+            20, int(self.get_parameter("random_tour_smooth_resample_n").value))
+        dense = _interpolate_via_spline(
+            [q_meas] + [list(qt[:6]) for qt in targets], resample_n)
+        if dense is None:
+            self.get_logger().warn("tour smooth spline failed -- fallback")
+            return None
+
+        # jerk-limited 时间重参数化（quintic 时间剖面，加加速度有界）
+        vmax = float(
+            self.get_parameter("random_tour_smooth_max_vel_rad_s").value)
+        amax = float(
+            self.get_parameter("random_tour_smooth_max_acc_rad_s2").value)
+        timed = _jerk_limited_timed_traj(dense, vmax, amax)
+        if timed is None:
+            self.get_logger().warn("tour smooth timing failed -- fallback")
+            return None
+        times, tpos = timed
+
+        traj = JointTrajectory()
+        traj.joint_names = list(GJ)
+        for t, pos in zip(times, tpos):
+            pt = JointTrajectoryPoint()
+            pt.positions = [float(v) for v in pos]
+            pt.time_from_start = _duration(t)
+            traj.points.append(pt)
+
+        # JTC 下发（L1–L6；L7 不参与保持 0）
+        self._publish_mode("TRAJ_RUNNING")
+        ok, dmsg = self._dispatch_trajectory(traj)
+        if not ok:
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"tour smooth: {dmsg}")
+            return None
+        self._set_state(STATE_TRAJ, "tour smooth")
+        duration = self._traj_duration(traj)
+        self._schedule_back_to_ready(duration + 0.3)
+
+        resp = RandomPoseTour.Response()
+        resp.success = True
+        metric_s = ""
+        m = _finite_diff_metrics(times, tpos)
+        if m is not None:
+            metric_s = f" j_rms={m[1]:.4f} a_rms={m[0]:.4f}"
+        resp.message = (
+            f"tour smooth completed ({len(tour_names)} via, "
+            f"{len(traj.points)} pts, {duration:.1f}s{metric_s})")
+        resp.sequence = list(tour_names)
+        resp.total_duration_s = duration
+        self.get_logger().info(
+            f"random tour smooth ({len(tour_names)} via, {duration:.1f}s): "
+            f"{tour_names}")
+        return resp
+
+    def _tour_sequence_chain(
+        self, tour_names: List[str], targets: List[List[float]]
+    ) -> Optional[RandomPoseTour.Response]:
+        """F134: 整序列一次规划/执行（pilz PTP + blend）。失败返回 None（回退逐腿）。"""
+        count = len(tour_names)
+        blend = float(self.get_parameter("random_tour_blend_radius_m").value)
+        GJ = JOINTS[:6]
+        est_total = 0.0
+        q0 = [self._positions[self._joint_names.index(jn)] for jn in GJ]
+        for qt in targets:
+            d, _slow = self._velocity_floor_duration(q0, list(qt[:6]), GJ)
+            est_total += d
+            q0 = list(qt[:6])
+        allowed, used_s, cooling_s = self._duty_check(max(est_total, 0.1))
+        if not allowed:
+            self.get_logger().warn(
+                f"tour sequence duty gate rejected ({used_s:.0f}s in window, "
+                f"wait {cooling_s:.0f}s) -- per-leg fallback")
+            return None
+        xyz_seq = [self._fk_ee_xyz(list(self._positions))]
+        xyz_seq += [self._fk_ee_xyz(qt) for qt in targets]
+        if any(x is None for x in xyz_seq):
+            radii = [blend if i < count - 1 else 0.0 for i in range(count)]
+        else:
+            radii = self._adaptive_blend_radii(xyz_seq, blend)
+        seq_items = [
+            self._build_ptp_sequence_item(qt[:6], radii[i])
+            for i, qt in enumerate(targets)]
+        ok, stotal, smsg = self._sequence_move_group(
+            seq_items, f"tour {count} legs")
+        if not ok:
+            self.get_logger().warn(
+                f"tour sequence failed ({smsg}) -- per-leg fallback")
+            return None
+        self._schedule_back_to_ready(0.3)  # 同步已执行完，仅短缓冲
+        resp = RandomPoseTour.Response()
+        resp.success = True
+        metric_s = ""
+        if "j_rms=" in smsg:
+            metric_s = " " + smsg[smsg.index("j_rms="):]
+        resp.message = (
+            f"tour sequence completed ({count} legs, {stotal:.1f}s, "
+            f"blend r<={max(radii):.2f}): {' -> '.join(tour_names)}{metric_s}")
+        resp.sequence = list(tour_names)
+        resp.total_duration_s = stotal
+        self.get_logger().info(
+            f"random tour sequence ({count} legs, {stotal:.1f}s): {tour_names}")
+        return resp
+
+    def _tour_perleg_chain(
+        self,
+        tour_names: List[str],
+        targets: List[List[float]],
+        count: int,
+        rng: "random.Random",
+        pool: List[str],
+        leg_retries: int,
+    ) -> RandomPoseTour.Response:
+        """F116: 逐腿规划+重试（回退链）。固定/预选序列按序执行；空序列随机逐腿重抽。"""
+        GJ = JOINTS[:6]
+        sequence: List[str] = []
+        total = 0.0
+        prev: Optional[str] = None
+        n = len(tour_names) if tour_names else count
+        for i in range(n):
+            excluded = {prev} if prev else set()
+            ok = False
+            dur = 0.0
+            msg = ""
+            name = ""
+            for attempt in range(leg_retries + 1):
+                if tour_names:
+                    name = tour_names[i]
+                    target6 = list(targets[i][:6])
+                else:
+                    choices = [p for p in pool if p not in excluded]
+                    if not choices:
+                        msg = f"tour pool exhausted ({len(pool)} poses all tried)"
+                        break
+                    name = rng.choice(choices)
+                    target6 = self._pad_pose7(self._poses[name])[:6]
+                ok, dur, msg = self._moveit_move(
+                    target6, GJ,
+                    f"tour {i + 1}/{n} {name}"
+                    + (f" (retry {attempt})" if attempt else ""),
+                )
+                if ok:
+                    break
+                self.get_logger().warn(
+                    f"tour leg {i + 1}/{n} '{name}' attempt {attempt + 1} "
+                    f"failed: {msg}")
+                excluded.add(name)
+            if not ok:
+                self._publish_mode("IDLE")
+                self._set_state(STATE_READY, f"tour aborted at leg {i + 1}")
+                resp = RandomPoseTour.Response()
+                resp.success = False
+                resp.message = (
+                    f"leg {i + 1}/{n} failed after {leg_retries + 1} attempt(s)"
+                    f" (last '{name}'): {msg}")
+                resp.sequence = sequence
+                resp.total_duration_s = total
+                return resp
+            sequence.append(name)
+            total += dur
+            prev = name
+
+        self._schedule_back_to_ready(0.3)  # 同步已执行完，仅短缓冲
+        resp = RandomPoseTour.Response()
+        resp.success = True
+        resp.message = f"tour completed: {' -> '.join(sequence)}"
+        resp.sequence = sequence
+        resp.total_duration_s = total
+        self.get_logger().info(f"random tour ({n} legs, {total:.1f}s): {sequence}")
+        return resp
+
     def _random_pose_tour_cb(
         self, req: RandomPoseTour.Request, resp: RandomPoseTour.Response
     ) -> RandomPoseTour.Response:
-        """F116: 随机抽 N 个命名点位，从当前位姿起逐点 move_group 规划+执行.
+        """F116/F134/F161: 命名点位巡游（随机或固定序列）。
 
-        允许重复、相邻不重；count=0 用参数 random_tour_count；seed=0 真随机；
-        点位池减去参数 random_tour_exclude_poses（默认 ["zero"]）。单腿失败按
-        random_tour_leg_retries 换抽点位重试，重试耗尽才中止；已完成序列/时长
-        如实回传。L7 不动（arm 组规划，点位 L7 均为 0）。
+        F161: req.fixed_sequence 非空 → 跳过随机抽取与相邻去重，按给定序列执行；
+        random_tour_use_smooth=true → 走「过点样条 + F68 retime(totg) + JTC」新链，
+        任一环节失败 WARN 并回退 F134 sequence / F116 逐腿链。
         """
         can, why = self._can_move()
         if not can:
@@ -3540,178 +3970,65 @@ class ArmController(Node):
             resp.message = "random tour requires goto_use_moveit=true (move_group)"
             return resp
 
-        count = int(req.count) if int(req.count) > 0 else int(
-            self.get_parameter("random_tour_count").value
-        )
-        if count < 1:
-            resp.success = False
-            resp.message = f"invalid count {count}"
-            return resp
-        exclude = {
-            str(n)
-            for n in (self.get_parameter("random_tour_exclude_poses").value or [])
-        }
-        pool = [n for n in sorted(self._poses) if n not in exclude]
-        if len(pool) < 2:
-            resp.success = False
-            resp.message = f"tour pool too small ({len(pool)}), need >= 2"
-            return resp
+        use_smooth = bool(self.get_parameter("random_tour_use_smooth").value)
+        use_sequence = bool(self.get_parameter("random_tour_use_sequence").value)
+        leg_retries = max(
+            0, int(self.get_parameter("random_tour_leg_retries").value))
 
-        rng = random.Random(int(req.seed) if int(req.seed) != 0 else None)
-        # F134: 优先整序列一次规划/执行（pilz PTP + blend，中间点不停车）。
-        # 逐点构造时静态门禁拒绝 → 当场重抽点位（与逐腿链同语义）；
-        # 整条仍不可行/门禁拒绝/action 失败 → 回落下方逐腿重试链。
-        if bool(self.get_parameter("random_tour_use_sequence").value):
-            blend = float(self.get_parameter("random_tour_blend_radius_m").value)
-            seq_leg_retries = max(
-                0, int(self.get_parameter("random_tour_leg_retries").value))
-            GJ = JOINTS[:6]
-            tour_names: List[str] = []
-            targets: List[List[float]] = []
-            tprev: Optional[str] = None
-            seq_failed = False
-            while len(tour_names) < count:
-                leg_excluded = {tprev} if tprev else set()
-                got = False
-                nm = ""
-                for attempt in range(seq_leg_retries + 1):
-                    ch = [n for n in pool if n not in leg_excluded]
-                    if not ch:
-                        break
-                    nm = rng.choice(ch)
-                    q = list(self._poses[nm])
-                    if len(q) < self._n_joints:
-                        q = q + [0.0] * (self._n_joints - len(q))
-                    elif len(q) > self._n_joints:
-                        q = q[: self._n_joints]
-                    q0_arm = (
-                        [self._positions[self._joint_names.index(jn)] for jn in GJ]
-                        if not targets else list(targets[-1][:6]))
-                    reject = (
-                        self._static_segment_violation(
-                            q0_arm, q[:6], GJ, len(tour_names))
-                        if self._have_js else None)
-                    if reject:
-                        self.get_logger().warn(
-                            f"tour sequence leg {len(tour_names) + 1} '{nm}' "
-                            f"{reject} -- redraw")
-                        leg_excluded.add(nm)
-                        continue
-                    got = True
-                    break
-                if not got:
-                    seq_failed = True
-                    break
-                tour_names.append(nm)
-                targets.append(q)
-                tprev = nm
+        rng = random.Random(None)  # 固定序列时未用
+        pool: List[str] = []
+
+        # ── 1. 解析点位序列 ──
+        if req.fixed_sequence:
+            tour_names = [str(n) for n in req.fixed_sequence]
+            missing = [n for n in tour_names if n not in self._poses]
+            if missing:
+                resp.success = False
+                resp.message = f"fixed_sequence unknown pose(s): {missing}"
+                return resp
+            targets = [self._pad_pose7(self._poses[n]) for n in tour_names]
+            count = len(tour_names)
+        else:
+            count = int(req.count) if int(req.count) > 0 else int(
+                self.get_parameter("random_tour_count").value)
+            if count < 1:
+                resp.success = False
+                resp.message = f"invalid count {count}"
+                return resp
+            exclude = {
+                str(n)
+                for n in (self.get_parameter("random_tour_exclude_poses").value or [])
+            }
+            pool = [n for n in sorted(self._poses) if n not in exclude]
+            if len(pool) < 2:
+                resp.success = False
+                resp.message = f"tour pool too small ({len(pool)}), need >= 2"
+                return resp
+            rng = random.Random(int(req.seed) if int(req.seed) != 0 else None)
+            tour_names, targets, seq_failed = self._select_tour_targets(
+                rng, count, pool, leg_retries)
             if seq_failed:
                 self.get_logger().warn(
                     "tour sequence: no feasible poses after redraw "
                     "-- per-leg fallback")
-            else:
-                est_total = 0.0
-                q0 = [
-                    self._positions[self._joint_names.index(jn)] for jn in GJ]
-                for qt in targets:
-                    d, _slow = self._velocity_floor_duration(q0, list(qt[:6]), GJ)
-                    est_total += d
-                    q0 = list(qt[:6])
-                allowed, used_s, cooling_s = self._duty_check(
-                    max(est_total, 0.1))
-                if not allowed:
-                    self.get_logger().warn(
-                        f"tour sequence duty gate rejected ({used_s:.0f}s in "
-                        f"window, wait {cooling_s:.0f}s) -- per-leg fallback")
-                else:
-                    xyz_seq = [
-                        self._fk_ee_xyz(list(self._positions))]
-                    xyz_seq += [self._fk_ee_xyz(qt) for qt in targets]
-                    if any(x is None for x in xyz_seq):
-                        radii = [
-                            blend if i < count - 1 else 0.0
-                            for i in range(count)]
-                    else:
-                        radii = self._adaptive_blend_radii(xyz_seq, blend)
-                    seq_items = [
-                        self._build_ptp_sequence_item(
-                            qt[:6], radii[i])
-                        for i, qt in enumerate(targets)
-                    ]
-                    ok, stotal, smsg = self._sequence_move_group(
-                        seq_items, f"tour {count} legs")
-                    if ok:
-                        self._schedule_back_to_ready(0.3)  # 同步已执行完，仅短缓冲
-                        resp.success = True
-                        resp.message = (
-                            f"tour sequence completed ({count} legs, {stotal:.1f}s, "
-                            f"blend r<={max(radii):.2f}): {' -> '.join(tour_names)}")
-                        resp.sequence = tour_names
-                        resp.total_duration_s = stotal
-                        self.get_logger().info(
-                            f"random tour sequence ({count} legs, {stotal:.1f}s): "
-                            f"{tour_names}")
-                        return resp
-                    self.get_logger().warn(
-                        f"tour sequence failed ({smsg}) -- per-leg fallback")
+                tour_names, targets = [], []
 
-        # F116: 逐腿规划+重试（回退链，行为同 2026-09 版）
-        # 单腿失败重试次数（OMPL 偶发规划失败/门禁瞬态拒绝，换抽点位重试即可恢复）
-        leg_retries = max(0, int(self.get_parameter("random_tour_leg_retries").value))
-        sequence: List[str] = []
-        total = 0.0
-        prev: Optional[str] = None
-        for i in range(count):
-            excluded = {prev} if prev else set()
-            ok = False
-            dur = 0.0
-            msg = ""
-            name = ""
-            for attempt in range(leg_retries + 1):
-                choices = [n for n in pool if n not in excluded]
-                if not choices:
-                    msg = f"tour pool exhausted ({len(pool)} poses all tried)"
-                    break
-                name = rng.choice(choices)
-                q1 = list(self._poses[name])
-                if len(q1) < self._n_joints:
-                    q1 = q1 + [0.0] * (self._n_joints - len(q1))
-                elif len(q1) > self._n_joints:
-                    q1 = q1[: self._n_joints]
-                ok, dur, msg = self._moveit_move(
-                    q1[:6], JOINTS[:6],
-                    f"tour {i + 1}/{count} {name}"
-                    + (f" (retry {attempt})" if attempt else ""),
-                )
-                if ok:
-                    break
-                self.get_logger().warn(
-                    f"tour leg {i + 1}/{count} '{name}' attempt {attempt + 1} "
-                    f"failed: {msg}"
-                )
-                excluded.add(name)
-            if not ok:
-                self._publish_mode("IDLE")
-                self._set_state(STATE_READY, f"tour aborted at leg {i + 1}")
-                resp.success = False
-                resp.message = (
-                    f"leg {i + 1}/{count} failed after {leg_retries + 1} attempt(s)"
-                    f" (last '{name}'): {msg}"
-                )
-                resp.sequence = sequence
-                resp.total_duration_s = total
-                return resp
-            sequence.append(name)
-            total += dur
-            prev = name
+        # ── 2. 执行优先级：平滑链 → 序列链 → 逐腿链 ──
+        if use_smooth and tour_names:
+            out = self._tour_smooth_chain(tour_names, targets)
+            if out is not None:
+                return out
+            self.get_logger().warn(
+                "tour smooth chain failed -- sequence/per-leg fallback")
 
-        self._schedule_back_to_ready(0.3)  # 同步已执行完，仅短缓冲
-        resp.success = True
-        resp.message = f"tour completed: {' -> '.join(sequence)}"
-        resp.sequence = sequence
-        resp.total_duration_s = total
-        self.get_logger().info(f"random tour ({count} legs, {total:.1f}s): {sequence}")
-        return resp
+        if use_sequence and tour_names:
+            out = self._tour_sequence_chain(tour_names, targets)
+            if out is not None:
+                return out
+            self.get_logger().warn("tour sequence failed -- per-leg fallback")
+
+        return self._tour_perleg_chain(
+            tour_names, targets, count, rng, pool, leg_retries)
 
     def _move_to_cb(
         self, req: MoveToJointPositions.Request, resp: MoveToJointPositions.Response

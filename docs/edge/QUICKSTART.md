@@ -160,6 +160,8 @@ ps aux | grep -E "ros2_control_node|a3_arm_controller|move_group" | grep -v grep
     python3 scripts/a3_test/ps4_sim_test.py
     # F116 随机点位 MoveIt 巡游（服务 /a3/arm/random_pose_tour）专项验收：
     python3 scripts/a3_test/f116_random_tour_sim_acceptance.py
+    # F161 巡游平滑链（固定点位 + 过点样条 + jerk-limited，j_rms/a_rms A/B）验收：
+    python3 scripts/a3_test/f161_tour_smooth_acceptance.py
     ```
     - RViz 双模型：实体色 = 实际反馈（`/joint_states`），半透明 = 目标 ghost（`target/` TF）。
     - 本机 RViz 两个必备前缀已由 launch 自动加：`LIBGL_ALWAYS_SOFTWARE=1`（LL-027）、`LD_PRELOAD=~/.a3/hide_randr/libhide_randr.so`（LL-065）。

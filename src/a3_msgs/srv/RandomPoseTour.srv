@@ -3,6 +3,9 @@
 # seed=0 → 真随机，非 0 可复现。点位池由参数 random_tour_exclude_poses 过滤（默认排除 zero）。
 uint32 count
 uint64 seed
+# F161: 非空时跳过随机抽取与相邻去重，按给定命名点位序列执行（验收专用）；
+# 空则走随机抽取，seed/count 语义不变。
+string[] fixed_sequence
 ---
 bool success
 string message

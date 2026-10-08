@@ -58,6 +58,7 @@
 ./scripts/a3_test/a3_test.sh env         # 环境自检
 python3 scripts/a3_test/ps4_sim_test.py  # PS4 全功能仿真（需仿真栈在跑）
 python3 scripts/a3_test/f116_random_tour_sim_acceptance.py  # 随机巡游验收
+python3 scripts/a3_test/f161_tour_smooth_acceptance.py      # 巡游平滑链 A/B 验收
 ```
 
 ## 相关文档

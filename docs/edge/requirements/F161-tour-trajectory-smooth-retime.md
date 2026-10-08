@@ -41,7 +41,9 @@
   5. **回退链**：retime 服务停掉 / 越限点位被门禁拒绝时，自动回退 F134/F116 且行为与现状一致、状态机不卡死。
 
 - **关联：** F116（随机巡游）、F134（pilz Sequence + blend，现巡游主线）、F137（五次 B 样条几何平滑）、F68（retime 服务）、F136（平滑度指标 J）、F160（full 前馈，转角冲击放大源）；[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)（Wave A 轨迹连续性对标）
-- **状态：** `proposed`
+- **状态：** `implemented`（2026-10 仿真验收 ALL PASS；后端由需求书 totg 改为 jerk-limited quintic 时间重参数化，见下「实现修订」）
+
+> **实现修订（与需求书差异）：** 需求书「实现方式」写 `backend=totg`，但 TOTG 是时间最优（bang-bang 加速度），实测 j_rms 相对 blend 反而升高（blend 4.7 → totg 5.7），无法满足「j_rms 降一个数量级」。故改为在编排层对 C2 样条路径施加 **quintic 时间剖面（jerk-limited）** 重参数化（L2 表「jerk-limited = Ruckig」语义），不依赖 F68 totg。新参数 `random_tour_smooth_max_vel_rad_s=0.6` / `random_tour_smooth_max_acc_rad_s2=2.0`。仿真 A/B：j_rms 4.73→0.456（×10.4）、a_rms 1.08→0.065（×16.5）。
 
 
 > 返回索引：[REQUIREMENTS.md](../REQUIREMENTS.md)
