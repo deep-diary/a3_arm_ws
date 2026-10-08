@@ -2588,26 +2588,10 @@ private:
       last_feedback_mit_vel_rad_s_[feedback->motor_id] = static_cast<double>(feedback->current_speed);
       last_feedback_master_id_[feedback->motor_id] = feedback->master_id;
       {
-        uint32_t mask = 0;
-        if (feedback->error_status) {
-          mask |= 1u << 0;
-        }
-        if (feedback->hall_error) {
-          mask |= 1u << 1;
-        }
-        if (feedback->magnet_error) {
-          mask |= 1u << 2;
-        }
-        if (feedback->temp_error) {
-          mask |= 1u << 3;
-        }
-        if (feedback->current_error) {
-          mask |= 1u << 4;
-        }
-        if (feedback->voltage_error) {
-          mask |= 1u << 5;
-        }
-        last_feedback_fault_mask_[idx] = mask;
+        // fault_mask 统一存原始 fault_code（can_id bit16-21），bit 布局同 EL05 手册：
+        //   bit0 欠压 / bit1 驱动 / bit2 过温 / bit3 磁编码 / bit4 堵转过载 / bit5 未标定
+        // （与 a3_hardware_interface 发布的 MotorState.fault_mask 保持一致，不再重编码）
+        last_feedback_fault_mask_[idx] = static_cast<uint32_t>(feedback->fault_code);
       }
       last_feedback_stamp_ns_[idx] = now.nanoseconds();
       if (!boot_feedback_captured_[idx]) {
@@ -2777,12 +2761,12 @@ private:
 
       const uint32_t m = last_feedback_fault_mask_[i];
       push_kv("fault_mask", std::to_string(m));
-      push_kv("fault_error_status", (m & (1u << 0)) ? "1" : "0");
-      push_kv("fault_hall", (m & (1u << 1)) ? "1" : "0");
-      push_kv("fault_magnet", (m & (1u << 2)) ? "1" : "0");
-      push_kv("fault_temp", (m & (1u << 3)) ? "1" : "0");
-      push_kv("fault_current", (m & (1u << 4)) ? "1" : "0");
-      push_kv("fault_voltage", (m & (1u << 5)) ? "1" : "0");
+      push_kv("fault_undervoltage", (m & (1u << 0)) ? "1" : "0");
+      push_kv("fault_driver", (m & (1u << 1)) ? "1" : "0");
+      push_kv("fault_overtemp", (m & (1u << 2)) ? "1" : "0");
+      push_kv("fault_magnet", (m & (1u << 3)) ? "1" : "0");
+      push_kv("fault_stall", (m & (1u << 4)) ? "1" : "0");
+      push_kv("fault_uncalibrated", (m & (1u << 5)) ? "1" : "0");
 
       if (m != 0u) {
         st.level = DiagnosticStatus::ERROR;

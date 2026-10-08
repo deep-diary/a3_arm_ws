@@ -33,11 +33,15 @@ struct MotorFeedback
   uint8_t mode_status{0};
   uint8_t fault_code{0};
   bool error_status{false};
-  bool hall_error{false};
-  bool magnet_error{false};
+  // EL05 反馈帧 can_id bit16-21 故障位（0 无 1 有）：
+  //   bit16 欠压 / bit17 驱动 / bit18 过温 / bit19 磁编码 /
+  //   bit20 堵转过载 / bit21 未标定
+  bool undervoltage_error{false};
+  bool driver_error{false};
   bool temp_error{false};
-  bool current_error{false};
-  bool voltage_error{false};
+  bool magnet_error{false};
+  bool stall_error{false};
+  bool uncalibrated{false};
   float current_angle{0.0f};
   float current_speed{0.0f};
   float current_torque{0.0f};

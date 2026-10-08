@@ -98,6 +98,20 @@ STATE_DISABLED = "DISABLED"    # F45: 已失能，须显式 enable
 STATE_COOLING = "COOLING"      # F44: 超温保护后降温中，enable 被拒直到降温
 STATE_FAULT = "FAULT"
 
+# EL05 电机 fault_mask（= 原始 fault_code，can_id bit16-21）位定义：
+#   bit0=欠压 bit1=驱动 bit2=过温 bit3=磁编码 bit4=堵转过载 bit5=未标定
+FAULT_UNDERVOLTAGE = 0x01
+FAULT_DRIVER = 0x02
+FAULT_OVERTEMP = 0x04
+FAULT_MAGNET = 0x08
+FAULT_STALL = 0x10
+FAULT_UNCALIBRATED = 0x20
+# 硬故障（立即 emergency reset + FAULT）：驱动 / 磁编码 / 堵转过载
+FAULT_HARD_MASK = FAULT_DRIVER | FAULT_MAGNET | FAULT_STALL
+# 软故障（计时 → safe park → disable，可自恢复不 reset）：欠压 / 过温 / 未标定
+# 过温主路径仍是 F44 温度值保护（safe park → COOLING）；此处兜底 fault 位单独置位。
+FAULT_SOFT_MASK = FAULT_UNDERVOLTAGE | FAULT_OVERTEMP | FAULT_UNCALIBRATED
+
 # 禁止运动类命令的底层控制模式
 BLOCKED_MODES = {"ZERO_TORQUE", "SERVO", "GRAVITY_COMP"}
 
@@ -603,7 +617,7 @@ class ArmController(Node):
         # 20ms 步进 + 相邻点线性插值消除阶梯跳变；l7_max_velocity_rad_s 硬限速。
         self.declare_parameter("l7_seq_tick_s", 0.02)
         self.declare_parameter("l7_seq_min_delta_rad", 0.01)
-        self.declare_parameter("l7_max_velocity_rad_s", 0.6)
+        self.declare_parameter("l7_max_velocity_rad_s", 1.8)
         # F44: 温度管理（warn 仅告警；protect 自动回 idle 失能降温；迟滞恢复）
         # 默认阈值 2026-09-13 调高：官方电机自带 130°C 保护兜底，初版 65°C 过低（LL-023）
         self.declare_parameter("temp_protect_enabled", True)
@@ -611,6 +625,9 @@ class ArmController(Node):
         self.declare_parameter("temp_protect_c", 95.0)
         self.declare_parameter("temp_hysteresis_c", 5.0)
         self.declare_parameter("fault_mask_reset_on_fault", True)
+        # 软故障（欠压/未标定）持续时长阈值：超过才触发 safe park → disable。
+        # 欠压常为锂电瞬时压降，给自恢复留时间；不自恢复才降级失能。
+        self.declare_parameter("soft_fault_grace_s", 1.5)
         # F48: 使能前读数限位门禁（环绕读数超限时拒绝使能，见 LL-019）
         self.declare_parameter("enable_position_check", True)
         # 限位比较裕量：set_zero 后编码器量化噪声 ±0.0002（L2/L3/L7 下界为 0），
@@ -711,6 +728,10 @@ class ArmController(Node):
         self._temp_protect_busy = False
         self._fault_reset_pending = False
         self._pending_fault: Tuple[str, int] = ("", 0)
+        # 软故障（欠压/未标定）计时：首次出现时间 + 关节 + mask；持续超阈值才降级
+        self._soft_fault_since: Optional[float] = None
+        self._soft_fault_joint = ""
+        self._soft_fault_mask = 0
 
         # 示教录制
         self._recording = False
@@ -1794,8 +1815,13 @@ class ArmController(Node):
         step = max_v * dt
         if abs(delta) > step:
             target = self._l7_last_cmd_pos + math.copysign(step, delta)
-        self._l7_last_cmd_pos = float(target)
+        # 目标未变（限幅后）→ 只推进时间基准、不重发 goal。否则恒定目标
+        # （夹爪静止段）会被 20ms 定时器反复抢占 GAC，产生海量
+        # "GripperCommand 未到位" 日志且 reached_goal 恒 false。
         self._l7_last_cmd_t = now
+        if abs(float(target) - self._l7_last_cmd_pos) < 1e-4:
+            return
+        self._l7_last_cmd_pos = float(target)
         self._send_gripper_goal(target)
 
     def _on_gripper_goal_response(self, future) -> None:
@@ -1919,17 +1945,27 @@ class ArmController(Node):
             self._send_gripper_goal_limited(seq[-1][1])
             self._stop_l7_sequence()
             return
-        # 相邻点线性插值：目标连续移动，消除阶梯跳变（夹爪无需 Ruckig）。
-        i = self._l7_seq_idx
-        while i + 1 < len(seq) and seq[i + 1][0] <= elapsed:
-            i += 1
-        self._l7_seq_idx = i
-        t0, p0 = seq[i]
-        if i + 1 < len(seq):
-            t1, p1 = seq[i + 1]
-            target = p0 + (p1 - p0) * (elapsed - t0) / max(t1 - t0, 1e-6)
+        if len(seq) == 2:
+            # 两点轨迹（到首点/回 idle）→ quintic S 曲线：起止零速零加加速度，
+            # 消除线性插值的起步/结束速度阶跃。多段录制序列仍走下方线性插值。
+            t0, p0 = seq[0]
+            t1, p1 = seq[1]
+            u = (elapsed - t0) / max(t1 - t0, 1e-6)
+            u = min(max(u, 0.0), 1.0)
+            s = 10.0 * u ** 3 - 15.0 * u ** 4 + 6.0 * u ** 5
+            target = p0 + (p1 - p0) * s
         else:
-            target = p0
+            # 相邻点线性插值：目标连续移动，消除阶梯跳变（夹爪无需 Ruckig）。
+            i = self._l7_seq_idx
+            while i + 1 < len(seq) and seq[i + 1][0] <= elapsed:
+                i += 1
+            self._l7_seq_idx = i
+            t0, p0 = seq[i]
+            if i + 1 < len(seq):
+                t1, p1 = seq[i + 1]
+                target = p0 + (p1 - p0) * (elapsed - t0) / max(t1 - t0, 1e-6)
+            else:
+                target = p0
         self._send_gripper_goal_limited(target)
 
     def _safe_park_then_disable(self) -> Tuple[bool, str]:
@@ -2148,7 +2184,7 @@ class ArmController(Node):
             self._temp_protect_busy = False
 
     def _handle_motor_fault(self) -> None:
-        """F44: 电机故障监视（fault_mask≠0，含固件过温锁存 bit3）→ 紧急失能 + FAULT."""
+        """硬故障（驱动/磁编码/堵转过载）→ 紧急 reset + FAULT."""
         jn, mask = self._pending_fault
         self.get_logger().error(f"motor fault: joint={jn} mask=0x{mask:X} -> emergency reset")
         ok, msg = self._motor_command(self._reset_cli, 2)
@@ -2158,6 +2194,19 @@ class ArmController(Node):
             self._set_state(
                 STATE_FAULT,
                 f"motor fault: {jn} mask=0x{mask:X}, reset refused: {msg}")
+
+    def _handle_soft_fault(self, jn: str, mask: int) -> None:
+        """软故障（欠压/过温/未标定）→ safe park → disable，可自恢复不 reset。"""
+        self.get_logger().warn(
+            f"soft motor fault: joint={jn} mask=0x{mask:X} -> safe park + disable")
+        ok, msg = self._safe_park_then_disable()
+        if ok:
+            self._set_state(
+                STATE_DISABLED, f"soft motor fault: {jn} mask=0x{mask:X}, disabled")
+        else:
+            # park 超时→FAULT / reset 被拒→READY 已由 _safe_park_then_disable 置位
+            self.get_logger().error(
+                f"soft motor fault: {jn} mask=0x{mask:X}, safe park failed: {msg}")
 
     def _schedule_back_to_ready(self, delay_s: float) -> None:
         self._traj_done_at = time.monotonic() + max(delay_s, 0.1)
@@ -2282,17 +2331,35 @@ class ArmController(Node):
             if cooled:
                 self._set_state(STATE_DISABLED, "overtemp cooled down")
 
-        # 电机故障监视（fault_mask 非零，含固件过温锁存 bit3）
+        # 电机故障监视（fault_mask = 原始 fault_code，bit 定义见 FAULT_* 常量）
         if self.get_parameter("fault_mask_reset_on_fault").value and self._state in (
             STATE_READY, STATE_TRAJ, STATE_IDLE,
         ):
+            hard: Optional[Tuple[str, int]] = None
+            soft: Optional[Tuple[str, int]] = None
             for st in msg.states:
-                if st.fresh and int(st.fault_mask) != 0:
-                    idx = int(st.motor_id) - 1
-                    jn = self._joint_names[idx] if 0 <= idx < n else f"motor{st.motor_id}"
-                    self._pending_fault = (jn, int(st.fault_mask))
-                    self._fault_reset_pending = True
+                if not st.fresh or int(st.fault_mask) == 0:
+                    continue
+                idx = int(st.motor_id) - 1
+                jn = self._joint_names[idx] if 0 <= idx < n else f"motor{st.motor_id}"
+                mask = int(st.fault_mask)
+                if mask & FAULT_HARD_MASK:
+                    hard = (jn, mask)
                     break
+                if soft is None and (mask & FAULT_SOFT_MASK):
+                    soft = (jn, mask)
+            if hard is not None:
+                self._pending_fault = hard
+                self._fault_reset_pending = True
+                self._soft_fault_since = None
+            elif soft is not None:
+                # 软故障计时：持续超 soft_fault_grace_s 才降级，给瞬时压降等自恢复留时间
+                if self._soft_fault_since is None:
+                    self._soft_fault_since = time.monotonic()
+                    self._soft_fault_joint = soft[0]
+                    self._soft_fault_mask = soft[1]
+            else:
+                self._soft_fault_since = None
 
         # F51/LL-039 本地兜底（不依赖看门狗在跑）：READY/TRAJ/SAFE_PARK 期间整臂报告
         # 「已失能」且持续 ≥ sustain → 电机被带外失能。持续窗用于抑制本节点自身
@@ -2369,6 +2436,12 @@ class ArmController(Node):
         if self._fault_reset_pending:
             self._fault_reset_pending = False
             self._handle_motor_fault()
+        if self._soft_fault_since is not None:
+            grace = float(self.get_parameter("soft_fault_grace_s").value)
+            if time.monotonic() - self._soft_fault_since >= grace:
+                jn, mask = self._soft_fault_joint, self._soft_fault_mask
+                self._soft_fault_since = None
+                self._handle_soft_fault(jn, mask)
 
         # F43: 力矩统计节流落盘
         if self._torque_stats_dirty and time.monotonic() - self._torque_stats_saved_at >= float(

@@ -301,6 +301,12 @@ class AutoRunner(Collector):
             return None
         print("  [+] enable → READY")
 
+        # 等 enable 后 soft-start/re-anchor 与 move_group current-state 同步：
+        # 立即 goto 会让 move_group 用陈旧起始状态规划，JTC 起始容差违例
+        # （PATH_TOLERANCE_VIOLATED → error -4）回退本地两点轨迹 → 起步冲击。
+        time.sleep(2.0)
+        print("  [+] enable 后稳定等待 2.0s")
+
         ok, msg = self.call_goto("home")
         if not ok:
             print(f"  [x] goto home 失败: {msg}")

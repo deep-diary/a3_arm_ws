@@ -7,7 +7,7 @@ float32 torque_nm        # 当前力矩（±6 Nm）
 float32 temperature_c    # 电机温度（raw/10，°C）
 uint8  mode_status       # 固件反馈 bit22-23：0=复位 1=标定 2=闭环
 uint8  error_status      # 聚合故障：0/1（反馈帧任意错误位置位）
-uint32 fault_mask        # bit0=综合 fault bit1=霍尔 bit2=磁编 bit3=过温 bit4=过流 bit5=电压
+uint32 fault_mask        # 原始 fault_code（can_id bit16-21）：bit0=欠压 bit1=驱动 bit2=过温 bit3=磁编码 bit4=堵转过载 bit5=未标定
 bool   has_feedback      # 该 ID 曾收到过至少一帧反馈
 bool   fresh             # 最近反馈在 feedback_fresh_timeout_s 窗口内
 bool   enabled           # mode_status == motor_enabled_mode_status_（尽力而为）

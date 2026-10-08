@@ -112,11 +112,12 @@ public:
     fb.master_id = static_cast<uint8_t>(frame.can_id & 0xFF);
     fb.motor_id = static_cast<uint8_t>((frame.can_id >> 8) & 0xFF);
     fb.error_status = static_cast<uint8_t>(((frame.can_id >> 16) & 0x3F) > 0 ? 1 : 0);
-    fb.hall_error = static_cast<bool>((frame.can_id >> 20) & 0x01);
+    fb.uncalibrated = static_cast<bool>((frame.can_id >> 21) & 0x01);
+    fb.stall_error = static_cast<bool>((frame.can_id >> 20) & 0x01);
     fb.magnet_error = static_cast<bool>((frame.can_id >> 19) & 0x01);
     fb.temp_error = static_cast<bool>((frame.can_id >> 18) & 0x01);
-    fb.current_error = static_cast<bool>((frame.can_id >> 17) & 0x01);
-    fb.voltage_error = static_cast<bool>((frame.can_id >> 16) & 0x01);
+    fb.driver_error = static_cast<bool>((frame.can_id >> 17) & 0x01);
+    fb.undervoltage_error = static_cast<bool>((frame.can_id >> 16) & 0x01);
     fb.mode_status = static_cast<uint8_t>((frame.can_id >> 22) & 0x03);
     fb.fault_code = static_cast<uint8_t>((frame.can_id >> 16) & 0x3F);
     fb.current_angle = UintToFloat(U16Be(frame.data[0], frame.data[1]), kPMin, kPMax, 16);
