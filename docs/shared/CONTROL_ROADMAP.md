@@ -322,6 +322,7 @@ flowchart LR
 | 零力矩明确模式 | ⚠️ | ✅ F13 | Wave B | C5 |
 | 笛卡尔 MoveToPose/IK | ✅ | ✅ F12 | Wave B | C1 |
 | 样条插值（JTC 语义） | ✅ JTC | ✅ F15 | Wave B / C2 增强 | F15 |
+| 多路点轨迹平滑（blend → 过点样条+retime，C2 连续） | ※ pilz blend（L1） | ⚠️ F134 blend（L1，转角加速度不连续）；F161 立项升级 L2+L3 | Wave B 增强 | F161 / F134 / F137 / F68 |
 | 主从示教 | 🔜 | ❌ | Wave B | C6 |
 | 末端六维力 / 导纳 | ❌ | ❌ | 硬件后 | C8 |
 | 诊断 / Safe Park | ※ | ❌（backlog：F140 Safe Park、F143 诊断视图） | Wave B 可选 | F140 / F143 |

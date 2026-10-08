@@ -182,6 +182,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 | F158 | reSpeaker 麦克风阵列与 DoA 空间感知（A4，可选硬件）【P3】 | proposed | backlog | [requirements/F158-respeak-mic-doa.md](requirements/F158-respeak-mic-doa.md) |
 | F159 | Isaac Sim USD 数字孪生与 sim-to-real（A5）【P2】 | proposed | backlog | [requirements/F159-isaac-sim-digital-twin.md](requirements/F159-isaac-sim-digital-twin.md) |
 | F160 | MIT 位置环速度/加速度前馈（VFF + AFF + 科氏/离心，全模型 computed-torque 前馈） | implemented | 功能 | [requirements/F160-mit-position-velocity-accel-feedforward.md](requirements/F160-mit-position-velocity-accel-feedforward.md) |
+| F161 | 巡游/多路点轨迹平滑升级（move_group blend → 过点样条 + retime，固定轨迹点 A/B 验收） | proposed | 功能 | [requirements/F161-tour-trajectory-smooth-retime.md](requirements/F161-tour-trajectory-smooth-retime.md) |
 
 ## 非功能需求
 
