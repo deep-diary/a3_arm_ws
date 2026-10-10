@@ -1,0 +1,38 @@
+# 口风琴弹奏几何参数（非逐键的物理常量 + 首键基准位姿）
+# 与 config/melodion_keys.json 配合：每键 up/down 3D 坐标 = base_pose 施加
+# (x_mm 沿键盘 + 黑键后退) 偏移，再叠加下压/抬起高度。
+
+# 首键(F3)「未按压」基准位姿 —— 机械臂末端(end_effector)在 base_link 下的 6D 位姿。
+# 定义为「指尖刚好触及 F3 键面」的位置（键面高度）。end_effector TCP 即按压力点。
+# 首点可自由定义，但须让 32 键 340.2mm 行程全部可达（用 melodion_ik_probe 校验）。
+# 实测可达布局：键盘沿 y 轴、x=-0.20，F3(y=-0.17) → C6(y=+0.17)，64/64 全可达。
+base_pose:
+  position: { x: -0.20, y: -0.17, z: 0.26 }
+  # ik_position_only=true 时姿态不参与 IK，仅作文档/未来 6D 模式参考。
+  orientation: { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
+
+keyboard:
+  axis: "y"        # 键盘走向映射到 base_link 哪个水平轴（"x" 或 "y"）
+  direction: 1     # +1=音高沿 +axis 递增；-1=反向（把 340.2mm 行程放进可达工作区）
+
+# IK 模式：true=仅收敛末端位置（忽略姿态，6DOF 冗余收敛稳，按键推荐）；false=6D 全姿态
+ik_position_only: true
+
+# 按压物理量（mm）
+press_depth_mm: 8.0        # 下压深度（键面下方，-z）
+approach_height_mm: 20.0   # 抬起/悬停高度（键面上方，+z）
+black_retreat_mm: 12.0     # 黑键相对白键沿键长方向的后退量（水平、垂直于键盘轴向）
+white_y_mm: 0.0            # 白键按压点在键长方向的基准偏移（默认 0）
+
+# 节拍/速度
+tempo_bpm_default: 72      # 曲谱未指定 tempo 时的默认 BPM
+approach_time_s: 1.0       # 起点 → 首键 hover 的接近时长
+press_time_s: 0.08         # 下压动作时长
+release_time_s: 0.08       # 抬起动作时长
+travel_speed_mm_s: 200.0   # 键间横移速度（mm/s），用于算 travel 时长
+travel_min_s: 0.05         # 键间横移最小时长下限
+
+# 关节与执行
+l7_gripper_pos: 0.0        # 弹奏时夹爪保持关闭(0)，不参与按键
+joint_names: [L1_joint, L2_joint, L3_joint, L4_joint, L5_joint, L6_joint, L7_joint]
+trajectory_topic: /joint_group_effort_controller/joint_trajectory

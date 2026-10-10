@@ -1,0 +1,36 @@
+# 逐键全扫测试轨迹：F3 → C6 依次各按一次（32 键）。
+# 需求 6 的测试轨迹，用于验收末端覆盖 340.2mm 全行程。
+tempo_bpm: 120
+notes:
+  - { name: "F3",  beats: 0.25 }
+  - { name: "F#3", beats: 0.25 }
+  - { name: "G3",  beats: 0.25 }
+  - { name: "G#3", beats: 0.25 }
+  - { name: "A3",  beats: 0.25 }
+  - { name: "A#3", beats: 0.25 }
+  - { name: "B3",  beats: 0.25 }
+  - { name: "C4",  beats: 0.25 }
+  - { name: "C#4", beats: 0.25 }
+  - { name: "D4",  beats: 0.25 }
+  - { name: "D#4", beats: 0.25 }
+  - { name: "E4",  beats: 0.25 }
+  - { name: "F4",  beats: 0.25 }
+  - { name: "F#4", beats: 0.25 }
+  - { name: "G4",  beats: 0.25 }
+  - { name: "G#4", beats: 0.25 }
+  - { name: "A4",  beats: 0.25 }
+  - { name: "A#4", beats: 0.25 }
+  - { name: "B4",  beats: 0.25 }
+  - { name: "C5",  beats: 0.25 }
+  - { name: "C#5", beats: 0.25 }
+  - { name: "D5",  beats: 0.25 }
+  - { name: "D#5", beats: 0.25 }
+  - { name: "E5",  beats: 0.25 }
+  - { name: "F5",  beats: 0.25 }
+  - { name: "F#5", beats: 0.25 }
+  - { name: "G5",  beats: 0.25 }
+  - { name: "G#5", beats: 0.25 }
+  - { name: "A5",  beats: 0.25 }
+  - { name: "A#5", beats: 0.25 }
+  - { name: "B5",  beats: 0.25 }
+  - { name: "C6",  beats: 0.25 }

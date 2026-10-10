@@ -1,0 +1,111 @@
+# 《青花瓷》副歌 示例曲谱（可编辑）
+# 说明：
+#   - 简化简谱转录，调 1=A（do=A3）。映射：1=A3 2=B3 3=C#4 4=D4 5=E4 6=F#4 7=G#4。
+#   - 时值简化：句内音符 0.5 拍，句尾音 1.0 拍，句间休止 0.5 拍（长短音/停顿演示）。
+#   - 本曲为示例，音高/节奏可按需校核修正。
+tempo_bpm: 100
+notes:
+  # 天青色等烟雨 而我在等你
+  - { name: "E4",  beats: 0.5 }
+  - { name: "E4",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "F#4", beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "E4",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "B3",  beats: 1.0 }
+  - { name: "REST", beats: 0.5 }
+
+  # 炊烟袅袅升起 隔江千万里
+  - { name: "E4",  beats: 0.5 }
+  - { name: "E4",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "E4",  beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "E4",  beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "A3",  beats: 1.0 }
+  - { name: "REST", beats: 0.5 }
+
+  # 在瓶底书汉隶仿前朝的飘逸
+  - { name: "A3",  beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "E4",  beats: 0.5 }
+  - { name: "F#4", beats: 0.5 }
+  - { name: "E4",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "E4",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "B3",  beats: 1.0 }
+  - { name: "REST", beats: 0.5 }
+
+  # 就当我 为遇见你伏笔
+  - { name: "A3",  beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "A3",  beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "A3",  beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "E4",  beats: 0.5 }
+  - { name: "C#4", beats: 1.0 }
+  - { name: "REST", beats: 0.5 }
+
+  # 天青色等烟雨 而我在等你
+  - { name: "E4",  beats: 0.5 }
+  - { name: "E4",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "F#4", beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "E4",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "B3",  beats: 1.0 }
+  - { name: "REST", beats: 0.5 }
+
+  # 月色被打捞起 晕开了结局
+  - { name: "E4",  beats: 0.5 }
+  - { name: "E4",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "E4",  beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "E4",  beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "A3",  beats: 1.0 }
+  - { name: "REST", beats: 0.5 }
+
+  # 如传世的青花瓷自顾自美丽
+  - { name: "A3",  beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "E4",  beats: 0.5 }
+  - { name: "F#4", beats: 0.5 }
+  - { name: "E4",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "E4",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "B3",  beats: 1.0 }
+  - { name: "REST", beats: 0.5 }
+
+  # 你眼带笑意
+  - { name: "E4",  beats: 0.5 }
+  - { name: "C#4", beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "B3",  beats: 0.5 }
+  - { name: "A3",  beats: 2.0 }
