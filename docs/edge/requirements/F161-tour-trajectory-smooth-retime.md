@@ -41,12 +41,14 @@
   5. **回退链**：retime 服务停掉 / 越限点位被门禁拒绝时，自动回退 F134/F116 且行为与现状一致、状态机不卡死。
 
 - **关联：** F116（随机巡游）、F134（pilz Sequence + blend，现巡游主线）、F137（五次 B 样条几何平滑）、F68（retime 服务）、F136（平滑度指标 J）、F160（full 前馈，转角冲击放大源）；[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)（Wave A 轨迹连续性对标）
-- **状态：** `implemented`（2026-10 仿真 + 真机验收 ALL PASS；后端由需求书 totg 改为 jerk-limited quintic 时间重参数化，见下「实现修订」）
+- **状态：** `implemented`（2026-10 仿真 + 真机验收；固定序列/合理点 smooth 链 ALL PASS，随机巡游默认回退 blend，见下「实现修订」）
 
 > **实现修订（与需求书差异）：** 需求书「实现方式」写 `backend=totg`，但 TOTG 是时间最优（bang-bang 加速度），实测 j_rms 相对 blend 反而升高（blend 4.7 → totg 5.7），无法满足「j_rms 降一个数量级」。故改为在编排层对 C2 样条路径施加 **quintic 时间剖面（jerk-limited）** 重参数化（L2 表「jerk-limited = Ruckig」语义），不依赖 F68 totg。新参数 `random_tour_smooth_max_vel_rad_s=0.6` / `random_tour_smooth_max_acc_rad_s2=2.0`。
 >
 > - **仿真 A/B**（3 点 cubic）：j_rms 4.73→0.456（×10.4）、a_rms 1.08→0.065（×16.5）。
 > - **真机 A/B**（3 点 cubic，`home_front→home_back→home_down`）：j_rms **4.73→0.381（×12.4）**、a_rms 1.08→0.129（×8.4）；逐点到位 ≤0.02 rad。6 点 quintic 链真机同样跑通（j_rms=0.4635、a_rms=0.0895）。
+>
+> - **2026-10 随机巡游真机验收（追加结论）**：随机巡游（`fixed_sequence` 为空、随机抽 10 点含 `snap_*` 大行程点）点位行程大、方向突变（「一个东一个西」），样条/S-curve 链即使规划成功冲击也大（仿真不含电机惯性，时间表现失真，实测还偏慢：quintic 单峰 273s）。故默认 `random_tour_smooth_mode` **回退 blend**（F134 pilz Sequence + 转角 blend，逐点时间最优，相对最稳，10 点 ~11s）；`s_curve`/`quintic` 保留为可选档，仅适合点距均匀、方向一致的连续多路点（如固定序列验收）。另发现 cubic 样条 `q(s)` 导数过冲（`dq/ds` 达 2.5 倍）会放大时间重参数化缩放，已改用线性插值重采样规避。
 
 
 > 返回索引：[REQUIREMENTS.md](../REQUIREMENTS.md)

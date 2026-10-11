@@ -180,12 +180,13 @@ def _interpolate_via_spline(
     via_points: List[List[float]], resample_n: int
 ) -> Optional[List[List[float]]]:
     """
-    F161: 稀疏 via 点 → 过点样条稠密路径（精确过点，非 F137 的 s=N·ε² 光顺）。
+    F161: 稀疏 via 点 → 三次（cubic）过点样条，C2 稠密路径。
 
     首点为当前位、随后为各目标点（每点 L1–L6）。逐关节按累计弦长参数化做
-    `make_interp_spline` 插值，阶数 k = 5（n≥6）优先、少点降 3（n=4/5）、
-    n=3 退 2；n<3 返回 None（调用方回退点对点 goto）。重采样网格显式并入每个
-    via 点参数值，保证输出严格经过各 via 点（验收逐点误差 ≤0.02 rad 的关键）。
+    `make_interp_spline(k=3)` 三次样条插值——C2 连续（加速度连续，不震动），
+    且过冲远小于 quintic（Runge 振荡随阶数加剧，真机实测 quintic L2 过冲 9 rad、
+    cubic 1.3 rad）。过冲由调用方 `_spline_bounds_violation` 兜底（>0.3 rad 或越限
+    则回退 blend/per-leg）。n<4 时降阶（k=n-1），仍优于 PCHIP 的 C1 硬拐。
     """
     import numpy as np
     from scipy.interpolate import make_interp_spline
@@ -194,7 +195,7 @@ def _interpolate_via_spline(
     n, m = via.shape
     if n < 3 or m < 1:
         return None
-    # 去掉相邻重复点（零弦长会让 make_interp_spline 报错；固定序列可能显式重复）
+    # 去掉相邻重复点（零弦长会让插值报错；固定序列可能显式重复）
     keep = [0]
     for i in range(1, n):
         if float(np.max(np.abs(via[i] - via[i - 1]))) > 1e-9:
@@ -210,8 +211,7 @@ def _interpolate_via_spline(
         u = np.linspace(0.0, 1.0, n)
     else:
         u = u / u[-1]
-    k = 5 if n >= 6 else (3 if n >= 4 else n - 1)
-    k = max(1, min(k, n - 1))
+    k = min(3, n - 1)  # cubic（C2），n<4 降阶
     grid = np.unique(np.concatenate([np.linspace(0.0, 1.0, resample_n), u]))
     out = np.empty((len(grid), m))
     try:
@@ -226,12 +226,12 @@ def _jerk_limited_timed_traj(
     dense: List[List[float]], vmax: float, amax: float
 ) -> Optional[Tuple[List[float], List[List[float]]]]:
     """
-    F161: C2 样条稠密路径 → quintic 时间剖面（jerk-limited）重定时。
+    F161: C2 样条稠密路径 → quintic 加速 + 巡航 + quintic 减速重定时。
 
-    沿路径弧长施加 quintic 时间剖面 s(t)=S·(10τ³−15τ⁴+6τ⁵)（起止零速/零加速度、
-    加加速度有界），把稠密路径重参数化为平滑时间轴。时长先按逐关节弧长 S_j 与
-    vmax/amax 上限估算（quintic 峰值速度系数 1.875、峰值加速度系数 5.7735），再
-    数值校验峰值速度/加速度并缩放，最多 8 轮。返回 (times, positions)，退化返回 None。
+    沿弧长：quintic 加速（0→vmax，jerk 连续）→ 巡航 vmax → quintic 减速（对称）。
+    有巡航段故平均速度接近 vmax（比单段 quintic 快 ~1.8 倍），加速/减速段 jerk 连续
+    （优于 S-curve 的 jerk 阶跃）。缩放循环通过降巡航速度确保峰值速度/加速度 ≤
+    vmax/amax（沿弧长样条 dq/ds 过冲时自动放慢）。返回 (times, positions)，退化返回 None。
     """
     import numpy as np
     from scipy.interpolate import make_interp_spline
@@ -245,38 +245,183 @@ def _jerk_limited_timed_traj(
     S = float(s[-1])
     if S <= 1e-9:
         return None
-    s_j = np.sum(np.abs(np.diff(q, axis=0)), axis=0)
     vmax = max(vmax, 1e-3)
     amax = max(amax, 1e-3)
-    T = 0.0
-    for j in range(m):
-        T = max(T, 1.875 * float(s_j[j]) / vmax,
-                math.sqrt(5.7735 * float(s_j[j]) / amax))
-    T = max(T, 0.5)
-    # 沿弧长的 C2 三次样条（替换线性 np.interp，消除重采样 kink 带来的伪 jerk）
-    arc_splines = [make_interp_spline(s, q[:, j], k=3) for j in range(m)]
+    # 线性插值（不用 cubic 样条）：稠密点下 dq/ds ≤ 1 天然成立；cubic 样条 q(s)
+    # 会导数过冲（dq/ds 达 2.5 倍），导致缩放循环把巡航速度压到极低、时长爆炸。
+    def _arc_eval(s_t: np.ndarray) -> np.ndarray:
+        return np.column_stack([np.interp(s_t, s, q[:, j]) for j in range(m)])
 
-    def _quintic(tau: np.ndarray) -> np.ndarray:
-        return 10.0 * tau ** 3 - 15.0 * tau ** 4 + 6.0 * tau ** 5
+    def _quintic_blend(v: float) -> Tuple[float, float]:
+        # quintic 0→v：峰值加速度 7.5v/T_a，位移 0.5v·T_a（平均速度 0.5v）
+        t_a = 7.5 * v / amax
+        return t_a, 0.5 * v * t_a
 
-    for _ in range(8):
-        n_t = max(20, int(round(T / 0.01)) + 1)
+    def _profile(S: float, v: float):
+        t_a, s_a = _quintic_blend(v)
+        if 2.0 * s_a >= S:
+            lo, hi = 0.0, v
+            for _ in range(60):
+                mid = (lo + hi) / 2.0
+                _, sa = _quintic_blend(mid)
+                if 2.0 * sa >= S:
+                    hi = mid
+                else:
+                    lo = mid
+            v = (lo + hi) / 2.0
+            t_a, s_a = _quintic_blend(v)
+            s_c = 0.0
+        else:
+            s_c = S - 2.0 * s_a
+        t_c = s_c / v if v > 0.0 else 0.0
+        return 2.0 * t_a + t_c, t_a, s_a, s_c, t_c, v
+
+    v_u = vmax
+    for _ in range(12):
+        T, t_a, s_a, s_c, t_c, v_u = _profile(S, v_u)
+        dt = 0.01
+        n_t = max(40, int(round(T / dt)) + 1)
         t = np.linspace(0.0, T, n_t)
-        s_t = S * _quintic(t / T)
-        q_t = np.column_stack([arc_splines[j](s_t) for j in range(m)])
+        s_t = np.zeros(n_t)
+        for i, tt in enumerate(t):
+            if tt < t_a:
+                u = tt / t_a
+                s_t[i] = s_a * (2.0 * u ** 6 - 6.0 * u ** 5 + 5.0 * u ** 4)
+            elif tt < t_a + t_c:
+                s_t[i] = s_a + v_u * (tt - t_a)
+            else:
+                u = (tt - t_a - t_c) / t_a
+                s_t[i] = s_a + s_c + s_a * (2.0 * u ** 6 - 6.0 * u ** 5 + 5.0 * u ** 4)
+        s_t[-1] = S
+        q_t = _arc_eval(np.clip(s_t, 0.0, S))
         vel = np.gradient(q_t, t, axis=0)
         acc = np.gradient(vel, t, axis=0)
         vpeak = float(np.max(np.abs(vel)))
         apeak = float(np.max(np.abs(acc)))
-        scale = 1.0
-        if vpeak > vmax:
-            scale = max(scale, vpeak / vmax)
-        if apeak > amax:
-            scale = max(scale, math.sqrt(apeak / amax))
-        if scale <= 1.001:
+        if vpeak <= vmax * 1.001 and apeak <= amax * 1.001:
+            return t.tolist(), [list(row) for row in q_t]
+        # 超限则降低巡航速度（等比），下轮重新生成剖面
+        factor = max(vpeak / vmax, math.sqrt(apeak / amax))
+        v_u = v_u / max(factor, 1.05)
+        if v_u < 1e-3:
             break
-        T *= scale
     return t.tolist(), [list(row) for row in q_t]
+
+
+def _s_curve_profile(
+    S: float, vmax: float, amax: float, jmax: float, dt: float = 0.01
+) -> Tuple[List[float], List[float]]:
+    """L2 沿弧长的 7 段式对称 jerk-limited S-curve：返回 (times, arc_positions)。
+
+    速度剖面 = 加速（jerk 限幅梯形加速度）→ 巡航 vmax → 减速（对称）；有巡航段
+    故平均速度接近 vmax（比 quintic 单峰快 ~1.8 倍），加加速度在加速/减速段为
+    有限阶跃（介于 blend 的无穷大阶跃与 quintic 的连续之间）。
+    """
+    import numpy as np
+
+    def accel_segment(v, amx, jmx, dtf):
+        tj = amx / jmx
+        if v >= amx * tj:
+            t_flat = v / amx - tj
+            t_a = 2.0 * tj + t_flat
+            a_peak = amx
+        else:
+            a_peak = math.sqrt(v * jmx)
+            tj = a_peak / jmx
+            t_a = 2.0 * tj
+        nt = max(8, int(round(t_a / dtf)) + 1)
+        tt = np.linspace(0.0, t_a, nt)
+        a = np.where(tt < tj, jmx * tt,
+                     np.where(tt < t_a - tj, a_peak, jmx * (t_a - tt)))
+        vel = np.cumsum(a) * dtf
+        s = np.cumsum(vel) * dtf
+        return t_a, float(s[-1]), tj, a_peak
+
+    tj = amax / jmax
+    t_a, s_a, tj, a_peak = accel_segment(vmax, amax, jmax, dt / 4.0)
+    if 2.0 * s_a >= S:
+        lo, hi = 0.0, vmax
+        for _ in range(50):
+            mid = (lo + hi) / 2.0
+            _, sa, _, _ = accel_segment(mid, amax, jmax, dt / 4.0)
+            if 2.0 * sa >= S:
+                hi = mid
+            else:
+                lo = mid
+        vmax_u = (lo + hi) / 2.0
+        t_cruise = 0.0
+    else:
+        vmax_u = vmax
+        t_cruise = (S - 2.0 * s_a) / vmax
+
+    tj = amax / jmax
+    if vmax_u >= amax * tj:
+        t_flat = vmax_u / amax - tj
+        t_a = 2.0 * tj + t_flat
+        a_peak = amax
+    else:
+        a_peak = math.sqrt(vmax_u * jmax)
+        tj = a_peak / jmax
+        t_a = 2.0 * tj
+    T = 2.0 * t_a + t_cruise
+    nt = max(40, int(round(T / dt)) + 1)
+    t = np.linspace(0.0, T, nt)
+    a = np.zeros(nt)
+    for i in range(nt):
+        tt = t[i]
+        if tt < tj:
+            a[i] = jmax * tt
+        elif tt < t_a - tj:
+            a[i] = a_peak
+        elif tt < t_a:
+            a[i] = jmax * (t_a - tt)
+        elif tt < t_a + t_cruise:
+            a[i] = 0.0
+        elif tt < t_a + t_cruise + tj:
+            a[i] = -jmax * (tt - t_a - t_cruise)
+        elif tt < 2 * t_a + t_cruise - tj:
+            a[i] = -a_peak
+        else:
+            a[i] = -jmax * (2 * t_a + t_cruise - tt)
+    vel = np.cumsum(a) * dt
+    vel[-1] = 0.0
+    s = np.cumsum(vel) * dt
+    if s[-1] > 1e-9:
+        s = s * (S / s[-1])
+    s[0] = 0.0
+    s[-1] = S
+    s = np.maximum.accumulate(np.clip(s, 0.0, S))
+    return t.tolist(), s.tolist()
+
+
+def _s_curve_timed_traj(
+    dense: List[List[float]], vmax: float, amax: float
+) -> Optional[Tuple[List[float], List[List[float]]]]:
+    """L2: C2 样条稠密路径 → S-curve（jerk-limited 梯形速度 + 巡航段）重定时。
+
+    与 quintic 版共用几何路径（过点样条），仅时间参数化不同——S-curve 有巡航段，
+    巡游速度明显更快。返回 (times, positions)，退化返回 None。
+    """
+    import numpy as np
+
+    q = np.asarray(dense, dtype=float)
+    n, m = q.shape
+    if n < 3 or m < 1:
+        return None
+    seg = np.linalg.norm(np.diff(q, axis=0), axis=1)
+    s = np.concatenate([[0.0], np.cumsum(seg)])
+    S = float(s[-1])
+    if S <= 1e-9:
+        return None
+    vmax = max(vmax, 1e-3)
+    amax = max(amax, 1e-3)
+    jmax = 6.0 * amax  # jerk ramp 时间 = 1/6 s
+    t, s_t = _s_curve_profile(S, vmax, amax, jmax)
+    # 线性插值（不用 cubic 样条）：稠密点下 dq/ds ≤ 1 天然成立，避免 cubic 样条 q(s)
+    # 导数过冲（dq/ds 达 2.5 倍）导致关节速度超限。
+    s_t = np.clip(np.asarray(s_t), 0.0, S)
+    q_t = np.column_stack([np.interp(s_t, s, q[:, j]) for j in range(m)])
+    return t, [list(row) for row in q_t]
 
 
 def _finite_diff_metrics(
@@ -656,12 +801,13 @@ class ArmController(Node):
         # false 或 sequence 不可用 → 回退逐腿规划。
         self.declare_parameter("random_tour_use_sequence", True)
         self.declare_parameter("random_tour_blend_radius_m", 0.02)
-        # F161: 巡游平滑链（过点样条 + jerk-limited 时间重参数化 + JTC）。true 走
-        # 新链，任一环节失败 WARN 并回退 F134 sequence / F116 逐腿链。
-        # 后端不再是 F68 totg（时间最优 = bang-bang 加速度，j_rms 反而高）；改为对
-        # C2 样条路径施加 quintic 时间剖面（加加速度有界），按 max_vel/max_acc 定长。
-        self.declare_parameter("random_tour_use_smooth", False)
-        self.declare_parameter("random_tour_smooth_max_vel_rad_s", 0.6)
+        # F161: 巡游轨迹平滑三档（L1 blend / L2 S-curve / L3 quintic）。
+        # blend = F134 pilz Sequence（转角 blend，加速度不连续）；
+        # s_curve = 过点样条 + jerk-limited S-curve（梯形速度含巡航段，快）；
+        # quintic = 过点样条 + quintic 单峰时间剖面（jerk 连续，最平滑但慢）。
+        # 任一新链环节失败 WARN 并回退 F134 sequence / F116 逐腿链。
+        self.declare_parameter("random_tour_smooth_mode", "quintic")
+        self.declare_parameter("random_tour_smooth_max_vel_rad_s", 1.5)
         self.declare_parameter("random_tour_smooth_max_acc_rad_s2", 2.0)
         self.declare_parameter("random_tour_smooth_resample_n", 200)
         self.declare_parameter("playback_ramp_duration_s", 2.5)
@@ -2959,10 +3105,12 @@ class ArmController(Node):
         qt_arm: List[float],
         group_joints: List[str],
         seg_i: int = 0,
+        samples: int = 21,
     ) -> Optional[str]:
         """
         F134/F107: 单段预检——目标关节须在自身限位内（pilz 拒绝越限 goal
-        constraints，error -16），再沿关节直线 21 点采样静态重力矩。
+        constraints，error -16），再沿关节直线采样静态重力矩（默认 21 点）。
+        选点阶段可用 samples=9 快速过滤（详细门禁仍在平滑/序列链预检做 21 点）。
         拒绝返原因，否则 None。
         """
         if not self._pin_ready:
@@ -2980,7 +3128,7 @@ class ArmController(Node):
                     return (
                         f"goal limits gate rejected at segment {seg_i + 1}: "
                         f"{jn} {float(tv):+.3f} outside [{lo:.3f},{hi:.3f}]")
-        samples = 21
+        samples = max(3, int(samples))
 
         def seg_full(frac: float) -> List[float]:
             full = list(self._positions)
@@ -3753,7 +3901,7 @@ class ArmController(Node):
                     if not targets else list(targets[-1][:6]))
                 reject = (
                     self._static_segment_violation(
-                        q0_arm, q[:6], GJ, len(names))
+                        q0_arm, q[:6], GJ, len(names), samples=9)
                     if self._have_js else None)
                 if reject:
                     self.get_logger().warn(
@@ -3770,10 +3918,43 @@ class ArmController(Node):
             tprev = nm
         return names, targets, False
 
+    def _spline_bounds_violation(
+        self, dense: List[List[float]], via: List[List[float]], group_joints: List[str]
+    ) -> Optional[str]:
+        """F161 兜底：稠密路径明显越限或超出 via 点包络 >0.3 rad 时返回原因，否则 None。
+
+        三次样条在 via 点附近有轻微过冲；当 via 点靠近限位（如 home_front L2=0.127 贴
+        近 0 下限）时，过冲可能轻微越限（~0.015 rad）。此类轻微越限由 JTC 软限位 clamp
+        兜底，不拦截；只有明显越限（>0.05 rad）或大过冲（>0.3 rad，孤立极端 via 点
+        的 Runge 振荡）才回退。
+        """
+        if not dense or not via:
+            return None
+        m = len(dense[0])
+        LIM_TOL = 0.05  # 轻微越限容差（rad），JTC 软限位 clamp 兜底
+        for j, jn in enumerate(group_joints):
+            if j >= m:
+                break
+            col = [p[j] for p in dense]
+            dmin, dmax = min(col), max(col)
+            vmin = min(v[j] for v in via)
+            vmax = max(v[j] for v in via)
+            lo_hi = self._joint_limits.get(jn)
+            if lo_hi is not None and (
+                dmin < lo_hi[0] - LIM_TOL or dmax > lo_hi[1] + LIM_TOL
+            ):
+                return (f"{jn} out of URDF limits [{dmin:+.3f},{dmax:+.3f}] "
+                        f"vs [{lo_hi[0]:.3f},{lo_hi[1]:.3f}]")
+            over = max(vmin - dmin, dmax - vmax)
+            if over > 0.3:
+                return f"{jn} overshoot {over:.3f} rad beyond via envelope"
+        return None
+
     def _tour_smooth_chain(
-        self, tour_names: List[str], targets: List[List[float]]
+        self, tour_names: List[str], targets: List[List[float]],
+        mode: str = "quintic",
     ) -> Optional[RandomPoseTour.Response]:
-        """F161: 巡游平滑链（过点样条 + F68 retime(totg) + JTC）。失败返回 None（回退）。"""
+        """F161: 巡游平滑链（过点样条 + 时间重参数化 + JTC）。失败返回 None（回退）。"""
         GJ = JOINTS[:6]
         # 单 via 点 = 点对点 goto（move_group）
         if len(targets) == 1:
@@ -3811,22 +3992,33 @@ class ArmController(Node):
                 f"wait {cooling_s:.0f}s) -- fallback")
             return None
 
-        # 当前位 + via 点 → 过点样条稠密 C2 路径
+        # 当前位 + via 点 → 保形插值（PCHIP）稠密路径
         q_meas = [self._positions[self._joint_names.index(jn)] for jn in GJ]
         resample_n = max(
             20, int(self.get_parameter("random_tour_smooth_resample_n").value))
-        dense = _interpolate_via_spline(
-            [q_meas] + [list(qt[:6]) for qt in targets], resample_n)
+        via_all = [q_meas] + [list(qt[:6]) for qt in targets]
+        dense = _interpolate_via_spline(via_all, resample_n)
         if dense is None:
             self.get_logger().warn("tour smooth spline failed -- fallback")
             return None
 
-        # jerk-limited 时间重参数化（quintic 时间剖面，加加速度有界）
+        # 过冲/越限兜底：任一关节越 URDF 限位，或超出 via 点包络 > 0.3 rad，则回退
+        # （PCHIP 保形本应零过冲，此处防御异常 via 点/插值退化）。
+        bounds_viol = self._spline_bounds_violation(dense, via_all, GJ)
+        if bounds_viol:
+            self.get_logger().warn(
+                f"tour smooth spline bounds: {bounds_viol} -- fallback")
+            return None
+
+        # 时间重参数化：quintic（jerk 连续，慢）或 S-curve（巡航段，快）
         vmax = float(
             self.get_parameter("random_tour_smooth_max_vel_rad_s").value)
         amax = float(
             self.get_parameter("random_tour_smooth_max_acc_rad_s2").value)
-        timed = _jerk_limited_timed_traj(dense, vmax, amax)
+        if mode == "s_curve":
+            timed = _s_curve_timed_traj(dense, vmax, amax)
+        else:
+            timed = _jerk_limited_timed_traj(dense, vmax, amax)
         if timed is None:
             self.get_logger().warn("tour smooth timing failed -- fallback")
             return None
@@ -3989,7 +4181,7 @@ class ArmController(Node):
         """F116/F134/F161: 命名点位巡游（随机或固定序列）。
 
         F161: req.fixed_sequence 非空 → 跳过随机抽取与相邻去重，按给定序列执行；
-        random_tour_use_smooth=true → 走「过点样条 + F68 retime(totg) + JTC」新链，
+        random_tour_smooth_mode ∈ {blend, s_curve, quintic} 选平滑后端，
         任一环节失败 WARN 并回退 F134 sequence / F116 逐腿链。
         """
         can, why = self._can_move()
@@ -4006,7 +4198,8 @@ class ArmController(Node):
             resp.message = "random tour requires goto_use_moveit=true (move_group)"
             return resp
 
-        use_smooth = bool(self.get_parameter("random_tour_use_smooth").value)
+        smooth_mode = str(self.get_parameter("random_tour_smooth_mode").value)
+        use_smooth = smooth_mode in ("s_curve", "quintic")
         use_sequence = bool(self.get_parameter("random_tour_use_sequence").value)
         leg_retries = max(
             0, int(self.get_parameter("random_tour_leg_retries").value))
@@ -4051,7 +4244,7 @@ class ArmController(Node):
 
         # ── 2. 执行优先级：平滑链 → 序列链 → 逐腿链 ──
         if use_smooth and tour_names:
-            out = self._tour_smooth_chain(tour_names, targets)
+            out = self._tour_smooth_chain(tour_names, targets, smooth_mode)
             if out is not None:
                 return out
             self.get_logger().warn(

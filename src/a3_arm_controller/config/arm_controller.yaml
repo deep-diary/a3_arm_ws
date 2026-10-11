@@ -36,11 +36,16 @@
     # F134: 整序列一次规划/执行（pilz PTP blend）；false/失败回退逐腿链
     random_tour_use_sequence: true
     random_tour_blend_radius_m: 0.02
-    # F161: 巡游平滑链（过点样条 + jerk-limited 时间重参数化 + JTC）。true 走新链，
+    # F161: 巡游轨迹平滑三档（L1 blend / L2 S-curve / L3 quintic）。
+    # blend = F134 pilz Sequence（转角 blend）；s_curve = 样条 + jerk-limited S-curve
+    # （梯形速度含巡航段，快）；quintic = 样条 + quintic 单峰（最平滑但慢）。
     # 任一环节失败 WARN 并回退 F134 sequence / F116 逐腿链。
-    # 2026-10 真机验收后默认开启：手柄 Options 长按巡游即 smooth 效果。
-    random_tour_use_smooth: true
-    random_tour_smooth_max_vel_rad_s: 0.6    # 平滑链峰值速度上限（rad/s；0.6=回放干净跟踪速度）
+    # 2026-10 真机验收结论：随机巡游点位行程大、方向突变（snap 大行程点），样条/S-curve
+    # 即使规划成功冲击也大（仿真不含电机惯性，时间表现失真）。默认回退 blend（F134
+    # pilz Sequence + 转角 blend，逐点时间最优，相对最稳）。s_curve/quintic 保留为可选
+    # 档，适合点距均匀、方向一致的连续多路点（如固定序列验收）。
+    random_tour_smooth_mode: blend
+    random_tour_smooth_max_vel_rad_s: 1.5    # 平滑链峰值速度上限（rad/s）
     random_tour_smooth_max_acc_rad_s2: 2.0   # 平滑链峰值加速度上限（rad/s²）
     random_tour_smooth_resample_n: 200       # 过点样条稠密重采样点数
 
