@@ -3,25 +3,13 @@
 <package format="3">
   <name>app_melodion</name>
   <version>0.1.0</version>
-  <description>A3 arm melodion (melodica) playing app: key config + playing geometry + score -> Pinocchio IK -> joint trajectory</description>
+  <description>A3 arm melodion playing app: key config + playing geometry + score -> stream trajectory config（离线脚本，无 ROS 依赖）</description>
   <maintainer email="dev@example.com">a3_arm</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_python</buildtool_depend>
 
-  <exec_depend>rclpy</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
-  <exec_depend>std_srvs</exec_depend>
-  <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>trajectory_msgs</exec_depend>
-  <exec_depend>geometry_msgs</exec_depend>
-  <exec_depend>builtin_interfaces</exec_depend>
-  <exec_depend>ament_index_python</exec_depend>
-  <exec_depend>a3_description</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
-  <exec_depend>python3-numpy</exec_depend>
-  <exec_depend>launch</exec_depend>
-  <exec_depend>launch_ros</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
 

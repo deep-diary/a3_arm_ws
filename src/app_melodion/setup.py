@@ -16,17 +16,18 @@ setup(
          glob("config/*.json") + glob("config/*.yaml")),
         (os.path.join("share", package_name, "config", "scores"),
          glob("config/scores/*.yaml")),
+        (os.path.join("share", package_name, "config", "streams"),
+         glob("config/streams/*.yaml")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
     maintainer="a3_arm",
     maintainer_email="dev@example.com",
-    description="A3 arm melodion playing app",
+    description="A3 arm melodion playing app (score -> stream trajectory config)",
     license="Apache-2.0",
     entry_points={
         "console_scripts": [
-            "melodion_player = app_melodion.melodion_player_node:main",
-            "melodion_ik_probe = app_melodion.ik_probe:main",
+            "melodion_score2stream = app_melodion.melodion_score2stream:main",
         ],
     },
 )

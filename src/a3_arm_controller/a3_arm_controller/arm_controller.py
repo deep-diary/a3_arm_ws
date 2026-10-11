@@ -663,6 +663,11 @@ class ArmController(Node):
         self.declare_parameter("random_tour_smooth_max_vel_rad_s", 0.6)
         self.declare_parameter("random_tour_smooth_max_acc_rad_s2", 2.0)
         self.declare_parameter("random_tour_smooth_resample_n", 200)
+        # F163: 轨迹段 via 过点（gotoby 原语）——当前位→中间过点→目标 一条 C2 平滑轨迹。
+        # 峰值速度/加速度上限（rad/s、rad/s²）与过点样条稠密重采样点数；speed(0~1) 线性缩放 v/a。
+        self.declare_parameter("goto_via_max_vel_rad_s", 0.6)
+        self.declare_parameter("goto_via_max_acc_rad_s2", 2.0)
+        self.declare_parameter("goto_via_resample_n", 200)
         self.declare_parameter("playback_ramp_duration_s", 2.5)
         # F68: 回放（ramp + 录制点）默认调 /a3/arm/retime_trajectory 做保几何重定时
         # （Ruckig jerk-limited，失败退化 TOTG）；服务不可用/失败才走旧的
@@ -3013,6 +3018,54 @@ class ArmController(Node):
             float(data.oMf[fid].translation[2]),
         ]
 
+    def _solve_ik_position(self, pose: dict) -> Optional[List[float]]:
+        """Pinocchio position-only IK（姿态自由），返回 L1..L6 关节角或 None。
+
+        用于轨迹流（软件编排）：目标点只给末端 xyz，姿态不可达时不强求（弹琴
+        只要求末端点到达键位）。scipy least_squares + 关节限位边界。
+        """
+        try:
+            if not self._pin_ready:
+                self._ensure_pin_model()
+            if not self._pin_ready:
+                return None
+        except Exception:  # noqa: BLE001
+            return None
+        from scipy.optimize import least_squares
+        import numpy as np
+        import pinocchio as pin  # type: ignore
+
+        pos = pose.get("position") or {}
+        try:
+            target = np.array([float(pos["x"]), float(pos["y"]), float(pos["z"])])
+        except (KeyError, TypeError):
+            return None
+
+        model = self._pin_model
+        q_idx = self._pin_q_idx[:6]
+        lo = [float(model.lowerPositionLimit[qi]) + 0.05 for qi in q_idx]
+        hi = [float(model.upperPositionLimit[qi]) - 0.05 for qi in q_idx]
+        x0 = [float(self._positions[i]) for i in range(6)]
+        x0 = [min(max(x0[i], lo[i]), hi[i]) for i in range(6)]
+        fid = model.getFrameId("end_effector")
+
+        def residual(q6):
+            q = np.zeros(model.nq)
+            for v, qi in zip(q6, q_idx):
+                q[qi] = float(v)
+            data = model.createData()
+            pin.forwardKinematics(model, data, q)
+            pin.updateFramePlacement(model, data, fid)
+            return data.oMf[fid].translation - target
+
+        res = least_squares(
+            residual, x0, bounds=(lo, hi),
+            xtol=1e-10, ftol=1e-10, gtol=1e-10, max_nfev=400,
+        )
+        if float(np.linalg.norm(res.fun)) < 1e-3:
+            return [float(v) for v in res.x]
+        return None
+
     def _adaptive_blend_radii(
         self, xyz_seq: List[List[float]], max_r: float
     ) -> List[float]:
@@ -3197,10 +3250,12 @@ class ArmController(Node):
         joint_names: List[str],
         label: str,
         state: str = STATE_TRAJ,
+        velocity_scaling: Optional[float] = None,
     ) -> Tuple[bool, float, str]:
         """
         F67: move_group action 规划 + TOTG 定时 + Execute（经 FJT → 执行层）.
 
+        velocity_scaling: 段级速度缩放（0~1）；None 用全局 moveit_velocity_scaling。
         返回 (成功, 执行时长 s, 说明)。任何不可用/失败均返回 False，调用方走本地兜底。
         """
         if not self._moveit_cli.server_is_ready():
@@ -3241,11 +3296,16 @@ class ArmController(Node):
         mpr.allowed_planning_time = float(
             self.get_parameter("moveit_allowed_planning_time_s").value
         )
-        mpr.max_velocity_scaling_factor = float(
-            self.get_parameter("moveit_velocity_scaling").value
+        vs = (
+            velocity_scaling
+            if velocity_scaling is not None
+            else float(self.get_parameter("moveit_velocity_scaling").value)
         )
-        mpr.max_acceleration_scaling_factor = float(
-            self.get_parameter("moveit_acceleration_scaling").value
+        a_global = float(self.get_parameter("moveit_acceleration_scaling").value)
+        mpr.max_velocity_scaling_factor = vs
+        # 段级 speed 同时缩放加速度：否则短距离轨迹加速度主导、速度缩放不改变时长
+        mpr.max_acceleration_scaling_factor = (
+            vs * a_global if velocity_scaling is not None else a_global
         )
         tol = float(self.get_parameter("moveit_goal_tolerance_rad").value)
         constraints = Constraints()
@@ -3333,6 +3393,7 @@ class ArmController(Node):
         pose: dict,
         label: str,
         gate_q: Optional[List[float]] = None,
+        velocity_scaling: Optional[float] = None,
     ) -> Tuple[bool, float, str]:
         """
         F131: Pilz LIN —— TCP 沿笛卡尔直线平移 + 姿态线性插值到打点 FK 位姿。
@@ -3340,6 +3401,7 @@ class ArmController(Node):
         规划失败不回落 PTP（语义不同：操作员明确要直线）。
         gate_q: 该目标路点的 7 关节位姿（打点时已记录），用于 F107 关节线性
         采样预检；真实笛卡尔路径由 Pilz 生成，偏差属工程近似（同 _moveit_move）。
+        velocity_scaling: 段级速度缩放（0~1）；None 用全局 waypoint_lin_velocity_scaling。
         """
         if not self._moveit_cli.server_is_ready():
             ready_deadline = time.monotonic() + 0.5
@@ -3413,11 +3475,16 @@ class ArmController(Node):
         mpr.allowed_planning_time = float(
             self.get_parameter("moveit_allowed_planning_time_s").value
         )
-        mpr.max_velocity_scaling_factor = float(
-            self.get_parameter("waypoint_lin_velocity_scaling").value
+        vs = (
+            velocity_scaling
+            if velocity_scaling is not None
+            else float(self.get_parameter("waypoint_lin_velocity_scaling").value)
         )
-        mpr.max_acceleration_scaling_factor = float(
-            self.get_parameter("waypoint_lin_acceleration_scaling").value
+        a_global = float(self.get_parameter("waypoint_lin_acceleration_scaling").value)
+        mpr.max_velocity_scaling_factor = vs
+        # 段级 speed 同时缩放加速度（同 _moveit_move）
+        mpr.max_acceleration_scaling_factor = (
+            vs * a_global if velocity_scaling is not None else a_global
         )
         mpr.goal_constraints = [constraints]
         goal.request = mpr
@@ -3621,6 +3688,194 @@ class ArmController(Node):
             f"{n - 1} segments, {total:.1f}s")
         return resp
 
+    def _goto_via_smooth(
+        self,
+        via: List[Dict[str, Any]],
+        target: Dict[str, Any],
+        speed: Optional[float],
+        label: str,
+    ) -> Tuple[bool, str]:
+        """F163: 当前位 → via 过点数组 → target 规划为一条 C2 平滑轨迹（gotoby 原语）。
+
+        via/target 可为 {"positions":[...]}（关节）或 {"pose":{position,orientation}}
+        （笛卡尔，走 _solve_ik_position）。speed(0~1) 线性缩放峰值速度/加速度上限；
+        None 时用 1.0（即全局 goto_via_* 上限）。中间点不停车、段末速度 0。
+        失败返回 False，调用方回落单段 _moveit_move。
+        """
+        GJ = JOINTS[:6]
+
+        def resolve(point: Dict[str, Any]) -> Optional[List[float]]:
+            positions = point.get("positions")
+            if positions:
+                q = [float(v) for v in positions]
+                if len(q) < 6:
+                    q = q + [0.0] * (6 - len(q))
+                return q[:6]
+            pose = point.get("pose")
+            if pose and "position" in pose:
+                return self._solve_ik_position(pose)
+            return None
+
+        q_cur = [self._positions[self._joint_names.index(jn)] for jn in GJ]
+        via_q: List[List[float]] = [q_cur]
+        for p in via:
+            q = resolve(p)
+            if q is None:
+                return False, "via point IK/resolve failed"
+            via_q.append(q)
+        qt = resolve(target)
+        if qt is None:
+            return False, "via target IK/resolve failed"
+        via_q.append(qt)
+
+        resample_n = max(20, int(self.get_parameter("goto_via_resample_n").value))
+        dense = _interpolate_via_spline(via_q, resample_n)
+        if dense is None:
+            return False, "via spline failed (too few distinct points)"
+
+        spd = 1.0 if speed is None else float(speed)
+        vmax = spd * float(self.get_parameter("goto_via_max_vel_rad_s").value)
+        amax = spd * float(self.get_parameter("goto_via_max_acc_rad_s2").value)
+        timed = _jerk_limited_timed_traj(dense, vmax, amax)
+        if timed is None:
+            return False, "via timing failed"
+        times, tpos = timed
+
+        traj = JointTrajectory()
+        traj.joint_names = list(GJ)
+        for t, pos in zip(times, tpos):
+            pt = JointTrajectoryPoint()
+            pt.positions = [float(v) for v in pos]
+            pt.time_from_start = _duration(t)
+            traj.points.append(pt)
+
+        # JTC 下发（L1–L6；L7 不参与保持 0），静态力矩/占空比门禁在内部生效。
+        self._publish_mode("TRAJ_RUNNING")
+        ok, dmsg = self._dispatch_trajectory(traj)
+        if not ok:
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"{label} via: {dmsg}")
+            return False, dmsg
+        self._set_state(STATE_TRAJ, f"{label} via")
+        duration = self._traj_duration(traj)
+        self._schedule_back_to_ready(duration + 0.3)
+
+        metric_s = ""
+        m = _finite_diff_metrics(times, tpos)
+        if m is not None:
+            metric_s = f" j_rms={m[1]:.4f} a_rms={m[0]:.4f}"
+        return True, (
+            f"{label}: via {len(via_q) - 1} pts, {len(traj.points)} samples, "
+            f"{duration:.2f}s{metric_s}")
+
+    def _execute_segment(self, seg: Dict[str, Any], label: str) -> Tuple[bool, str, float]:
+        """执行一个「轨迹段」：target(mode ptp/lin) + speed + sleep。
+
+        统一段模型（F162 轨迹流）：ptp=MoveIt 关节规划、lin=pilz 笛卡尔直线；
+        speed 为段级速度缩放（0~1）；sleep 为到位后停顿秒数（表达节奏）。
+        返回 (成功, 说明, 运行时长秒 = 运动时长 + sleep)。
+        """
+        target = seg.get("target") or {}
+        mode = str(seg.get("mode") or "ptp").strip().lower()
+        speed = seg.get("speed")
+        if speed is not None:
+            speed = float(speed)
+        sleep_s = float(seg.get("sleep") or 0.0)
+        dur = 0.0
+
+        # F163: 过点段——当前位 → via 中间点数组 → target 一条 C2 平滑轨迹（中间点不停车）。
+        via = seg.get("via")
+        if via:
+            ok, msg = self._goto_via_smooth(list(via), target, speed, label)
+            if ok and sleep_s > 0.0:
+                time.sleep(sleep_s)
+            return ok, msg, dur + sleep_s
+
+        if mode == "lin":
+            pose = target.get("pose")
+            if not pose or "position" not in pose:
+                return False, "lin segment missing pose", 0.0
+            # LIN 保持姿态（pilz 需要 6D 目标）；姿态自由的弹琴走 mode=ptp。
+            ok, dur, msg = self._lin_move(
+                pose, label, gate_q=None, velocity_scaling=speed)
+        else:
+            positions = target.get("positions")
+            if positions:
+                q = [float(v) for v in positions]
+            else:
+                pose = target.get("pose")
+                if not pose or "position" not in pose:
+                    return False, "ptp segment missing positions/pose", 0.0
+                # 笛卡尔目标 → position-only IK 转关节（姿态自由，规避 6D 不可达）
+                q6 = self._solve_ik_position(pose)
+                if q6 is None:
+                    return False, "ptp pose IK failed", 0.0
+                q = q6 + [0.0]
+            if len(q) < self._n_joints:
+                q = q + [0.0] * (self._n_joints - len(q))
+            ok, dur, msg = self._moveit_move(
+                q[:6], JOINTS[:6], label, velocity_scaling=speed)
+            if ok and self._n_joints >= 7:
+                self._dispatch_l7_linear(q[6])
+
+        if not ok:
+            return False, msg, 0.0
+        if sleep_s > 0.0:
+            time.sleep(sleep_s)
+        return True, msg, dur + sleep_s
+
+    def _play_stream(
+        self, data: dict, label: str, resp: PlaybackTrajectory.Response
+    ) -> PlaybackTrajectory.Response:
+        """轨迹流（stream）逐段执行：每段末速度 0，含 mode/speed/sleep。"""
+        segments = data.get("segments") or []
+        if not segments:
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"playback {label}: empty stream")
+            resp.success = False
+            resp.message = "empty stream"
+            return resp
+
+        n = len(segments)
+        seg_retries = max(0, int(self.get_parameter("waypoint_segment_retries").value))
+        total = 0.0
+        for i, seg in enumerate(segments):
+            seg_label = f"stream {label} {i + 1}/{n}"
+            ok = False
+            msg = ""
+            dur = 0.0
+            for attempt in range(seg_retries + 1):
+                ok, msg, dur = self._execute_segment(seg, seg_label)
+                if ok:
+                    break
+                self.get_logger().warn(f"{seg_label} attempt {attempt + 1} failed: {msg}")
+            if not ok:
+                self._publish_mode("IDLE")
+                self._set_state(STATE_READY, f"playback {label}: seg {i + 1} failed")
+                resp.success = False
+                resp.message = (
+                    f"segment {i + 1}/{n} failed after {seg_retries + 1} attempt(s): {msg}")
+                return resp
+            total += dur
+            # LL-103: 段间等 move_group 内部状态追上实际关节（防下段 LIN IK -31）
+            if i < n - 1:
+                self._wait_move_group_current(list(self._positions))
+
+        self._schedule_back_to_ready(0.3)
+        resp.success = True
+        resp.message = f"stream '{label}': {n} segments, {total:.1f}s"
+        return resp
+
+    def _stream_path(self, name: str) -> str:
+        """轨迹流配置文件路径：优先仓库 app_melodion/config/streams（版本控制），
+        fallback ~/.a3/trajectories/streams。"""
+        try:
+            base = os.path.join(
+                get_package_share_directory("app_melodion"), "config", "streams")
+        except Exception:  # noqa: BLE001
+            base = os.path.join(self._traj_dir, "streams")
+        return os.path.join(base, _sanitize_name(name) + ".yaml")
+
     def _goto_cb(
         self, req: GotoNamedPose.Request, resp: GotoNamedPose.Response
     ) -> GotoNamedPose.Response:
@@ -3649,6 +3904,9 @@ class ArmController(Node):
         if bool(self.get_parameter("goto_use_moveit").value):
             ok, duration, msg = self._moveit_move(q1[:6], JOINTS[:6], f"goto {name}")
             if ok:
+                # LL-103: 等 move_group current-state 追上实际关节，防下一段
+                # （playback/stream 首段）从旧位规划导致时长/轨迹失真
+                self._wait_move_group_current(q1)
                 if self._n_joints >= 7:
                     # LL-077: move_group 只规划 arm 组，L7 需单独补下发；6J 变体无此关节
                     duration = max(duration, self._dispatch_l7_linear(q1[6]))
@@ -4667,8 +4925,9 @@ class ArmController(Node):
     def _playback_cb(
         self, req: PlaybackTrajectory.Request, resp: PlaybackTrajectory.Response
     ) -> PlaybackTrajectory.Response:
-        # F131: type=waypoint 走路点任务子目录；strategy=ptp/lin
+        # F131: type=waypoint 走路点任务子目录；type=stream 走轨迹流配置文件
         is_wp = (req.type or "").strip().lower() == "waypoint"
+        is_stream = (req.type or "").strip().lower() == "stream"
         strategy = (req.strategy or "ptp").strip().lower()
         if is_wp and strategy not in ("ptp", "lin"):
             resp.success = False
@@ -4676,9 +4935,17 @@ class ArmController(Node):
             return resp
         # F54: 空名 = 回放 latest 槽（分支在 sanitize 之前，_sanitize_name("")→"trajectory" 会撞纸面名）
         is_latest = not (req.name or "").strip()
-        label = (("wp_" if is_wp else "") + ("latest" if is_latest else _sanitize_name(req.name)))
-        base_dir = self._wp_dir if is_wp else self._traj_dir
-        path = _traj_path_for(base_dir, req.name)
+        if is_stream and is_latest:
+            resp.success = False
+            resp.message = "stream requires explicit name"
+            return resp
+        prefix = "wp_" if is_wp else ("st_" if is_stream else "")
+        label = prefix + ("latest" if is_latest else _sanitize_name(req.name))
+        if is_stream:
+            path = self._stream_path(req.name)
+        else:
+            base_dir = self._wp_dir if is_wp else self._traj_dir
+            path = _traj_path_for(base_dir, req.name)
         if not os.path.exists(path):
             if is_latest:
                 resp.success = False
@@ -4729,13 +4996,20 @@ class ArmController(Node):
                 f"'{label}' is {file_kind}, not a waypoint task —— "
                 "Square 短按回放连续轨迹；路点回放请先 Share 长按录制")
             return resp
-        if not is_wp and file_kind == "waypoint":
+        if is_stream and file_kind != "stream":
             self._publish_mode("IDLE")
             self._set_state(STATE_READY, f"playback {label}: kind gate")
             resp.success = False
             resp.message = (
-                f"'{label}' is a waypoint task —— 用 Square 长按(PTP)或"
-                "触摸板单击/Circle 长按(LIN)回放")
+                f"'{label}' is {file_kind}, not a stream task —— "
+                "轨迹流请用 type=stream 回放")
+            return resp
+        if not is_wp and not is_stream and file_kind in ("waypoint", "stream"):
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"playback {label}: kind gate")
+            resp.success = False
+            resp.message = (
+                f"'{label}' is a {file_kind} task —— 用 type={file_kind} 回放")
             return resp
 
         # F133: 已烘焙过 retime 的文件不再重复写回——避免每次回放对重采样几何
@@ -4744,6 +5018,8 @@ class ArmController(Node):
 
         if is_wp:
             return self._play_waypoints(data, label, strategy, resp)
+        if is_stream:
+            return self._play_stream(data, label, resp)
 
         file_joint_names = list(data.get("joint_names") or self._joint_names)
         recorded_positions: List[List[float]] = []

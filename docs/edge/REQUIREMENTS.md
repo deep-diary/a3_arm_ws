@@ -184,6 +184,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 | F160 | MIT 位置环速度/加速度前馈（VFF + AFF + 科氏/离心，全模型 computed-torque 前馈） | implemented | 功能 | [requirements/F160-mit-position-velocity-accel-feedforward.md](requirements/F160-mit-position-velocity-accel-feedforward.md) |
 | F161 | 巡游/多路点轨迹平滑升级（move_group blend → 过点样条 + retime，固定轨迹点 A/B 验收） | implemented | 功能 | [requirements/F161-tour-trajectory-smooth-retime.md](requirements/F161-tour-trajectory-smooth-retime.md) |
 | F162 | 机械臂弹奏口风琴（app_melodion：键位合并+弹奏几何+曲谱+Pinocchio IK+直发轨迹） | implemented | 功能 | [requirements/F162-melodion-playing.md](requirements/F162-melodion-playing.md) |
+| F163 | 轨迹段 via 过点：单条 C2 平滑轨迹跨键过渡（gotoby 原语，stream 段加 via 数组） | implemented | 功能 | [requirements/F163-via-point-smooth-transition.md](requirements/F163-via-point-smooth-transition.md) |
 
 ## 非功能需求
 

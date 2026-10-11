@@ -26,6 +26,11 @@
     # "goto 挺快"，减速亦减小 JTC 跟踪误差余量）
     moveit_velocity_scaling: 0.15
     moveit_acceleration_scaling: 0.15
+    # F163: 轨迹段 via 过点（gotoby 原语）——当前位→中间过点→目标 一条 C2 平滑轨迹。
+    # 峰值速度/加速度上限与过点样条稠密重采样点数；段级 speed(0~1) 线性缩放 v/a。
+    goto_via_max_vel_rad_s: 0.6
+    goto_via_max_acc_rad_s2: 2.0
+    goto_via_resample_n: 200
 
     # ═══════════════════════════════════════════════════════════════════
     # 3. 随机位姿巡游（F116/F134）

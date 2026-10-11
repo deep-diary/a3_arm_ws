@@ -129,7 +129,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/arm/start_waypoint_teach` | `std_srvs/Trigger` | 切零力矩拖动 + 开始**路点**录制（Share 长按 1.5s），L2 打点，Options 结束保存 |
 | `/a3/arm/stop_teach` | `std_srvs/Trigger` | 停止记录 + 退出拖动；按当前状态分派：连续录制走 F54 保存逻辑（样本 ≥ `teach_auto_save_min_samples` 时自动保存 `latest.yaml` + `teach_TIMESTAMP.yaml` 备份），路点录制保存到 `~/.a3/trajectories/waypoints/latest.yaml` + `teach_wp_TIMESTAMP.yaml`；误触发(样本不足)自动跳过不覆盖 |
 | `/a3/arm/save_trajectory` | `a3_msgs/srv/SaveTrajectory` | `name` → 保存为本地轨迹文件；`name` 为空 ≡ latest 槽位(`latest.yaml`) |
-| `/a3/arm/playback` | `a3_msgs/srv/PlaybackTrajectory` | `name` + `type`(continuous/waypoint) + `strategy`(ptp/lin) → 读取并回放；`name` 为空 ≡ 回放 latest。F124：连续轨迹当前位与录制首点差 >0.02 且 `playback_return_use_moveit:=true`（默认）时，先经 MoveIt 规划回首点（state=`playback return {label}`），再执行录制轨迹（state=`playback {label}`）。F131：路点 PTP 逐段 MoveJ（F107 门禁+段间同步），路点 LIN 逐段 Pilz LIN（arm_lin 规划组 / global pick_ik）；跨奇异/超限明确拒绝，不回落 PTP。轨迹文件头 `kind` 双向门禁防误混用 |
+| `/a3/arm/playback` | `a3_msgs/srv/PlaybackTrajectory` | `name` + `type`(continuous/waypoint/stream) + `strategy`(ptp/lin) → 读取并回放；`name` 为空 ≡ 回放 latest。F124：连续轨迹当前位与录制首点差 >0.02 且 `playback_return_use_moveit:=true`（默认）时，先经 MoveIt 规划回首点，再执行录制轨迹。F131：路点 PTP 逐段 MoveJ、LIN 逐段 Pilz LIN；跨奇异/超限明确拒绝。F162：`type=stream` 轨迹流逐段执行（段末速度 0，每段 `mode/speed/sleep`），配置文件在 `app_melodion/config/streams/`。F163：stream 段可选 `via:[{pose|positions},…]` 中间过点数组——遇 `via` 时把「当前位→过点→target」规划成一条 C2 平滑轨迹（`_goto_via_smooth`，中间点不停车）；仅 ptp 语义，`via`+`lin` 不支持。轨迹文件头 `kind` 双向门禁防误混用 |
 | `/a3/arm/enter_ai` | `std_srvs/Trigger` | 状态 → `AI`（LeRobot 采集/回放） |
 | `/a3/arm/exit_ai` | `std_srvs/Trigger` | 状态 → `READY` |
 
