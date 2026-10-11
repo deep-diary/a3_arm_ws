@@ -38,7 +38,8 @@
     random_tour_blend_radius_m: 0.02
     # F161: 巡游平滑链（过点样条 + jerk-limited 时间重参数化 + JTC）。true 走新链，
     # 任一环节失败 WARN 并回退 F134 sequence / F116 逐腿链。
-    random_tour_use_smooth: false
+    # 2026-10 真机验收后默认开启：手柄 Options 长按巡游即 smooth 效果。
+    random_tour_use_smooth: true
     random_tour_smooth_max_vel_rad_s: 0.6    # 平滑链峰值速度上限（rad/s；0.6=回放干净跟踪速度）
     random_tour_smooth_max_acc_rad_s2: 2.0   # 平滑链峰值加速度上限（rad/s²）
     random_tour_smooth_resample_n: 200       # 过点样条稠密重采样点数

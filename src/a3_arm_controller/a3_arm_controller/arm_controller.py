@@ -2729,6 +2729,13 @@ class ArmController(Node):
             resp.success = False
             resp.message = f"busy in state={self._state}"
             return resp
+        # LL-151: READY 下重复 enable 必须幂等返回，不能重走 hardware activate +
+        # switch_controller activate——arm_controller 已 active 时 STRICT 拒绝会触发
+        # 「硬件退回 INACTIVE → 电机 reset 失能 → 掉臂」（2026-10 真机事故）。
+        if self._state == STATE_READY:
+            resp.success = True
+            resp.message = "already enabled (READY)"
+            return resp
         # F53/LL-045: 零力矩/重力补偿下使能=执行层重锚当前位，但 zero_torque 仍生效
         # （kp 0, enable 不退出该模式）——臂继续保持悬浮，enable 成“伪成功”。拒绝。
         if self._mode in BLOCKED_MODES:
