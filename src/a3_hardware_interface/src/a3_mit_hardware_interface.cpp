@@ -32,6 +32,7 @@
 #include <a3_can_bridge/msg/motor_state.hpp>
 #include <a3_can_bridge/msg/motor_states.hpp>
 #include <a3_msgs/msg/torque_components.hpp>
+#include <a3_msgs/srv/motor_id_command.hpp>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
 #include <diagnostic_msgs/msg/key_value.hpp>
@@ -548,6 +549,46 @@ public:
     health_exec_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
     health_exec_->add_node(health_node_);
 
+    // F91 扩展：栈运行时设零。SystemInterface 插件不能 host service（motor_maintenance
+    // 因此才做成独立工具），但 health_node_ 是真正的 rclcpp::Node 且共享 transport_，
+    // 可在栈运行（电机 disabled/coast）时设零。active_ 互锁：使能中写零会打碎正在
+    // 伺服的位置帧，故已使能时拒绝——与 motor_maintenance 的控制器 active 互锁等价。
+    set_zero_srv_ = health_node_->create_service<a3_msgs::srv::MotorIdCommand>(
+      "/a3/hardware/set_zero",
+      [this](
+        const std::shared_ptr<a3_msgs::srv::MotorIdCommand::Request> req,
+        std::shared_ptr<a3_msgs::srv::MotorIdCommand::Response> resp) {
+        if (active_.load()) {
+          resp->success = false;
+          resp->message =
+            "refused: hardware active (motors enabled) — disable first";
+          return;
+        }
+        std::vector<uint8_t> targets;
+        if (req->motor_id == 0xFF) {
+          for (const auto & j : joints_) {
+            targets.push_back(j.motor_id);
+          }
+        } else {
+          const auto it = std::find_if(
+            joints_.begin(), joints_.end(),
+            [&](const auto & j) { return j.motor_id == req->motor_id; });
+          if (it == joints_.end()) {
+            resp->success = false;
+            resp->message = "motor_id out of configured range (1..7, 255=all)";
+            return;
+          }
+          targets.push_back(req->motor_id);
+        }
+        for (const uint8_t mid : targets) {
+          transport_.Send(ProtocolCodec::BuildSetZeroFrame(bus_, mid), nullptr);
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        resp->success = true;
+        resp->message =
+          "set_zero sent to " + std::to_string(targets.size()) + " motor(s)";
+      });
+
     // F108: ratio tunable online (EDULITE semantics) — ramp the feedforward
     // up during commissioning without restarting controller_manager.
     health_node_->declare_parameter(
@@ -855,6 +896,7 @@ public:
     torque_components_pub_.reset();
     stale_pub_.reset();
     diag_pub_.reset();
+    set_zero_srv_.reset();
     health_exec_.reset();
     health_node_.reset();
     return CallbackReturn::SUCCESS;
@@ -1595,6 +1637,7 @@ private:
   rclcpp::TimerBase::SharedPtr motor_states_timer_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
     on_set_parameters_handle_;
+  rclcpp::Service<a3_msgs::srv::MotorIdCommand>::SharedPtr set_zero_srv_;
 };
 
 }  // namespace a3_hardware_interface

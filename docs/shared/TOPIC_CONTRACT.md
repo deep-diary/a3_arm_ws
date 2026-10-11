@@ -118,7 +118,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 
 | 服务 | 类型 | 说明 |
 |------|------|------|
-| `/a3/arm/init` | `std_srvs/Trigger` | 设零 → 异步确认 7 电机到位 → 使能；`message` 携带 `n/7`。F48：读数越限只 WARN 不阻断（恢复路径——set_zero 把当前位姿定义为零位，仅限已知位姿执行） |
+| `/a3/arm/init` | `std_srvs/Trigger` | F91：设零（写当前位姿为零点）→ 状态 `DISABLED`，**不带使能**；使能仍走 `/a3/arm/enable`（L3）。已使能（READY）时拒绝，须先 disable。底层调执行层 `/a3/hardware/set_zero`（电机未使能时放行）。F48：读数越限只 WARN 不阻断（恢复路径——set_zero 把当前位姿定义为零位，仅限已知位姿执行） |
 | `/a3/arm/enable` | `std_srvs/Trigger` | 使能 7 电机，状态 → `READY`。F48：使能前读数限位门禁——越限（疑似断电多圈环绕）或无 /joint_states 一律拒绝并点名关节（`enable_position_check`） |
 | `/a3/arm/disable` | `std_srvs/Trigger` | 失能保护（F40）：不在 idle 容差内先自动平滑回 idle（SAFE_PARK）再失能，状态 → `SAFE_PARK → DISABLED`；容差内直达。`success=true ⟺ 已失能`；park 超时 → FAULT 不 reset；reset 被 gate 拒 → 失败/回 READY（语义表见 [SAFETY.md](SAFETY.md)「失能保护」） |
 | `/a3/arm/goto_named_pose` | `a3_msgs/srv/GotoNamedPose` | `pose_name` 按 `named_poses.yaml` 插值下发 |

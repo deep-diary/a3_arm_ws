@@ -33,7 +33,7 @@
 | 状态 | 含义 | 臂/电机状态 | 备注 |
 |------|------|-------------|------|
 | `IDLE` | 上电未使能 | 电机 off | 初始态 |
-| `INIT` | set_zero→确认→enable | 使能中 | 阻塞同步 |
+| `INIT` | set_zero（写当前位姿为零点） | 未使能 | 阻塞同步 |
 | `READY` | 使能就绪 | 闭合保位（kp 软起步后额定） | 事件主战场 |
 | `TRAJ` | goto/move_to/jog/playback 运动 | 轨迹流 | 结束后自动回 READY |
 | `TEACH` | 连续轨迹示教拖动 | 零力矩（执行层 ZERO_TORQUE） | ⇔ zero_torque/start|
@@ -57,8 +57,8 @@ stateDiagram-v2
     IDLE --> INIT: /a3/arm/init
     DISABLED --> INIT: /a3/arm/init
     FAULT --> INIT: /a3/arm/init（紧急恢复）
-    INIT --> READY: set_zero 全零 + enable ok
-    INIT --> FAULT: set_zero / 零确认 / enable 任一失败
+    INIT --> DISABLED: set_zero ok（F91 不带使能）
+    INIT --> FAULT: set_zero 失败
     DISABLED --> READY: /a3/arm/enable（F51 重锚当前位）
     COOLING --> READY: /a3/arm/enable（降温达标）
     FAULT --> READY: /a3/arm/enable

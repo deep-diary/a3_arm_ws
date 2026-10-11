@@ -11,7 +11,7 @@
 #              Circle 短按=idle / Circle 长按 1.5s=路点 LIN 直线回放
 #              Options 长按 3s=F116 随机点位巡游（READY 态才执行；TEACH/WAYPOINT_TEACH 等态被服务端拒绝）
 #   点位:      L2 短按=保存当前位姿为 snap_YYYYMMDD_HHMMSS（F114，写包内 named_poses.yaml）
-#   功能:      L1+R1 同按长按 2s=init(调零+自动使能)（F135：PS 为开机键易误触，已解绑）
+#   功能:      L1+R1 同按长按 2s=init(设零，不带使能)（F135：PS 为开机键易误触，已解绑）
 #   运动:      L1 按住+摇杆=末端平移死人开关 / R1 按住+摇杆=末端旋转死人开关(首批仅偏航)
 #              左摇杆=平移 Y(左右)/Z(上下)；右摇杆上下=平移 X(前后)，右摇杆左右=偏航
 #              （F115 起 D-pad 调速退役，平移/旋转恒用 speed_normal 默认档）

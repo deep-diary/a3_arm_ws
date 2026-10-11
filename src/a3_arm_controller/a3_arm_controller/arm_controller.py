@@ -64,6 +64,7 @@ from a3_can_bridge.srv import MotorCommand
 from a3_msgs.msg import ArmStatus, MonitorStatus, TorqueComponents
 from a3_msgs.srv import (
     GotoNamedPose,
+    MotorIdCommand,
     MoveToJointPositions,
     PlaybackTrajectory,
     RandomPoseTour,
@@ -1046,6 +1047,10 @@ class ArmController(Node):
             MotorCommand, "/a3/motor/set_zero", callback_group=self._cb_group)
         self._enable_cli = self.create_client(
             MotorCommand, "/a3/motor/enable", callback_group=self._cb_group)
+        # F91 扩展：标准栈运行时设零（health_node_ 的 /a3/hardware/set_zero，
+        # 复用已占用的 can1；仅电机未使能时放行）。
+        self._hw_set_zero_cli = self.create_client(
+            MotorIdCommand, "/a3/hardware/set_zero", callback_group=self._cb_group)
         self._reset_cli = self.create_client(
             MotorCommand, "/a3/motor/reset", callback_group=self._cb_group)
         self._zt_start_cli = self.create_client(
@@ -1766,6 +1771,20 @@ class ArmController(Node):
         req.motor_id = 0  # 广播到映射内全部电机
         req.command = command
         future = client.call_async(req)
+        if future is None:
+            return False, "service call rejected"
+        if self._wait_future(future, 2.0):
+            resp = future.result()
+            return bool(resp.success), resp.message
+        return False, "service call timeout"
+
+    def _call_hw_set_zero(self, motor_id: int = 255) -> Tuple[bool, str]:
+        """F91 扩展：栈运行时设零（/a3/hardware/set_zero，电机未使能时放行）。"""
+        if not self._wait_service(self._hw_set_zero_cli):
+            return False, "/a3/hardware/set_zero unavailable"
+        req = MotorIdCommand.Request()
+        req.motor_id = motor_id
+        future = self._hw_set_zero_cli.call_async(req)
         if future is None:
             return False, "service call rejected"
         if self._wait_future(future, 2.0):
@@ -2642,18 +2661,28 @@ class ArmController(Node):
                 )
 
         if self._using_controller_switch():
-            # F75 标准栈：绝对编码帧无需 set_zero，也无零位确认；activate 时硬件
-            # 在当前反馈位重锚，直接激活控制器。
-            self._set_state(STATE_INIT, "init: activate controllers")
-            ok, msg = self._motor_command(self._enable_cli, 1)
+            # F75/F91：标准栈 init = 设零（绝对编码帧写当前位姿为零点），不带使能；
+            # 使能仍走 L3 / /a3/arm/enable。设零前电机须未使能（health_node active_ 互锁）。
+            if self._state == STATE_READY:
+                resp.success = False
+                resp.message = (
+                    "arm enabled (READY) — disable first (/a3/arm/disable) "
+                    "before set_zero"
+                )
+                return resp
+            self._set_state(STATE_INIT, "init: set_zero")
+            ok, msg = self._call_hw_set_zero(255)
             if not ok:
-                self._set_state(STATE_FAULT, f"enable failed: {msg}")
+                self._set_state(STATE_FAULT, f"set_zero failed: {msg}")
                 resp.success = False
                 resp.message = msg
                 return resp
-            self._set_state(STATE_READY, "init ok (controller_switch)")
+            self._set_state(
+                STATE_DISABLED, "init ok: zero set, motors not enabled")
             resp.success = True
-            resp.message = "init ok: controllers activated"
+            resp.message = (
+                "init ok: zero set (not enabled); enable via /a3/arm/enable"
+            )
             return resp
 
         self._set_state(STATE_INIT, "init: set_zero")
