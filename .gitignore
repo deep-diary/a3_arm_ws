@@ -55,3 +55,9 @@ candump-*.log
 
 # 回放轨迹报告（scripts/make_report.py 生成产物，不入库）
 /report/
+
+# 运行时轨迹产物（归仓库 trajectories/ 目录，但不 git 跟踪；Q4/F163）
+/trajectories/*.yaml
+/trajectories/waypoints/
+/trajectories/streams/
+!/trajectories/**/.gitkeep

@@ -1,6 +1,6 @@
 # 读取本地轨迹文件并回放
 string name
-# F131/F162: 轨迹槽类型 — ""=连续轨迹(默认，向后兼容) / "waypoint"=路点任务 / "stream"=轨迹流(逐段+段末停+每段mode/speed/sleep)
+# F131/F162/F163/F164: 轨迹槽类型 — ""=连续轨迹(默认，向后兼容) / "waypoint"=路点任务 / "stream"=轨迹流(逐段+段末停+每段mode/speed/sleep/via) / "cp"=连续笛卡尔路径(lin折线+circ圆弧，一条过点样条)
 string type
 # F131: 路点段策略 — "ptp"=关节空间自动规划(默认) / "lin"=TCP 笛卡尔走直线
 string strategy

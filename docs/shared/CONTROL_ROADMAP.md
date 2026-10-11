@@ -323,6 +323,8 @@ flowchart LR
 | 笛卡尔 MoveToPose/IK | ✅ | ✅ F12 | Wave B | C1 |
 | 样条插值（JTC 语义） | ✅ JTC | ✅ F15 | Wave B / C2 增强 | F15 |
 | 多路点轨迹平滑（blend → 过点样条+retime，C2 连续） | ※ pilz blend（L1） | ✅ F161（过点样条 + jerk-limited quintic 时间重参数化，j_rms 降 ×10.4）；F134 blend 为回退链 | Wave B 增强 | F161 / F134 / F137 / F68 |
+| 连续笛卡尔路径（cp：lin 折线 + circ 圆弧） | ※ pilz LIN | ✅ F163/F164（`_goto_via_smooth`/`_goto_via_lin_blend` 一条 C2 轨迹） | Wave B 增强 | [TRAJECTORY_KINDS.md](TRAJECTORY_KINDS.md) |
+| 防晃运输（slosh-free 轨迹） | ❌ | ❌（**对标缺口**：光靠 jerk-limited 只能减弱不能消除；需输入整形 ZV/ZVD + 球摆模型前馈） | Wave B 之后 | [TRAJECTORY_KINDS.md](TRAJECTORY_KINDS.md) |
 | 主从示教 | 🔜 | ❌ | Wave B | C6 |
 | 末端六维力 / 导纳 | ❌ | ❌ | 硬件后 | C8 |
 | 诊断 / Safe Park | ※ | ❌（backlog：F140 Safe Park、F143 诊断视图） | Wave B 可选 | F140 / F143 |
@@ -550,6 +552,7 @@ AI 赋能已单独成文：[AI_ROADMAP.md](AI_ROADMAP.md)（A0–A5 分层 + reB
 | 文档 | 说明 |
 |------|------|
 | [TOPIC_CONTRACT.md](TOPIC_CONTRACT.md) | 轨迹、关节、门控话题契约 |
+| [TRAJECTORY_KINDS.md](TRAJECTORY_KINDS.md) | 轨迹种类清单（continuous/waypoint/stream/cp + 非 playback kind） |
 | [SAFETY.md](SAFETY.md) | 安全原则与力控边界 |
 | [ROBOT_MODEL.md](ROBOT_MODEL.md) | 7 关节模型与 CAN ID |
 | [edge/ARCHITECTURE.md](../edge/ARCHITECTURE.md) | Edge 运行时分层与数据流 |

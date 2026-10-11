@@ -27,7 +27,7 @@ from app_melodion.score import REST, load_score
 _PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def build_stream(config: MelodionConfig, score: dict, speed: float) -> dict:
+def build_stream(config: MelodionConfig, score: dict, speed: float, mode: str = "ptp") -> dict:
     tempo = float(score.get("tempo_bpm", config.geometry.get("tempo_bpm_default", 72)))
     beat_s = 60.0 / tempo
     segments: List[dict] = []
@@ -58,7 +58,7 @@ def build_stream(config: MelodionConfig, score: dict, speed: float) -> dict:
             via = config.transition_via_pose(prev_key, key)
             segments.append({
                 "target": {"pose": down},
-                "mode": "ptp",
+                "mode": mode,   # ptp=关节过点样条 / lin=pilz blend（默认 ptp）
                 "speed": speed,
                 "sleep": round(beats * beat_s, 4),
                 "via": [{"pose": via}],
@@ -86,6 +86,8 @@ def main() -> None:
     parser.add_argument("--keys", default=None, help="melodion_keys.json 路径（默认包内 config）")
     parser.add_argument("--geometry", default=None, help="playing_geometry.yaml 路径（默认包内 config）")
     parser.add_argument("--speed", type=float, default=0.5, help="段速度缩放（0~1，MoveIt velocity_scaling）")
+    parser.add_argument("--mode", choices=["ptp", "lin"], default=None,
+                        help="过点段 mode（默认读 playing_geometry.yaml 的 via_apex.mode，再默认 ptp）")
     parser.add_argument("--out", default=None, help="输出 stream yaml 路径（默认 config/streams/<score>.yaml）")
     args = parser.parse_args()
 
@@ -99,7 +101,9 @@ def main() -> None:
         score_name = args.score
     score = load_score(score_path)
 
-    doc = build_stream(config, score, args.speed)
+    mode = args.mode or str(
+        (config.geometry.get("via_apex", {}) or {}).get("mode", "ptp")).strip().lower()
+    doc = build_stream(config, score, args.speed, mode)
     doc["name"] = score_name
 
     out = args.out or os.path.join(_PKG_DIR, "config", "streams", score_name + ".yaml")

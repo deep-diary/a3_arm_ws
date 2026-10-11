@@ -914,7 +914,7 @@ class ArmController(Node):
         self._l7_last_cmd_t = 0.0
 
         # 轨迹持久化目录
-        self._traj_dir = os.path.expanduser(str(self.get_parameter("trajectories_dir").value))
+        self._traj_dir = self._resolve_trajectories_dir()
         os.makedirs(self._traj_dir, exist_ok=True)
         # F131: 路点任务子目录
         self._wp_dir = os.path.join(self._traj_dir, "waypoints")
@@ -3121,8 +3121,12 @@ class ArmController(Node):
 
     def _build_lin_sequence_item(
         self, pose: dict, blend_r: float,
+        velocity_scaling: Optional[float] = None,
     ) -> MotionSequenceItem:
-        """F134: pilz LIN 序列项（约束构造与单段 _lin_move 一致）."""
+        """F134: pilz LIN 序列项（约束构造与单段 _lin_move 一致）。
+
+        velocity_scaling: 段级速度缩放（0~1）；None 用全局 waypoint_lin_velocity_scaling。
+        """
         pos = pose.get("position") or {}
         ori = pose.get("orientation") or {}
         target_pose = Pose()
@@ -3162,8 +3166,9 @@ class ArmController(Node):
         mpr.num_planning_attempts = 1
         mpr.allowed_planning_time = float(
             self.get_parameter("moveit_allowed_planning_time_s").value)
-        mpr.max_velocity_scaling_factor = float(
-            self.get_parameter("waypoint_lin_velocity_scaling").value)
+        mpr.max_velocity_scaling_factor = (
+            float(self.get_parameter("waypoint_lin_velocity_scaling").value)
+            if velocity_scaling is None else velocity_scaling)
         mpr.max_acceleration_scaling_factor = float(
             self.get_parameter("waypoint_lin_acceleration_scaling").value)
         mpr.goal_constraints = [constraints]
@@ -3768,6 +3773,55 @@ class ArmController(Node):
             f"{label}: via {len(via_q) - 1} pts, {len(traj.points)} samples, "
             f"{duration:.2f}s{metric_s}")
 
+    def _goto_via_lin_blend(
+        self,
+        via: List[Dict[str, Any]],
+        target: Dict[str, Any],
+        speed: Optional[float],
+        label: str,
+    ) -> Tuple[bool, str]:
+        """F163: 当前位 → via 过点 → target 走 pilz LIN Sequence（blend 过中间点不停车）。
+
+        所有 via/target 须为笛卡尔 {"pose":{position,orientation}}（lin 语义）；
+        blend 不精确过中间点（F134 语义）。失败返回 False，调用方回落 _goto_via_smooth。
+        """
+        def pose_of(point: Dict[str, Any]) -> Optional[dict]:
+            pose = point.get("pose")
+            if pose and "position" in pose and "orientation" in pose:
+                return pose
+            return None
+
+        poses: List[dict] = []
+        for p in via:
+            pose = pose_of(p)
+            if pose is None:
+                return False, "lin via point missing pose"
+            poses.append(pose)
+        tpose = pose_of(target)
+        if tpose is None:
+            return False, "lin via target missing pose"
+        poses.append(tpose)
+
+        xyz_seq = [self._fk_ee_xyz(list(self._positions))]
+        for pose in poses:
+            pos = pose["position"]
+            xyz_seq.append([float(pos["x"]), float(pos["y"]), float(pos["z"])])
+        blend = float(self.get_parameter("waypoint_blend_radius_m").value)
+        if any(x is None for x in xyz_seq):
+            radii = [blend if i < len(poses) - 1 else 0.0 for i in range(len(poses))]
+        else:
+            radii = self._adaptive_blend_radii(xyz_seq, blend)
+
+        items = [
+            self._build_lin_sequence_item(pose, radii[i], speed)
+            for i, pose in enumerate(poses)]
+        ok, stotal, smsg = self._sequence_move_group(
+            items, f"via lin {label}")
+        if not ok:
+            return False, smsg
+        self._schedule_back_to_ready(0.3)  # 同步已执行完，仅短缓冲
+        return True, f"{label}: via lin {len(poses)} pts, {stotal:.1f}s"
+
     def _execute_segment(self, seg: Dict[str, Any], label: str) -> Tuple[bool, str, float]:
         """执行一个「轨迹段」：target(mode ptp/lin) + speed + sleep。
 
@@ -3783,10 +3837,14 @@ class ArmController(Node):
         sleep_s = float(seg.get("sleep") or 0.0)
         dur = 0.0
 
-        # F163: 过点段——当前位 → via 中间点数组 → target 一条 C2 平滑轨迹（中间点不停车）。
+        # F163: 过点段——当前位 → via 中间点数组 → target 一条平滑轨迹（中间点不停车）。
+        # mode=ptp（默认）：关节过点样条（C2，精确过点）；mode=lin：pilz LIN blend（不停车不精确过点）。
         via = seg.get("via")
         if via:
-            ok, msg = self._goto_via_smooth(list(via), target, speed, label)
+            if mode == "lin":
+                ok, msg = self._goto_via_lin_blend(list(via), target, speed, label)
+            else:
+                ok, msg = self._goto_via_smooth(list(via), target, speed, label)
             if ok and sleep_s > 0.0:
                 time.sleep(sleep_s)
             return ok, msg, dur + sleep_s
@@ -3866,15 +3924,79 @@ class ArmController(Node):
         resp.message = f"stream '{label}': {n} segments, {total:.1f}s"
         return resp
 
-    def _stream_path(self, name: str) -> str:
-        """轨迹流配置文件路径：优先仓库 app_melodion/config/streams（版本控制），
-        fallback ~/.a3/trajectories/streams。"""
+    def _play_cp(
+        self, data: dict, label: str, resp: PlaybackTrajectory.Response
+    ) -> PlaybackTrajectory.Response:
+        """F163/F164: 连续笛卡尔路径（cp）——via 点列 + target 规划为一条 C2 轨迹。
+
+        复用 _goto_via_smooth（关节过点样条）；mode=lin 可选走 _goto_via_lin_blend。
+        schema: {kind: cp, joint_names, speed, mode, via:[{pose|positions},...], target}。
+        """
+        via = data.get("via") or []
+        target = data.get("target") or {}
+        if not via:
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"playback {label}: cp empty via")
+            resp.success = False
+            resp.message = "cp task needs >= 1 via point"
+            return resp
+        speed = data.get("speed")
+        if speed is not None:
+            speed = float(speed)
+        mode = str(data.get("mode") or "ptp").strip().lower()
+        if mode == "lin":
+            ok, msg = self._goto_via_lin_blend(list(via), target, speed, label)
+        else:
+            ok, msg = self._goto_via_smooth(list(via), target, speed, label)
+        if not ok:
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"playback {label}: cp failed")
+            resp.success = False
+            resp.message = msg
+            return resp
+        resp.success = True
+        resp.message = f"cp '{label}': {len(via)} via + target ({msg})"
+        return resp
+
+    def _resolve_trajectories_dir(self) -> str:
+        """Q4: 轨迹持久化目录——默认解析工作区根 <ws>/trajectories（不 git 跟踪），
+        解析失败回退 ~/.a3/trajectories。trajectories_dir 参数被显式覆盖（非默认
+        ~/.a3/trajectories）时优先用参数。"""
+        raw = str(self.get_parameter("trajectories_dir").value)
+        if raw != "~/.a3/trajectories":
+            return os.path.expanduser(raw)
         try:
-            base = os.path.join(
-                get_package_share_directory("app_melodion"), "config", "streams")
+            share = get_package_share_directory("a3_arm_controller")
+            ws = os.path.normpath(os.path.join(share, "..", "..", "..", ".."))
+            if os.path.isdir(ws):
+                return os.path.join(ws, "trajectories")
         except Exception:  # noqa: BLE001
-            base = os.path.join(self._traj_dir, "streams")
-        return os.path.join(base, _sanitize_name(name) + ".yaml")
+            pass
+        return os.path.expanduser("~/.a3/trajectories")
+
+    def _stream_path(self, name: str) -> str:
+        """轨迹流配置文件路径（Q4 搜索顺序）：
+        1) 仓库 trajectories/streams/（运行时/实验槽，untracked）
+        2) app_melodion/config/streams/（版本控制，脚本生成源）
+        3) ~/.a3/trajectories/streams（旧槽）
+        返回首个存在的；都不存在则返回首个候选（便于报错定位）。"""
+        fname = _sanitize_name(name) + ".yaml"
+        candidates = [os.path.join(self._traj_dir, "streams", fname)]
+        try:
+            candidates.append(os.path.join(
+                get_package_share_directory("app_melodion"), "config", "streams", fname))
+        except Exception:  # noqa: BLE001
+            pass
+        candidates.append(os.path.expanduser(
+            os.path.join("~/.a3/trajectories", "streams", fname)))
+        for c in candidates:
+            if os.path.exists(c):
+                return c
+        return candidates[0]
+
+    def _cp_path(self, name: str) -> str:
+        """cp 路径配置文件路径：与 stream 同槽（软件编排，仓库/版本控制/旧槽搜索顺序）。"""
+        return self._stream_path(name)
 
     def _goto_cb(
         self, req: GotoNamedPose.Request, resp: GotoNamedPose.Response
@@ -4922,27 +5044,35 @@ class ArmController(Node):
         last = traj.points[-1].time_from_start
         return float(last.sec) + float(last.nanosec) * 1e-9
 
-    def _playback_cb(
+    def _prepare_playback(
         self, req: PlaybackTrajectory.Request, resp: PlaybackTrajectory.Response
-    ) -> PlaybackTrajectory.Response:
-        # F131: type=waypoint 走路点任务子目录；type=stream 走轨迹流配置文件
+    ) -> Tuple[Optional[dict], str, str, str, str, Optional[PlaybackTrajectory.Response]]:
+        """Q3: 三类轨迹 kind 共用的回放前导——解析 type/strategy → 定 path/label →
+        存在性 → _can_move → 发布 TRAJ_RUNNING → 加载 YAML → kind 双向门禁。
+
+        返回 (data, label, kind, path, strategy, failed)：成功 data 非空、failed=None；
+        失败 data=None、failed=已填好 success/message 的 resp。
+        """
         is_wp = (req.type or "").strip().lower() == "waypoint"
         is_stream = (req.type or "").strip().lower() == "stream"
+        is_cp = (req.type or "").strip().lower() == "cp"
         strategy = (req.strategy or "ptp").strip().lower()
         if is_wp and strategy not in ("ptp", "lin"):
             resp.success = False
             resp.message = f"unknown strategy '{strategy}' (ptp/lin)"
-            return resp
+            return None, "", "", "", strategy, resp
         # F54: 空名 = 回放 latest 槽（分支在 sanitize 之前，_sanitize_name("")→"trajectory" 会撞纸面名）
         is_latest = not (req.name or "").strip()
-        if is_stream and is_latest:
+        if (is_stream or is_cp) and is_latest:
             resp.success = False
-            resp.message = "stream requires explicit name"
-            return resp
-        prefix = "wp_" if is_wp else ("st_" if is_stream else "")
+            resp.message = "stream/cp requires explicit name"
+            return None, "", "", "", strategy, resp
+        prefix = "wp_" if is_wp else ("st_" if is_stream else ("cp_" if is_cp else ""))
         label = prefix + ("latest" if is_latest else _sanitize_name(req.name))
         if is_stream:
             path = self._stream_path(req.name)
+        elif is_cp:
+            path = self._cp_path(req.name)
         else:
             base_dir = self._wp_dir if is_wp else self._traj_dir
             path = _traj_path_for(base_dir, req.name)
@@ -4958,12 +5088,12 @@ class ArmController(Node):
             else:
                 resp.success = False
                 resp.message = f"trajectory not found: {path}"
-            return resp
+            return None, "", "", "", strategy, resp
         can, why = self._can_move()
         if not can:
             resp.success = False
             resp.message = why
-            return resp
+            return None, "", "", "", strategy, resp
 
         # F129: 通过门禁即发布 TRAJ_RUNNING + TRAJ 状态 → 灯带立即变色，不再等
         # YAML 解析（纯 Python loader 在满载节点内实测 3–4s）。cyan/purple 由
@@ -4984,7 +5114,7 @@ class ArmController(Node):
             self._set_state(STATE_READY, f"playback {label}: load failed")
             resp.success = False
             resp.message = f"load failed: {exc}"
-            return resp
+            return None, "", "", "", strategy, resp
 
         # F131: kind 双向门禁——杜绝连续轨迹被逐段规划、路点任务被短按原样回放
         file_kind = str(data.get("kind") or "continuous")
@@ -4995,7 +5125,7 @@ class ArmController(Node):
             resp.message = (
                 f"'{label}' is {file_kind}, not a waypoint task —— "
                 "Square 短按回放连续轨迹；路点回放请先 Share 长按录制")
-            return resp
+            return None, "", "", "", strategy, resp
         if is_stream and file_kind != "stream":
             self._publish_mode("IDLE")
             self._set_state(STATE_READY, f"playback {label}: kind gate")
@@ -5003,23 +5133,45 @@ class ArmController(Node):
             resp.message = (
                 f"'{label}' is {file_kind}, not a stream task —— "
                 "轨迹流请用 type=stream 回放")
-            return resp
-        if not is_wp and not is_stream and file_kind in ("waypoint", "stream"):
+            return None, "", "", "", strategy, resp
+        if is_cp and file_kind != "cp":
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"playback {label}: kind gate")
+            resp.success = False
+            resp.message = (
+                f"'{label}' is {file_kind}, not a cp task —— "
+                "连续笛卡尔路径请用 type=cp 回放")
+            return None, "", "", "", strategy, resp
+        if not is_wp and not is_stream and not is_cp and file_kind in ("waypoint", "stream", "cp"):
             self._publish_mode("IDLE")
             self._set_state(STATE_READY, f"playback {label}: kind gate")
             resp.success = False
             resp.message = (
                 f"'{label}' is a {file_kind} task —— 用 type={file_kind} 回放")
-            return resp
+            return None, "", "", "", strategy, resp
 
-        # F133: 已烘焙过 retime 的文件不再重复写回——避免每次回放对重采样几何
-        # 再烘焙造成逐代漂移，也防止原始备份被覆盖。
-        already_retimed = bool(data.get("retimed"))
+        return data, label, file_kind, path, strategy, None
 
-        if is_wp:
+    def _playback_cb(
+        self, req: PlaybackTrajectory.Request, resp: PlaybackTrajectory.Response
+    ) -> PlaybackTrajectory.Response:
+        data, label, kind, path, strategy, failed = self._prepare_playback(req, resp)
+        if data is None:
+            return failed
+        if kind == "waypoint":
             return self._play_waypoints(data, label, strategy, resp)
-        if is_stream:
+        if kind == "stream":
             return self._play_stream(data, label, resp)
+        if kind == "cp":
+            return self._play_cp(data, label, resp)
+        return self._play_continuous(data, label, path, resp)
+
+    def _play_continuous(
+        self, data: dict, label: str, path: str, resp: PlaybackTrajectory.Response
+    ) -> PlaybackTrajectory.Response:
+        """连续轨迹回放（F137 去噪 + F68 retime + JTC），从 _playback_cb 内联段抽出，逻辑不变。"""
+        use_moveit = bool(self.get_parameter("playback_return_use_moveit").value)
+        already_retimed = bool(data.get("retimed"))
 
         file_joint_names = list(data.get("joint_names") or self._joint_names)
         recorded_positions: List[List[float]] = []
