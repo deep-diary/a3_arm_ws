@@ -13,7 +13,7 @@ segments:
       position:
         x: -0.2
         y: -0.17
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -25,9 +25,9 @@ segments:
 - target:
     pose:
       position:
-        x: -0.188
+        x: -0.18000000000000002
         y: -0.16360000000000002
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -39,9 +39,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: -0.1668
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -52,7 +52,7 @@ segments:
       position:
         x: -0.2
         y: -0.1511
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -64,9 +64,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: -0.15735000000000002
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -75,9 +75,9 @@ segments:
 - target:
     pose:
       position:
-        x: -0.188
+        x: -0.18000000000000002
         y: -0.1416
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -89,9 +89,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: -0.14635
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -102,7 +102,7 @@ segments:
       position:
         x: -0.2
         y: -0.1322
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -114,9 +114,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: -0.13690000000000002
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -125,9 +125,9 @@ segments:
 - target:
     pose:
       position:
-        x: -0.188
+        x: -0.18000000000000002
         y: -0.11960000000000001
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -139,9 +139,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: -0.1259
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -152,7 +152,7 @@ segments:
       position:
         x: -0.2
         y: -0.11330000000000001
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -164,9 +164,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: -0.11645000000000001
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -177,7 +177,7 @@ segments:
       position:
         x: -0.2
         y: -0.09440000000000001
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -191,7 +191,7 @@ segments:
       position:
         x: -0.2
         y: -0.10385000000000001
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -200,9 +200,9 @@ segments:
 - target:
     pose:
       position:
-        x: -0.188
+        x: -0.18000000000000002
         y: -0.08650000000000001
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -214,9 +214,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: -0.09045
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -227,7 +227,7 @@ segments:
       position:
         x: -0.2
         y: -0.07550000000000001
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -239,9 +239,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: -0.08100000000000002
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -250,9 +250,9 @@ segments:
 - target:
     pose:
       position:
-        x: -0.188
+        x: -0.18000000000000002
         y: -0.06450000000000002
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -264,9 +264,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: -0.07
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -277,7 +277,7 @@ segments:
       position:
         x: -0.2
         y: -0.05660000000000001
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -289,9 +289,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: -0.060550000000000014
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -302,7 +302,7 @@ segments:
       position:
         x: -0.2
         y: -0.03770000000000001
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -316,7 +316,7 @@ segments:
       position:
         x: -0.2
         y: -0.04715000000000001
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -325,9 +325,9 @@ segments:
 - target:
     pose:
       position:
-        x: -0.188
+        x: -0.18000000000000002
         y: -0.0315
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -339,9 +339,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: -0.034600000000000006
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -352,7 +352,7 @@ segments:
       position:
         x: -0.2
         y: -0.01880000000000001
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -364,9 +364,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: -0.025150000000000006
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -375,9 +375,9 @@ segments:
 - target:
     pose:
       position:
-        x: -0.188
+        x: -0.18000000000000002
         y: -0.009500000000000008
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -389,9 +389,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: -0.01415000000000001
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -402,7 +402,7 @@ segments:
       position:
         x: -0.2
         y: 9.999999999998899e-05
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -414,9 +414,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: -0.00470000000000001
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -425,9 +425,9 @@ segments:
 - target:
     pose:
       position:
-        x: -0.188
+        x: -0.18000000000000002
         y: 0.012599999999999972
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -439,9 +439,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: 0.006349999999999981
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -452,7 +452,7 @@ segments:
       position:
         x: -0.2
         y: 0.01899999999999999
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -464,9 +464,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: 0.01579999999999998
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -477,7 +477,7 @@ segments:
       position:
         x: -0.2
         y: 0.03789999999999999
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -491,7 +491,7 @@ segments:
       position:
         x: -0.2
         y: 0.02844999999999999
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -500,9 +500,9 @@ segments:
 - target:
     pose:
       position:
-        x: -0.188
+        x: -0.18000000000000002
         y: 0.045599999999999974
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -514,9 +514,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: 0.04174999999999998
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -527,7 +527,7 @@ segments:
       position:
         x: -0.2
         y: 0.05679999999999999
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -539,9 +539,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: 0.05119999999999998
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -550,9 +550,9 @@ segments:
 - target:
     pose:
       position:
-        x: -0.188
+        x: -0.18000000000000002
         y: 0.0676
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -564,9 +564,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: 0.06219999999999999
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -577,7 +577,7 @@ segments:
       position:
         x: -0.2
         y: 0.07569999999999999
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -589,9 +589,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: 0.07164999999999999
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -602,7 +602,7 @@ segments:
       position:
         x: -0.2
         y: 0.09459999999999999
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -616,7 +616,7 @@ segments:
       position:
         x: -0.2
         y: 0.08514999999999999
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -625,9 +625,9 @@ segments:
 - target:
     pose:
       position:
-        x: -0.188
+        x: -0.18000000000000002
         y: 0.1006
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -639,9 +639,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: 0.09759999999999999
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -652,7 +652,7 @@ segments:
       position:
         x: -0.2
         y: 0.11349999999999996
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -664,9 +664,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: 0.10704999999999998
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -675,9 +675,9 @@ segments:
 - target:
     pose:
       position:
-        x: -0.188
+        x: -0.18000000000000002
         y: 0.1227
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -689,9 +689,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: 0.11809999999999998
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -702,7 +702,7 @@ segments:
       position:
         x: -0.2
         y: 0.1324
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -714,9 +714,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: 0.12755
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -725,9 +725,9 @@ segments:
 - target:
     pose:
       position:
-        x: -0.188
+        x: -0.18000000000000002
         y: 0.14469999999999997
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -739,9 +739,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: 0.13854999999999998
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -752,7 +752,7 @@ segments:
       position:
         x: -0.2
         y: 0.15130000000000002
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -764,9 +764,9 @@ segments:
   via:
   - pose:
       position:
-        x: -0.194
+        x: -0.19
         y: 0.148
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -777,7 +777,7 @@ segments:
       position:
         x: -0.2
         y: 0.1702
-        z: 0.252
+        z: 0.255
       orientation:
         x: 0.0
         y: 0.0
@@ -791,7 +791,7 @@ segments:
       position:
         x: -0.2
         y: 0.16075
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0
@@ -802,7 +802,7 @@ segments:
       position:
         x: -0.2
         y: 0.1702
-        z: 0.28
+        z: 0.27
       orientation:
         x: 0.0
         y: 0.0

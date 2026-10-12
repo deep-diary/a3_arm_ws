@@ -28,8 +28,11 @@
     moveit_acceleration_scaling: 0.15
     # F163: 轨迹段 via 过点（gotoby 原语）——当前位→中间过点→目标 一条 C2 平滑轨迹。
     # 峰值速度/加速度上限与过点样条稠密重采样点数；段级 speed(0~1) 线性缩放 v/a。
-    goto_via_max_vel_rad_s: 0.6
-    goto_via_max_acc_rad_s2: 2.0
+    # F16x: via 点姿态保持（_solve_ik_position ref_orientation）消除腕部绕路后，
+    # 提速：vmax=1.5、amax=15.0（via 折返的加速度是瓶颈，amax 越高 T 越短；
+    # 出厂检测 ~1.3s/键）。真机若 JTC 跟踪误差大，amax 回调到 6.0。
+    goto_via_max_vel_rad_s: 1.5
+    goto_via_max_acc_rad_s2: 15.0
     goto_via_resample_n: 200
 
     # ═══════════════════════════════════════════════════════════════════

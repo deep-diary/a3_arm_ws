@@ -27,8 +27,8 @@
 | **R2** | 模拟 | 夹爪力控（**不需要 L1/R1**），松开全开 | gripper_force |
 | 左摇杆 X / Y | 模拟（L1） | 平移 Y（左右）/ Z（上下） | servo_lin_y / servo_lin_z |
 | 右摇杆 Y / X | 模拟 | 平移 X（前后，gate l1）/ 偏航（gate r1） | servo_lin_x / servo_ang_z |
-| **D-pad 上 / 下** | 点按 | goto home_up（home 上 15cm）/ home_down（下 10cm），F115 | `goto_named_pose {name: home_up/home_down}` |
-| **D-pad 左 / 右** | 点按 | goto home_back（home 后 20cm）/ home_front（前 15cm），F115 | `goto_named_pose {name: home_back/home_front}` |
+| **D-pad 上 / 下** | 点按 | goto 口风琴首键 F3 抬高 10mm / 下压 5mm（melodion_F3_up/down），F16x | `goto_named_pose {name: melodion_F3_up/melodion_F3_down}` |
+| **D-pad 左 / 右** | 点按 | goto 口风琴最左键 F3 未按下 / 最右键 C6 未按下（melodion_F3_up/C6_up），F16x | `goto_named_pose {name: melodion_F3_up/melodion_C6_up}` |
 | **L2** | 短按 | 保存当前位姿为 snap_YYYYMMDD_HHMMSS（F114，写包内 named_poses.yaml） | `/a3/arm/save_named_pose {name: ""}` |
 | touchpad | 单击（tap） | **预留不绑**（蓝牙无键事件 LL-052；hidraw 触摸偏移缺陷 LL-143，F132 修复后在 `default.yaml` 取消注释即绑 LIN 回放） | — |
 

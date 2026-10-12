@@ -33,7 +33,7 @@
 
 | 文件 | 说明 |
 |---|---|
-| `config/melodion_keys.json` | 合并键位（音名/midi/solfa/jianpu/x_mm/类型，32 键） |
+| `config/melodion_keys.json` | 合并键位（音名/midi/solfa/jianpu/jianpu_octave/x_mm/类型，32 键；音域 F3「低音4下一点」~ C6「高高音1上两点」，19 白 + 13 黑） |
 | `config/playing_geometry.yaml` | 弹奏几何：首键基准位姿、下压/抬升/黑键后退 |
 | `config/scores/*.yaml` | 曲谱（音名 + 时值） |
 | `config/streams/*.yaml` | 生成的轨迹流配置（软件编排产物，版本控制） |
@@ -49,6 +49,16 @@ cd ~/a3_arm_ws/src/app_melodion
 python3 -m app_melodion.melodion_score2stream --score scale
 python3 -m app_melodion.melodion_score2stream --score qinghuaci
 # 产物：config/streams/scale.yaml、config/streams/qinghuaci.yaml
+
+# 出厂按键检测（蛇形：先 19 白键左→右，再 13 黑键右→左）
+python3 -m app_melodion.melodion_score2stream --inspection --speed 1.0
+# 模式(ptp/lin)×速度(0.1~1.0) 扫描测试轨迹
+python3 -m app_melodion.melodion_score2stream --sweep
+# 相对位置模式（frame=relative + anchor，换口风琴位置只改 anchor）
+python3 -m app_melodion.melodion_score2stream --score scale --relative
+
+# 预烘焙缓存（把逐段 via 关节轨迹算好存 <name>.yaml.baked.yaml，playback 直接下发提速）
+python3 ~/a3_arm_ws/scripts/melodion_bake.py --stream scale
 
 # 2. 标准栈（mock 仿真 / can 真机），先到 READY 再回 home
 source ~/a3_arm_ws/scripts/a3_shell_env.sh

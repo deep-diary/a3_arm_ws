@@ -85,3 +85,13 @@ poses:
   # F114: saved via /a3/arm/save_named_pose at 2026-10-02 20:08:53
   snap_20261002_200853:
     positions: [0.0010, 0.7835, -0.7774, 0.0010, 0.0102, 0.0017, -0.0002]
+
+  # F16x: 口风琴关键对位点（playing_geometry press=5/approach=10/retreat=20，
+  # scripts/melodion_dpad_ik.py position-only IK 解算）
+  # D-pad 左/上 = F3 未按下（低音4）；下 = F3 下压；右 = C6 未按下（高高音1）。
+  melodion_F3_up:
+    positions: [0.6971, 1.3320, -1.0584, 0.2127, -0.0290, 0.0000, 0.0000]
+  melodion_F3_down:
+    positions: [0.7187, 1.5820, -1.4367, 0.8908, 0.0555, 0.0000, 0.0000]
+  melodion_C6_up:
+    positions: [-0.7078, 1.3329, -1.0596, 0.2138, -0.0106, 0.0000, 0.0000]

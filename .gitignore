@@ -61,3 +61,6 @@ candump-*.log
 /trajectories/waypoints/
 /trajectories/streams/
 !/trajectories/**/.gitkeep
+
+# 预烘焙轨迹缓存（F16x：melodion_bake.py 生成 <name>.yaml.baked.yaml，可删可重烘焙）
+*.baked.yaml

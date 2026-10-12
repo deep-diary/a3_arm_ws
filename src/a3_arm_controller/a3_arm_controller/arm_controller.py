@@ -3018,11 +3018,35 @@ class ArmController(Node):
             float(data.oMf[fid].translation[2]),
         ]
 
-    def _solve_ik_position(self, pose: dict) -> Optional[List[float]]:
-        """Pinocchio position-only IK（姿态自由），返回 L1..L6 关节角或 None。
+    def _fk_ee_orientation(self, positions6: List[float]):
+        """Pinocchio end_effector 世界系姿态（3x3 旋转矩阵）；模型不可用返回 None。"""
+        try:
+            if not self._pin_ready:
+                self._ensure_pin_model()
+        except Exception:  # noqa: BLE001
+            return None
+        import numpy as np  # type: ignore
+        import pinocchio as pin  # type: ignore
 
-        用于轨迹流（软件编排）：目标点只给末端 xyz，姿态不可达时不强求（弹琴
-        只要求末端点到达键位）。scipy least_squares + 关节限位边界。
+        q = np.zeros(self._pin_model.nq)
+        for pos, qi in zip(positions6, self._pin_q_idx[:6]):
+            q[qi] = pos
+        data = self._pin_model.createData()
+        pin.forwardKinematics(self._pin_model, data, q)
+        fid = self._pin_model.getFrameId("end_effector")
+        pin.updateFramePlacement(self._pin_model, data, fid)
+        return np.array(data.oMf[fid].rotation, dtype=float)
+
+    def _solve_ik_position(
+        self, pose: dict, ref_orientation=None,
+    ) -> Optional[List[float]]:
+        """Pinocchio IK，返回 L1..L6 关节角或 None。
+
+        默认 position-only（姿态自由）：用于轨迹流（软件编排），目标点只给末端
+        xyz，姿态不可达时不强求（弹琴只要求末端点到达键位）。
+        ref_orientation 非 None（3x3 旋转矩阵）时改为 6D IK：末端姿态软约束到
+        ref_orientation（log3 旋转误差），用于 via 过点保持相邻按压点的腕部姿态、
+        避免 L4/L5 大幅摆动导致关节路径绕远路（弹琴提速关键）。
         """
         try:
             if not self._pin_ready:
@@ -3048,19 +3072,24 @@ class ArmController(Node):
         x0 = [float(self._positions[i]) for i in range(6)]
         x0 = [min(max(x0[i], lo[i]), hi[i]) for i in range(6)]
         fid = model.getFrameId("end_effector")
+        ref_R = None if ref_orientation is None else np.asarray(ref_orientation, dtype=float)
+        data = model.createData()  # 复用，避免每次迭代重建（6D IK 迭代次数多时省时）
 
         def residual(q6):
             q = np.zeros(model.nq)
             for v, qi in zip(q6, q_idx):
                 q[qi] = float(v)
-            data = model.createData()
             pin.forwardKinematics(model, data, q)
             pin.updateFramePlacement(model, data, fid)
-            return data.oMf[fid].translation - target
+            trans_err = data.oMf[fid].translation - target
+            if ref_R is None:
+                return trans_err
+            rot_err = pin.log3(ref_R.T @ data.oMf[fid].rotation)
+            return np.concatenate([trans_err, rot_err])
 
         res = least_squares(
             residual, x0, bounds=(lo, hi),
-            xtol=1e-10, ftol=1e-10, gtol=1e-10, max_nfev=400,
+            xtol=1e-10, ftol=1e-10, gtol=1e-10, max_nfev=120,
         )
         if float(np.linalg.norm(res.fun)) < 1e-3:
             return [float(v) for v in res.x]
@@ -3699,17 +3728,17 @@ class ArmController(Node):
         target: Dict[str, Any],
         speed: Optional[float],
         label: str,
-    ) -> Tuple[bool, str]:
+    ) -> Tuple[bool, str, float]:
         """F163: 当前位 → via 过点数组 → target 规划为一条 C2 平滑轨迹（gotoby 原语）。
 
         via/target 可为 {"positions":[...]}（关节）或 {"pose":{position,orientation}}
         （笛卡尔，走 _solve_ik_position）。speed(0~1) 线性缩放峰值速度/加速度上限；
         None 时用 1.0（即全局 goto_via_* 上限）。中间点不停车、段末速度 0。
-        失败返回 False，调用方回落单段 _moveit_move。
+        返回 (成功, 说明, 运动时长秒)。失败返回 (False, msg, 0.0)，调用方回落单段 _moveit_move。
         """
         GJ = JOINTS[:6]
 
-        def resolve(point: Dict[str, Any]) -> Optional[List[float]]:
+        def resolve(point: Dict[str, Any], ref_R=None) -> Optional[List[float]]:
             positions = point.get("positions")
             if positions:
                 q = [float(v) for v in positions]
@@ -3718,32 +3747,37 @@ class ArmController(Node):
                 return q[:6]
             pose = point.get("pose")
             if pose and "position" in pose:
-                return self._solve_ik_position(pose)
+                return self._solve_ik_position(pose, ref_orientation=ref_R)
             return None
 
         q_cur = [self._positions[self._joint_names.index(jn)] for jn in GJ]
-        via_q: List[List[float]] = [q_cur]
-        for p in via:
-            q = resolve(p)
-            if q is None:
-                return False, "via point IK/resolve failed"
-            via_q.append(q)
+        # 先解 target（position-only），其末端姿态作为 via 点的姿态参考，
+        # 避免 via 点姿态自由导致腕部 L4/L5 大幅摆动、关节路径绕远路（提速关键）。
         qt = resolve(target)
         if qt is None:
-            return False, "via target IK/resolve failed"
+            return False, "via target IK/resolve failed", 0.0
+        ref_R = self._fk_ee_orientation(qt)
+        via_q: List[List[float]] = [q_cur]
+        for p in via:
+            q = resolve(p, ref_R)
+            if q is None and ref_R is not None:
+                q = resolve(p)  # 姿态保持失败时回落 position-only（保底）
+            if q is None:
+                return False, "via point IK/resolve failed", 0.0
+            via_q.append(q)
         via_q.append(qt)
 
         resample_n = max(20, int(self.get_parameter("goto_via_resample_n").value))
         dense = _interpolate_via_spline(via_q, resample_n)
         if dense is None:
-            return False, "via spline failed (too few distinct points)"
+            return False, "via spline failed (too few distinct points)", 0.0
 
         spd = 1.0 if speed is None else float(speed)
         vmax = spd * float(self.get_parameter("goto_via_max_vel_rad_s").value)
         amax = spd * float(self.get_parameter("goto_via_max_acc_rad_s2").value)
         timed = _jerk_limited_timed_traj(dense, vmax, amax)
         if timed is None:
-            return False, "via timing failed"
+            return False, "via timing failed", 0.0
         times, tpos = timed
 
         traj = JointTrajectory()
@@ -3760,7 +3794,7 @@ class ArmController(Node):
         if not ok:
             self._publish_mode("IDLE")
             self._set_state(STATE_READY, f"{label} via: {dmsg}")
-            return False, dmsg
+            return False, dmsg, 0.0
         self._set_state(STATE_TRAJ, f"{label} via")
         duration = self._traj_duration(traj)
         self._schedule_back_to_ready(duration + 0.3)
@@ -3771,7 +3805,7 @@ class ArmController(Node):
             metric_s = f" j_rms={m[1]:.4f} a_rms={m[0]:.4f}"
         return True, (
             f"{label}: via {len(via_q) - 1} pts, {len(traj.points)} samples, "
-            f"{duration:.2f}s{metric_s}")
+            f"{duration:.2f}s{metric_s}"), duration
 
     def _goto_via_lin_blend(
         self,
@@ -3779,11 +3813,12 @@ class ArmController(Node):
         target: Dict[str, Any],
         speed: Optional[float],
         label: str,
-    ) -> Tuple[bool, str]:
+    ) -> Tuple[bool, str, float]:
         """F163: 当前位 → via 过点 → target 走 pilz LIN Sequence（blend 过中间点不停车）。
 
         所有 via/target 须为笛卡尔 {"pose":{position,orientation}}（lin 语义）；
-        blend 不精确过中间点（F134 语义）。失败返回 False，调用方回落 _goto_via_smooth。
+        blend 不精确过中间点（F134 语义）。返回 (成功, 说明, 运动时长秒)；
+        失败返回 (False, msg, 0.0)，调用方回落 _goto_via_smooth。
         """
         def pose_of(point: Dict[str, Any]) -> Optional[dict]:
             pose = point.get("pose")
@@ -3795,11 +3830,11 @@ class ArmController(Node):
         for p in via:
             pose = pose_of(p)
             if pose is None:
-                return False, "lin via point missing pose"
+                return False, "lin via point missing pose", 0.0
             poses.append(pose)
         tpose = pose_of(target)
         if tpose is None:
-            return False, "lin via target missing pose"
+            return False, "lin via target missing pose", 0.0
         poses.append(tpose)
 
         xyz_seq = [self._fk_ee_xyz(list(self._positions))]
@@ -3818,9 +3853,9 @@ class ArmController(Node):
         ok, stotal, smsg = self._sequence_move_group(
             items, f"via lin {label}")
         if not ok:
-            return False, smsg
+            return False, smsg, 0.0
         self._schedule_back_to_ready(0.3)  # 同步已执行完，仅短缓冲
-        return True, f"{label}: via lin {len(poses)} pts, {stotal:.1f}s"
+        return True, f"{label}: via lin {len(poses)} pts, {stotal:.1f}s", stotal
 
     def _execute_segment(self, seg: Dict[str, Any], label: str) -> Tuple[bool, str, float]:
         """执行一个「轨迹段」：target(mode ptp/lin) + speed + sleep。
@@ -3842,12 +3877,12 @@ class ArmController(Node):
         via = seg.get("via")
         if via:
             if mode == "lin":
-                ok, msg = self._goto_via_lin_blend(list(via), target, speed, label)
+                ok, msg, vdur = self._goto_via_lin_blend(list(via), target, speed, label)
             else:
-                ok, msg = self._goto_via_smooth(list(via), target, speed, label)
+                ok, msg, vdur = self._goto_via_smooth(list(via), target, speed, label)
             if ok and sleep_s > 0.0:
                 time.sleep(sleep_s)
-            return ok, msg, dur + sleep_s
+            return ok, msg, vdur + sleep_s
 
         if mode == "lin":
             pose = target.get("pose")
@@ -3882,10 +3917,62 @@ class ArmController(Node):
             time.sleep(sleep_s)
         return True, msg, dur + sleep_s
 
+    def _expand_relative(self, data: dict) -> Tuple[bool, str]:
+        """F16x: 相对位置展开——frame=relative 时，把每个 target/via 的 pose.position
+        加上 anchor.position（展开成绝对）。原地修改 data。返回 (成功, 错误消息)。
+
+        只对笛卡尔 pose.position 做偏移；positions（关节）与 orientation 无相对语义，
+        保持不变。frame 缺省 = absolute（向后兼容）。
+        """
+        frame = str(data.get("frame") or "absolute").strip().lower()
+        if frame == "absolute":
+            return True, ""
+        if frame != "relative":
+            return False, f"unknown frame '{frame}' (absolute/relative)"
+        anchor = (data.get("anchor") or {}).get("position") or {}
+        try:
+            ax, ay, az = float(anchor["x"]), float(anchor["y"]), float(anchor["z"])
+        except (KeyError, TypeError):
+            return False, "relative frame missing anchor.position {x,y,z}"
+
+        def shift(point: Dict[str, Any]) -> None:
+            pose = point.get("pose") if isinstance(point, dict) else None
+            if not pose or "position" not in pose:
+                return
+            p = pose["position"]
+            p["x"] = float(p.get("x", 0.0)) + ax
+            p["y"] = float(p.get("y", 0.0)) + ay
+            p["z"] = float(p.get("z", 0.0)) + az
+
+        for seg in (data.get("segments") or []):
+            if seg.get("target"):
+                shift(seg["target"])
+            for v in (seg.get("via") or []):
+                shift(v)
+        # cp kind：顶层 via[] + target
+        for v in (data.get("via") or []):
+            shift(v)
+        if data.get("target"):
+            shift(data["target"])
+        return True, ""
+
     def _play_stream(
-        self, data: dict, label: str, resp: PlaybackTrajectory.Response
+        self, data: dict, label: str, path: str, resp: PlaybackTrajectory.Response
     ) -> PlaybackTrajectory.Response:
-        """轨迹流（stream）逐段执行：每段末速度 0，含 mode/speed/sleep。"""
+        """轨迹流（stream）逐段执行：每段末速度 0，含 mode/speed/sleep。
+
+        F16x: 优先用预烘焙缓存 <path>.baked.yaml（存在则直接下发，跳过逐段 IK+重定时）。
+        """
+        baked_path = path + ".baked.yaml"
+        if os.path.exists(baked_path):
+            return self._play_baked(baked_path, label, resp)
+        ok_rel, err_rel = self._expand_relative(data)
+        if not ok_rel:
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"playback {label}: {err_rel}")
+            resp.success = False
+            resp.message = err_rel
+            return resp
         segments = data.get("segments") or []
         if not segments:
             self._publish_mode("IDLE")
@@ -3924,6 +4011,48 @@ class ArmController(Node):
         resp.message = f"stream '{label}': {n} segments, {total:.1f}s"
         return resp
 
+    def _play_baked(
+        self, baked_path: str, label: str, resp: PlaybackTrajectory.Response
+    ) -> PlaybackTrajectory.Response:
+        """F16x: 下发预烘焙关节轨迹缓存（跳过逐段 IK+重定时，提速关键）。"""
+        try:
+            with open(baked_path, "r", encoding="utf-8") as f:
+                baked = yaml.load(f, Loader=_YamlSafeLoader)
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"baked cache load failed: {exc}")
+            resp.success = False
+            resp.message = f"baked cache load failed: {exc}"
+            return resp
+
+        points = baked.get("points") or []
+        if not points:
+            resp.success = False
+            resp.message = "baked cache empty"
+            return resp
+
+        traj = JointTrajectory()
+        traj.joint_names = list(baked.get("joint_names") or JOINTS)
+        for p in points:
+            pt = JointTrajectoryPoint()
+            pt.positions = [float(v) for v in p["positions"]]
+            pt.time_from_start = _duration(float(p.get("time_from_start_sec", 0.0)))
+            traj.points.append(pt)
+
+        self._publish_mode("TRAJ_RUNNING")
+        ok, dmsg = self._dispatch_trajectory(traj)
+        if not ok:
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"{label} baked: {dmsg}")
+            resp.success = False
+            resp.message = dmsg
+            return resp
+        self._set_state(STATE_TRAJ, f"{label} baked")
+        duration = self._traj_duration(traj)
+        self._schedule_back_to_ready(duration + 0.3)
+        resp.success = True
+        resp.message = f"stream '{label}' (baked): {len(points)} pts, {duration:.1f}s"
+        return resp
+
     def _play_cp(
         self, data: dict, label: str, resp: PlaybackTrajectory.Response
     ) -> PlaybackTrajectory.Response:
@@ -3932,6 +4061,13 @@ class ArmController(Node):
         复用 _goto_via_smooth（关节过点样条）；mode=lin 可选走 _goto_via_lin_blend。
         schema: {kind: cp, joint_names, speed, mode, via:[{pose|positions},...], target}。
         """
+        ok_rel, err_rel = self._expand_relative(data)
+        if not ok_rel:
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"playback {label}: {err_rel}")
+            resp.success = False
+            resp.message = err_rel
+            return resp
         via = data.get("via") or []
         target = data.get("target") or {}
         if not via:
@@ -3945,9 +4081,9 @@ class ArmController(Node):
             speed = float(speed)
         mode = str(data.get("mode") or "ptp").strip().lower()
         if mode == "lin":
-            ok, msg = self._goto_via_lin_blend(list(via), target, speed, label)
+            ok, msg, _ = self._goto_via_lin_blend(list(via), target, speed, label)
         else:
-            ok, msg = self._goto_via_smooth(list(via), target, speed, label)
+            ok, msg, _ = self._goto_via_smooth(list(via), target, speed, label)
         if not ok:
             self._publish_mode("IDLE")
             self._set_state(STATE_READY, f"playback {label}: cp failed")
@@ -5161,7 +5297,7 @@ class ArmController(Node):
         if kind == "waypoint":
             return self._play_waypoints(data, label, strategy, resp)
         if kind == "stream":
-            return self._play_stream(data, label, resp)
+            return self._play_stream(data, label, path, resp)
         if kind == "cp":
             return self._play_cp(data, label, resp)
         return self._play_continuous(data, label, path, resp)

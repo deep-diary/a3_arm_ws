@@ -1,0 +1,674 @@
+kind: stream
+joint_names:
+- L1_joint
+- L2_joint
+- L3_joint
+- L4_joint
+- L5_joint
+- L6_joint
+- L7_joint
+segments:
+- target:
+    pose: &id001
+      position:
+        x: -0.2
+        y: -0.17
+        z: 0.255
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+  mode: ptp
+  speed: 0.5
+  sleep: 0.1
+- target:
+    pose: &id002
+      position:
+        x: -0.2
+        y: 0.1702
+        z: 0.255
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+  mode: ptp
+  speed: 0.1
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: ptp
+  speed: 0.1
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: ptp
+  speed: 0.2
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: ptp
+  speed: 0.2
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: ptp
+  speed: 0.3
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: ptp
+  speed: 0.3
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: ptp
+  speed: 0.4
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: ptp
+  speed: 0.4
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: ptp
+  speed: 0.5
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: ptp
+  speed: 0.5
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: ptp
+  speed: 0.6
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: ptp
+  speed: 0.6
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: ptp
+  speed: 0.7
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: ptp
+  speed: 0.7
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: ptp
+  speed: 0.8
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: ptp
+  speed: 0.8
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: ptp
+  speed: 0.9
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: ptp
+  speed: 0.9
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: ptp
+  speed: 1.0
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: ptp
+  speed: 1.0
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: lin
+  speed: 0.1
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: lin
+  speed: 0.1
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: lin
+  speed: 0.2
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: lin
+  speed: 0.2
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: lin
+  speed: 0.3
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: lin
+  speed: 0.3
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: lin
+  speed: 0.4
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: lin
+  speed: 0.4
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: lin
+  speed: 0.5
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: lin
+  speed: 0.5
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: lin
+  speed: 0.6
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: lin
+  speed: 0.6
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: lin
+  speed: 0.7
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: lin
+  speed: 0.7
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: lin
+  speed: 0.8
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: lin
+  speed: 0.8
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: lin
+  speed: 0.9
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: lin
+  speed: 0.9
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id002
+  mode: lin
+  speed: 1.0
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+- target:
+    pose: *id001
+  mode: lin
+  speed: 1.0
+  sleep: 0.1
+  via:
+  - pose:
+      position:
+        x: -0.2
+        y: 9.999999999998899e-05
+        z: 0.27
+      orientation:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+        w: 1.0
+name: sweep

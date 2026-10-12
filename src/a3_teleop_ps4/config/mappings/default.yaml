@@ -44,15 +44,16 @@ axes:
     kind: analog_n11
     gates: [r1]
 
-# F115：D-pad hat 轴（-1/0/+1）0→±1 边沿各触发一次；持续按住不连发，回中后才能再按。
-# 上/下/左/右 = home 周边 4 个笛卡尔偏移命名点（走 goto_named_pose → F67 MoveIt）。
+# F115/F16x：D-pad hat 轴（-1/0/+1）0→±1 边沿各触发一次；持续按住不连发，回中后才能再按。
+# 上/下/左/右 = 口风琴关键对位点（走 goto_named_pose → F67 MoveIt）：上/左=首键 F3 未按下、
+# 下=首键 F3 下压、右=末键 C6 未按下。
 dpad:
   - axis: dpad_y
-    neg: {fn: goto_named_pose, kwargs: {name: home_up}}      # 上：home 上方 15cm
-    pos: {fn: goto_named_pose, kwargs: {name: home_down}}    # 下：home 下方 10cm
+    neg: {fn: goto_named_pose, kwargs: {name: melodion_F3_up}}      # 上：首键 F3 抬高 10mm
+    pos: {fn: goto_named_pose, kwargs: {name: melodion_F3_down}}    # 下：首键 F3 下压 5mm
   - axis: dpad_x
-    neg: {fn: goto_named_pose, kwargs: {name: home_back}}    # 左：home 后方 20cm
-    pos: {fn: goto_named_pose, kwargs: {name: home_front}}   # 右：home 前方 15cm
+    neg: {fn: goto_named_pose, kwargs: {name: melodion_F3_up}}      # 左：最左键 F3 未按下
+    pos: {fn: goto_named_pose, kwargs: {name: melodion_C6_up}}      # 右：最右键 C6 未按下
 
 buttons:
   cross:

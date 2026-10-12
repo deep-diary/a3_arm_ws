@@ -24,6 +24,8 @@ class Key:
     solfa: Optional[str]
     jianpu: Optional[int]
     x_mm: float
+    # 简谱八度（相对中音 C4=0）：-1=低音(下一点)/0=中音/+1=高音(上一点)/+2=高高音(上两点)
+    jianpu_octave: Optional[int] = None
 
 
 class MelodionConfig:
