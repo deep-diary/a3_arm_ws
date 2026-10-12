@@ -11,6 +11,8 @@
 #   a3_stack.sh restart               重启 = stop + start
 #   a3_stack.sh status                查看 can1 / 进程 / arm_status
 #   a3_stack.sh free [on|off]         零重力矩补偿自由拖动（on=进入，off=退出恢复闭环）
+#   a3_stack.sh set-zero [id]         停栈状态下设电机零点（不带使能）；id=1..7 单电机，
+#                                      省略=全部(255)。设零后自动 save_param 写 flash
 #   可选参数：-f|--force（停栈跳过臂状态安全门）
 #             --rviz（启动/重启时随栈打开 RViz）
 #             --no-probe（跳过起栈前电机在线探测；降级档/确认无硬件时用）
@@ -208,7 +210,7 @@ do_stop() {
     return 0
   fi
 
-  # 安全门：臂必须 DISABLED；状态读不到需 -f
+  # 安全门：臂必须未使能（DISABLED 已失能 / IDLE 上电未初始化）；状态读不到需 -f
   local state
   state="$(arm_state)"
   if [ -z "$state" ]; then
@@ -218,9 +220,9 @@ do_stop() {
       err "读不到 /a3/arm_status。确认臂已失能后用 -f 强制关停"
       return 1
     fi
-  elif [ "$state" != "DISABLED" ]; then
+  elif [ "$state" != "DISABLED" ] && [ "$state" != "IDLE" ]; then
     if [ "$force" = 1 ]; then
-      warn "臂当前状态为 $state（非 DISABLED），--force 继续关停"
+      warn "臂当前状态为 $state（非 DISABLED/IDLE），--force 继续关停"
     else
       err "臂当前状态为 $state，未失能不能停栈"
       err "请先 R3 软失能或：ros2 service call /a3/arm/disable std_srvs/srv/Trigger"
@@ -349,6 +351,79 @@ do_free() {
   msg="$(_srv_trigger_msg "$out")"
   err "零力矩操作失败：${msg:-$(printf '%s' "$out" | tr '\n' ' ')}"
   return 1
+}
+
+# 设零（F91 motor_maintenance）：停栈状态下把电机当前编码器位置写为零点，不带使能。
+# 前提：栈必须已停（motor_maintenance 独占 can1 socket + 控制器 inactive 互锁）。
+# id=1..7 单个电机；省略/255 = 全部。设零后自动 save_param 写 flash 持久化。
+do_set_zero() {
+  local motor_id="${1:-255}"
+
+  if stack_alive; then
+    err "真机栈仍在运行；设零需独占 can1，请先：$0 stop"
+    return 1
+  fi
+  if ! can1_up; then
+    err "can1 未 UP；请先确认 CAN 硬件（ip link show can1）"
+    return 1
+  fi
+  if ! [[ "$motor_id" =~ ^[0-9]+$ ]]; then
+    err "motor_id 须为 1..7 或 255（全部）：$motor_id"
+    return 1
+  fi
+  if [ "$motor_id" != "255" ] && { [ "$motor_id" -lt 1 ] || [ "$motor_id" -gt 7 ]; }; then
+    err "motor_id 须为 1..7 或 255（全部）：$motor_id"
+    return 1
+  fi
+
+  local maint_log="/tmp/a3_motor_maintenance.log"
+  info "启动 motor_maintenance（can1 独占；栈已停、控制器 inactive，互锁放行）…"
+  ros2 run a3_hardware_interface motor_maintenance --ros-args \
+    -p can_interface:=can1 \
+    -p enforce_controller_interlock:=true \
+    </dev/null >"$maint_log" 2>&1 &
+  local maint_pid=$!
+
+  local deadline=$(( $(date +%s) + 10 ))
+  while ! timeout 3 ros2 service list --no-daemon 2>/dev/null | grep -q '/a3/maintenance/set_zero'; do
+    if ! kill -0 "$maint_pid" 2>/dev/null; then
+      err "motor_maintenance 启动失败，日志：$maint_log"
+      tail -n 20 "$maint_log" >&2
+      return 1
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      err "等待 /a3/maintenance/set_zero 服务超时"
+      kill -TERM "$maint_pid" 2>/dev/null || true
+      return 1
+    fi
+    sleep 0.5
+  done
+
+  local desc="全部电机(255)"
+  [ "$motor_id" != "255" ] && desc="电机 $motor_id"
+
+  info "设零（写零点，不带使能）：$desc"
+  local out
+  out="$(timeout 8 ros2 service call /a3/maintenance/set_zero a3_msgs/srv/MotorIdCommand "{motor_id: $motor_id}" --no-daemon 2>&1)"
+  if ! printf '%s' "$out" | grep -qE 'success: true|success=True'; then
+    err "set_zero 失败：$(printf '%s' "$out" | tr '\n' ' ')"
+    kill -TERM "$maint_pid" 2>/dev/null || true
+    return 1
+  fi
+  ok "set_zero 完成（$desc，不带使能）"
+
+  info "保存参数到 flash …"
+  out="$(timeout 8 ros2 service call /a3/maintenance/save_parameters a3_msgs/srv/MotorIdCommand "{motor_id: $motor_id}" --no-daemon 2>&1)"
+  if ! printf '%s' "$out" | grep -qE 'success: true|success=True'; then
+    err "save_parameters 失败：$(printf '%s' "$out" | tr '\n' ' ')"
+    kill -TERM "$maint_pid" 2>/dev/null || true
+    return 1
+  fi
+  ok "save_parameters 完成"
+
+  kill -TERM "$maint_pid" 2>/dev/null || true
+  info "维护节点已退出；验证零位：python3 scripts/mit_noenable_stream.py probe --iface can1 --ids 1..7"
+  return 0
 }
 
 do_start() {
@@ -539,6 +614,8 @@ usage() {
   status   查看状态
   free     零重力矩补偿自由拖动：free / free on 进入（软 kp + 重力前馈），
            free off 退出恢复位置闭环；需栈已运行且电机已使能（READY）
+  set-zero 设电机零点（不带使能，需栈已停）：set-zero [id]，id=1..7 单个、省略=全部(255)
+           设零后自动 save_param 写 flash
   -f, --force    停栈时跳过臂状态安全门
   --rviz         启动/重启时随栈一起打开 RViz
   --no-probe     跳过起栈前电机在线探测（5J 降级档/确认无硬件时）
@@ -575,7 +652,7 @@ main() {
   esac
   local action="$1"; shift
 
-  local force=0 keep_rviz=0 with_rviz=0 do_probe=1 do_joy=1 turn_off=0
+  local force=0 keep_rviz=0 with_rviz=0 do_probe=1 do_joy=1 turn_off=0 set_zero_id=255
   while [ $# -gt 0 ]; do
     case "$1" in
       -f|--force) force=1 ;;
@@ -586,7 +663,13 @@ main() {
       on|start) turn_off=0 ;;
       off|stop) turn_off=1 ;;
       -h|--help) usage; exit 0 ;;
-      *) err "未知参数：$1"; usage; exit 1 ;;
+      *)
+        if [ "$action" = "set-zero" ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+          set_zero_id="$1"
+        else
+          err "未知参数：$1"; usage; exit 1
+        fi
+        ;;
     esac
     shift
   done
@@ -595,6 +678,7 @@ main() {
     start)   do_start "$with_rviz" "$do_probe" "$do_joy" ;;
     stop)    do_stop "$force" "$keep_rviz" ;;
     free)    do_free "$turn_off" ;;
+    set-zero) do_set_zero "$set_zero_id" ;;
     restart) do_stop "$force" "$keep_rviz" || exit 1
              do_start "$with_rviz" "$do_probe" "$do_joy" ;;
     status)  do_status ;;

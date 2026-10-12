@@ -23,6 +23,7 @@
 > ./scripts/a3_stack.sh restart    # 重启（可带 --rviz）
 > ./scripts/a3_stack.sh status     # 查看 can1 / 进程 / arm_status
 > ./scripts/a3_stack.sh free       # 零重力矩补偿自由拖动（free off 退出恢复闭环；需栈在跑且已使能 READY）
+> ./scripts/a3_stack.sh set-zero [id]  # 停栈状态下设电机零点（不带使能）；id=1..7 单个、省略=全部(255)，自动 save_param
 > ```
 > 起栈前会无侵入探测 ID 1..7（电机有 24V 即应答，与软件门禁无关）：0/7 或缺关节会提示
 > （查动力电/急停/CAN 线束）并中止，不拉起栈；5J 降级档等场景加 `--no-probe` 跳过。
@@ -188,7 +189,7 @@ ps aux | grep -E "ros2_control_node|a3_arm_controller|move_group" | grep -v grep
     # 若需单独起（如用非默认 config_file）：a3_bringup 加 use_arm_controller:=false，再：
     # ros2 launch a3_arm_controller arm_controller.launch.py config_file:=...
 
-    # 初始化（设零 + 确认 7 电机到位 + 使能）：
+    # 设零（写当前位姿为零点，不带使能；使能走下一行 enable）：
     ros2 service call /a3/arm/init std_srvs/srv/Trigger
     # 使能 / 失能：
     ros2 service call /a3/arm/enable std_srvs/srv/Trigger
