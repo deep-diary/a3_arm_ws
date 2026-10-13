@@ -1,0 +1,20 @@
+# F16x: 多路点轨迹模式基准对比配置（traj_modes_bench.py 输入）。
+# 给定 N 个命名位姿点（named_poses.yaml 的 poses），用 5 种轨迹模式 × 速度扫描，
+# 对比命令平滑度 + 时长 + 在线跟踪误差。
+
+# 测试点（2~6 个命名位姿，关节角从 named_poses.yaml 加载，L1-L6 取前 6）
+# 默认用 F161 真机 A/B 验证过的 3 点（home_front→home_back→home_down）。
+points: [home_front, home_back, home_down]
+
+# 轨迹模式：ptp（逐点 MoveJ）/ l1（MoveIt+blend）/ l2（梯形）/ l3（钟形）/ l1p5（保形）
+modes: [ptp, l1, l2, l3, l1p5]
+
+# 速度扫描（0~1，缩放峰值速度/加速度上限）
+speeds: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+
+# 峰值速度/加速度上限（rad/s, rad/s²）——L2/L3/L1.5 离线生成用
+vmax_rad_s: 1.5
+amax_rad_s2: 15.0
+
+# 每轮结束回 home（在线运行脚本用）
+return_home: true

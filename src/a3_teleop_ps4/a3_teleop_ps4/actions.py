@@ -475,6 +475,19 @@ class ActionExecutor:
         self._playback.call_async(req)
         self._n.get_logger().info("playback_latest -> /a3/arm/playback {name:''}")
 
+    def playback_stream(self, name: str = "modes_sweep") -> None:
+        """F16x: 长按 Triangle → 回放多模式 stream（gen_stream_modes.py 产物）。"""
+        if not self._playback.service_is_ready():
+            self._n.get_logger().warn("arm/playback not available")
+            return
+        req = PlaybackTrajectory.Request()
+        req.name = name
+        req.type = "stream"
+        self._playback.call_async(req)
+        self._n.get_logger().info(
+            f"playback_stream -> /a3/arm/playback {{type:'stream', name:'{name}'}}")
+
+
     def _play_waypoints(self, strategy: str) -> None:
         """F131: 路点任务回放（ptp=关节空间 / lin=笛卡尔直线）；服务端 kind 门禁."""
         if not self._playback.service_is_ready():

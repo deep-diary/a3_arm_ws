@@ -72,7 +72,7 @@ def generate_launch_description():
             ),
             launch_arguments={
                 "use_rviz": "false",
-                "use_target_ghost": "true",
+                "use_target_ghost": "false",  # F16x: 仿真栈屏蔽 target ghost 模型，减少发布+渲染负载，提高帧率
                 "use_gripper": use_gripper,
             }.items(),
         )
@@ -157,7 +157,8 @@ def generate_launch_description():
         )
     ])
 
-    rviz_cfg = os.path.join(desc_share, "config", "el_a3_dual_view.rviz")
+    # F16x: 仿真栈只保留单模型（el_a3_view.rviz），屏蔽 target 双模型避免卡顿。
+    rviz_cfg = os.path.join(desc_share, "config", "el_a3_view.rviz")
     # 隐藏 RANDR：本机 X RANDR 报告尺寸但零刷新率 → Ogre 视频模式表为空 →
     # possibleValues[0] 空指针解引用，rviz2 启动即崩（LL-065）。
     hide_randr_so = os.path.expanduser("~/.a3/hide_randr/libhide_randr.so")

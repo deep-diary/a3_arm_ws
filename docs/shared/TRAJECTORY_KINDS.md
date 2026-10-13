@@ -10,7 +10,7 @@
 | `continuous` | 密集录制点（手动拖动录制） | F137 几何去噪 + F68 retime + JTC 下发 | 已有 |
 | `waypoint` | 离散点序列（手动打点；blend/逐段） | pilz Sequence（blend）/ `_moveit_move`+`_lin_move` 逐段 | 已有 |
 | `stream` | 段序列（软件编排；每段 `mode/speed/sleep/via`） | `_execute_segment`（ptp/lin/via）逐段 | 已有 |
-| `cp` | 连续笛卡尔路径（软件编排；lin 折线 + circ 圆弧） | `_play_cp` → `_goto_via_smooth`/`_goto_via_lin_blend` 一条 C2 轨迹 | **F163/F164 新增** |
+| `cp` | 连续笛卡尔路径（软件编排；via 点列 + 目标一条轨迹） | `_play_cp` → `_goto_via_smooth`/`_goto_via_lin_blend` 一条 C2 轨迹 | **F163/F164 新增** |
 
 ## 非 playback kind（不在 `/a3/arm/playback` 内）
 
@@ -22,10 +22,16 @@
 
 ## 段模型（stream/cp 共用）
 
-- `stream` 段：`{target: {positions|pose}, mode: ptp|lin, speed, sleep, via:[...]}`。
-  - `via` 非空时：`mode=ptp` 走关节过点样条（`_goto_via_smooth`，C2 精确过点）；
-    `mode=lin` 走 pilz Sequence blend（`_goto_via_lin_blend`，不停车但不精确过点）。
-- `cp`：`{kind: cp, joint_names, speed, mode, via:[{pose|positions},...], target}`，一条过点样条。
+- `stream` 段：`{target: {positions|pose, exact?}, mode, speed, sleep, via:[{positions|pose, exact?}]}`。
+  - `mode`：**9 种规范名**（`arm_controller.TRAJ_MODES`）——`ptp`/`ptp_blend`/`lin_exact`/`lin_blend`/
+    `jnt_g64_quintic`/`jnt_g64_trapezoid`/`jnt_spline_bell`/`circ`/`jnt_spline_approx`；
+    旧名 `pilz/blend/l1p5/l2/l3/lin/ptp` 为**别名**（F166，`resolve_traj_mode`）。
+  - `mode: auto`：由离线 `scripts/traj_plan_auto.py` 按逐点 `exact` + 时长/平滑择优解析为具体模式；
+    运行时若仍是 auto → 保守兜底 + WARN。
+  - `exact`（F166，逐点）：该点是否**必须精确过点**（`true` → blend/圆角半径置 0）；via 默认 false、target 默认 true。
+- `cp`：`{kind: cp, joint_names, speed, mode, via:[{pose|positions},...], target}`，一条过点样条
+  （圆弧用 `mode=circ` 的 stream 段，pilz CIRC，辅助点放 `path_constraints(name=interim)`）。
+
 
 ## 文件位置
 

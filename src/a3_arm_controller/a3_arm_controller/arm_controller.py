@@ -18,6 +18,7 @@ import re
 import shutil
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
@@ -222,6 +223,213 @@ def _interpolate_via_spline(
     return [list(row) for row in out]
 
 
+def _linear_dense(via_points: List[List[float]], resample_n: int = 200) -> Optional[List[List[float]]]:
+    """稀疏 via 点 → 直线段连接 + 按段均匀重采样的稠密路径（保形，不过冲）。
+
+    L1 保形/L2 梯形用（与 cubic 样条的过冲/绕路区分）；线性插值 dq/ds 在拐角不连续，
+    但几何不过冲（真机 cubic 样条过冲达 9 rad，线性保形更稳）。
+    """
+    import numpy as np
+
+    via = np.asarray(via_points, dtype=float)
+    n, m = via.shape
+    if n < 2 or m < 1:
+        return None
+    per = max(2, int(resample_n / (n - 1)))
+    out: List[List[float]] = [list(via[0])]
+    for i in range(n - 1):
+        for k in range(1, per + 1):
+            out.append(list(via[i] + (via[i + 1] - via[i]) * (k / per)))
+    return out
+
+
+def _round_corners(
+    via_points: List[List[float]],
+    blend_r: "float | List[float]",
+    samples_per_corner: int = 20,
+) -> Optional[List[List[float]]]:
+    """F165/F166 工业 G64 连续路径：关节空间折线尖角 → 二次 Bezier 圆角（C1 连续）。
+
+    保留直线段（保形、不过冲），仅在内部顶点 V_i 切角：进入点 P_in = V_i - r·d_in、
+    离开点 P_out = V_i + r·d_out，两点间用控制点 V_i 的二次 Bezier B(t) 过渡——B 在
+    P_in/P_out 处切线分别沿 d_in/d_out（速度方向连续），消除折线尖角导致的加速度尖峰。
+    blend_r：标量（所有内部顶点统一半径）或**逐顶点列表**（长度 = 顶点数；F166 逐点 exact：
+    某顶点半径 0 → 该点**精确过点**不做圆角）。r_i = min(blend_r_i, 0.45·min(前后段长))，
+    与 pilz 自适应 blend 同口径。全 0 时原样返回。返回稀疏路径（直线段 2 端点 + 拐角密集）。
+    """
+    import numpy as np
+
+    via = np.asarray(via_points, dtype=float)
+    n, m = via.shape
+    if n < 2 or m < 1:
+        return None
+    if isinstance(blend_r, (list, tuple)):
+        rb = [float(x) for x in blend_r]
+        if len(rb) < n:
+            rb = rb + [0.0] * (n - len(rb))
+    else:
+        rb = [float(blend_r)] * n
+    if max(rb) <= 1e-6:
+        return [list(p) for p in via]
+
+    samples = max(2, int(samples_per_corner))
+    out: List[List[float]] = [list(via[0])]
+    for i in range(1, n - 1):
+        v_in = via[i] - via[i - 1]
+        v_out = via[i + 1] - via[i]
+        l_in = float(np.linalg.norm(v_in))
+        l_out = float(np.linalg.norm(v_out))
+        if l_in < 1e-9 or l_out < 1e-9:
+            out.append(list(via[i]))
+            continue
+        r = min(rb[i], 0.45 * min(l_in, l_out))
+        if r < 1e-6:
+            out.append(list(via[i]))  # 半径 0（或段太短）→ 精确过点、不切角
+            continue
+        d_in = v_in / l_in
+        d_out = v_out / l_out
+        p_in = via[i] - r * d_in
+        p_out = via[i] + r * d_out
+        for k in range(samples + 1):
+            t = k / samples
+            b = (1.0 - t) ** 2 * p_in + 2.0 * (1.0 - t) * t * via[i] + t ** 2 * p_out
+            out.append(list(b))
+    out.append(list(via[n - 1]))
+    # 去相邻重复点（固定序列可能显式重复路点；零长段会让弧长 s 出现相等相邻值，
+    # 使 _arc_eval 的 np.interp / np.gradient 产生伪尖峰）。
+    dedup: List[List[float]] = [out[0]]
+    for p in out[1:]:
+        if float(np.max(np.abs(np.asarray(p) - np.asarray(dedup[-1])))) > 1e-9:
+            dedup.append(p)
+    return dedup
+
+
+def _approx_spline(
+    via_points: List[List[float]], resample_n: int, ctrl_ratio: float = 0.7
+) -> Optional[List[List[float]]]:
+    """F166 逼近样条：夹紧端点的最小二乘 B 样条（端点精确插值、中间逼近不过点）。
+
+    与 `_interpolate_via_spline`（插值样条，**精确过所有点**、可能过冲）相对——本函数用
+    scipy `make_lsq_spline`（clamped 结点向量）拟合：控制点数 `nc < 数据点数 n`（由
+    ctrl_ratio 决定，下限 k+1=4），故为**最小二乘逼近**（中间不要求过点，更平滑、过冲小）；
+    再把首、末控制点强制设为首、末端点 → **首末精确**。n 越多逼近效果越明显（点少时逼近≈插值）。
+    n<4 或退化返回 None。
+    """
+    import numpy as np
+    from scipy.interpolate import make_lsq_spline
+
+    via = np.asarray(via_points, dtype=float)
+    n, m = via.shape
+    if n < 4 or m < 1:
+        return None
+    # 去相邻重复点
+    keep = [0]
+    for i in range(1, n):
+        if float(np.max(np.abs(via[i] - via[i - 1]))) > 1e-9:
+            keep.append(i)
+    via = via[keep]
+    n = len(via)
+    if n < 4:
+        return None
+    # 弦长参数化
+    seg = np.linalg.norm(np.diff(via, axis=0), axis=1)
+    u = np.concatenate([[0.0], np.cumsum(seg)])
+    if float(u[-1]) <= 0.0:
+        u = np.linspace(0.0, 1.0, n)
+    else:
+        u = u / u[-1]
+    k = 3
+    nc = max(k + 1, min(n, int(round(n * ctrl_ratio))))  # 控制点数 < n → 逼近（下限 4）
+    n_int = max(0, nc - k - 1)  # 内部结点数
+    interior = np.linspace(u[0], u[-1], n_int + 2)[1:-1] if n_int > 0 else np.array([])
+    t = np.concatenate([[u[0]] * (k + 1), interior, [u[-1]] * (k + 1)])
+    out = np.empty((resample_n, m))
+    grid = np.linspace(0.0, 1.0, resample_n)
+    try:
+        for j in range(m):
+            spl = make_lsq_spline(u, via[:, j], t, k=k)
+            # clamped 首末控制点 = 首末端点 → 曲线首末精确（中间为最小二乘逼近）
+            spl.c[0] = via[0, j]
+            spl.c[-1] = via[-1, j]
+            out[:, j] = spl(grid)
+    except Exception:
+        return None
+    # 采样端对齐到原端点，消除数值残差
+    out[0, :] = via[0]
+    out[-1, :] = via[-1]
+    return [list(row) for row in out]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# F166: 轨迹模式注册表（统一命名 + 抽象调度）
+#   canonical 规范名 / aliases 兼容旧名 / space 空间 / kind 执行机制
+#   / profile 软件平滑剖面 / exact 精确过点能力 / stop_each 是否逐点停
+# ═══════════════════════════════════════════════════════════════════════════
+
+@dataclass(frozen=True)
+class TrajModeSpec:
+    canonical: str
+    aliases: Tuple[str, ...]
+    space: str      # "joint" | "cartesian"
+    kind: str       # "ptp_legs"|"pilz_ptp_seq"|"pilz_lin_seq"|"lin_single"|"circ_single"|"soft_smooth"
+    profile: str    # soft_smooth 用: "l1p5"|"l2"|"l3"|"l3_fit"
+    exact: str      # "all" | "per_point" | "none"
+    stop_each: bool
+    note: str = ""
+
+
+_TRAJ_MODE_LIST: Tuple[TrajModeSpec, ...] = (
+    TrajModeSpec("ptp", (), "joint", "ptp_legs", "", "all", True,
+                 "关节 PTP 逐腿（OMPL+TOTG，逐点精确停）"),
+    TrajModeSpec("ptp_blend", ("ptp_seq",), "joint", "pilz_ptp_seq", "", "per_point", False,
+                 "关节 PTP Sequence + blend（不停车，切角）"),
+    TrajModeSpec("lin_exact", ("pilz",), "cartesian", "lin_single", "", "all", True,
+                 "笛卡尔 LIN（pilz，blend=0 逐点精确停）"),
+    TrajModeSpec("lin_blend", ("lin", "blend"), "cartesian", "pilz_lin_seq", "", "per_point", False,
+                 "笛卡尔 LIN Sequence + blend（不停车，切角）"),
+    TrajModeSpec("jnt_g64_quintic", ("l1p5",), "joint", "soft_smooth", "l1p5", "per_point", False,
+                 "G64 拐角圆滑 + quintic 加-巡-减"),
+    TrajModeSpec("jnt_g64_trapezoid", ("l2",), "joint", "soft_smooth", "l2", "per_point", False,
+                 "G64 拐角圆滑 + 梯形速度"),
+    TrajModeSpec("jnt_spline_bell", ("l3",), "joint", "soft_smooth", "l3", "all", False,
+                 "三次插值样条 + 钟形（精确过点、点间可能过冲）"),
+    TrajModeSpec("circ", (), "cartesian", "circ_single", "", "all", False,
+                 "pilz CIRC 圆弧（3 点定弧，弧过中间点）"),
+    TrajModeSpec("jnt_spline_approx", ("l3_fit",), "joint", "soft_smooth", "l3_fit", "none", False,
+                 "夹紧端点最小二乘 B 样条（首末精确、中间逼近不过点）"),
+)
+
+TRAJ_MODES: Dict[str, TrajModeSpec] = {s.canonical: s for s in _TRAJ_MODE_LIST}
+_MODE_ALIAS: Dict[str, str] = {}
+for _s in _TRAJ_MODE_LIST:
+    _MODE_ALIAS[_s.canonical] = _s.canonical
+    for _a in _s.aliases:
+        _MODE_ALIAS[_a] = _s.canonical
+
+
+def resolve_traj_mode(name: str) -> Optional[TrajModeSpec]:
+    """规范名 / 别名（大小写不敏感）→ TrajModeSpec；未知返回 None。"""
+    key = str(name or "").strip().lower()
+    return TRAJ_MODES.get(_MODE_ALIAS.get(key, ""))
+
+
+def mode_exact_ok(spec: TrajModeSpec, need_exact_pattern: List[bool]) -> bool:
+    """F166: 给定内部点的 exact 需求模式，判断该模式是否可行。
+
+    need_exact_pattern[i]=True 表示第 i 个内部 via 点必须精确过。规则：
+      * 无需任何精确点 → 任何模式可行；
+      * 全部需要精确 → exact ∈ {all, per_point} 可行（none 不可行）；
+      * 混合 → 仅 per_point 可行（all 要求每点都过、none 都不过，均不满足）。
+    """
+    if not any(need_exact_pattern):
+        return True
+    if all(need_exact_pattern):
+        return spec.exact in ("all", "per_point")
+    return spec.exact == "per_point"
+
+
+
+
 def _jerk_limited_timed_traj(
     dense: List[List[float]], vmax: float, amax: float
 ) -> Optional[Tuple[List[float], List[List[float]]]]:
@@ -291,7 +499,13 @@ def _jerk_limited_timed_traj(
                 s_t[i] = s_a + v_u * (tt - t_a)
             else:
                 u = (tt - t_a - t_c) / t_a
-                s_t[i] = s_a + s_c + s_a * (2.0 * u ** 6 - 6.0 * u ** 5 + 5.0 * u ** 4)
+                # 减速段须镜像加速段：s = (s_a+s_c) + s_a·(1 - f(1-u))，起点速度 = v（巡航
+                # 速度）、终点 0。原实现复用加速段 f(u)（f'(0)=0 → 起点速度 0），造成巡航→
+                # 减速处速度从 v 突降到 0 的假加速度尖峰（≈v/(2dt)≈50v），使缩放循环把 v
+                # 压到 ~amax/50、整条轨迹时长爆炸（F165 修复）。
+                w = 1.0 - u
+                s_t[i] = s_a + s_c + s_a * (
+                    1.0 - (2.0 * w ** 6 - 6.0 * w ** 5 + 5.0 * w ** 4))
         s_t[-1] = S
         q_t = _arc_eval(np.clip(s_t, 0.0, S))
         vel = np.gradient(q_t, t, axis=0)
@@ -422,6 +636,125 @@ def _s_curve_timed_traj(
     s_t = np.clip(np.asarray(s_t), 0.0, S)
     q_t = np.column_stack([np.interp(s_t, s, q[:, j]) for j in range(m)])
     return t, [list(row) for row in q_t]
+
+
+def _trapezoidal_timed_traj(
+    dense: List[List[float]], vmax: float, amax: float
+) -> Optional[Tuple[List[float], List[List[float]]]]:
+    """L2 梯形：dense 路径 → 纯梯形速度剖面（恒加速 → 恒速巡航 → 恒减速）重定时。
+
+    加速度方波（bang-bang，加加速度在起止为无穷脉冲），速度剖面严格梯形——工业最
+    基础梯形速度曲线。位移不足以达 vmax 时退化为三角形（无巡航段）。线性插值
+    `np.interp` 保形（避免样条过冲），缩放循环降巡航速度保证峰值 ≤ vmax/amax。
+    返回 (times, positions)，退化返回 None。
+    """
+    import numpy as np
+
+    q = np.asarray(dense, dtype=float)
+    n, m = q.shape
+    if n < 2 or m < 1:
+        return None
+    seg = np.linalg.norm(np.diff(q, axis=0), axis=1)
+    s = np.concatenate([[0.0], np.cumsum(seg)])
+    S = float(s[-1])
+    if S <= 1e-9:
+        return None
+    vmax = max(vmax, 1e-3)
+    amax = max(amax, 1e-3)
+
+    def _arc_eval(s_t: np.ndarray) -> np.ndarray:
+        return np.column_stack([np.interp(s_t, s, q[:, j]) for j in range(m)])
+
+    def _profile(S: float, v: float):
+        t_a = v / amax
+        s_a = 0.5 * v * t_a
+        if 2.0 * s_a >= S:
+            v = math.sqrt(S * amax)  # 三角形剖面（无巡航）
+            t_a = v / amax
+            s_a = 0.5 * v * t_a
+            s_c = 0.0
+        else:
+            s_c = S - 2.0 * s_a
+        t_c = s_c / v if v > 0.0 else 0.0
+        return 2.0 * t_a + t_c, t_a, s_a, s_c, t_c, v
+
+    v_u = vmax
+    for _ in range(12):
+        T, t_a, s_a, s_c, t_c, v_u = _profile(S, v_u)
+        dt = 0.01
+        n_t = max(40, int(round(T / dt)) + 1)
+        t = np.linspace(0.0, T, n_t)
+        s_t = np.zeros(n_t)
+        for i, tt in enumerate(t):
+            if tt < t_a:
+                s_t[i] = 0.5 * amax * tt * tt
+            elif tt < t_a + t_c:
+                s_t[i] = s_a + v_u * (tt - t_a)
+            else:
+                tr = T - tt
+                s_t[i] = S - 0.5 * amax * tr * tr
+        s_t[-1] = S
+        q_t = _arc_eval(np.clip(s_t, 0.0, S))
+        vel = np.gradient(q_t, t, axis=0)
+        acc = np.gradient(vel, t, axis=0)
+        vpeak = float(np.max(np.abs(vel)))
+        apeak = float(np.max(np.abs(acc)))
+        if vpeak <= vmax * 1.001 and apeak <= amax * 1.001:
+            return t.tolist(), [list(row) for row in q_t]
+        factor = max(vpeak / vmax, math.sqrt(apeak / amax))
+        v_u = v_u / max(factor, 1.05)
+        if v_u < 1e-3:
+            break
+    return t.tolist(), [list(row) for row in q_t]
+
+
+def _bell_timed_traj(
+    dense: List[List[float]], vmax: float, amax: float
+) -> Optional[Tuple[List[float], List[List[float]]]]:
+    """L3 钟形：dense 路径 → 纯 quintic 钟形速度剖面（无巡航段）重定时。
+
+    沿弧长 s(t)=S·quintic(t/T)，quintic 0→1 起止零速/零加速度，速度钟形、加速度
+    连续、加加速度连续（C2）。初始 T 用 quintic 峰值系数（vpeak=1.875·S/T、
+    apeak=5.7735·S/T²）估算，缩放循环保证 ≤ vmax/amax。线性插值 `np.interp` 保形。
+    返回 (times, positions)，退化返回 None。
+    """
+    import numpy as np
+
+    q = np.asarray(dense, dtype=float)
+    n, m = q.shape
+    if n < 3 or m < 1:
+        return None
+    seg = np.linalg.norm(np.diff(q, axis=0), axis=1)
+    s = np.concatenate([[0.0], np.cumsum(seg)])
+    S = float(s[-1])
+    if S <= 1e-9:
+        return None
+    vmax = max(vmax, 1e-3)
+    amax = max(amax, 1e-3)
+
+    def _arc_eval(s_t: np.ndarray) -> np.ndarray:
+        return np.column_stack([np.interp(s_t, s, q[:, j]) for j in range(m)])
+
+    T = max(1.875 * S / vmax, math.sqrt(5.7735 * S / amax), 0.05)
+    for _ in range(12):
+        dt = 0.01
+        n_t = max(40, int(round(T / dt)) + 1)
+        t = np.linspace(0.0, T, n_t)
+        u = t / T
+        s_t = S * (10.0 * u ** 3 - 15.0 * u ** 4 + 6.0 * u ** 5)
+        s_t[-1] = S
+        q_t = _arc_eval(np.clip(s_t, 0.0, S))
+        vel = np.gradient(q_t, t, axis=0)
+        acc = np.gradient(vel, t, axis=0)
+        vpeak = float(np.max(np.abs(vel)))
+        apeak = float(np.max(np.abs(acc)))
+        if vpeak <= vmax * 1.001 and apeak <= amax * 1.001:
+            return t.tolist(), [list(row) for row in q_t]
+        factor = max(vpeak / vmax, math.sqrt(apeak / amax))
+        T = T * max(factor, 1.05)
+        if T > 1e5:
+            break
+    return t.tolist(), [list(row) for row in q_t]
 
 
 def _finite_diff_metrics(
@@ -815,6 +1148,9 @@ class ArmController(Node):
         self.declare_parameter("goto_via_max_vel_rad_s", 0.6)
         self.declare_parameter("goto_via_max_acc_rad_s2", 2.0)
         self.declare_parameter("goto_via_resample_n", 200)
+        # F165: 工业 G64 连续路径——l1p5/l2 直线折线的 via 拐角做二次 Bezier 圆角半径
+        # （关节空间弧度）；直线段保形不变，仅切角消除加速度尖峰。<=0 关闭圆角。
+        self.declare_parameter("goto_via_corner_blend_rad", 0.15)
         self.declare_parameter("playback_ramp_duration_s", 2.5)
         # F68: 回放（ramp + 录制点）默认调 /a3/arm/retime_trajectory 做保几何重定时
         # （Ruckig jerk-limited，失败退化 TOTG）；服务不可用/失败才走旧的
@@ -3382,8 +3718,12 @@ class ArmController(Node):
         mpr.max_velocity_scaling_factor = (
             float(self.get_parameter("waypoint_lin_velocity_scaling").value)
             if velocity_scaling is None else velocity_scaling)
-        mpr.max_acceleration_scaling_factor = float(
+        # F165: 段级 speed 须同时缩放加速度——否则短距离轨迹加速度主导、速度缩放
+        # 不改变时长（pilz/blend 在 speed>=0.4 后饱和）。与 _moveit_move 同口径。
+        a_global = float(
             self.get_parameter("waypoint_lin_acceleration_scaling").value)
+        mpr.max_acceleration_scaling_factor = (
+            velocity_scaling * a_global if velocity_scaling is not None else a_global)
         mpr.goal_constraints = [constraints]
         item = MotionSequenceItem()
         item.req = mpr
@@ -3604,6 +3944,33 @@ class ArmController(Node):
                 for jn, v in zip(self._joint_names, expected_q))
             if worst < eps:
                 return True
+        return False
+
+    def _wait_joint_arrival(
+        self, target_q: Dict[str, float], timeout_s: float, eps: float = 0.02
+    ) -> bool:
+        """F16x: 等 /joint_states 实际关节追到 target_q（容差 eps rad）。
+
+        topic/fjt 直发段（_goto_via_smooth / cp）下发后是异步执行，若立即返回，
+        下一段会抢占/覆盖本段轨迹（sim_motor_node _on_traj 整条覆盖）。这里轮询
+        self._positions（订阅 /joint_states 更新）直到追到轨迹终点。
+        返回是否在 timeout_s 内到位；超时仅 WARN 不阻断（轨迹已下发成功）。
+        """
+        if not self._have_js:
+            return False
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout_s:
+            worst = 0.0
+            for jn, tv in target_q.items():
+                if jn in self._joint_names:
+                    actual = self._positions[self._joint_names.index(jn)]
+                    worst = max(worst, abs(actual - float(tv)))
+            if worst < eps:
+                return True
+            time.sleep(0.05)
+        self.get_logger().warn(
+            f"_wait_joint_arrival timeout after {timeout_s:.1f}s "
+            f"(gap > {eps:.3f} rad)")
         return False
 
     def _lin_move(
@@ -3912,12 +4279,18 @@ class ArmController(Node):
         target: Dict[str, Any],
         speed: Optional[float],
         label: str,
+        profile: str = "l1p5",
+        exact: Optional[List[bool]] = None,
     ) -> Tuple[bool, str, float]:
-        """F163: 当前位 → via 过点数组 → target 规划为一条 C2 平滑轨迹（gotoby 原语）。
+        """F163/F16x: 当前位 → via 过点数组 → target 规划为一条平滑轨迹（gotoby 原语）。
 
         via/target 可为 {"positions":[...]}（关节）或 {"pose":{position,orientation}}
         （笛卡尔，走 _solve_ik_position）。speed(0~1) 线性缩放峰值速度/加速度上限；
         None 时用 1.0（即全局 goto_via_* 上限）。中间点不停车、段末速度 0。
+        profile 选时间剖面：l1p5=线性折线+G64 圆角+quintic 加-巡-减（默认）、l2=...+梯形、
+        l3=cubic 插值样条+钟形、l3_fit=最小二乘逼近样条+quintic（F166）。
+        exact（F166，长度=len(via)）：逐 via 点是否**必须精确过点**（True→该顶点不做 G64
+        圆角）；None 表示全不精确（统一 corner_r）。端点（当前位/target）恒精确。
         返回 (成功, 说明, 运动时长秒)。失败返回 (False, msg, 0.0)，调用方回落单段 _moveit_move。
         """
         GJ = JOINTS[:6]
@@ -3952,14 +4325,42 @@ class ArmController(Node):
         via_q.append(qt)
 
         resample_n = max(20, int(self.get_parameter("goto_via_resample_n").value))
-        dense = _interpolate_via_spline(via_q, resample_n)
-        if dense is None:
-            return False, "via spline failed (too few distinct points)", 0.0
-
         spd = 1.0 if speed is None else float(speed)
         vmax = spd * float(self.get_parameter("goto_via_max_vel_rad_s").value)
         amax = spd * float(self.get_parameter("goto_via_max_acc_rad_s2").value)
-        timed = _jerk_limited_timed_traj(dense, vmax, amax)
+        # F165：l1p5/l2 的直线折线在 via 拐角是几何尖角（dq/ds 不连续），会让时间
+        # 参数化的缩放循环把整条轨迹大幅降速。按工业 G64 连续路径，仅对拐角做二次
+        # Bezier 圆角（直线段保形不变）。goto_via_corner_blend_rad<=0 关闭圆角。
+        corner_r = float(self.get_parameter("goto_via_corner_blend_rad").value)
+        # F166：逐点 exact → 逐顶点半径（0=精确过点）。via_q = [q_cur, *via, target]，
+        # 端点（下标 0 与末位）恒精确；内部顶点按 exact 标置 0 或 corner_r。
+        if exact is not None:
+            n_via = len(via)
+            radii_v = ([0.0]
+                       + [0.0 if (i < len(exact) and bool(exact[i])) else corner_r
+                          for i in range(n_via)]
+                       + [0.0])
+        else:
+            radii_v = corner_r
+
+        if profile == "l3":
+            dense = _interpolate_via_spline(via_q, resample_n)
+            timed = _bell_timed_traj(dense, vmax, amax) if dense else None
+        elif profile == "l3_fit":
+            dense = _approx_spline(via_q, resample_n)
+            if dense is None:
+                dense = _interpolate_via_spline(via_q, resample_n)  # 兜底：退回插值样条
+            timed = _jerk_limited_timed_traj(dense, vmax, amax) if dense else None
+        elif profile == "l2":
+            dense = _round_corners(via_q, radii_v)
+            if dense is None:
+                dense = _linear_dense(via_q, resample_n)  # 兜底：圆角不可用则回退直线折线
+            timed = _trapezoidal_timed_traj(dense, vmax, amax) if dense else None
+        else:  # l1p5 默认（G64 圆角 + quintic 加-巡-减）
+            dense = _round_corners(via_q, radii_v)
+            if dense is None:
+                dense = _linear_dense(via_q, resample_n)
+            timed = _jerk_limited_timed_traj(dense, vmax, amax) if dense else None
         if timed is None:
             return False, "via timing failed", 0.0
         times, tpos = timed
@@ -3981,7 +4382,12 @@ class ArmController(Node):
             return False, dmsg, 0.0
         self._set_state(STATE_TRAJ, f"{label} via")
         duration = self._traj_duration(traj)
-        self._schedule_back_to_ready(duration + 0.3)
+        # F16x 修复：topic/fjt 直发是异步的，须同步等到 /joint_states 追到轨迹
+        # 终点再返回，否则 _play_stream 下一段会抢占/覆盖本段（l1p5/l2/l3 被回程
+        # 段顶掉，实际只跑了 ~0.2s）。对齐 _goto_via_lin_blend 的同步语义。
+        target_q = dict(zip(list(traj.joint_names), list(traj.points[-1].positions)))
+        self._wait_joint_arrival(target_q, timeout_s=duration + 5.0)
+        self._schedule_back_to_ready(0.3)  # 同步已执行完，仅短缓冲
 
         metric_s = ""
         m = _finite_diff_metrics(times, tpos)
@@ -3997,11 +4403,15 @@ class ArmController(Node):
         target: Dict[str, Any],
         speed: Optional[float],
         label: str,
+        blend_radius: Optional[float] = None,
+        exact: Optional[List[bool]] = None,
     ) -> Tuple[bool, str, float]:
-        """F163: 当前位 → via 过点 → target 走 pilz LIN Sequence（blend 过中间点不停车）。
+        """F163/F16x: 当前位 → via 过点 → target 走 pilz LIN Sequence（blend 过中间点不停车）。
 
         所有 via/target 须为笛卡尔 {"pose":{position,orientation}}（lin 语义）；
-        blend 不精确过中间点（F134 语义）。返回 (成功, 说明, 运动时长秒)；
+        blend 不精确过中间点（F134 语义）。blend_radius=None 用 waypoint_blend_radius_m；
+        传 0.0 则逐点精确过点、段末停（笛卡尔 pilz 模式）。exact（F166，长度=len(via)）：
+        逐点是否必须精确过点（True→该项 blend=0 精确到位）。返回 (成功, 说明, 运动时长秒)；
         失败返回 (False, msg, 0.0)，调用方回落 _goto_via_smooth。
         """
         def pose_of(point: Dict[str, Any]) -> Optional[dict]:
@@ -4021,15 +4431,23 @@ class ArmController(Node):
             return False, "lin via target missing pose", 0.0
         poses.append(tpose)
 
-        xyz_seq = [self._fk_ee_xyz(list(self._positions))]
-        for pose in poses:
-            pos = pose["position"]
-            xyz_seq.append([float(pos["x"]), float(pos["y"]), float(pos["z"])])
-        blend = float(self.get_parameter("waypoint_blend_radius_m").value)
-        if any(x is None for x in xyz_seq):
-            radii = [blend if i < len(poses) - 1 else 0.0 for i in range(len(poses))]
+        if blend_radius is not None:
+            radii = [blend_radius if i < len(poses) - 1 else 0.0 for i in range(len(poses))]
         else:
-            radii = self._adaptive_blend_radii(xyz_seq, blend)
+            xyz_seq = [self._fk_ee_xyz(list(self._positions))]
+            for pose in poses:
+                pos = pose["position"]
+                xyz_seq.append([float(pos["x"]), float(pos["y"]), float(pos["z"])])
+            blend = float(self.get_parameter("waypoint_blend_radius_m").value)
+            if any(x is None for x in xyz_seq):
+                radii = [blend if i < len(poses) - 1 else 0.0 for i in range(len(poses))]
+            else:
+                radii = self._adaptive_blend_radii(xyz_seq, blend)
+        # F166: 逐点 exact → 该项 blend=0（精确过点）
+        if exact is not None:
+            for i in range(len(radii)):
+                if i < len(exact) and bool(exact[i]):
+                    radii[i] = 0.0
 
         items = [
             self._build_lin_sequence_item(pose, radii[i], speed)
@@ -4041,11 +4459,279 @@ class ArmController(Node):
         self._schedule_back_to_ready(0.3)  # 同步已执行完，仅短缓冲
         return True, f"{label}: via lin {len(poses)} pts, {stotal:.1f}s", stotal
 
-    def _execute_segment(self, seg: Dict[str, Any], label: str) -> Tuple[bool, str, float]:
-        """执行一个「轨迹段」：target(mode ptp/lin) + speed + sleep。
+    def _goto_via_ptp_blend(
+        self,
+        via: List[Dict[str, Any]],
+        target: Dict[str, Any],
+        speed: Optional[float],
+        label: str,
+        blend_radius: Optional[float] = None,
+        exact: Optional[List[bool]] = None,
+    ) -> Tuple[bool, str, float]:
+        """F166: 当前位 → via 过点 → target 走 pilz PTP Sequence（关节空间，blend 不停车）。
 
-        统一段模型（F162 轨迹流）：ptp=MoveIt 关节规划、lin=pilz 笛卡尔直线；
-        speed 为段级速度缩放（0~1）；sleep 为到位后停顿秒数（表达节奏）。
+        via/target 解析成关节（positions 直取；pose 走 _solve_ik_position）。逐项 pilz PTP +
+        自适应 blend 半径（F134 语义）。exact（长度=len(via)）为 True 的点 blend=0 → 精确过点。
+        返回 (成功, 说明, 运动时长秒)；失败返回 (False, msg, 0.0)。
+        """
+        GJ = JOINTS[:6]
+
+        def resolve(point: Dict[str, Any]) -> Optional[List[float]]:
+            positions = point.get("positions")
+            if positions:
+                q = [float(v) for v in positions]
+                if len(q) < 6:
+                    q = q + [0.0] * (6 - len(q))
+                return q[:6]
+            pose = point.get("pose")
+            if pose and "position" in pose:
+                return self._solve_ik_position(pose)
+            return None
+
+        chain: List[List[float]] = [
+            [self._positions[self._joint_names.index(jn)] for jn in GJ]]
+        for p in via:
+            q = resolve(p)
+            if q is None:
+                return False, "ptp_blend via IK/resolve failed", 0.0
+            chain.append(q)
+        qt = resolve(target)
+        if qt is None:
+            return False, "ptp_blend target IK/resolve failed", 0.0
+        chain.append(qt)
+
+        if blend_radius is not None:
+            radii = [blend_radius] * (len(chain) - 1)
+        else:
+            xyz_seq = [self._fk_ee_xyz(list(q)) for q in chain]
+            blend = float(self.get_parameter("waypoint_blend_radius_m").value)
+            if any(x is None for x in xyz_seq):
+                radii = [blend] * (len(chain) - 1)
+            else:
+                radii = self._adaptive_blend_radii(xyz_seq, blend)
+        if exact is not None:
+            for i in range(len(radii)):
+                if i < len(exact) and bool(exact[i]):
+                    radii[i] = 0.0
+        radii[-1] = 0.0  # 末项恒精确停
+
+        v_s = 1.0 if speed is None else float(speed)
+        a_global = float(self.get_parameter("moveit_acceleration_scaling").value)
+        items = [
+            self._build_ptp_sequence_item(
+                chain[i + 1][:6], radii[i], v_scale=v_s, a_scale=v_s * a_global)
+            for i in range(len(chain) - 1)]
+        ok, stotal, smsg = self._sequence_move_group(items, f"via ptp {label}")
+        if not ok:
+            return False, smsg, 0.0
+        self._schedule_back_to_ready(0.3)
+        return True, f"{label}: via ptp {len(chain) - 1} legs, {stotal:.1f}s", stotal
+
+    def _circ_move(
+        self,
+        aux: Dict[str, Any],
+        target: Dict[str, Any],
+        speed: Optional[float],
+        label: str,
+    ) -> Tuple[bool, float, str]:
+        """F166: CIRC 圆弧 —— 起点=当前 TCP、辅助点=aux、终点=target，pilz CIRC 规划。
+
+        pilz CIRC 约定：goal_constraints 需含**两个**笛卡尔约束，[0]=辅助(中间)点、[1]=目标点。
+        失败不回落（圆弧语义，与 LIN 一致）。返回 (成功, 时长s, 说明)。
+        """
+        if not self._moveit_cli.server_is_ready():
+            ready_deadline = time.monotonic() + 0.5
+            while time.monotonic() < ready_deadline and not self._moveit_cli.server_is_ready():
+                time.sleep(0.02)
+        if not self._moveit_cli.server_is_ready():
+            return False, 0.0, "move_group action unavailable"
+
+        def pose_of(p: Dict[str, Any]) -> Optional[dict]:
+            pose = p.get("pose")
+            if pose and "position" in pose and "orientation" in pose:
+                return pose
+            return None
+
+        p_aux, p_goal = pose_of(aux), pose_of(target)
+        if p_aux is None or p_goal is None:
+            return False, 0.0, "circ needs pose (position+orientation) for aux & target"
+
+        pos_tol = float(self.get_parameter("waypoint_lin_pos_tol_m").value)
+        rot_tol = float(self.get_parameter("waypoint_lin_rot_tol_rad").value)
+
+        def constraint_of(pose: dict, box_m: float) -> Constraints:
+            pos = pose.get("position") or {}
+            ori = pose.get("orientation") or {}
+            tp = Pose()
+            tp.position.x = float(pos["x"])
+            tp.position.y = float(pos["y"])
+            tp.position.z = float(pos["z"])
+            tp.orientation.x = float(ori["x"])
+            tp.orientation.y = float(ori["y"])
+            tp.orientation.z = float(ori["z"])
+            tp.orientation.w = float(ori["w"])
+            box = SolidPrimitive(type=SolidPrimitive.BOX, dimensions=[box_m] * 3)
+            pc = PositionConstraint()
+            pc.header.frame_id = str(self.get_parameter("waypoint_base_link").value)
+            pc.link_name = str(self.get_parameter("waypoint_ee_link").value)
+            pc.constraint_region.primitives = [box]
+            pc.constraint_region.primitive_poses = [tp]
+            oc = OrientationConstraint()
+            oc.header = pc.header
+            oc.orientation = tp.orientation
+            oc.link_name = pc.link_name
+            oc.absolute_x_axis_tolerance = rot_tol
+            oc.absolute_y_axis_tolerance = rot_tol
+            oc.absolute_z_axis_tolerance = rot_tol
+            oc.weight = 1.0
+            c = Constraints()
+            c.position_constraints = [pc]
+            c.orientation_constraints = [oc]
+            return c
+
+        goal = MoveGroup.Goal()
+        mpr = MotionPlanRequest()
+        mpr.group_name = str(self.get_parameter("waypoint_lin_planning_group").value)
+        mpr.pipeline_id = "pilz"
+        mpr.planner_id = "CIRC"
+        mpr.num_planning_attempts = int(self.get_parameter("moveit_num_planning_attempts").value)
+        mpr.allowed_planning_time = float(
+            self.get_parameter("moveit_allowed_planning_time_s").value)
+        vs = (float(speed) if speed is not None
+              else float(self.get_parameter("waypoint_lin_velocity_scaling").value))
+        a_global = float(self.get_parameter("waypoint_lin_acceleration_scaling").value)
+        mpr.max_velocity_scaling_factor = vs
+        mpr.max_acceleration_scaling_factor = vs * a_global if speed is not None else a_global
+        # pilz CIRC：goal_constraints = 目标点（恰好 1 个）；辅助(中间)点放 path_constraints，
+        #   且该约束**名必须是 "interim"**（或 "center"）——否则 CIRC 报
+        #   "No path constraint named interim/center found"（INVALID_MOTION_PLAN）。
+        #   辅助点：只给位置，且用**大包围盒**——path_constraints 会被 MoveGroup 沿整条弧
+        #   校验位置/姿态，小盒或带姿态约束会因弧上偏离而报 violated；pilz CIRC 只取该约束
+        #   的位姿点定义圆，盒大小不影响其几何。
+        mpr.goal_constraints = [constraint_of(p_goal, pos_tol)]
+        aux_c = constraint_of(p_aux, 1.0)
+        aux_c.orientation_constraints = []
+        aux_c.position_constraints[0].constraint_region.primitives[0].dimensions = [1.0] * 3
+        aux_c.name = "interim"
+        mpr.path_constraints = aux_c
+        goal.request = mpr
+        goal.planning_options = PlanningOptions()
+
+        timeout_s = float(self.get_parameter("moveit_goto_timeout_s").value)
+        seg_timeout = float(self.get_parameter("waypoint_segment_timeout_s").value)
+        if seg_timeout > 0.0:
+            timeout_s = seg_timeout
+        t0 = time.monotonic()
+        send_future = self._moveit_cli.send_goal_async(goal)
+        if not self._wait_future(send_future, timeout_s):
+            return False, 0.0, "move_group send timeout"
+        goal_handle = send_future.result()
+        if not goal_handle.accepted:
+            return False, 0.0, "move_group goal rejected (CIRC)"
+        self._publish_mode("TRAJ_RUNNING")
+        self._set_state(STATE_TRAJ, f"{label} (planning CIRC)")
+
+        result_future = goal_handle.get_result_async()
+        remaining = max(0.1, timeout_s - (time.monotonic() - t0))
+        if not self._wait_future(result_future, remaining):
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"{label}: result timeout")
+            return False, 0.0, "move_group result timeout"
+        result = result_future.result().result
+        if result.error_code.val != MoveItErrorCodes.SUCCESS:
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"{label}: error {result.error_code.val}")
+            return False, 0.0, f"pilz CIRC error_code={result.error_code.val} (no fallback)"
+        rt = result.executed_trajectory
+        if not rt.joint_trajectory.points:
+            rt = result.planned_trajectory
+        pts = rt.joint_trajectory.points
+        if not pts:
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"{label}: empty trajectory")
+            return False, 0.0, "pilz CIRC returned empty trajectory"
+        last = pts[-1]
+        duration = float(last.time_from_start.sec) + float(last.time_from_start.nanosec) * 1e-9
+        duration = max(duration, 0.1)
+        self._duty_record(duration)
+        return True, duration, f"{label}: CIRC {len(pts)} pts, {duration:.1f}s"
+
+    def _plan_single(self, spec, target: Dict[str, Any], speed, label: str):
+        """单腿（无 via）：按 spec.space 走笛卡尔 _lin_move 或关节 _moveit_move。"""
+        if spec.space == "cartesian":
+            pose = target.get("pose")
+            if not pose or "position" not in pose:
+                return False, f"{label}: cartesian segment missing pose", 0.0
+            ok, dur, msg = self._lin_move(
+                pose, label, gate_q=None, velocity_scaling=speed)
+            return ok, msg, dur
+        positions = target.get("positions")
+        if positions:
+            q = [float(v) for v in positions]
+        else:
+            pose = target.get("pose")
+            if not pose or "position" not in pose:
+                return False, f"{label}: target missing positions/pose", 0.0
+            q6 = self._solve_ik_position(pose)
+            if q6 is None:
+                return False, f"{label}: pose IK failed", 0.0
+            q = q6 + [0.0]
+        if len(q) < self._n_joints:
+            q = q + [0.0] * (self._n_joints - len(q))
+        ok, dur, msg = self._moveit_move(
+            q[:6], JOINTS[:6], label, velocity_scaling=speed)
+        if ok and self._n_joints >= 7:
+            self._dispatch_l7_linear(q[6])
+        return ok, msg, dur
+
+    def _plan_mode(
+        self, spec: "TrajModeSpec", via: List[Dict[str, Any]],
+        target: Dict[str, Any], speed, label: str, exact: List[bool],
+    ) -> Tuple[bool, str, float]:
+        """F166 统一分派：按 spec.kind 执行「当前位 → via → target」段，返回 (ok, msg, dur)。
+
+        新增/切换模式只需在 TRAJ_MODES 加一条注册（+ 对应 kind 实现），调用方无需改动。
+        """
+        k = spec.kind
+        if k == "ptp_legs" and via:
+            # 历史兼容：`mode: ptp` + via 旧行为=关节 G64 过点（等价 jnt_g64_quintic）；
+            # 真「逐腿停」用多个无 via 的 ptp 段表达（每段 _plan_single）。
+            return self._goto_via_smooth(
+                via, target, speed, label, profile="l1p5", exact=exact)
+        if not via:
+            return self._plan_single(spec, target, speed, label)
+        if k == "pilz_ptp_seq":
+            return self._goto_via_ptp_blend(via, target, speed, label, exact=exact)
+        if k == "pilz_lin_seq":
+            return self._goto_via_lin_blend(via, target, speed, label, exact=exact)
+        if k == "lin_single":
+            return self._goto_via_lin_blend(
+                via, target, speed, label, blend_radius=0.0, exact=exact)
+        if k == "circ_single":
+            if len(via) != 1:
+                return False, f"{label}: circ needs exactly 1 via (auxiliary point)", 0.0
+            ok, dur, msg = self._circ_move(via[0], target, speed, label)
+            return ok, msg, dur
+        if k == "soft_smooth":
+            return self._goto_via_smooth(
+                via, target, speed, label, profile=spec.profile, exact=exact)
+        return False, f"unhandled mode kind '{k}'", 0.0
+
+    def _auto_fallback_spec(self, via: List[Dict[str, Any]]) -> "TrajModeSpec":
+        """F166: `mode: auto` 的运行时保守兜底（正式应由离线 traj_plan_auto.py 解析）。
+
+        全 via 点 exact → jnt_spline_bell（精确过点）；否则 jnt_g64_trapezoid（per_point 切角）。
+        """
+        if via and all(bool(p.get("exact", False)) for p in via):
+            return TRAJ_MODES["jnt_spline_bell"]
+        return TRAJ_MODES["jnt_g64_trapezoid"]
+
+    def _execute_segment(self, seg: Dict[str, Any], label: str) -> Tuple[bool, str, float]:
+        """执行一个「轨迹段」（F166 统一模式分派）。
+
+        段模型：{target, mode, speed, sleep, via:[{positions|pose, exact}]}。
+        mode 为规范名/别名（`TRAJ_MODES`）；'auto' 运行时保守兜底（正式由离线
+        `scripts/traj_plan_auto.py` 解析为具体模式）。exact=该点是否必须精确过点。
         返回 (成功, 说明, 运行时长秒 = 运动时长 + sleep)。
         """
         target = seg.get("target") or {}
@@ -4054,52 +4740,26 @@ class ArmController(Node):
         if speed is not None:
             speed = float(speed)
         sleep_s = float(seg.get("sleep") or 0.0)
-        dur = 0.0
+        via = list(seg.get("via") or [])
 
-        # F163: 过点段——当前位 → via 中间点数组 → target 一条平滑轨迹（中间点不停车）。
-        # mode=ptp（默认）：关节过点样条（C2，精确过点）；mode=lin：pilz LIN blend（不停车不精确过点）。
-        via = seg.get("via")
-        if via:
-            if mode == "lin":
-                ok, msg, vdur = self._goto_via_lin_blend(list(via), target, speed, label)
+        spec = resolve_traj_mode(mode)
+        if spec is None:
+            if mode == "auto":
+                spec = self._auto_fallback_spec(via)
+                self.get_logger().warn(
+                    f"mode=auto 运行时兜底为 '{spec.canonical}' —— "
+                    "建议先跑 scripts/traj_plan_auto.py 离线解析")
             else:
-                ok, msg, vdur = self._goto_via_smooth(list(via), target, speed, label)
-            if ok and sleep_s > 0.0:
-                time.sleep(sleep_s)
-            return ok, msg, vdur + sleep_s
+                return False, (
+                    f"unknown mode '{mode}' (have: {sorted(TRAJ_MODES)})"), 0.0
+        exact = [bool(p.get("exact", False)) for p in via]
 
-        if mode == "lin":
-            pose = target.get("pose")
-            if not pose or "position" not in pose:
-                return False, "lin segment missing pose", 0.0
-            # LIN 保持姿态（pilz 需要 6D 目标）；姿态自由的弹琴走 mode=ptp。
-            ok, dur, msg = self._lin_move(
-                pose, label, gate_q=None, velocity_scaling=speed)
-        else:
-            positions = target.get("positions")
-            if positions:
-                q = [float(v) for v in positions]
-            else:
-                pose = target.get("pose")
-                if not pose or "position" not in pose:
-                    return False, "ptp segment missing positions/pose", 0.0
-                # 笛卡尔目标 → position-only IK 转关节（姿态自由，规避 6D 不可达）
-                q6 = self._solve_ik_position(pose)
-                if q6 is None:
-                    return False, "ptp pose IK failed", 0.0
-                q = q6 + [0.0]
-            if len(q) < self._n_joints:
-                q = q + [0.0] * (self._n_joints - len(q))
-            ok, dur, msg = self._moveit_move(
-                q[:6], JOINTS[:6], label, velocity_scaling=speed)
-            if ok and self._n_joints >= 7:
-                self._dispatch_l7_linear(q[6])
-
+        ok, msg, vdur = self._plan_mode(spec, via, target, speed, label, exact)
         if not ok:
             return False, msg, 0.0
         if sleep_s > 0.0:
             time.sleep(sleep_s)
-        return True, msg, dur + sleep_s
+        return True, msg, vdur + sleep_s
 
     def _expand_relative(self, data: dict) -> Tuple[bool, str]:
         """F16x: 相对位置展开——frame=relative 时，把每个 target/via 的 pose.position

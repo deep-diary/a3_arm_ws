@@ -48,6 +48,7 @@ docs/
 │   ├── STATE_MACHINE.md       编排层状态机（指令×状态矩阵）
 │   ├── QUICKSTART.md
 │   ├── PS4_OPERATOR_GUIDE.md  PS4 手柄操作员手册（F60/F64 键位/五色灯/震动）
+│   ├── TRAJECTORY_MODE_SELECTION.md  轨迹规划模式选型指南（F165：G64 圆角/模式对比/推荐器）
 │   ├── ROS_COMMANDS.md        ROS 命令速查（source/构建/launch/服务/排障）
 │   └── PLATFORM_CAN.md
 ├── cloud_edge/               A3 CloudEdge 支线
@@ -77,11 +78,12 @@ docs/
 | 文档 | 说明 |
 |------|------|
 | [edge/REQUIREMENTS.md](edge/REQUIREMENTS.md) | 边缘全栈需求（总览 + 索引，正文在 requirements/） |
-| [edge/requirements/](edge/requirements/) | 需求正文 F###-slug.md（一条一文件，F1–F160） |
+| [edge/requirements/](edge/requirements/) | 需求正文 F###-slug.md（一条一文件，F1–F166） |
 | [edge/ARCHITECTURE.md](edge/ARCHITECTURE.md) | 运行时分层与数据流 |
 | [edge/STATE_MACHINE.md](edge/STATE_MACHINE.md) | 编排层状态机（11 态 + 指令×状态×模式矩阵，F53） |
 | [edge/QUICKSTART.md](edge/QUICKSTART.md) | 真机快速上手清单 |
 | [edge/PS4_OPERATOR_GUIDE.md](edge/PS4_OPERATOR_GUIDE.md) | PS4 操作员手册：流程、五色灯、震动（F60/F64） |
+| [edge/TRAJECTORY_MODE_SELECTION.md](edge/TRAJECTORY_MODE_SELECTION.md) | 轨迹规划模式选型指南（F165/F166：9 模式注册表、G64 圆角、逐点 exact、离线 auto 规划） |
 | [edge/ROS_COMMANDS.md](edge/ROS_COMMANDS.md) | ROS 命令速查：source/构建/launch/服务/排障 |
 | [edge/PLATFORM_CAN.md](edge/PLATFORM_CAN.md) | RK3588 SocketCAN 上板配置 |
 

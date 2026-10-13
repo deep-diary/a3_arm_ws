@@ -5,9 +5,7 @@ Panels:
     Property Tree Widget:
       Expanded:
         - /ArmTarget_目标1
-        - /ArmTarget_目标1/Status1
         - /TF1
-        - /TF1/Status1
       Splitter Ratio: 0.5
     Tree Height: 1078
   - Class: rviz_common/Views
@@ -289,18 +287,18 @@ Visualization Manager:
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.06734233349561691
-        Y: 0.08941935747861862
-        Z: 0.09669988602399826
+        X: 0.00328829325735569
+        Y: 0.09831425547599792
+        Z: 0.2285507768392563
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.12500007450580597
+      Pitch: 0.4897964298725128
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 2.125
+      Yaw: 5.588184356689453
     Saved: ~
 Window Geometry:
   Displays:

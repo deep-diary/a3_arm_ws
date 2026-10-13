@@ -324,6 +324,8 @@ flowchart LR
 | 样条插值（JTC 语义） | ✅ JTC | ✅ F15 | Wave B / C2 增强 | F15 |
 | 多路点轨迹平滑（blend → 过点样条+retime，C2 连续） | ※ pilz blend（L1） | ✅ F161（过点样条 + jerk-limited quintic 时间重参数化，j_rms 降 ×10.4）；F134 blend 为回退链 | Wave B 增强 | F161 / F134 / F137 / F68 |
 | 连续笛卡尔路径（cp：lin 折线 + circ 圆弧） | ※ pilz LIN | ✅ F163/F164（`_goto_via_smooth`/`_goto_via_lin_blend` 一条 C2 轨迹） | Wave B 增强 | [TRAJECTORY_KINDS.md](TRAJECTORY_KINDS.md) |
+| 拐角圆滑（G64 连续路径）与规划模式选型 | ※ 商用控制器 G64 | ✅ F165（关节折线拐角二次 Bezier 圆角 `_round_corners`，直线保形、消除拐角加速度尖峰；修 `_jerk_limited_timed_traj` 减速段速度不连续 + 段级 speed 同步缩放加速度） | Wave B 增强 | [../edge/TRAJECTORY_MODE_SELECTION.md](../edge/TRAJECTORY_MODE_SELECTION.md) |
+| 轨迹模式注册表 + CIRC 圆弧 + 逼近样条 + 自动选型 | ※ KUKA CIRC/SPLINE | ✅ F166（9 模式统一注册表 `arm_controller.TRAJ_MODES` + `resolve_traj_mode` 抽象调度；`circ`=pilz CIRC 圆弧；`jnt_spline_approx`=scipy 夹紧端点最小二乘 B 样条；stream 逐点 `exact` + `mode:auto` 离线择优 `traj_plan_auto.py`） | Wave B 增强 | [../edge/TRAJECTORY_MODE_SELECTION.md](../edge/TRAJECTORY_MODE_SELECTION.md) |
 | 防晃运输（slosh-free 轨迹） | ❌ | ❌（**对标缺口**：光靠 jerk-limited 只能减弱不能消除；需输入整形 ZV/ZVD + 球摆模型前馈） | Wave B 之后 | [TRAJECTORY_KINDS.md](TRAJECTORY_KINDS.md) |
 | 主从示教 | 🔜 | ❌ | Wave B | C6 |
 | 末端六维力 / 导纳 | ❌ | ❌ | 硬件后 | C8 |

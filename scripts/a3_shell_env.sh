@@ -59,6 +59,12 @@ unset _a3_nounset
 
 export PYTHONNOUSERSITE=1
 
+# LL-152：pip 装 matplotlib 把 numpy 2.2.6 装进 /usr/local/lib/python3.10/dist-packages
+# （sys.path 优先级高于系统 /usr/lib/python3/dist-packages 的 1.21.5），导致
+# pinocchio/scipy（针对 numpy 1.x ABI 编译）import 崩溃（_ARRAY_API not found）。
+# PYTHONNOUSERSITE 只避开 ~/.local，覆盖不到 /usr/local 的污染 → 强制系统 numpy 优先。
+export PYTHONPATH="/usr/lib/python3/dist-packages:${PYTHONPATH:-}"
+
 if [ -z "${A3_KEEP_DISPLAY:-}" ] && [ -S /tmp/.X11-unix/X0 ]; then
   export DISPLAY=:0
 fi

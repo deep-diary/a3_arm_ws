@@ -61,9 +61,14 @@ buttons:
     edge: longpress
     hold_s: 1.0
   triangle:
-    fn: goto_named_pose
-    kwargs: {name: home}
-    edge: rising
+    # F16x: 短按=home（F120 保留）；长按 1.5s=回放多模式 stream（gen_stream_modes.py 产物，5 模式×4 速度对比）
+    - fn: goto_named_pose
+      kwargs: {name: home}
+      edge: shortpress
+      hold_s: 1.5
+    - fn: playback_stream
+      edge: longpress
+      hold_s: 1.5
   circle:
     # F131: 短按=idle 位姿；长按 1.5s=路点 LIN 直线回放（触摸板单击手势实测可靠后将并存）
     - fn: goto_named_pose

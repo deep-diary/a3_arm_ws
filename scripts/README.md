@@ -32,6 +32,15 @@
 | `mit_noenable_stream.py` | MIT 电机 CAN 无使能探测 + 零增益流式工具（纯标准库，无 ROS） | `python3 scripts/mit_noenable_stream.py probe --iface can1 --ids 1..7` |
 | `traj_smoothness_calibration.py` | F136 轨迹平滑度标定脚手架：标准 quintic 轨迹 vs 录制轨迹 + 指标 J + 参数扫描（离线，无 ROS） | `python3 scripts/traj_smoothness_calibration.py --scan v_scaling` |
 | `traj_smooth.py` | F137 录制轨迹几何去噪 + 平滑重规划：逐关节五次 B 样条光顺 + quintic 重定时，三列对比 + ε 扫描 + 报告（离线） | `python3 scripts/traj_smooth.py --dir ~/.a3/trajectories --latest 3 --eps 0.01` |
+| `melodion_bake.py` | 口风琴 stream 预烘焙：把逐段 via 关节轨迹算好存 `<name>.yaml.baked.yaml`，playback 直接下发跳过实时 IK+重定时 | `python3 scripts/melodion_bake.py --stream scale` |
+| `melodion_impact_eval.py` | 口风琴跨键冲击评估（approach/速度 vs j_rms/a_rms/时长） | `python3 scripts/melodion_impact_eval.py` |
+| `melodion_speed_diag.py` | 口风琴跨键 via 关节空间 nominal 时长扫参（approach/vmax/amax） | `python3 scripts/melodion_speed_diag.py` |
+| `traj_modes_bench.py` | 多路点轨迹模式基准（离线）：ptp/L1/L2/L3/L1.5 × 速度，命令平滑度 j_rms/a_rms + 时长 + SVG/MD | `python3 scripts/traj_modes_bench.py --config src/a3_arm_controller/config/traj_modes_bench.yaml` |
+| `gen_stream_modes.py` | 路点轨迹 → 多模式 stream 生成器（离线，不触发运动）：读 waypoints/latest.yaml 取前 6 点，生成 **9 模式**(ptp/ptp_blend/lin_exact/lin_blend/jnt_g64_quintic/jnt_g64_trapezoid/jnt_spline_bell/circ/jnt_spline_approx)×N 速度的 stream（段间自动回起点） | `python3 scripts/gen_stream_modes.py [--speeds 0.4 0.8] [--modes ptp circ] [--out <path>]` |
+| `traj_mode_recommend.py` | F165 轨迹模式离线推荐器：给定轨迹算各模式时长/a_rms/j_rms/过冲 + 推荐（最快/最平滑 + 场景提示） | `python3 scripts/traj_mode_recommend.py --poses home_up,home_front,...` |
+| `traj_plan_auto.py` | F166 离线 auto 规划器：读含逐点 `exact` + `mode:auto` 的规划配置 → 按 exact 筛可行模式 → 时长/平滑加权择优 → 写最终 stream + 报告 | `python3 scripts/traj_plan_auto.py --config <plan.yaml> [--w-dur 0.5 --w-j 0.5]` |
+| `a3_test/traj_modes_tcp_capture.py` | 9 模式 TCP 轨迹在线采集：逐模式回放 + 录 `/joint_states` → JSON | `python3 scripts/a3_test/traj_modes_tcp_capture.py --speed 0.4` |
+| `a3_test/traj_modes_tcp_report.py` | 9 模式 TCP 对比报告：FK 到末端 → 位置（等比例 y-z）/速度/加速度 3 张 SVG + 距直线折线偏差 MD | `python3 scripts/a3_test/traj_modes_tcp_report.py --run /tmp/traj_modes_tcp.json` |
 
 ## 桥接/工具
 

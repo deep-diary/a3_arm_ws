@@ -186,6 +186,8 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 | F162 | 机械臂弹奏口风琴（app_melodion：键位合并+弹奏几何+曲谱+Pinocchio IK+直发轨迹） | implemented | 功能 | [requirements/F162-melodion-playing.md](requirements/F162-melodion-playing.md) |
 | F163 | 轨迹段 via 过点：单条 C2 平滑轨迹跨键过渡（gotoby 原语，stream 段加 via 数组） | implemented | 功能 | [requirements/F163-via-point-smooth-transition.md](requirements/F163-via-point-smooth-transition.md) |
 | F164 | 连续笛卡尔路径（cp）轨迹 kind：lin 折线 + circ 圆弧，一条过点样条 | implemented | 功能 | [requirements/F164-cp-cartesian-path-kind.md](requirements/F164-cp-cartesian-path-kind.md) |
+| F165 | 轨迹规划模式工业级优化与智能选型（G64 拐角圆滑 + 速度梯度验证 + 离线推荐器） | implemented | 功能 | [requirements/F165-trajectory-mode-industrial-optimization.md](requirements/F165-trajectory-mode-industrial-optimization.md) |
+| F166 | 轨迹规划 9 模式：抽象注册表（含 CIRC 圆弧/逼近样条）+ 逐点 exact + 离线 auto 规划 | implemented | 功能 | [requirements/F166-trajectory-mode-registry-9mode-auto.md](requirements/F166-trajectory-mode-registry-9mode-auto.md) |
 
 ## 非功能需求
 

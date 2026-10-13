@@ -97,6 +97,10 @@ functions:
     kind: discrete
     description: 'F131 Circle 长按 1.5s / 触摸板单击: 路点笛卡尔直线回放 {type:"waypoint", strategy:"lin"}；直线跨奇异/超限即拒，不回落 PTP'
 
+  playback_stream:
+    kind: discrete
+    description: 'F16x Triangle 长按 1.5s: 回放多模式 stream {type:"stream", name:"modes_sweep"}（gen_stream_modes.py 产物，5 模式×4 速度对比）'
+
   random_pose_tour:
     kind: discrete
     description: 'F116 Options 长按 3s: Call /a3/arm/random_pose_tour（READY 态抽命名点逐点 MoveIt 巡游；可选 kwargs count/seed）'
