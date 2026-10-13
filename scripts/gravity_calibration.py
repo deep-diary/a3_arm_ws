@@ -295,7 +295,7 @@ def _urdf_initial(model, jids: dict) -> np.ndarray:
 
 
 def predict_gravity(model, data, q7: np.ndarray, params: Optional[np.ndarray] = None) -> np.ndarray:
-    """rnea 静态重力：返回 7 维力矩。params 非空时原地改写惯性算完还原。"""
+    """rnea 静态重力：返回 len(q7) 维力矩（6 或 7 关节）。params 非空时原地改写惯性算完还原。"""
     import pinocchio as pin  # 延迟导入，供无 ROS 环境冒烟
 
     saved = None
@@ -317,7 +317,7 @@ def predict_gravity(model, data, q7: np.ndarray, params: Optional[np.ndarray] = 
             for jid, mass, lever in saved:
                 model.inertias[jid].mass = mass
                 model.inertias[jid].lever = lever
-    return np.asarray(tau)[:7]
+    return np.asarray(tau)[: len(q7)]
 
 
 def fit_inertia(model, records, fix_masses: bool = False) -> Tuple[dict, float, float]:
@@ -590,8 +590,8 @@ class GravityCalibrator:
         signs = getattr(args, "joint_signs", None)
         if signs:
             s = np.array([float(x) for x in str(signs).split(",")])
-            if len(s) != 7 or not np.all(np.isin(s, (-1.0, 1.0))):
-                raise SystemExit(f"--joint-signs 需要 7 个 ±1，收到 {signs}")
+            if len(s) != len(JOINT_NAMES) or not np.all(np.isin(s, (-1.0, 1.0))):
+                raise SystemExit(f"--joint-signs 需要 {len(JOINT_NAMES)} 个 ±1，收到 {signs}")
             self.signs = s
         else:
             self.signs = JOINT_SIGNS.copy()
@@ -628,7 +628,7 @@ class GravityCalibrator:
 
         def on_status(msg: ArmStatus):
             self.arm_state = msg.state
-            if len(msg.temperatures) == 7:
+            if len(msg.temperatures) == len(JOINT_NAMES):
                 self.temps = np.array(msg.temperatures)
 
         self.node.create_subscription(ArmStatus, "/a3/arm_status", on_status, 10)
@@ -808,9 +808,9 @@ class GravityCalibrator:
             try:
                 anchors.append([float(x) for x in raw.split(",")])
             except ValueError:
-                print(f"  WARN: 无法解析 anchor '{raw}'（需 7 个逗号分隔浮点），跳过")
+                print(f"  WARN: 无法解析 anchor '{raw}'（需 {len(JOINT_NAMES)} 个逗号分隔浮点），跳过")
         for a in anchors:
-            if len(a) == 7 and not any(np.allclose(a, c, atol=0.05) for c in test_configs):
+            if len(a) == len(JOINT_NAMES) and not any(np.allclose(a, c, atol=0.05) for c in test_configs):
                 test_configs.append(a)
         if anchors:
             tag = "无 rest（--no-rest-anchor）" if self.args.no_rest_anchor else "含 rest"
@@ -822,7 +822,7 @@ class GravityCalibrator:
             filtered = []
             for cfg in test_configs:
                 q = np.zeros(self.model.nq)
-                q[:7] = cfg
+                q[: len(cfg)] = cfg
                 tau = self.pin.computeGeneralizedGravity(self.model, self.data, q)
                 if np.max(np.abs(tau[1:6])) > self.config.torque_skip:
                     print(f"  [skip] 预测 τ 超 {self.config.torque_skip} Nm: {cfg}")
@@ -948,9 +948,9 @@ class GravityCalibrator:
         # URDF 域才能和 pinocchio 的 τ_g 比；仿真 sim_motor_node 直接发 URDF 域。
         # 数据文件 meta 里注明的域优先于命令行（--optimize-only 读旧文件时不会搞错）。
         domain = (meta or {}).get("effort_domain") or self.args.effort_domain
-        signs = self.signs if domain == "motor" else np.ones(7)
+        signs = self.signs if domain == "motor" else np.ones(len(JOINT_NAMES))
         if domain == "motor":
-            flips = [JOINT_NAMES[i] for i in range(7) if signs[i] < 0]
+            flips = [JOINT_NAMES[i] for i in range(len(JOINT_NAMES)) if signs[i] < 0]
             print(f"effort 域：motor → ×joint_signs 转 URDF 域（翻转 {flips}）")
         self.records = [(np.array(r["position"]), np.array(r["effort"]) * signs)
                         for r in records]
@@ -992,6 +992,8 @@ class GravityCalibrator:
 def main():
     parser = argparse.ArgumentParser(description="F49 7J gravity calibration (官方复刻)")
     parser.add_argument("--mode", default="full", choices=["quick", "full", "high", "ultra"])
+    parser.add_argument("--joints", type=int, default=7, choices=[6, 7],
+                        help="关节数：7=含 L7 夹爪（默认，行为不变）；6=拆掉夹爪的产品 6J 档（L1–L6）")
     parser.add_argument("--start", type=int, default=None, help="断点续采起始下标")
     parser.add_argument("--restart", action="store_true", help="清数据重来")
     parser.add_argument("--optimize-only", action="store_true", help="只拟合不采集")
@@ -1026,6 +1028,16 @@ def main():
                              "（须与 a3_can_bridge/config/control_gains.yaml 一致）")
     args = parser.parse_args()
 
+    # 关节档位（F169）：7=默认 L1–L7；6=产品 6J 档（拆掉夹爪）。据此重设全局
+    # JOINT_NAMES/JOINT_SIGNS 与 home/rest 位姿长度，其余逻辑按 len 自适应。
+    global JOINT_NAMES, JOINT_SIGNS
+    n = int(args.joints)
+    if n not in (6, 7):
+        raise SystemExit(f"--joints 只支持 6 或 7，收到 {n}")
+    JOINT_NAMES = [f"L{i}_joint" for i in range(1, n + 1)]
+    JOINT_SIGNS = JOINT_SIGNS[:n]
+    print(f"关节档位：{n}（{JOINT_NAMES}）")
+
     if args.urdf is None:
         from ament_index_python.packages import get_package_share_directory
         args.urdf = os.path.join(
@@ -1044,6 +1056,9 @@ def main():
         temp_pause_c=args.temp_pause,
         temp_resume_c=args.temp_resume,
     )
+    # 网格基位/降温位默认按 7 关节定义（L7=0）；6J 档截到 n（L7 本就恒 0，丢弃无影响）。
+    config.home_position = config.home_position[:n]
+    config.rest_pose = config.rest_pose[:n]
 
     cal = GravityCalibrator(config, args)
     if not cal.init_pinocchio():

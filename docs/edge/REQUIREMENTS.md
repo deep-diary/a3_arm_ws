@@ -189,6 +189,8 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 | F165 | 轨迹规划模式工业级优化与智能选型（G64 拐角圆滑 + 速度梯度验证 + 离线推荐器） | implemented | 功能 | [requirements/F165-trajectory-mode-industrial-optimization.md](requirements/F165-trajectory-mode-industrial-optimization.md) |
 | F166 | 轨迹规划 9 模式：抽象注册表（含 CIRC 圆弧/逼近样条）+ 逐点 exact + 离线 auto 规划 | implemented | 功能 | [requirements/F166-trajectory-mode-registry-9mode-auto.md](requirements/F166-trajectory-mode-registry-9mode-auto.md) |
 | F167 | 轨迹规划「用成熟库」升级：Ruckig/TOTG 替换手写剖面 + toppra 力矩约束 + 实时 OTG 演示 | implemented | 功能 | [requirements/F167-trajectory-lib-upgrade-ruckig-toppra-otg.md](requirements/F167-trajectory-lib-upgrade-ruckig-toppra-otg.md) |
+| F168 | 产品栈原生 6 关节档（拆掉 L7 夹爪电机：xacro/SRDF/controllers/编排层整套 6J + 启动脚本自动选档） | implemented | 功能 | [requirements/F168-product-6j-profile.md](requirements/F168-product-6j-profile.md) |
+| F169 | 标定子命令集成（`a3_stack.sh calibrate {model\|scale}`）+ F49 脚本 6 关节适配 | implemented | 功能 | [requirements/F169-calibration-entry-and-6j-adaptation.md](requirements/F169-calibration-entry-and-6j-adaptation.md) |
 
 ## 非功能需求
 

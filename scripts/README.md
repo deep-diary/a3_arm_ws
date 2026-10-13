@@ -6,7 +6,7 @@
 
 | 脚本 | 功能 | 用法 |
 |---|---|---|
-| `a3_stack.sh` | **真机/仿真栈一键启停**。真机：can1 检查→电机 7/7 探测→setsid 起栈→健康验证；仿真：`edge_teleop_full_sim`（domain 99 隔离真机，默认带 PS4 手柄 joy_node） | `./scripts/a3_stack.sh {start\|stop\|restart\|status} [-f] [--rviz] [--no-probe] [--keep-rviz] [--sim] [--no-joy]` |
+| `a3_stack.sh` | **真机/仿真栈一键启停 + 重力标定**。真机：can1 检查→电机探测（7/7→7J，1..6 在线缺 L7→自动切 6J 档，F168）→setsid 起栈→健康验证；`calibrate` 子命令收口 F49 模型/F89 比例标定（F169）；仿真：`edge_teleop_full_sim`（domain 99 隔离真机，默认带 PS4 手柄 joy_node） | `./scripts/a3_stack.sh {start\|stop\|restart\|status\|calibrate} [-f] [--rviz] [--no-probe] [--6j] [--keep-rviz] [--sim] [--no-joy]` · `./scripts/a3_stack.sh calibrate {model\|scale}` |
 | `a3_shell_env.sh` | ROS 环境 source 脚本（含 PYTHONNOUSERSITE、DISPLAY 处理、micro-ROS prefix 剥离） | `source scripts/a3_shell_env.sh` |
 | `setup/install_a3_service.sh` | F93 安装 a3-arm.service 到 systemd（只安装，不 enable） | `sudo scripts/setup/install_a3_service.sh` |
 | `setup/setup_realtime.sh` | F100 配置 ros2_control 实时调度权限（pam_limits） | `sudo scripts/setup/setup_realtime.sh [USER]` |

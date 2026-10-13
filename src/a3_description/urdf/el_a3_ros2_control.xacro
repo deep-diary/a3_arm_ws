@@ -2,7 +2,7 @@
 <!-- EL-A3 ros2_control configuration -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-  <xacro:macro name="el_a3_ros2_control" params="use_mock_hardware use_real_hardware can_interface host_can_id wrist_motor_type adaptive_kd_enabled motor_can_timeout_enabled motor_can_timeout_s active_report_hz">
+  <xacro:macro name="el_a3_ros2_control" params="use_mock_hardware use_real_hardware can_interface host_can_id wrist_motor_type adaptive_kd_enabled motor_can_timeout_enabled motor_can_timeout_s active_report_hz include_gripper:=true">
 
     <!-- Wrist motor effort limits based on motor type -->
     <xacro:property name="wrist_effort_max" value="${5.5 if wrist_motor_type == 'RS05' else 6.0}"/>
@@ -366,6 +366,7 @@
         </xacro:if>
       </joint>
 
+      <xacro:if value="${include_gripper}">
       <!-- Joint L7 - ${wrist_motor_type} Motor 7 (Gripper) -->
       <joint name="L7_joint">
         <param name="motor_id">7</param>
@@ -401,6 +402,7 @@
           <state_interface name="temperature"/>
         </xacro:if>
       </joint>
+      </xacro:if>
 
     </ros2_control>
 

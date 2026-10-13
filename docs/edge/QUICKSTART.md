@@ -481,7 +481,51 @@ ros2 launch a3_bringup edge_legacy_stack.launch.py use_power_sequence:=false use
 - **7J 档默认行为不变**：不传这两个参数即 `control_gains.yaml` + `motor_map.yaml`。
 - 注意 `/a3/motor/enable`（执行层）**不查 URDF 限位**，只有编排层 `/a3/arm/enable` 查——「一个拒一个过」不是 bug。
 
+### 6 关节档（F168，拆掉 L7 夹爪电机）
+
+拆掉 L7 夹爪电机（can1 上只剩电机 1..6）后，**产品栈**（`a3_bringup.launch.py`，即 `a3_stack.sh` 起的栈）用**原生 6J 档**整栈去 L7——与 F52 的旧栈降级档（`motor_map_5j` / `edge_legacy_stack`）不同，6J 档保留 MoveIt/JTC/弹琴链路：
+
+```bash
+# 自动选档：探测到 1..6 在线且缺电机 7 → 自动 6J；7/7 → 7J（默认）
+./scripts/a3_stack.sh restart --rviz -f
+
+# 强制 6 关节档（不等探测 / 无探测时）
+./scripts/a3_stack.sh start --rviz --6j
+./scripts/a3_stack.sh start --no-probe --6j
+
+# 等价的手工起栈（档位由 include_gripper 一个参数切）
+ros2 launch a3_bringup a3_bringup.launch.py hardware:=can can_interface:=can1 include_gripper:=false
+```
+
+- **档位文件配对**：`include_gripper:=false` 会整套切换——xacro 不生成 `L7_joint`/`gripper_link`、SRDF 用 `el_a3_6j.srdf`、controllers 用 `el_a3_controllers_6j.yaml`、power_sequence 用 `motor_map_6j.yaml`、编排层 `joint_names`/`switch_controllers` 自动去 L7，`gripper_controller` spawner 跳过。
+- **起栈自检**：`/joint_states` 恰好 `L1..L6`、日志 `a3_arm_controller ready: joints=6`、`power_sequence F52 档位：6 关节`、`zero_torque ... pinocchio nq=6`。`a3_stack.sh` 起栈后会比对 `/joint_states` 关节数与档位。
+- **不传 `include_gripper`（或 `true`）即 7J 默认档，行为逐字不变**。
+- 踩坑（`PythonExpression` 三元拼接优先级）见 [LL-157](../lessons_learned/LL-157-product-6j-profile-include-gripper.md)；需求 [F168](requirements/F168-product-6j-profile.md)。
+
+**6 关节臂重标重力（F169，拆夹爪后整臂变轻，零力矩手感变重时做）：**
+```bash
+./scripts/a3_stack.sh start --rviz        # 起 6 关节栈；PS4 L3 使能到 READY
+./scripts/a3_stack.sh calibrate           # 帮助 + 现状（会显示「/joint_states 关节数=6」）
+# F49 模型重拟合（最彻底；anchors 给 6 个 = ready 自由位姿）：
+./scripts/a3_stack.sh calibrate model --dry-run --no-rest-anchor \
+  --anchors 0.07,1.0839,-0.5649,-0.4617,0.0831,-0.0497
+./scripts/a3_stack.sh calibrate model --no-rest-anchor \
+  --anchors 0.07,1.0839,-0.5649,-0.4617,0.0831,-0.0497   # 采集~68 点+拟合，需监护
+./scripts/a3_stack.sh calibrate scale --quick            # 或先快速整体比例核验（F89）
+./scripts/a3_stack.sh restart --rviz                     # F49 生效需重启（F89 下次起栈自动加载）
+```
+
 ### 重力标定（F49，真机 7 关节臂）
+
+> **记忆入口（F169）：** 上面这些命令不必记——用统一子命令即可，自动按当前档位（6/7 关节）透传 `--joints`：
+> ```bash
+> ./scripts/a3_stack.sh calibrate                       # 帮助 + 现状（栈/臂状态/关节数）
+> ./scripts/a3_stack.sh calibrate model --dry-run --no-rest-anchor --anchors <a1,…,aN>   # F49 只看网格
+> ./scripts/a3_stack.sh calibrate model --no-rest-anchor --anchors <a1,…,aN>             # F49 采集+拟合
+> ./scripts/a3_stack.sh calibrate scale --quick                                          # F89 逐关节比例
+> ```
+> 前置：真机栈在跑 + 臂已使能到 READY（脚本会自检，不满足直接拒绝、不动臂）；额外参数原样透传给底层脚本。
+> **6 关节臂（拆掉夹爪）**：`--anchors` 给 **6 个**值；命令示例见下节「6 关节档」。
 
 替换 `a3_description/config/inertia_params.yaml`（Pinocchio 重力前馈的参数源）。2026-09-14 真机 full 模式 68 点完成，RMSE 0.1592 / R² 0.9835（旧的官方 6J 参数在同批数据上 0.2036，URDF 默认 0.705）。**误差地板与验收偏差见 [LL-038](../lessons_learned/LL-038-static-gravity-calibration-hardware-floor.md)**。
 

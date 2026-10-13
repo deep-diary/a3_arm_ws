@@ -39,6 +39,7 @@ from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
     IncludeLaunchDescription,
+    OpaqueFunction,
     RegisterEventHandler,
     TimerAction,
 )
@@ -96,6 +97,26 @@ def load_yaml(package_name, file_path):
 
 
 def generate_launch_description():
+    return LaunchDescription([
+        DeclareLaunchArgument(
+            "include_gripper",
+            default_value="true",
+            description="true=L1–L7（含 L7 夹爪，默认）；"
+                        "false=L1–L6 六关节臂（去掉 L7 夹爪电机）——xacro/SRDF/"
+                        "controllers/编排层/gravity 自动切 6J 档",
+        ),
+        OpaqueFunction(function=_launch_setup),
+    ])
+
+
+def _launch_setup(context, *args, **kwargs):
+    """include_gripper 需要在建 LaunchDescription 时拿到真实布尔值（决定 xacro/
+    SRDF/controllers/编排层档位），故用 OpaqueFunction 在配置解析后构建。"""
+    raw = str(context.launch_configurations.get("include_gripper", "true")).lower()
+    return _build(raw not in ("false", "0", "no", "off"))
+
+
+def _build(include_gripper):
     hardware = LaunchConfiguration("hardware")
     can_interface = LaunchConfiguration("can_interface")
     adaptive_kd_enabled = LaunchConfiguration("adaptive_kd_enabled")
@@ -125,20 +146,27 @@ def generate_launch_description():
 
     xacro_file = os.path.join(desc_share, "urdf", "el_a3.urdf.xacro")
     # mock/can 仅切换 xacro 插件参数；其余拓扑共用同一份描述命令。
+    # include_gripper 在此固化为字面量（build 期已知）：false 时 xacro 不生成 L7。
+    grip_arg = "true" if include_gripper else "false"
     hw_args = PythonExpression([
-        "' use_mock_hardware:=true' if '", hardware, "' == 'mock'",
+        "(' use_mock_hardware:=true' if '", hardware, "' == 'mock'",
         " else ' use_mock_hardware:=false use_real_hardware:=true",
         " can_interface:=", can_interface,
         " adaptive_kd_enabled:=", adaptive_kd_enabled,
         " motor_can_timeout_enabled:=", motor_can_timeout_enabled,
-        " active_report_hz:=", active_report_hz, "'",
+        " active_report_hz:=", active_report_hz, "')",
+        " + ' include_gripper:=", grip_arg, "'",
     ])
     robot_description = ParameterValue(
         Command(["xacro ", xacro_file, hw_args]),
         value_type=str,
     )
 
-    controllers_yaml = os.path.join(desc_share, "config", "el_a3_controllers.yaml")
+    controllers_yaml = os.path.join(
+        desc_share,
+        "config",
+        "el_a3_controllers.yaml" if include_gripper else "el_a3_controllers_6j.yaml",
+    )
 
     # F89: gravity scales produced by scripts/gravity_scale_calibration.py.
     # Default output is now in the package config dir (same as
@@ -153,8 +181,8 @@ def generate_launch_description():
     )
 
     # F89: JTC 前馈链（gravity_torque_node）同样应用标定的 tau_scale。
-    # 标定文件 tau_scale 为 L1-L7 七值（前 6 有效、L7 占位 1.0），直接整体传入。
-    gravity_tau_scale = [1.0] * 7
+    # 标定文件 tau_scale 为 L1-L7 七值（前 6 有效、L7 占位 1.0）；6J 档只取前 6。
+    gravity_tau_scale = [1.0] * (7 if include_gripper else 6)
     if default_scales and os.path.exists(default_scales):
         try:
             with open(default_scales, "r", encoding="utf-8") as _f:
@@ -162,9 +190,9 @@ def generate_launch_description():
             _ts = (_scales_doc.get("zero_torque_controller", {})
                    .get("ros__parameters", {}).get("tau_scale"))
             if isinstance(_ts, list) and _ts:
-                gravity_tau_scale = [float(v) for v in _ts]
+                gravity_tau_scale = [float(v) for v in _ts][:len(gravity_tau_scale)]
         except Exception:
-            gravity_tau_scale = [1.0] * 7
+            gravity_tau_scale = [1.0] * (7 if include_gripper else 6)
 
     rsp = Node(
         package="robot_state_publisher",
@@ -207,19 +235,23 @@ def generate_launch_description():
         allow_substs=True,
     )
 
+    cm_parameters = [
+        {"robot_description": robot_description},
+        controllers_yaml,
+        arm_ff_plugin_file,
+        gravity_scales_file_param,
+    ]
+    if include_gripper:
+        # LL-103：rcl 参数文件后者覆盖，且 gravity_scales 留空时解析为
+        # controllers_yaml 本身——gripper 覆盖文件必须在最后，否则 mock 的
+        # position 插件覆写会被基础 yaml 冲掉（F88）。6J 档无 gripper_controller，
+        # 不加该覆盖文件。
+        cm_parameters.append(gripper_plugin_file)
+
     controller_manager = Node(
         package="controller_manager",
         executable="ros2_control_node",
-        parameters=[
-            {"robot_description": robot_description},
-            controllers_yaml,
-            arm_ff_plugin_file,
-            gravity_scales_file_param,
-            # LL-103：rcl 参数文件后者覆盖，且 gravity_scales 留空时解析为
-            # controllers_yaml 本身——gripper 覆盖文件必须在最后，否则 mock 的
-            # position 插件覆写会被基础 yaml 冲掉（F88）。
-            gripper_plugin_file,
-        ],
+        parameters=cm_parameters,
         output="screen",
     )
 
@@ -229,12 +261,13 @@ def generate_launch_description():
     # Node（launch_ros 禁止同一 action 对象二次调度），否则一次瞬时 load 竞态
     # 会把整个 launch 打死（"ExecuteLocal ... executed more than once"）。
     def make_jtc_spawner():
+        jtc_controllers = ["arm_controller"] + (
+            ["gripper_controller"] if include_gripper else []
+        )
         return Node(
             package="controller_manager",
             executable="spawner",
-            arguments=[
-                "arm_controller",
-                "gripper_controller",
+            arguments=jtc_controllers + [
                 "--inactive",
                 "--controller-manager",
                 "/controller_manager",
@@ -280,7 +313,11 @@ def generate_launch_description():
     jsb0 = make_jsb_spawner()
 
     # ---- move_group（OMPL + Pilz 双管线；直连官方 JTC FJT action）----
-    with open(os.path.join(moveit_share, "config", "el_a3.srdf"), "r", encoding="utf-8") as f:
+    # 6J 档用去夹爪的 SRDF（无 gripper / arm_with_gripper 组、无 gripper_link 碰撞对）。
+    srdf_file = os.path.join(
+        moveit_share, "config", "el_a3.srdf" if include_gripper else "el_a3_6j.srdf"
+    )
+    with open(srdf_file, "r", encoding="utf-8") as f:
         robot_description_semantic = f.read()
     kinematics_yaml = load_yaml("a3_moveit_config", "config/kinematics.yaml")
     joint_limits_yaml = load_yaml("a3_moveit_config", "config/joint_limits.yaml")
@@ -437,6 +474,21 @@ def generate_launch_description():
     )
 
     # ---- 编排层：F74 FJT 后端 + F75 controller_switch 使能后端 ----
+    # 6J 档只需覆盖 joint_names（去 L7）与 switch_controllers（无 gripper_controller，
+    # 否则 STRICT activate 会因未知控制器被拒）；rest（require_gate/joint_rated_torque/
+    # 温度/限位等）沿用 arm_controller.yaml，行为与 7J 保持一致。
+    fsm_overrides = {
+        # require_gate 由 arm_controller.yaml 决定（真机 true / 仿真 false）；
+        # 不再在 launch 里硬编码覆盖。
+        "control_backend": fsm_backend,
+        "motor_service_backend": "controller_switch",
+    }
+    if not include_gripper:
+        fsm_overrides["joint_names"] = [
+            "L1_joint", "L2_joint", "L3_joint", "L4_joint", "L5_joint", "L6_joint",
+        ]
+        fsm_overrides["switch_controllers"] = ["arm_controller"]
+
     fsm = Node(
         package="a3_arm_controller",
         executable="arm_controller",
@@ -444,12 +496,7 @@ def generate_launch_description():
         output="screen",
         parameters=[
             os.path.join(arm_share, "config", "arm_controller.yaml"),
-            {
-                # require_gate 由 arm_controller.yaml 决定（真机 true / 仿真 false）；
-                # 不再在 launch 里硬编码覆盖。
-                "control_backend": fsm_backend,
-                "motor_service_backend": "controller_switch",
-            },
+            fsm_overrides,
         ],
     )
 
@@ -620,7 +667,10 @@ def generate_launch_description():
         output="screen",
         parameters=[
             os.path.join(can_bridge_share, "config", "power_sequence.yaml"),
-            os.path.join(can_bridge_share, "config", "motor_map.yaml"),
+            os.path.join(
+                can_bridge_share, "config",
+                "motor_map.yaml" if include_gripper else "motor_map_6j.yaml",
+            ),
         ],
         condition=IfCondition(PythonExpression(["'", hardware, "' == 'can'"])),
     )
@@ -657,7 +707,7 @@ def generate_launch_description():
         ])],
     )
 
-    return LaunchDescription([
+    return [
         DeclareLaunchArgument(
             "hardware",
             default_value="mock",
@@ -770,4 +820,4 @@ def generate_launch_description():
         stage_free_drive,
         stage_jsb,
         rviz,
-    ])
+    ]

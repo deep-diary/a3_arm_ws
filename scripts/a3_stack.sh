@@ -144,19 +144,31 @@ recover_can1() {
   esac
 }
 
-# 期望在线的电机（权威：a3_can_bridge config/motor_map.yaml 的 motor_ids_by_index）
-EXPECTED_MOTOR_IDS="1 2 3 4 5 6 7"
+# ── 关节档位（6J/7J）────────────────────────────────────────────
+# 7J 档 = L1–L7（含 L7 夹爪，电机 1..7）；6J 档 = L1–L6（拆掉夹爪电机 7）。
+# 权威：a3_can_bridge config/motor_map.yaml（7J）· motor_map_6j.yaml（6J），
+# 与 xacro include_gripper / SRDF / controllers / 编排层 joint_names 配对。
+ALL_MOTOR_IDS="1 2 3 4 5 6 7"
 EXPECTED_MOTOR_COUNT=7
+# INCLUDE_GRIPPER=1 → 7J（默认）；=0 → 6J（auto 探测到缺 L7 或显式 --6j 时置 0）
+INCLUDE_GRIPPER=1
 
-# 起栈前无侵入探测电机：成功（7/7）返回 0；0 个或部分应答返回 1
+# 起栈前无侵入探测电机：
+#   7J 档：7/7 全在线 → 通过
+#   6J 档：1..6 全在线（电机 7 可缺）→ 通过
+#   auto（默认 7J 未指定 --6j/--7j）：出现「1..6 全在线且缺 7」→ 自动降级 6J 档
+# 0 个或部分应答返回 1
 # 原理：MIT 电机只要有 24V 动力电就应答 get_device_id(cmd 0)，与软件 gate/enable 无关。
 # 此时栈未启动、can1 无占用者，探测安全。
 # 鲁棒性：探测前先看 can1 控制器状态，BUS-OFF/ERROR-PASSIVE 则重置接口；
 #         探测失败（含 0 应答）最多重试 PROBE_RETRIES 次，每次前 recover_can1。
 PROBE_RETRIES=3
+_motor_online() {  # $1=id, $2=answered列表
+  echo " $2 " | grep -qw "$1"
+}
 probe_motors() {
   info "探测 can1 在线电机（ID 1..7，get_device_id 无侵入，不使能）…"
-  local attempt out cnt answered missing
+  local attempt out cnt answered
   for attempt in $(seq 1 "$PROBE_RETRIES"); do
     recover_can1   # BUS-OFF/ERROR-PASSIVE 时重置接口；ERROR-ACTIVE 直接返回
 
@@ -165,13 +177,32 @@ probe_motors() {
              | grep -E '发现 [0-9]+ 个电机|motor_id=|无任何应答')"
 
     cnt="$(printf '%s' "$out" | sed -n 's/.*发现 \([0-9]\+\) 个电机.*/\1/p')"
-    answered="$(printf '%s' "$out" | sed -n 's/.*motor_id= *\([0-9]\+\).*/\1/p' | sort -n | tr '\n' ' ')"
+    answered="$(printf '%s' "$out" | sed -n 's/.*motor_id= *\([0-9]\+\).*/\1/p' | sort -n | uniq | tr '\n' ' ')"
     [ -z "$cnt" ] && cnt=0
 
-    if [ "$cnt" -eq "$EXPECTED_MOTOR_COUNT" ]; then
-      [ "$attempt" -gt 1 ] && ok "电机探测通过（第 $attempt 次尝试）$cnt/$EXPECTED_MOTOR_COUNT（ID: $answered）" \
-                            || ok "电机探测通过 $cnt/$EXPECTED_MOTOR_COUNT（ID: $answered）"
-      return 0
+    local have16=1 id
+    for id in 1 2 3 4 5 6; do _motor_online "$id" "$answered" || have16=0; done
+
+    # 显式 6J 档：只要 1..6 全在线即可（电机 7 可有可无）
+    if [ "$INCLUDE_GRIPPER" = 0 ]; then
+      if [ "$have16" = 1 ]; then
+        [ "$attempt" -gt 1 ] && ok "电机探测通过（6J 档，第 $attempt 次）6/6（ID: $answered）" \
+                              || ok "电机探测通过（6J 档）6/6（ID: $answered）"
+        return 0
+      fi
+    else
+      # 7/7 全在线
+      if [ "$cnt" -ge "$EXPECTED_MOTOR_COUNT" ] && _motor_online 7 "$answered"; then
+        [ "$attempt" -gt 1 ] && ok "电机探测通过（第 $attempt 次尝试）$cnt/$EXPECTED_MOTOR_COUNT（ID: $answered）" \
+                              || ok "电机探测通过 $cnt/$EXPECTED_MOTOR_COUNT（ID: $answered）"
+        return 0
+      fi
+      # auto 降级：1..6 全在线且电机 7 缺失 → 自动切 6J 档
+      if [ "$have16" = 1 ] && ! _motor_online 7 "$answered"; then
+        INCLUDE_GRIPPER=0
+        warn "电机 7（L7 夹爪）不在线，1..6 全在线 → 自动切 6 关节档（include_gripper:=false）"
+        return 0
+      fi
     fi
 
     if [ "$attempt" -lt "$PROBE_RETRIES" ]; then
@@ -185,13 +216,14 @@ probe_motors() {
     err "请检查：① 24V 动力电是否开启  ② 急停按钮是否弹起  ③ CAN 线束是否接在 can1 / 终端电阻"
     err "终端电阻应为 60Ω（两端 120Ω 并联）；当前若偏低会触发 bus-off"
   else
-    missing=""
-    local id
-    for id in $EXPECTED_MOTOR_IDS; do
-      echo "$answered" | grep -qw "$id" || missing="$missing $id"
+    local missing="" want_ids="$ALL_MOTOR_IDS"
+    [ "$INCLUDE_GRIPPER" = 0 ] && want_ids="1 2 3 4 5 6"
+    for id in $want_ids; do
+      _motor_online "$id" "$answered" || missing="$missing $id"
     done
     err "电机探测不完整 $cnt/$EXPECTED_MOTOR_COUNT（在线: ${answered:-无}；缺失:$missing）"
-    err "请检查缺失关节的供电与线束；确认降级配置（5J 档）后可用 --no-probe 跳过"
+    err "6 关节臂（拆掉夹爪电机 7）应 1..6 全在线；缺其它关节请检查供电与线束"
+    err "确认档位后可用 --no-probe（6 轴加 --6j）跳过探测"
   fi
   err "已中止启动，未拉起栈"
   return 1
@@ -462,8 +494,14 @@ do_start() {
     rviz_arg="true"
     info "已请求随栈启动 RViz（launch 自动接软件渲染/LL-027 与 hide_randr/LL-065）"
   fi
+  local grip_arg="true" joints_desc="7 关节（L1–L7，含夹爪）"
+  if [ "$INCLUDE_GRIPPER" = 0 ]; then
+    grip_arg="false"
+    joints_desc="6 关节（L1–L6，无夹爪）"
+  fi
+  info "启动档位：$joints_desc（include_gripper:=$grip_arg）"
   info "setsid 启动真机栈，日志：$LOG_FILE"
-  setsid bash -c "source '$SCRIPT_DIR/a3_shell_env.sh' && export PYTHONNOUSERSITE=1 && cd '$WS_DIR' && ros2 launch a3_bringup a3_bringup.launch.py hardware:=can can_interface:=can1 use_rviz:=$rviz_arg" \
+  setsid bash -c "source '$SCRIPT_DIR/a3_shell_env.sh' && export PYTHONNOUSERSITE=1 && cd '$WS_DIR' && ros2 launch a3_bringup a3_bringup.launch.py hardware:=can can_interface:=can1 use_rviz:=$rviz_arg include_gripper:=$grip_arg" \
     </dev/null >"$LOG_FILE" 2>&1 &
 
   info "等待 15s 起栈 …"
@@ -485,6 +523,16 @@ do_start() {
     ok "arm_status: $state（起栈后默认 DISABLED/IDLE，需 PS4 L3 使能）"
   else
     warn "节点在跑但暂时读不到 arm_status，稍等片刻或查日志"
+  fi
+  # 关节数自检：与启动档位一致（6J→6，7J→7），不一致多半是档位/URDF/SRDF 未配对
+  local want_n=7 got_n
+  [ "$INCLUDE_GRIPPER" = 0 ] && want_n=6
+  got_n="$(timeout 8 ros2 topic echo /joint_states --once --no-daemon 2>/dev/null \
+            | grep -cE '^- L[0-9]+_joint')"
+  if [ "${got_n:-0}" -eq "$want_n" ]; then
+    ok "/joint_states 关节数 = $got_n（档位 $want_n，一致）"
+  elif [ "${got_n:-0}" -gt 0 ]; then
+    warn "/joint_states 关节数 = $got_n，与启动档位 $want_n 不一致，请核查档位配对"
   fi
   [ -n "$power" ] && info "power_sequence: $power"
   ok "真机栈已启动"
@@ -605,23 +653,124 @@ do_status_sim() {
   fi
 }
 
+# ── 标定（F169）────────────────────────────────────────────────
+# 把零散的重力标定脚本收成一个记忆入口；真机栈需在跑且臂已使能到 READY。
+#   calibrate model → F49 重力模型重拟合（inertia_params.yaml，--joints 按当前档位）
+#   calibrate scale → F89 逐关节重力比例（gravity_scales.yaml）
+# 额外参数原样透传给底层脚本（如 --dry-run / --restart / --optimize-only / --anchors）。
+_cal_joint_count() {
+  timeout 8 ros2 topic echo /joint_states --once --no-daemon 2>/dev/null \
+    | grep -cE '^- L[0-9]+_joint'
+}
+
+_cal_help() {
+  cat <<EOF
+标定（真机栈需在跑且臂已使能到 READY；夹爪拆装后必须重标）
+  $0 calibrate                 本帮助 + 现状
+  $0 calibrate model [参数…]   F49 重力模型重拟合 → src/a3_description/config/inertia_params.yaml
+  $0 calibrate scale [参数…]   F89 逐关节重力比例 → src/a3_description/config/gravity_scales.yaml
+
+F49（改质量/质心，最彻底）常用：
+  $0 calibrate model --dry-run --no-rest-anchor --anchors <a1,…,aN>   # 只看网格，不动臂
+  $0 calibrate model --no-rest-anchor --anchors <a1,…,aN>             # 采集 + 拟合（需监护）
+  $0 calibrate model --optimize-only                                  # 只拟合已采数据
+F89（只调整体比例，快）常用：
+  $0 calibrate scale --quick
+  说明：--anchors 是逗号分隔浮点，长度对应当前档位（6 关节臂给 6 个，7 关节给 7 个）；
+        用 ready 自由位姿锚定，别用折叠 rest 位（顶限位 τ≈0，非重力样本，LL-035）。
+EOF
+  echo "── 现状 ────────────────────────────"
+  if [ "$SIM" = 1 ]; then
+    echo "  仿真栈（--sim）：标定仅针对真机栈"
+    return 0
+  fi
+  if stack_alive; then
+    local n; n="$(_cal_joint_count)"
+    echo "  真机栈在跑；arm_status=$(arm_state)；/joint_states 关节数=${n:-?}（标定将按此档位）"
+  else
+    echo "  真机栈未运行（先 $0 start --rviz，6 轴会自动选档）"
+  fi
+}
+
+# calibrate 会把剩余参数透传给底层脚本，故不走通用 flag 解析。
+do_calibrate() {
+  local sub="${1:-}"
+  case "$sub" in
+    model|scale) shift ;;
+    ""|-h|--help) _cal_help; return 0 ;;
+    *) err "未知标定目标：$sub（用 model 或 scale）"; _cal_help; return 1 ;;
+  esac
+
+  if [ "$SIM" = 1 ]; then
+    err "标定只针对真机栈（--sim 不支持）"
+    return 1
+  fi
+  if ! stack_alive; then
+    err "真机栈未运行；先 $0 start --rviz（6 轴自动选档）"
+    return 1
+  fi
+  local state
+  state="$(arm_state)"
+  if [ "$state" != "READY" ]; then
+    err "臂 state=${state:-读不到}，标定需 READY（先 PS4 L3 使能或 ros2 service call /a3/arm/enable）"
+    return 1
+  fi
+  local n
+  n="$(_cal_joint_count)"
+  if [ -z "$n" ] || [ "$n" -lt 6 ]; then
+    err "读不到 /joint_states 关节数（n=${n:-空}），稍等片刻或查栈日志"
+    return 1
+  fi
+
+  local rc=0
+  case "$sub" in
+    model)
+      info "F49 重力模型重拟合（inertia_params.yaml，$n 关节）… 数据逐点落盘 ~/.a3/calibration/"
+      python3 "$SCRIPT_DIR/gravity_calibration.py" --joints "$n" "$@"
+      rc=$?
+      [ "$rc" = 0 ] && info "生效：重启重力前馈——$0 restart --rviz（或重启 a3_gravity_torque 节点）"
+      ;;
+    scale)
+      info "F89 逐关节重力比例标定（gravity_scales.yaml）…"
+      python3 "$SCRIPT_DIR/gravity_scale_calibration.py" "$@"
+      rc=$?
+      [ "$rc" = 0 ] && info "生效：下次起栈自动加载 gravity_scales.yaml（$0 restart --rviz）"
+      ;;
+  esac
+  if [ "$rc" != 0 ]; then
+    err "标定退出码 $rc（F49 数据已逐点留盘，重跑同命令可续采）"
+  else
+    ok "标定流程结束"
+  fi
+  return "$rc"
+}
+
 usage() {
   cat <<EOF
-用法：$0 {start|stop|restart|status|free} [-f|--force] [--rviz] [--no-probe] [--keep-rviz] [--sim] [--no-joy]
-  start    启动真机栈（先探测电机 7/7 在线，setsid 起栈，日志 $LOG_FILE）
+用法：$0 {start|stop|restart|status|free|calibrate} [-f|--force] [--rviz] [--no-probe] [--6j] [--keep-rviz] [--sim] [--no-joy]
+  start    启动真机栈（先探测电机：7J 档 7/7、6J 档 1..6 在线，setsid 起栈，日志 $LOG_FILE）
   stop     优雅停栈（臂未失能默认拒绝）
   restart  重启
   status   查看状态
+  calibrate 重力标定（真机 + 已使能 READY）：calibrate [model|scale]，见 $0 calibrate
+           model=F49 模型重拟合（inertia_params.yaml）；scale=F89 逐关节比例（gravity_scales.yaml）
   free     零重力矩补偿自由拖动：free / free on 进入（软 kp + 重力前馈），
            free off 退出恢复位置闭环；需栈已运行且电机已使能（READY）
   set-zero 设电机零点（不带使能，需栈已停）：set-zero [id]，id=1..7 单个、省略=全部(255)
            设零后自动 save_param 写 flash
   -f, --force    停栈时跳过臂状态安全门
   --rviz         启动/重启时随栈一起打开 RViz
-  --no-probe     跳过起栈前电机在线探测（5J 降级档/确认无硬件时）
+  --no-probe     跳过起栈前电机在线探测（降级档/确认无硬件时）
+  --6j           强制 6 关节档（L1–L6，拆掉夹爪电机 7；include_gripper:=false）。
+                 不指定时按探测自动选档：7/7→7J，1..6 在线且缺 7→6J
   --keep-rviz    停栈时不关独立手工起的 RViz
   --sim          走全仿真栈 edge_teleop_full_sim（domain $SIM_DOMAIN 隔离真机；可放任意位置）
   --no-joy       仅 --sim：不起 joy_node（/joy 由脚本注入，如 ps4_sim_test.py 合成测试）
+
+6/7 关节示例：
+  $0 start --rviz          # 自动选档（探到 1..6→6 关节栈；7/7→7 关节栈）
+  $0 restart -f --6j       # 强制 6 关节档（不等探测；缺 L7 时用）
+  $0 start --no-probe --6j # 跳过探测、直接按 6 关节档起栈
 
 仿真示例：
   $0 start --sim           # 起仿真栈 + 真手柄（默认 use_joy_node:=true），日志 $SIM_LOG_FILE
@@ -652,12 +801,19 @@ main() {
   esac
   local action="$1"; shift
 
+  # calibrate 剩余参数直接透传底层标定脚本，不走通用 flag 解析（F169）
+  if [ "$action" = "calibrate" ]; then
+    do_calibrate "$@"
+    exit $?
+  fi
+
   local force=0 keep_rviz=0 with_rviz=0 do_probe=1 do_joy=1 turn_off=0 set_zero_id=255
   while [ $# -gt 0 ]; do
     case "$1" in
       -f|--force) force=1 ;;
       --rviz) with_rviz=1 ;;
       --no-probe) do_probe=0 ;;
+      --6j) INCLUDE_GRIPPER=0 ;;
       --keep-rviz) keep_rviz=1 ;;
       --no-joy) do_joy=0 ;;
       on|start) turn_off=0 ;;

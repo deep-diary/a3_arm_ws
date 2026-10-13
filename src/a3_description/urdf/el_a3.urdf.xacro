@@ -13,6 +13,10 @@
   <xacro:arg name="motor_can_timeout_enabled" default="true"/>
   <xacro:arg name="motor_can_timeout_s" default="0.2"/>
   <xacro:arg name="active_report_hz" default="10.0"/>
+  <!-- include_gripper：true=7 关节（L1–L7，含 L7 夹爪，默认）；
+       false=6 关节臂（拆掉 L7 夹爪电机）——不生成 L7_joint / gripper_link，
+       也不在 ros2_control 里声明 L7，配合 6J 档 SRDF/controllers 使用。 -->
+  <xacro:arg name="include_gripper" default="true"/>
 
   <!-- Wrist motor parameters (EL05: 6Nm, RS05: 5.5Nm) -->
   <xacro:property name="wrist_motor_type" value="$(arg wrist_motor_type)"/>
@@ -271,38 +275,42 @@
     <child link="end_effector"/>
   </joint>
 
-  <!-- Joint L7 (${wrist_motor_type} Motor 7 - Gripper, separate kinematic branch) -->
-  <joint name="L7_joint" type="revolute">
-    <origin xyz="0 0 -0.074" rpy="0 0 0"/>
-    <parent link="l5_l6_urdf_asm"/>
-    <child link="gripper_link"/>
-    <axis xyz="0 0 1"/>
-    <!-- F98: L7 calibrated 2026-09-13: open=0.0, mechanical stop 1.7825,
-         operational clamp 1.78; replaces reference ±1.5708. -->
-    <limit effort="${wrist_effort}" velocity="50" lower="0.0" upper="1.78"/>
-    <dynamics damping="0.05" friction="0.05"/>
-  </joint>
+  <!-- Joint L7 (${wrist_motor_type} Motor 7 - Gripper, separate kinematic branch)
+       include_gripper=false（6 关节臂）时不生成：L7 是独立分支（挂 l5_l6_urdf_asm），
+       去掉不影响 arm 组链（tip=end_effector）。 -->
+  <xacro:if value="$(arg include_gripper)">
+    <joint name="L7_joint" type="revolute">
+      <origin xyz="0 0 -0.074" rpy="0 0 0"/>
+      <parent link="l5_l6_urdf_asm"/>
+      <child link="gripper_link"/>
+      <axis xyz="0 0 1"/>
+      <!-- F98: L7 calibrated 2026-09-13: open=0.0, mechanical stop 1.7825,
+           operational clamp 1.78; replaces reference ±1.5708. -->
+      <limit effort="${wrist_effort}" velocity="50" lower="0.0" upper="1.78"/>
+      <dynamics damping="0.05" friction="0.05"/>
+    </joint>
 
-  <link name="gripper_link">
-    <inertial>
-      <mass value="0.05"/>
-      <origin xyz="0 0 0"/>
-      <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
-    </inertial>
-    <visual>
-      <origin xyz="0 0 -0.0015" rpy="3.14159 0 0"/>
-      <geometry>
-        <mesh filename="package://a3_description/meshes/jaw.stl"/>
-      </geometry>
-      <material name="orange"/>
-    </visual>
-    <collision>
-      <origin xyz="0 0 -0.0015" rpy="3.14159 0 0"/>
-      <geometry>
-        <mesh filename="package://a3_description/meshes/jaw.stl"/>
-      </geometry>
-    </collision>
-  </link>
+    <link name="gripper_link">
+      <inertial>
+        <mass value="0.05"/>
+        <origin xyz="0 0 0"/>
+        <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
+      </inertial>
+      <visual>
+        <origin xyz="0 0 -0.0015" rpy="3.14159 0 0"/>
+        <geometry>
+          <mesh filename="package://a3_description/meshes/jaw.stl"/>
+        </geometry>
+        <material name="orange"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 -0.0015" rpy="3.14159 0 0"/>
+        <geometry>
+          <mesh filename="package://a3_description/meshes/jaw.stl"/>
+        </geometry>
+      </collision>
+    </link>
+  </xacro:if>
 
   <!-- ros2_control interface -->
   <xacro:el_a3_ros2_control
@@ -314,6 +322,7 @@
     adaptive_kd_enabled="$(arg adaptive_kd_enabled)"
     motor_can_timeout_enabled="$(arg motor_can_timeout_enabled)"
     motor_can_timeout_s="$(arg motor_can_timeout_s)"
-    active_report_hz="$(arg active_report_hz)"/>
+    active_report_hz="$(arg active_report_hz)"
+    include_gripper="$(arg include_gripper)"/>
 
 </robot>

@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+EL-A3 Robot Arm SRDF（6 关节档，无 L7 夹爪）
+由 el_a3.srdf 派生：去掉 gripper / arm_with_gripper 组、open/close 组状态、
+end_effector 元素与所有涉及 gripper_link 的碰撞对。配合 xacro include_gripper:=false
+（不含 L7_joint / gripper_link）使用；arm 组链（base_link→end_effector）不变。
+-->
+<robot name="EL-A3">
+    <!-- Planning Groups -->
+    <!-- Arm group: 6-DOF (L1-L6), chain ends at end_effector (fixed to l5_l6_urdf_asm) -->
+    <group name="arm">
+        <chain base_link="base_link" tip_link="end_effector"/>
+    </group>
+
+    <!-- F131: 同链第二规划组——pick_ik global 模式（路点 LIN 目标 IK 种子敏感, LL-103） -->
+    <group name="arm_lin">
+        <chain base_link="base_link" tip_link="end_effector"/>
+    </group>
+
+    <!-- Group states (predefined poses) -->
+    <!-- F113: folded natural-hanging (gravity-stable), F40 safe-park target.
+         Renamed from "home"; values = 2026-09-13 real-machine calibration. -->
+    <group_state name="idle" group="arm">
+        <joint name="L1_joint" value="-0.0002"/>
+        <joint name="L2_joint" value="0.0006"/>
+        <joint name="L3_joint" value="0.0002"/>
+        <joint name="L4_joint" value="0.3351"/>
+        <joint name="L5_joint" value="0.0121"/>
+        <joint name="L6_joint" value="-0.0002"/>
+    </group_state>
+
+    <!-- F109: folded upright, CoM over base center, minimal static torque -->
+    <group_state name="ready" group="arm">
+        <joint name="L1_joint" value="0"/>
+        <joint name="L2_joint" value="1.05"/>
+        <joint name="L3_joint" value="-1.575"/>
+        <joint name="L4_joint" value="0"/>
+        <joint name="L5_joint" value="0"/>
+        <joint name="L6_joint" value="0"/>
+    </group_state>
+
+    <group_state name="zero" group="arm">
+        <joint name="L1_joint" value="0"/>
+        <joint name="L2_joint" value="0"/>
+        <joint name="L3_joint" value="0"/>
+        <joint name="L4_joint" value="0"/>
+        <joint name="L5_joint" value="0"/>
+        <joint name="L6_joint" value="0"/>
+    </group_state>
+
+    <!-- F115: Cartesian offsets around legacy home, EE orientation held.
+         Values from named_poses.yaml (Pinocchio 6D IK probe 2026-09-26). -->
+    <group_state name="home_back" group="arm">
+        <joint name="L1_joint" value="0"/>
+        <joint name="L2_joint" value="1.8674"/>
+        <joint name="L3_joint" value="-1.6192"/>
+        <joint name="L4_joint" value="-0.2482"/>
+        <joint name="L5_joint" value="0"/>
+        <joint name="L6_joint" value="0"/>
+    </group_state>
+    <group_state name="home_front" group="arm">
+        <joint name="L1_joint" value="0"/>
+        <joint name="L2_joint" value="0.1266"/>
+        <joint name="L3_joint" value="-0.8918"/>
+        <joint name="L4_joint" value="0.7653"/>
+        <joint name="L5_joint" value="0"/>
+        <joint name="L6_joint" value="0"/>
+    </group_state>
+    <group_state name="home_up" group="arm">
+        <joint name="L1_joint" value="0"/>
+        <joint name="L2_joint" value="1.2862"/>
+        <joint name="L3_joint" value="-1.9643"/>
+        <joint name="L4_joint" value="0.678"/>
+        <joint name="L5_joint" value="0"/>
+        <joint name="L6_joint" value="0"/>
+    </group_state>
+    <group_state name="home_down" group="arm">
+        <joint name="L1_joint" value="0"/>
+        <joint name="L2_joint" value="0.7154"/>
+        <joint name="L3_joint" value="-0.2479"/>
+        <joint name="L4_joint" value="-0.4675"/>
+        <joint name="L5_joint" value="0"/>
+        <joint name="L6_joint" value="0"/>
+    </group_state>
+
+    <!-- Virtual Joint to World -->
+    <virtual_joint name="world_joint" type="fixed" parent_frame="world" child_link="base_link"/>
+
+    <!-- Disable collisions between adjacent links -->
+    <disable_collisions link1="l1_urdf_urdf_asm" link2="l1_link_urdf_asm" reason="Adjacent"/>
+    <disable_collisions link1="l1_link_urdf_asm" link2="l2_l3_urdf_asm" reason="Adjacent"/>
+    <disable_collisions link1="l2_l3_urdf_asm" link2="l3_lnik_urdf_asm" reason="Adjacent"/>
+    <disable_collisions link1="l3_lnik_urdf_asm" link2="l4_l5_urdf_asm" reason="Adjacent"/>
+    <disable_collisions link1="l4_l5_urdf_asm" link2="part_9" reason="Adjacent"/>
+    <disable_collisions link1="part_9" link2="l5_l6_urdf_asm" reason="Adjacent"/>
+    <disable_collisions link1="l5_l6_urdf_asm" link2="end_effector" reason="Adjacent"/>
+
+    <!-- Additional collision pairs that never collide -->
+    <disable_collisions link1="l1_urdf_urdf_asm" link2="l2_l3_urdf_asm" reason="Never"/>
+    <disable_collisions link1="l1_link_urdf_asm" link2="l3_lnik_urdf_asm" reason="Never"/>
+    <disable_collisions link1="l2_l3_urdf_asm" link2="l4_l5_urdf_asm" reason="Never"/>
+    <disable_collisions link1="l3_lnik_urdf_asm" link2="part_9" reason="Never"/>
+    <disable_collisions link1="l4_l5_urdf_asm" link2="l5_l6_urdf_asm" reason="Never"/>
+    <disable_collisions link1="part_9" link2="end_effector" reason="Never"/>
+    <disable_collisions link1="base_link" link2="l1_urdf_urdf_asm" reason="Adjacent"/>
+
+    <disable_collisions link1="l2_l3_urdf_asm" link2="part_9" reason="Never"/>
+    <disable_collisions link1="l2_l3_urdf_asm" link2="l5_l6_urdf_asm" reason="Never"/>
+
+    <!-- base_link pairs (fixed base, structurally cannot collide with nearby links) -->
+    <disable_collisions link1="base_link" link2="l1_link_urdf_asm" reason="Never"/>
+    <disable_collisions link1="base_link" link2="l2_l3_urdf_asm" reason="Never"/>
+
+    <!-- Near-chain pairs (geometrically too far apart on this arm) -->
+    <disable_collisions link1="l1_urdf_urdf_asm" link2="l3_lnik_urdf_asm" reason="Never"/>
+    <disable_collisions link1="l1_link_urdf_asm" link2="l4_l5_urdf_asm" reason="Never"/>
+    <disable_collisions link1="l3_lnik_urdf_asm" link2="l5_l6_urdf_asm" reason="Never"/>
+    <disable_collisions link1="l4_l5_urdf_asm" link2="end_effector" reason="Never"/>
+    <disable_collisions link1="l2_l3_urdf_asm" link2="end_effector" reason="Never"/>
+    <disable_collisions link1="l3_lnik_urdf_asm" link2="end_effector" reason="Never"/>
+
+    <!--
+    NOTE: For a complete collision matrix, run MoveIt Setup Assistant:
+      ros2 launch moveit_setup_assistant setup_assistant.launch.py
+    and use "Self-Collisions" → "Generate Collision Matrix" with 10000+ samples.
+    -->
+
+</robot>
