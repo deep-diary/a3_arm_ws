@@ -37,8 +37,13 @@ from gen_stream_modes import MODES, CARTESIAN_MODES, build_mode_segments  # noqa
 STREAM_DIR = os.path.join(WS, "trajectories", "streams")
 
 
-def build_streams(wp_path: str, speed: float) -> List[str]:
-    """生成 9 个 stream（每模式一条，末尾一段 ptp 回起点），返回 (stream 名, 段总数) 列表。"""
+def build_streams(wp_path: str, speed: float):
+    """生成 9 个 stream（每模式一条，末尾一段 ptp 回起点）+ 1 个准备 stream。
+
+    准备 stream：单独一次 ptp 到 P0 并驻留（sleep），保证每个模式开跑前臂**精确落定在 P0**，
+    从而各模式起点一致（消除"回起点段未完全收敛"导致的起点残差）。
+    返回 ([(stream 名, 段总数)...], 准备 stream 名)。
+    """
     with open(wp_path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
     wps = data["waypoints"]
@@ -56,7 +61,14 @@ def build_streams(wp_path: str, speed: float) -> List[str]:
         with open(os.path.join(STREAM_DIR, name + ".yaml"), "w", encoding="utf-8") as f:
             yaml.safe_dump(doc, f, sort_keys=False, allow_unicode=True)
         names.append((name, len(segs)))
-    return names
+    # 准备 stream：每模式前「精确停到 P0」（独立 playback，不计入采样）
+    prep_name = "tcp_cmp_prep"
+    prep = [{"mode": "ptp", "speed": 0.4,
+             "target": {"positions": list(wps[0]["positions"])}, "sleep": 1.0}]
+    with open(os.path.join(STREAM_DIR, prep_name + ".yaml"), "w", encoding="utf-8") as f:
+        yaml.safe_dump({"kind": "stream", "joint_names": list(jnames), "segments": prep},
+                       f, sort_keys=False, allow_unicode=True)
+    return names, prep_name
 
 
 class Capture(Node):
@@ -118,6 +130,14 @@ class Capture(Node):
                 return False
         return self._state == "READY"
 
+    def run_prep(self, name: str) -> bool:
+        """播放准备 stream（ptp 到 P0 + 驻留到位），不采集；成功返回 True。"""
+        self.wait_ready()
+        ok, msg = self.call_playback(name)
+        if not ok:
+            self.get_logger().warn(f"prep 失败: {msg}")
+        return ok
+
     def run_mode(self, name: str, n_total: int) -> Dict:
         for attempt in range(2):
             self.wait_ready()
@@ -145,8 +165,8 @@ def main() -> None:
     ap.add_argument("--out", default="/tmp/traj_modes_tcp.json")
     args = ap.parse_args()
 
-    names = build_streams(args.waypoints, args.speed)
-    print(f"生成 {len(names)} 个 stream: {[n for n, _ in names]}")
+    names, prep_name = build_streams(args.waypoints, args.speed)
+    print(f"生成 {len(names)} 个 stream: {[n for n, _ in names]} + 准备 {prep_name}")
 
     rclpy.init()
     node = Capture()
@@ -154,6 +174,7 @@ def main() -> None:
 
     out: Dict = {"speed": args.speed, "modes": {}}
     for mode, (name, n_total) in zip(MODES, names):
+        node.run_prep(prep_name)  # 先「精确停到 P0」，保证各模式起点一致
         r = node.run_mode(name, n_total)
         out["modes"][mode] = r
         print(f"[{mode}] ok={r['ok']} n={r['n']} segs={n_total} wall={r['wall']:.1f}s  {r['msg']}")

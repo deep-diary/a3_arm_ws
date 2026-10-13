@@ -41,3 +41,8 @@
 | `stream` / `cp` | `app_melodion/config/streams/`（版本控制，脚本生成源）+ `<ws>/trajectories/streams/`（实验槽） |
 
 搜索顺序见 `arm_controller._stream_path` / `_cp_path`（仓库 trajectories → app_melodion config → 旧 `~/.a3`）。
+
+## 相关文档
+
+- [control/03-trajectory.md](../control/03-trajectory.md) — 轨迹规划与时间律「从简到难」进阶清单（模块化学习手册）
+- [CONTROL_ROADMAP.md](CONTROL_ROADMAP.md) — 控制功能分层路线（L2/L4/L5）

@@ -1151,6 +1151,11 @@ class ArmController(Node):
         # F165: 工业 G64 连续路径——l1p5/l2 直线折线的 via 拐角做二次 Bezier 圆角半径
         # （关节空间弧度）；直线段保形不变，仅切角消除加速度尖峰。<=0 关闭圆角。
         self.declare_parameter("goto_via_corner_blend_rad", 0.15)
+        # F167: 软件模式（jnt_g64_*/jnt_spline_*）时间律后端——software=手写剖面（默认，
+        # 作为回退保留）；totg/ruckig=调 /a3/arm/retime_trajectory 用成熟库换时间律
+        # （几何路径不变，仅时间律形状变），服务不可用/失败自动回退 software。
+        self.declare_parameter("goto_via_time_backend", "software")
+        self.declare_parameter("goto_via_retime_timeout_s", 5.0)
         self.declare_parameter("playback_ramp_duration_s", 2.5)
         # F68: 回放（ramp + 录制点）默认调 /a3/arm/retime_trajectory 做保几何重定时
         # （Ruckig jerk-limited，失败退化 TOTG）；服务不可用/失败才走旧的
@@ -4289,6 +4294,8 @@ class ArmController(Node):
         None 时用 1.0（即全局 goto_via_* 上限）。中间点不停车、段末速度 0。
         profile 选时间剖面：l1p5=线性折线+G64 圆角+quintic 加-巡-减（默认）、l2=...+梯形、
         l3=cubic 插值样条+钟形、l3_fit=最小二乘逼近样条+quintic（F166）。
+        F167: `goto_via_time_backend`=software（默认）/totg/ruckig 决定时间律来源——非
+        software 时调 /a3/arm/retime_trajectory 换时间律（几何路径不变），失败回退手写剖面。
         exact（F166，长度=len(via)）：逐 via 点是否**必须精确过点**（True→该顶点不做 G64
         圆角）；None 表示全不精确（统一 corner_r）。端点（当前位/target）恒精确。
         返回 (成功, 说明, 运动时长秒)。失败返回 (False, msg, 0.0)，调用方回落单段 _moveit_move。
@@ -4343,24 +4350,49 @@ class ArmController(Node):
         else:
             radii_v = corner_r
 
+        # 几何路径（手写，保留）：按 profile 选路径生成器；时间律见下（F167 可切成熟库）。
         if profile == "l3":
             dense = _interpolate_via_spline(via_q, resample_n)
-            timed = _bell_timed_traj(dense, vmax, amax) if dense else None
         elif profile == "l3_fit":
             dense = _approx_spline(via_q, resample_n)
             if dense is None:
                 dense = _interpolate_via_spline(via_q, resample_n)  # 兜底：退回插值样条
-            timed = _jerk_limited_timed_traj(dense, vmax, amax) if dense else None
-        elif profile == "l2":
+        else:  # l1p5/l2：G64 圆角折线
             dense = _round_corners(via_q, radii_v)
             if dense is None:
                 dense = _linear_dense(via_q, resample_n)  # 兜底：圆角不可用则回退直线折线
-            timed = _trapezoidal_timed_traj(dense, vmax, amax) if dense else None
-        else:  # l1p5 默认（G64 圆角 + quintic 加-巡-减）
-            dense = _round_corners(via_q, radii_v)
-            if dense is None:
-                dense = _linear_dense(via_q, resample_n)
-            timed = _jerk_limited_timed_traj(dense, vmax, amax) if dense else None
+        if dense is None:
+            return False, "via path failed", 0.0
+
+        def _software_timing() -> Optional[Tuple[List[float], List[List[float]]]]:
+            if profile == "l3":
+                return _bell_timed_traj(dense, vmax, amax)
+            if profile == "l2":
+                return _trapezoidal_timed_traj(dense, vmax, amax)
+            # l1p5 / l3_fit：quintic 加-巡-减
+            return _jerk_limited_timed_traj(dense, vmax, amax)
+
+        # F167: 时间律——software=手写剖面；totg/ruckig=调 /a3/arm/retime_trajectory
+        # 用成熟库换时间律（几何路径不变），服务不可用/失败自动回退手写剖面。
+        timed = None
+        time_backend = str(self.get_parameter("goto_via_time_backend").value).strip().lower()
+        if time_backend in ("totg", "ruckig"):
+            ok_r, rtraj, rmsg = self._call_retime(
+                dense, list(GJ), time_backend, 1.0, 1.0,
+                velocity_limits=[vmax] * len(GJ),
+                acceleration_limits=[amax] * len(GJ),
+                timeout_s=float(self.get_parameter("goto_via_retime_timeout_s").value),
+            )
+            if ok_r and rtraj is not None and len(rtraj.points) >= 2:
+                times = [_tfs_seconds(p.time_from_start) for p in rtraj.points]
+                tpos = [list(p.positions) for p in rtraj.points]
+                timed = (times, tpos)
+            else:
+                self.get_logger().warn(
+                    f"goto_via retime({time_backend}) failed ({rmsg}); "
+                    f"fallback to software profile '{profile}'")
+        if timed is None:
+            timed = _software_timing()
         if timed is None:
             return False, "via timing failed", 0.0
         times, tpos = timed
@@ -6034,11 +6066,16 @@ class ArmController(Node):
         a_scaling: float,
         geo_times: Optional[List[float]] = None,
         target_duration: float = 0.0,
+        velocity_limits: Optional[List[float]] = None,
+        acceleration_limits: Optional[List[float]] = None,
+        timeout_s: float = 5.0,
     ) -> Tuple[bool, Optional[JointTrajectory], str]:
         """
         F68: 同步（轮询）调 /a3/arm/retime_trajectory。geo_times 给出各点.
 
         time_from_start（录制时刻 + ramp 偏移），用于 Ruckig 播种。
+        F167: velocity_limits/acceleration_limits 非空时按 group 顺序下发逐关节**绝对**
+        上限（服务端忽略 scaling），用于 goto_via 复现自身 caps。
         """
         if not self._wait_service(self._retime_cli, 1.0):
             return False, None, "retime service unavailable"
@@ -6054,8 +6091,12 @@ class ArmController(Node):
         req.velocity_scaling = v_scaling
         req.acceleration_scaling = a_scaling
         req.target_duration = target_duration
+        if velocity_limits:
+            req.velocity_limits = [float(x) for x in velocity_limits]
+        if acceleration_limits:
+            req.acceleration_limits = [float(x) for x in acceleration_limits]
         future = self._retime_cli.call_async(req)
-        if not self._wait_future(future, 5.0):
+        if not self._wait_future(future, float(timeout_s)):
             return False, None, "retime call timeout"
         result = future.result()
         if result.success:

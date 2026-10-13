@@ -188,6 +188,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 | F164 | 连续笛卡尔路径（cp）轨迹 kind：lin 折线 + circ 圆弧，一条过点样条 | implemented | 功能 | [requirements/F164-cp-cartesian-path-kind.md](requirements/F164-cp-cartesian-path-kind.md) |
 | F165 | 轨迹规划模式工业级优化与智能选型（G64 拐角圆滑 + 速度梯度验证 + 离线推荐器） | implemented | 功能 | [requirements/F165-trajectory-mode-industrial-optimization.md](requirements/F165-trajectory-mode-industrial-optimization.md) |
 | F166 | 轨迹规划 9 模式：抽象注册表（含 CIRC 圆弧/逼近样条）+ 逐点 exact + 离线 auto 规划 | implemented | 功能 | [requirements/F166-trajectory-mode-registry-9mode-auto.md](requirements/F166-trajectory-mode-registry-9mode-auto.md) |
+| F167 | 轨迹规划「用成熟库」升级：Ruckig/TOTG 替换手写剖面 + toppra 力矩约束 + 实时 OTG 演示 | implemented | 功能 | [requirements/F167-trajectory-lib-upgrade-ruckig-toppra-otg.md](requirements/F167-trajectory-lib-upgrade-ruckig-toppra-otg.md) |
 
 ## 非功能需求
 

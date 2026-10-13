@@ -25,7 +25,11 @@ ament_target_dependencies(
 )
 target_link_libraries(retime_trajectory_node ruckig::ruckig)
 
-install(TARGETS retime_trajectory_node
+# F167.3: 实时 OTG 演示（纯计算，复用 ruckig；仿真-only，不接生产链路）
+add_executable(otg_demo src/otg_demo.cpp)
+target_link_libraries(otg_demo ruckig::ruckig)
+
+install(TARGETS retime_trajectory_node otg_demo
   DESTINATION lib/${PROJECT_NAME}
 )
 

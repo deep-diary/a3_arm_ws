@@ -48,6 +48,18 @@ SHORT = {
     "circ": "circ", "jnt_g64_quintic": "g64q", "jnt_g64_trapezoid": "g64t",
     "jnt_spline_bell": "bell", "jnt_spline_approx": "fit",
 }
+# F167 报告补充列：过首末点 / 过中间点 / 应用场合（语义依据 arm_controller.TRAJ_MODES）
+MODE_META = {
+    "ptp": ("✅ 段末精确停", "✅ 逐腿逐点停", "点对点定位 / 示教逐段回放；需停稳、精确到点"),
+    "ptp_blend": ("✅ 段末精确停", "❌ 切角（可逐点指定精确）", "关节快速过渡、多路点连续运动（不停车）"),
+    "lin_exact": ("✅ 直线到点+停", "✅ 逐点精确", "需笛卡尔直线且逐点停：精密接触 / 涂胶 / 焊接示教"),
+    "lin_blend": ("✅ 段末精确停", "❌ 切角（可逐点指定精确）", "需笛卡尔直线的连续轨迹：喷涂 / 巡边，拐角圆滑"),
+    "jnt_g64_quintic": ("✅ 端点精确", "❌ 切角（可逐点指定精确）", "关节平滑连续路径（G64）+ 加-巡-减；产线节拍"),
+    "jnt_g64_trapezoid": ("✅ 端点精确", "❌ 切角（可逐点指定精确）", "同 G64 但梯形速度，最省时；节拍优先"),
+    "jnt_spline_bell": ("✅ 端点精确", "✅ 全部精确过点", "要求精确过全部路点且 C2 平滑（抖小）"),
+    "circ": ("✅ 弧到点+停", "✅ 过辅助点（弧过 3 点）", "圆弧路径：绕行 / 倒角 / 球面轨迹"),
+    "jnt_spline_approx": ("✅ 端点精确", "❌ 仅端点（中间逼近不过点）", "给一批点求最平滑逼近：点不必严格过、最抗过冲"),
+}
 
 
 def _legend(parts, modes, H, L, per_row=5, dx=104, y0=None):
@@ -266,11 +278,13 @@ def main() -> None:
              "", "## 位置对比", "", f"![位置]({os.path.basename(pos_svg)})", "",
              "## 速度对比", "", f"![速度]({os.path.basename(spd_svg)})", "",
              "## 加速度对比", "", f"![加速度]({os.path.basename(acc_svg)})", "",
-             "| 模式 | 时长(s) | TCP 峰值速率(m/s) | TCP 峰值加速度(m/s²) | TCP 路径长(m) | 距直线折线(mm) |",
-             "|---|---|---|---|---|---|"]
+             "| 模式 | 时长(s) | TCP峰值速率(m/s) | TCP峰值加速度(m/s²) | TCP路径长(m) | 距直线折线(mm) | 过首末点 | 过中间点 | 应用场合 |",
+             "|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
+        ep, vp, sc = MODE_META.get(r["mode"], ("?", "?", "?"))
         lines.append(f"| {r['mode']} | {r['dur']:.2f} | {r['vmax']:.3f} | "
-                     f"{r['amax']:.2f} | {r['path_len']:.4f} | {r['dev_mm']:.1f} |")
+                     f"{r['amax']:.2f} | {r['path_len']:.4f} | {r['dev_mm']:.1f} | "
+                     f"{ep} | {vp} | {sc} |")
     lines.append("")
     md = os.path.join(out_dir, "traj_modes_tcp_report.md")
     with open(md, "w", encoding="utf-8") as f:

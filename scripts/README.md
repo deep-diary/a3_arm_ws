@@ -41,6 +41,10 @@
 | `traj_plan_auto.py` | F166 离线 auto 规划器：读含逐点 `exact` + `mode:auto` 的规划配置 → 按 exact 筛可行模式 → 时长/平滑加权择优 → 写最终 stream + 报告 | `python3 scripts/traj_plan_auto.py --config <plan.yaml> [--w-dur 0.5 --w-j 0.5]` |
 | `a3_test/traj_modes_tcp_capture.py` | 9 模式 TCP 轨迹在线采集：逐模式回放 + 录 `/joint_states` → JSON | `python3 scripts/a3_test/traj_modes_tcp_capture.py --speed 0.4` |
 | `a3_test/traj_modes_tcp_report.py` | 9 模式 TCP 对比报告：FK 到末端 → 位置（等比例 y-z）/速度/加速度 3 张 SVG + 距直线折线偏差 MD | `python3 scripts/a3_test/traj_modes_tcp_report.py --run /tmp/traj_modes_tcp.json` |
+| `traj_retime_toppra.py` | F167.2 toppra 离线重定时：速度/加速度 + **力矩约束**（Pinocchio `rnea`）+ 自定义凸约束 `\|W·q̈\|≤c`；输出指标 + baked 轨迹（可回放）。**依赖 toppra**（本机 `sudo pip3 install --no-deps --no-build-isolation toppra`，先装 Cython；顶层 import matplotlib 已内置 stub） | `python3 scripts/traj_retime_toppra.py --waypoints trajectories/waypoints/latest.yaml --out <name>.yaml.baked.yaml` |
+| `a3_test/f167_retime_ab.py` | F167.1 A/B：4 软件模式 `goto_via_time_backend`=software vs totg 的时间律指标对比（几何一致性判定） | `python3 scripts/a3_test/f167_retime_ab.py --software <sw.json> --totg <totg.json>` |
+| `a3_test/f167_toppra_acceptance.py` | F167.2 验收：toppra 求解 + 力矩在限内 +（`--sim`）baked 仿真回放 | `python3 scripts/a3_test/f167_toppra_acceptance.py --sim` |
+| `a3_test/f167_otg_report.py` | F167.3 报告：读 `otg_demo` CSV → 同步/改目标/急停指标 + SVG（numpy-only） | `python3 scripts/a3_test/f167_otg_report.py --dir /tmp --out-dir docs/dev` |
 
 ## 桥接/工具
 

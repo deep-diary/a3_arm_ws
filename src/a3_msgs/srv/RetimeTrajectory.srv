@@ -8,6 +8,8 @@ float64 velocity_scaling        # <= 1.0; non-positive -> 1.0
 float64 acceleration_scaling    # <= 1.0; non-positive -> 1.0
 float64 sample_dt               # output point spacing hint; non-positive -> 0.01 s
 float64 target_duration         # >0: TOTG fallback iteratively scales limits to hit this duration (s)
+float64[] velocity_limits       # F167: absolute per-joint velocity caps (len = group joints, group order); empty = node params. When set, velocity_scaling is ignored.
+float64[] acceleration_limits   # F167: absolute per-joint acceleration caps (same rules as velocity_limits)
 ---
 bool success
 string message

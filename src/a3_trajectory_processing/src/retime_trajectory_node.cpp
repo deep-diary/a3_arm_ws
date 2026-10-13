@@ -269,6 +269,37 @@ private:
       return;
     }
 
+    // F167: 请求级绝对限值覆盖（逐关节，group 顺序）。用于 goto_via 等把"逐关节 caps"
+    // 直接告诉服务（节点参数无法逐请求覆盖）；覆盖值为最终上限，故忽略 scaling。
+    const bool has_override = !request->velocity_limits.empty() || !request->acceleration_limits.empty();
+    if (has_override)
+    {
+      const size_t m = group_joint_names.size();
+      if (request->velocity_limits.size() != m || request->acceleration_limits.size() != m)
+      {
+        response->success = false;
+        response->message = "velocity_limits/acceleration_limits must both have length = group joints (" +
+                            std::to_string(m) + ")";
+        return;
+      }
+      for (size_t j = 0; j < m; ++j)
+      {
+        const double v = request->velocity_limits[j];
+        const double a = request->acceleration_limits[j];
+        if (!(v > 0.0) || !(a > 0.0))
+        {
+          response->success = false;
+          response->message = "non-positive override limit for joint " + group_joint_names[j];
+          return;
+        }
+        base_velocity_limits[group_joint_names[j]] = v;
+        base_acceleration_limits[group_joint_names[j]] = a;
+        base_jerk_limits[group_joint_names[j]] = default_jerk_scale_ * a;
+      }
+      v_scaling = 1.0;
+      a_scaling = 1.0;
+    }
+
     std::string backend = request->backend;
     if (backend.empty())
     {

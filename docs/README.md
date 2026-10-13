@@ -41,6 +41,14 @@ docs/
 │   ├── SAFETY.md
 │   ├── CONTROL_ROADMAP.md    控制功能开发路线
 │   └── AI_ROADMAP.md         AI 功能开发路线
+├── control/                  控制「从简到难」进阶清单（模块化学习手册）
+│   ├── README.md             模块索引 + 学习路径 + L0–L8 映射
+│   ├── 01-drive-bus.md       驱动与总线
+│   ├── 02-kinematics.md      运动学
+│   ├── 03-trajectory.md      轨迹规划与时间律
+│   ├── 04-dynamics.md        动力学与补偿
+│   ├── 05-force-compliance.md 力控与柔顺
+│   └── 06-safety-realtime.md 安全与实时
 ├── edge/                     A3 Edge 主线
 │   ├── REQUIREMENTS.md         需求总览 + 索引（正文在 requirements/）
 │   ├── requirements/           需求正文 F###-slug.md（一条一文件）
@@ -72,6 +80,22 @@ docs/
 | [shared/SAFETY.md](shared/SAFETY.md) | 软限位、gate、急停、断连策略原则 |
 | [shared/CONTROL_ROADMAP.md](shared/CONTROL_ROADMAP.md) | 控制功能分层路线（L0–L8）、reBot/A3 对比、Edge C1–C8 |
 | [shared/AI_ROADMAP.md](shared/AI_ROADMAP.md) | AI 赋能分层路线（A0–A5）、reBot AI 功能清单、复刻/自研两步路线 |
+
+> `CONTROL_ROADMAP.md` 是**规划/对标**用层级底稿（L0–L8、Wave A/B）；面向新人的**模块化学习清单**见下方 `control/`（按模块逐级说明每个功能点「从简到难」进阶与增量能力）。
+
+### 控制学习手册（control/）
+
+按「从简到难」逐级说明六个核心控制模块的功能点进阶、`新增能力`、工业对标、本仓状态与可继续进阶缺口。定位是新人学习/查阅（学习手册），与 `CONTROL_ROADMAP.md`（规划底稿）分工，通过 L0–L8↔模块映射表对齐。
+
+| 文档 | 覆盖层级 | 说明 |
+|------|----------|------|
+| [control/README.md](control/README.md) | — | 模块索引、六模块总览、新人学习路径、L0–L8↔模块映射 |
+| [control/01-drive-bus.md](control/01-drive-bus.md) | L0–L1 | 驱动与总线（单电机 → 多厂商 HAL） |
+| [control/02-kinematics.md](control/02-kinematics.md) | L3 | 运动学（FK/IK → 无奇异路径与任务约束） |
+| [control/03-trajectory.md](control/03-trajectory.md) | L2/L4/L5 | 轨迹规划与时间律（PTP → 工业级统一调度 + 在线 OTG） |
+| [control/04-dynamics.md](control/04-dynamics.md) | L3/L7 | 动力学与补偿（重力 → 全模型前馈 + 辨识 + 观测器） |
+| [control/05-force-compliance.md](control/05-force-compliance.md) | L8 | 力控与柔顺（关节阻抗 → 末端力控与接触任务） |
+| [control/06-safety-realtime.md](control/06-safety-realtime.md) | 横切 | 安全与实时（软限位 → 功能安全与可观测性） |
 
 ### A3 Edge（主线）
 

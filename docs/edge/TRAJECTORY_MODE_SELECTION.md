@@ -21,6 +21,43 @@
 
 > 关节模式（ptp/ptp_blend/l1p5/l2/l3/l3_fit）用 `positions`；笛卡尔模式（lin/pilz/blend/circ）用 `pose`。
 > 「精确过点」列：`✅ 全部` = 每个 via 都精确到；`❌（可逐点…）` = 默认切角，但支持**逐点 exact**（见 §2）。
+> 术语：**OMPL** = Open Motion Planning Library（采样式运动规划库，MoveIt 默认规划器 RRTConnect）。
+> 本仓 `ptp` 单腿经 MoveIt/OMPL 规划**关节无碰路径**，再由 TOTG/Ruckig 赋时间律（故称「OMPL+TOTG」）。
+
+### 1.1 使用场景速查（首末点固定，差别在"中间点怎么过"）
+
+**端点语义（9 种一致）**：段首 = **当前实际位**（恒精确、无跳变），段末 = `target`（恒精确停）；
+只有中间 `via` 点才可能不精确。「过点」由 `exact` 属性表达（见 §2）。
+
+| 模式 | 中间点过点 | 最少配置点 | 典型使用场景 |
+|---|---|---|---|
+| `ptp` | 全过（逐点停） | 1 | 点位定位、示教逐段回放；要停稳/精确到点/大惯性急反向 |
+| `ptp_blend` | 可逐点指定 | 2 | 关节快速多路点过渡（不停车）；不需笛卡尔直线 |
+| `lin_exact` | 全过（逐点停） | 1 | 精密接触/压装、涂胶、焊接——要**直线且逐点停** |
+| `lin_blend` | 可逐点指定 | 2 | 喷涂/巡边/码垛——要直线但拐角不停车 |
+| `jnt_g64_quintic` | 可逐点指定 | 2 | 产线节拍 + 关节平滑连续路径（最通用的"顺滑过点"） |
+| `jnt_g64_trapezoid` | 可逐点指定 | 2 | 节拍优先（最快），能接受加速度不连续 |
+| `jnt_spline_bell` | 全过（点间可能过冲） | 2 | 要**精确过每个路点**且抖小（示教点严格重现） |
+| `circ` | 过辅助点（弧过 3 点） | 2（恰好 1 辅助） | 圆弧：绕行、倒角、球面/圆周轨迹 |
+| `jnt_spline_approx` | 全不过（仅端点） | 3（=via≥2） | 一批点求**最平滑逼近**、点不必严格过（去抖/去噪） |
+
+### 1.2 最少点数要求与退化行为
+
+「配置点」= 段内 `via` 数 + 1（`target`），**不含起点**。低于阈值会退化（不再体现该模式特色）：
+
+| 模式 | 配置点 = 1（仅 target） | 配置点 = 2 | 配置点 ≥ 3 |
+|---|---|---|---|
+| `ptp` | 1 段 OMPL 单腿 ✅ | 2 段逐腿 | 多段逐腿 |
+| `ptp_blend` | ⚠️ 退化为 OMPL 单段（非 pilz） | pilz PTP 序列 ✅ | ✅ |
+| `lin_exact` | 单段 LIN ✅（即其特色） | 逐点精确停 ✅ | ✅ |
+| `lin_blend` | ⚠️ 退化为单段 LIN | pilz LIN 序列 ✅ | ✅ |
+| `jnt_g64_quintic` / `jnt_g64_trapezoid` | ⚠️ 退化为 OMPL 单段（无拐角可圆） | G64 圆角 ✅ | ✅ |
+| `jnt_spline_bell` | ⚠️ 退化为 OMPL 单段 | 3 点样条 ✅ | ✅（过冲随点数增大） |
+| `circ` | ⚠️ 退化为单段 LIN | **恰好 2 = 正常** | ❌ 报错（必须恰好 1 辅助点） |
+| `jnt_spline_approx` | ⚠️ 退化为 OMPL 单段 | ⚠️ 退回插值样条（≈`jnt_spline_bell`） | ✅ 真·最小二乘逼近 |
+
+> 原因：无 `via` 的段走 `_plan_single`（关节 → OMPL `_moveit_move`；笛卡尔 → `_lin_move`），
+> 不进入该模式的手写路径生成器。所以**除 `ptp`/`lin_exact`/`circ` 外，要让模式特色生效至少要给 1 个 `via` 点**。
 
 ## 2. 逐点 exact（是否需要精确过点）
 
@@ -143,6 +180,39 @@ python3 scripts/traj_mode_recommend.py --stream scale
 - 实现：`src/a3_arm_controller/a3_arm_controller/arm_controller.py`（`_round_corners`、
   `_jerk_limited_timed_traj`、`_goto_via_smooth`、`_build_lin_sequence_item`）
 - 参数：`src/a3_arm_controller/config/arm_controller.yaml`（`goto_via_corner_blend_rad` 等）
-- 生成器：`scripts/gen_stream_modes.py`（多模式对比）、`scripts/traj_mode_recommend.py`（推荐器）
+- 生成器：`scripts/gen_stream_modes.py`（多模式对比）、`scripts/traj_mode_recommend.py`（推荐器）、`scripts/traj_plan_auto.py`（离线 auto 规划）
 - 契约：[shared/TOPIC_CONTRACT.md](../shared/TOPIC_CONTRACT.md)、[shared/CONTROL_ROADMAP.md](../shared/CONTROL_ROADMAP.md)
-- 需求：[requirements/F165-trajectory-mode-industrial-optimization.md](requirements/F165-trajectory-mode-industrial-optimization.md)
+- 学习清单：[control/03-trajectory.md](../control/03-trajectory.md)（轨迹规划与时间律「从简到难」进阶，本指南为其 T0–T11 的选型细节）
+- 需求：[requirements/F165-trajectory-mode-industrial-optimization.md](requirements/F165-trajectory-mode-industrial-optimization.md)、
+  [requirements/F166-trajectory-mode-registry-9mode-auto.md](requirements/F166-trajectory-mode-registry-9mode-auto.md)、
+  [requirements/F167-trajectory-lib-upgrade-ruckig-toppra-otg.md](requirements/F167-trajectory-lib-upgrade-ruckig-toppra-otg.md)
+
+## 9. 时间律来源：手写剖面 ↔ 成熟库（F167）
+
+软件模式（`jnt_g64_quintic`/`jnt_g64_trapezoid`/`jnt_spline_bell`/`jnt_spline_approx`）的**几何路径**
+为手写（G64 圆角 / scipy 样条），**时间律**可切换（参数 `goto_via_time_backend`）：
+
+| 取值 | 时间律 | 说明 |
+|---|---|---|
+| `software`（默认） | 手写剖面（quintic / 梯形 / 钟形） | 平滑（j_rms 低）、进程内、零回归 |
+| `totg` / `ruckig` | `/a3/arm/retime_trajectory`（成熟库） | **时间最优（bang-bang）**：更快（实测快 30-60%）但更"抖"（j_rms 高 2-8×）；服务不可用自动回退 `software` |
+
+- 服务请求带逐关节**绝对** `velocity_limits/acceleration_limits`（复现 `goto_via_max_*` caps），几何路径不变。
+- A/B 与结论见 [dev/F167_TRAJECTORY_LIB_UPGRADE_REPORT.md](../dev/F167_TRAJECTORY_LIB_UPGRADE_REPORT.md)。
+- 另：离线力矩/动力学约束（toppra + Pinocchio）、实时 OTG（Ruckig）能力见 F167.2/F167.3。
+
+## 10. `jnt_spline_approx` 与示教回放（F137+F68）的关系
+
+两者是**同一思路「几何逼近/平滑 + 时间重定时」**在不同输入上的落地：
+
+| 维度 | 示教/连续回放（`playback`，F137+F68） | `jnt_spline_approx`（`l3_fit`） |
+|---|---|---|
+| 输入 | **密集录制点**（拖动示教，几百~几千点） | **稀疏路点**（几个 `via`） |
+| 几何 | 逐关节**五次** B 样条平滑去噪（`s=N·ε²`，RMS 残差 ≈ ε rad）；端点不强制 | **三次** B 样条最小二乘逼近（`ctrl_ratio=0.7`）；**端点强制精确** |
+| 目的 | 去编码器量化锯齿、光顺 | 平滑逼近稀疏点、抗过冲 |
+| 时间律 | F68 retime（TOTG/Ruckig，时间最优） | `_jerk_limited_timed_traj`（quintic 加-巡-减）；F167 可切 `totg`/`ruckig` |
+| 下发 | JTC（C2 样条插值） | JTC |
+
+**结论**：`jnt_spline_approx` 即「**稀疏路点版**的 F137」——都是 B 样条逼近 + retime。把
+`goto_via_time_backend` 切到 `totg`/`ruckig` 后，其时间律与 F68 同源，二者链路基本等价。
+差别在定位：F137 面向**密集录制**（去噪为主、端点可微改），`jnt_spline_approx` 面向**稀疏路点**（端点必须精确）。

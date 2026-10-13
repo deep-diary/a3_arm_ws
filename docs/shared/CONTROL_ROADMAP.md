@@ -326,6 +326,9 @@ flowchart LR
 | 连续笛卡尔路径（cp：lin 折线 + circ 圆弧） | ※ pilz LIN | ✅ F163/F164（`_goto_via_smooth`/`_goto_via_lin_blend` 一条 C2 轨迹） | Wave B 增强 | [TRAJECTORY_KINDS.md](TRAJECTORY_KINDS.md) |
 | 拐角圆滑（G64 连续路径）与规划模式选型 | ※ 商用控制器 G64 | ✅ F165（关节折线拐角二次 Bezier 圆角 `_round_corners`，直线保形、消除拐角加速度尖峰；修 `_jerk_limited_timed_traj` 减速段速度不连续 + 段级 speed 同步缩放加速度） | Wave B 增强 | [../edge/TRAJECTORY_MODE_SELECTION.md](../edge/TRAJECTORY_MODE_SELECTION.md) |
 | 轨迹模式注册表 + CIRC 圆弧 + 逼近样条 + 自动选型 | ※ KUKA CIRC/SPLINE | ✅ F166（9 模式统一注册表 `arm_controller.TRAJ_MODES` + `resolve_traj_mode` 抽象调度；`circ`=pilz CIRC 圆弧；`jnt_spline_approx`=scipy 夹紧端点最小二乘 B 样条；stream 逐点 `exact` + `mode:auto` 离线择优 `traj_plan_auto.py`） | Wave B 增强 | [../edge/TRAJECTORY_MODE_SELECTION.md](../edge/TRAJECTORY_MODE_SELECTION.md) |
+| 时间律用成熟库（手写剖面 → Ruckig/TOTG） | ※ 商用控制器 | ✅ F167.1（`goto_via_time_backend=software/totg/ruckig`；软件模式时间律调 `/a3/arm/retime_trajectory`，几何路径不变；服务缺失回退手写剖面。实测 totg 快 30-60% 但 j_rms 高 2-8×） | Wave B 增强 | [dev/F167_TRAJECTORY_LIB_UPGRADE_REPORT.md](../dev/F167_TRAJECTORY_LIB_UPGRADE_REPORT.md) |
+| 力矩/动力学约束 + 自定义凸约束时间参数化 | ⚠️ 仅 v/a | ✅ F167.2（`scripts/traj_retime_toppra.py`：toppra TOPP-RA + Pinocchio `rnea` 力矩约束 + 自定义 `\|W·q̈\|≤c` 凸约束 → baked 回放；离线） | Wave B 增加 | [dev/F167_TRAJECTORY_LIB_UPGRADE_REPORT.md](../dev/F167_TRAJECTORY_LIB_UPGRADE_REPORT.md) |
+| 实时在线轨迹生成 OTG（多轴同步/改目标/急停） | ※ Reflexxes 类 | ⚠️ 仿真演示 F167.3（`a3_trajectory_processing/otg_demo` 复用 ruckig；同步到齐 0ms、改目标不停车、急停 200ms；**未接**生产 SERVO/teleop） | Wave B 之后 | [dev/F167_TRAJECTORY_LIB_UPGRADE_REPORT.md](../dev/F167_TRAJECTORY_LIB_UPGRADE_REPORT.md) |
 | 防晃运输（slosh-free 轨迹） | ❌ | ❌（**对标缺口**：光靠 jerk-limited 只能减弱不能消除；需输入整形 ZV/ZVD + 球摆模型前馈） | Wave B 之后 | [TRAJECTORY_KINDS.md](TRAJECTORY_KINDS.md) |
 | 主从示教 | 🔜 | ❌ | Wave B | C6 |
 | 末端六维力 / 导纳 | ❌ | ❌ | 硬件后 | C8 |
@@ -553,6 +556,7 @@ AI 赋能已单独成文：[AI_ROADMAP.md](AI_ROADMAP.md)（A0–A5 分层 + reB
 
 | 文档 | 说明 |
 |------|------|
+| [../control/README.md](../control/README.md) | **模块化学习清单**：按六模块逐级说明控制功能「从简到难」进阶与增量能力（学习/查阅用） |
 | [TOPIC_CONTRACT.md](TOPIC_CONTRACT.md) | 轨迹、关节、门控话题契约 |
 | [TRAJECTORY_KINDS.md](TRAJECTORY_KINDS.md) | 轨迹种类清单（continuous/waypoint/stream/cp + 非 playback kind） |
 | [SAFETY.md](SAFETY.md) | 安全原则与力控边界 |
