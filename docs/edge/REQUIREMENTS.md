@@ -191,6 +191,8 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 | F167 | 轨迹规划「用成熟库」升级：Ruckig/TOTG 替换手写剖面 + toppra 力矩约束 + 实时 OTG 演示 | implemented | 功能 | [requirements/F167-trajectory-lib-upgrade-ruckig-toppra-otg.md](requirements/F167-trajectory-lib-upgrade-ruckig-toppra-otg.md) |
 | F168 | 产品栈原生 6 关节档（拆掉 L7 夹爪电机：xacro/SRDF/controllers/编排层整套 6J + 启动脚本自动选档） | implemented | 功能 | [requirements/F168-product-6j-profile.md](requirements/F168-product-6j-profile.md) |
 | F169 | 标定子命令集成（`a3_stack.sh calibrate {model\|scale}`）+ F49 脚本 6 关节适配 | implemented | 功能 | [requirements/F169-calibration-entry-and-6j-adaptation.md](requirements/F169-calibration-entry-and-6j-adaptation.md) |
+| F170 | 全行程重力标定网格档（F49 `--mode space`，覆盖真机实际示教行程 L2→2.4/L3→-2.1，消除示教外推下塌） | implemented | 功能 | [requirements/F170-fullspace-calibration-grid.md](requirements/F170-fullspace-calibration-grid.md) |
+| F171 | 示教 assist：小 kp + 滞后保持 setpoint（死区内冻结顶住残余力矩、死区外跟随可拖 → 示教"稳得住又能拖"） | implemented | 功能 | [requirements/F171-teach-assist-lagged-hold-kp.md](requirements/F171-teach-assist-lagged-hold-kp.md) |
 
 ## 非功能需求
 

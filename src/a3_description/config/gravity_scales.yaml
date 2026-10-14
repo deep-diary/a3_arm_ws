@@ -1,16 +1,19 @@
+# 2026-10-14：F49 模型已重标（含拆夹爪的 6J 全行程），整体比例已被吸收 →
+# F89 的 tau_scale 复位为全 1.0，避免与 F49 重复补偿（原 7J 值 L2×1.0695/L4×0.9570 已作废）。
 zero_torque_controller:
   ros__parameters:
     tau_scale:
     - 1.0
-    - 1.0695199284751284
-    - 0.9963520405079651
-    - 0.9570098511789986
+    - 1.0
+    - 1.0
+    - 1.0
     - 1.0
     - 1.0
     - 1.0
 gravity_calibration_metadata:
   ros__parameters:
-    date: '2026-10-04 16:26:53'
+    date: '2026-10-14 reset-to-1.0 (F49 refit supersedes F89)'
+    note: 'tau_scale 复位为 1.0；如需再标定用 a3_stack.sh calibrate scale'
     tool: scripts/gravity_scale_calibration.py
     joints:
     - L1_joint

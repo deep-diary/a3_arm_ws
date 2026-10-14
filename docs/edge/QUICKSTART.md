@@ -506,11 +506,11 @@ ros2 launch a3_bringup a3_bringup.launch.py hardware:=can can_interface:=can1 in
 ```bash
 ./scripts/a3_stack.sh start --rviz        # 起 6 关节栈；PS4 L3 使能到 READY
 ./scripts/a3_stack.sh calibrate           # 帮助 + 现状（会显示「/joint_states 关节数=6」）
-# F49 模型重拟合（最彻底；anchors 给 6 个 = ready 自由位姿）：
+# F49 模型重拟合（最彻底；anchors 给 6 个 = home 半抬自由位）：
 ./scripts/a3_stack.sh calibrate model --dry-run --no-rest-anchor \
-  --anchors 0.07,1.0839,-0.5649,-0.4617,0.0831,-0.0497
+  --anchors 0.0,0.785,-0.785,0.0,0.0,0.0
 ./scripts/a3_stack.sh calibrate model --no-rest-anchor \
-  --anchors 0.07,1.0839,-0.5649,-0.4617,0.0831,-0.0497   # 采集~68 点+拟合，需监护
+  --anchors 0.0,0.785,-0.785,0.0,0.0,0.0   # 采集~68 点+拟合，需监护
 ./scripts/a3_stack.sh calibrate scale --quick            # 或先快速整体比例核验（F89）
 ./scripts/a3_stack.sh restart --rviz                     # F49 生效需重启（F89 下次起栈自动加载）
 ```
@@ -537,11 +537,11 @@ ros2 launch a3_bringup a3_bringup.launch.py hardware:=can use_teleop:=false use_
 
 # 1) 先看要动的点位与时长（不动臂）
 python3 scripts/gravity_calibration.py --dry-run --no-rest-anchor \
-  --anchors 0.07,1.0839,-0.5649,-0.4617,0.0831,-0.0497,-0.0002
+  --anchors 0.0,0.785,-0.785,0.0,0.0,0.0,0.0
 
 # 2) 采集 + 拟合（断点续采：重跑同命令；清数据：--restart；只拟合：--optimize-only）
 python3 scripts/gravity_calibration.py --no-rest-anchor \
-  --anchors 0.07,1.0839,-0.5649,-0.4617,0.0831,-0.0497,-0.0002
+  --anchors 0.0,0.785,-0.785,0.0,0.0,0.0,0.0
 
 # 3) 生效：重启重力节点（install 下 yaml 是 symlink，不必重编）
 ros2 run a3_bringup gravity_torque_node --ros-args -r __node:=a3_gravity_torque -p enabled:=True
@@ -552,10 +552,10 @@ ros2 run a3_bringup gravity_torque_node --ros-args -r __node:=a3_gravity_torque 
 
 - **`--effort-domain`**：真机 `/joint_states.effort` 是**电机域**（LL-037），默认 `motor`（拟合前 ×`joint_signs`）；仿真数据文件用 `urdf`。域随数据文件 meta 留档，混用会直接报错退出。
 - **`--temp-pause/--temp-resume`**（默认 85/75 °C）：超限回折叠位降温再续采（3D 打印外壳散热差，85 留 5 °C 余量给 F44 warn 90；实测被动降温 ~2 °C/min，单次约 5 min）。
-- **`--no-rest-anchor` + `--anchors`**：折叠 home 位搭在支撑上 τ 恒≈0，不是重力样本（LL-035）——用 ready 等自由位姿做外推锚定。
+- **`--no-rest-anchor` + `--anchors`**：折叠支撑位（现名 `idle`）搭在支撑上 τ 恒≈0，不是重力样本（LL-035）——用 `home`（半抬自由位）/ `ready` 等自由位姿做外推锚定；锚点是**实测**到达的位姿，换末端负载后须重采。
 - **安全**：所有移动 ≤0.25 rad/步链式分段（3 s/段），每点前用当前模型预测 τ（>3.5 Nm 跳过），F42/F44 仍是最后防线；异常时 Ctrl+C，数据逐点留盘。
 - **yaml 旧版留档**：`inertia_params.official-6J-20260318.bak.yaml`（官方 6J 标定值，回退用）。
-- **验收位姿用 ready**（自由悬空位）：home 是折叠支撑位，实测 τ≈0 判不了模型（LL-035）。
+- **验收位姿用 ready**（自由悬空位）；折叠支撑位现名 `idle`（F113），实测 τ≈0 判不了模型（LL-035）。
 
 ```bash
 # 4) ready 位复核模型 vs 实测（臂会移动到 ready；实测 τ 需 ×joint_signs）

@@ -35,11 +35,16 @@
             <!-- F85: velocity-adaptive free-drive damping (el_a3_hardware computeAdaptiveKd);
                  per-joint zero_torque_kd_min/max below override the global values. -->
             <param name="adaptive_kd_enabled">${adaptive_kd_enabled}</param>
-            <param name="zero_torque_kd">0.3</param>
+            <param name="zero_torque_kd">0.6</param>
             <param name="zero_torque_kd_min">0.001</param>
-            <param name="zero_torque_kd_max">0.15</param>
+            <param name="zero_torque_kd_max">0.6</param>
             <param name="kd_velocity_ref">1.0</param>
             <param name="kd_smoothing_alpha">0.15</param>
+            <!-- F171 teach assist：示教给一点位置刚度（滞后保持 setpoint）——
+                 死区内冻结顶住残余力矩、慢漂被 kp 拉回（"稳得住"），死区外跟随实测
+                 （"能拖"）。teach_kp=0 即回退原 kp=0 自由拖动。可运行时 ros2 param set。 -->
+            <param name="teach_kp">10.0</param>
+            <param name="teach_hold_deadband">0.05</param>
             <!-- F86: arm motor-side CAN timeout (0x7028, uint32 counts ~50us, 20000≈1s).
                  Independent of the F81 host watchdog: trips even if the host dies.
                  0 / false disarms; firmware write is volatile, re-armed every on_activate. -->
@@ -67,7 +72,7 @@
             <param name="urdf_path">$(find a3_description)/urdf/el_a3.urdf</param>
             <param name="use_calibrated_inertia">true</param>
             <param name="inertia_config_path">$(find a3_description)/config/inertia_params.yaml</param>
-            <param name="gravity_scales_file">~/.a3/gravity_scales.yaml</param>
+            <param name="gravity_scales_file">$(find a3_description)/config/gravity_scales.yaml</param>
           </xacro:if>
           <xacro:unless value="${use_real_hardware}">
           <!-- Board runtime uses a3_can_bridge topic stack (not this plugin).
@@ -263,7 +268,7 @@
         <param name="kp">100.0</param>
         <param name="kd">4.0</param>
         <param name="zero_torque_kd_min">0.005</param>
-        <param name="zero_torque_kd_max">0.1</param>
+        <param name="zero_torque_kd_max">0.6</param>
         <command_interface name="position">
           <param name="min">-1.0472</param>
           <param name="max">1.5708</param>
@@ -301,7 +306,7 @@
         <param name="kp">100.0</param>
         <param name="kd">4.0</param>
         <param name="zero_torque_kd_min">0.005</param>
-        <param name="zero_torque_kd_max">0.05</param>
+        <param name="zero_torque_kd_max">0.3</param>
         <command_interface name="position">
           <param name="min">-1.5708</param>
           <param name="max">1.5708</param>
@@ -339,7 +344,7 @@
         <param name="kp">100.0</param>
         <param name="kd">4.0</param>
         <param name="zero_torque_kd_min">0.005</param>
-        <param name="zero_torque_kd_max">0.05</param>
+        <param name="zero_torque_kd_max">0.3</param>
         <command_interface name="position">
           <param name="min">-1.5708</param>
           <param name="max">1.5708</param>

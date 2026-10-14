@@ -24,7 +24,7 @@
   python3 scripts/gravity_calibration.py --restart            # 清数据重来
   # 折叠 rest 位顶限位/搭支撑时（τ 实测恒≈0，非重力样本）剔除该锚点、改用自由位姿锚定：
   python3 scripts/gravity_calibration.py --no-rest-anchor \
-      --anchors 0.07,1.0839,-0.5649,-0.4617,0.0831,-0.0497,-0.0002   # ready 位
+      --anchors 0.0,0.785,-0.785,0.0,0.0,0.0,0.0   # home 半抬自由位（EDULITE SRDF home；6J 去掉末位 0）
 
 前提：桥 + 编排层在跑、臂已 enable（READY）。中断后重跑自动续采。
 """
@@ -150,6 +150,16 @@ def generate_test_configurations(mode: str, home: List[float]) -> List[List[floa
         l3_range = np.linspace(-1.4, -0.2, 15)
         l4_range = np.linspace(0.2, 1.3, 8)
         l5_range = np.linspace(0.2, 1.1, 6)
+        grid_step = 2
+    elif mode == "space":
+        # F170 全行程档：覆盖本臂真机实际示教行程（L2→2.4、L3→-2.1；URDF 限位 L2 [0,3.665]、
+        # L3 [-4.014,0]），解决高抬/后仰区「网格外推」导致的示教（kp=0）下塌。L4/L5 也放宽到
+        # 负值侧（示教常到 L4≈-0.25、L5≈0）。范围按本臂实际可达设定，非官方参考范围；每点仍过
+        # 碰撞过滤 + τ 预测跳过（超 --torque-skip）+ 温度守护。
+        l2_range = np.linspace(0.0, 2.4, 11)
+        l3_range = np.linspace(-2.1, -0.2, 11)
+        l4_range = np.linspace(-0.5, 1.3, 6)
+        l5_range = np.linspace(-0.4, 1.1, 4)
         grid_step = 2
     else:  # full
         l2_range = np.linspace(0.3, 1.5, 10)
@@ -439,11 +449,12 @@ def residual_report(model, records, results, min_move: float = 0.02) -> dict:
     params = results.get("_params")
     data = model.createData()
     errs, dirs = [], []
-    prev_q, last_dir = None, np.zeros(7)
+    n = len(records[0][0]) if records else 0
+    prev_q, last_dir = None, np.zeros(n)
     for positions, measured in records:
         errs.append(measured - predict_gravity(model, data, positions, params))
         if prev_q is None:
-            dirs.append(np.zeros(7))
+            dirs.append(np.zeros(n))
         else:
             moved = np.abs(positions - prev_q) > min_move
             last_dir = np.where(moved, np.sign(positions - prev_q), last_dir)
@@ -494,6 +505,28 @@ def acceptance_verdict(rmse: float, report: dict) -> Tuple[bool, List[str]]:
     return ok, notes
 
 
+def load_params_yaml(path: str) -> Optional[np.ndarray]:
+    """读 inertia_params.yaml → 12 参数向量（顺序同 _urdf_initial）。读不到/解析失败返回 None。"""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        import yaml
+        with open(path) as f:
+            doc = yaml.safe_load(f) or {}
+        p = doc.get("inertia_params") or {}
+        if not p:
+            return None
+        return np.array([
+            p["L2"]["mass"], p["L2"]["com"][0],
+            p["L3"]["mass"], p["L3"]["com"][0], p["L3"]["com"][1],
+            p["L4"]["mass"], p["L4"]["com"][0], p["L4"]["com"][1],
+            p["L5"]["mass"], p["L5"]["com"][2],
+            p["L6"]["mass"], p["L6"]["com"][2],
+        ], dtype=float)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def eval_params_yaml(model, records, path: str) -> Optional[float]:
     """用同一批数据评当前 yaml（切换前基线对比）。读不到就返回 None。"""
     if not os.path.isfile(path):
@@ -527,7 +560,7 @@ def save_results(results: dict, output_path: str) -> None:
     content = (
         "# EL-A3 arm inertia parameters\n"
         "# For Pinocchio gravity compensation\n"
-        "# Fitted by scripts/gravity_calibration.py (F49, 7J with gripper) — override URDF defaults\n"
+        f"# Fitted by scripts/gravity_calibration.py (F49, {len(JOINT_NAMES)} 关节) — override URDF defaults\n"
         "#\n"
         f"# Calibration date: {info['date']}\n"
         f"# RMSE: {info['rmse']:.4f} Nm\n"
@@ -643,6 +676,21 @@ class GravityCalibrator:
         self.data = self.model.createData()
         if self.model.nq != 7:
             print(f"WARN: URDF nq={self.model.nq} != 7 — 期望 7 关节模型")
+        # 6J 档：真机已拆夹爪，但 URDF 仍含 L7/gripper_link。清零夹爪惯量，使拟合模型
+        # 与真机一致——否则拟合会压低 L2–L6 质量去抵消模型里并不存在的夹爪（~0.06 kg），
+        # 消费端 6J 模型（无夹爪）套用就系统性欠补偿 → 各关节到处下塌（见 LL-160）。
+        if int(self.args.joints) == 6:
+            gid = self.model.getFrameId("gripper_link")
+            if gid < len(self.model.frames):
+                self.model.inertias[self.model.frames[gid].parentJoint] = pin.Inertia.Zero()
+                print("6J 档：已清零 gripper_link 惯量（拟合模型对齐真机）")
+        # τ 预测（安全跳过）用「当前已标定模型」而非 URDF 默认：URDF 默认惯量含夹爪质量，
+        # 在伸展/后仰区高估 ~40%（同姿态 5.5 vs 实际 4.0 Nm），会把可采位姿误跳。
+        self.calib_params = load_params_yaml(self.args.output)
+        if self.calib_params is not None:
+            print(f"τ 预测使用已标定模型：{os.path.basename(self.args.output)}")
+        else:
+            print("τ 预测使用 URDF 默认惯量（未找到/无法解析已标定 yaml）")
         return True
 
     # ---- 基础工具 ----
@@ -816,14 +864,18 @@ class GravityCalibrator:
             tag = "无 rest（--no-rest-anchor）" if self.args.no_rest_anchor else "含 rest"
             print(f"锚点位姿追加：{len(anchors)} 个（{tag}）")
 
-        # 力矩预测过滤（当前模型，可能低估——F42/F44 仍是最后防线）
+        # 力矩预测过滤（当前已标定模型；可能低估——F42/F44 仍是最后防线）
         skipped = 0
         if self.config.torque_filter:
             filtered = []
             for cfg in test_configs:
-                q = np.zeros(self.model.nq)
-                q[: len(cfg)] = cfg
-                tau = self.pin.computeGeneralizedGravity(self.model, self.data, q)
+                if self.calib_params is not None:
+                    tau = predict_gravity(self.model, self.data,
+                                          np.asarray(cfg, dtype=float), self.calib_params)
+                else:
+                    q = np.zeros(self.model.nq)
+                    q[: len(cfg)] = cfg
+                    tau = self.pin.computeGeneralizedGravity(self.model, self.data, q)
                 if np.max(np.abs(tau[1:6])) > self.config.torque_skip:
                     print(f"  [skip] 预测 τ 超 {self.config.torque_skip} Nm: {cfg}")
                     skipped += 1
@@ -831,6 +883,70 @@ class GravityCalibrator:
                 filtered.append(cfg)
             test_configs = filtered
             print(f"τ 预测过滤：{skipped} 点跳过，剩 {len(test_configs)} 点")
+
+        # F170 末端高度过滤：末帧（end_effector）在 base 系的高度低于 --min-tip-z 的位姿会把末端
+        # 伸到桌面以下（真机基座与桌面等高时压桌）。低 L2（大幅后仰）尤其会把末端压到基座平面下
+        # （L2=2.4 时末端 z≈-0.02 m）——用 FK 剔除，替代脆弱的 (l2,l3) 启发式。旧档位末端最低≈0.12 m，
+        # 不受默认 0.05 影响（向后兼容）。
+        if self.args.min_tip_z is not None:
+            tip_id = self.model.getFrameId("end_effector")
+            if tip_id >= len(self.model.frames):
+                tip_id = None
+            h_skipped = 0
+            hfiltered = []
+            for cfg in test_configs:
+                q = np.zeros(self.model.nq)
+                q[: len(cfg)] = cfg
+                self.pin.forwardKinematics(self.model, self.data, q)
+                self.pin.updateFramePlacements(self.model, self.data)
+                if tip_id is not None:
+                    M = self.data.oMf[tip_id]
+                    # 物理末端 = end_effector 帧沿链 -z 再伸出 tip_overhang
+                    # （URDF 的 end_effector 在 L6 轴外 7.4cm，真机电机+转接杆约 10cm）
+                    z_tip = M.translation[2] - self.args.tip_overhang * M.rotation[2, 2]
+                else:  # 无 end_effector 帧时退回所有帧的最低点
+                    z_tip = min(self.data.oMf[i].translation[2]
+                                for i in range(len(self.model.frames)))
+                if z_tip < self.args.min_tip_z:
+                    print(f"  [skip] 末端高度 {z_tip:+.3f} m < {self.args.min_tip_z} m（压桌风险）: {cfg}")
+                    h_skipped += 1
+                    continue
+                hfiltered.append(cfg)
+            test_configs = hfiltered
+            print(f"末端高度过滤：{h_skipped} 点跳过，剩 {len(test_configs)} 点")
+
+        # F170b 关节限位余量过滤：贴近机械止挡的位姿，止挡会分担重力 → 实测 τ≠重力矩，
+        # 不是有效重力样本（同 LL-035 的折叠位）。本次 `space` 档 l2 从 0 起，采到 L2 下限
+        # (0) 的 7 个点顶在止挡上、把 L2 参数整体拉偏（拟合 RMSE 0.148→0.101、L2 质量
+        # 0.679→0.704）。剔除任一关节距限位 < --limit-margin 的位姿。
+        if self.args.limit_margin is not None:
+            lm = float(self.args.limit_margin)
+            lo = self.model.lowerPositionLimit
+            hi = self.model.upperPositionLimit
+            l_skipped = 0
+            lfiltered = []
+            for cfg in test_configs:
+                hit = None
+                for i, nm in enumerate(JOINT_NAMES):
+                    if i >= len(cfg):
+                        break
+                    jid = self.model.getJointId(nm)
+                    if jid >= len(self.model.joints):
+                        continue
+                    k = self.model.joints[jid].idx_q
+                    if k < 0:
+                        continue
+                    if cfg[i] - lo[k] < lm or hi[k] - cfg[i] < lm:
+                        hit = (nm, cfg[i], lo[k], hi[k])
+                        break
+                if hit:
+                    print(f"  [skip] {hit[0]}={hit[1]:+.3f} 距限位 <{lm}（{hit[2]:+.2f}..{hit[3]:+.2f}）"
+                          f"止挡承重、非重力样本: {cfg}")
+                    l_skipped += 1
+                    continue
+                lfiltered.append(cfg)
+            test_configs = lfiltered
+            print(f"关节限位余量过滤：{l_skipped} 点跳过，剩 {len(test_configs)} 点")
 
         if self.args.dry_run:
             total_segs = 0
@@ -991,7 +1107,7 @@ class GravityCalibrator:
 
 def main():
     parser = argparse.ArgumentParser(description="F49 7J gravity calibration (官方复刻)")
-    parser.add_argument("--mode", default="full", choices=["quick", "full", "high", "ultra"])
+    parser.add_argument("--mode", default="full", choices=["quick", "full", "high", "ultra", "space"])
     parser.add_argument("--joints", type=int, default=7, choices=[6, 7],
                         help="关节数：7=含 L7 夹爪（默认，行为不变）；6=拆掉夹爪的产品 6J 档（L1–L6）")
     parser.add_argument("--start", type=int, default=None, help="断点续采起始下标")
@@ -1009,6 +1125,15 @@ def main():
     parser.add_argument("--max-step", type=float, default=0.25)
     parser.add_argument("--segment-s", type=float, default=3.0)
     parser.add_argument("--torque-skip", type=float, default=3.5)
+    parser.add_argument("--min-tip-z", type=float, default=0.05, dest="min_tip_z",
+                        help="末端（end_effector 帧）在 base 系的最低允许高度（m），低于此值视为压桌剔除；"
+                             "默认 0.05（旧档位末端最低≈0.12 不受影响）。给负数可放宽")
+    parser.add_argument("--tip-overhang", type=float, default=0.026, dest="tip_overhang",
+                        help="end_effector 帧之外的实际工具伸出量（m，沿链 -z）：URDF 帧在 L6 轴外 7.4cm、"
+                             "真机电机+转接杆约 10cm → 默认 0.026。仅用于末端高度过滤")
+    parser.add_argument("--limit-margin", type=float, default=0.10, dest="limit_margin",
+                        help="剔除任一关节距其限位 < 该值(rad) 的位姿（贴近机械止挡时止挡分担重力，"
+                             "实测 τ≠重力矩、非有效样本）。默认 0.10；给负数可关闭")
     parser.add_argument("--anchors", action="append", default=None,
                         help="追加锚点位姿（可多次），7 个逗号分隔浮点，"
                              "如 0.07,1.08,-0.56,-0.46,0.08,-0.05,0（rest 折叠位默认追加）")

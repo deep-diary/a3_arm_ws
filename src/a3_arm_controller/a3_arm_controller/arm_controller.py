@@ -2658,7 +2658,8 @@ class ArmController(Node):
                 self.get_logger().warn(f"safe park: {msg} -- local linear fallback")
 
         # move_group 只规划 arm 组（L1–L6）；L7（夹爪）单独走 GripperCommand 回 home
-        if planned:
+        # （6J 变体无 L7：home 只有 6 个元素，取值前必须判 n_joints）
+        if planned and self._n_joints >= 7:
             duration = max(duration, self._dispatch_l7_linear(home[6]))
 
         if not planned:
@@ -5491,7 +5492,9 @@ class ArmController(Node):
         if bool(self.get_parameter("goto_use_moveit").value):
             ok, duration, msg = self._moveit_move(q1[:6], JOINTS[:6], "move_to")
             if ok:
-                duration = max(duration, self._dispatch_l7_linear(q1[6]))
+                # LL-077 / 6J：move_group 只规划 L1–L6，L7 需单独补下发；6J 无 L7
+                if self._n_joints >= 7:
+                    duration = max(duration, self._dispatch_l7_linear(q1[6]))
                 self._schedule_back_to_ready(duration + 0.3)
                 resp.success = True
                 resp.message = msg
@@ -6365,13 +6368,17 @@ class ArmController(Node):
             )
             if ok:
                 traj = rtraj
-                l7_traj = self._l7_recorded_traj(geo, geo_times)
+                # L7 单独下发/写回仅 7J 有（6J 变体无 L7）
+                if self._n_joints >= 7:
+                    l7_traj = self._l7_recorded_traj(geo, geo_times)
                 retime_msg = msg
                 # F133: 重定时成功 → 优化轨迹烘焙回 latest.yaml。仅 latest 槽
                 # （空名或显式 'latest'）；ramp 前缀（若走几何 ramp）会污染录制，
                 # 故仅当 ramp 由 MoveIt 完成（ramp_in_geo=False）或无 ramp 时写回。
+                # 合并写回是 7 关节单时间轴格式，6J 跳过（不影响下发）。
                 is_latest_path = os.path.basename(path) == "latest.yaml"
-                if (is_latest_path and not ramp_in_geo and not already_retimed
+                if (self._n_joints >= 7 and is_latest_path and not ramp_in_geo
+                        and not already_retimed
                         and bool(self.get_parameter("playback_retime_writeback").value)):
                     merged = self._merge_retimed_with_l7(rtraj, geo, geo_times)
                     if self._writeback_retimed(path, merged, eps):

@@ -14,7 +14,10 @@
   - `scripts/gravity_calibration.py`：新增 `--joints {6,7}`（默认 7）；据此设置 `JOINT_NAMES`/`JOINT_SIGNS` 及 `home/rest` 位姿长度；放开写死的 7（`tau[:len(q7)]`、温度 `== len(JOINT_NAMES)`、`q[:len(cfg)]`、anchor/符号长度校验、`run_optimize` 的 `ones/range`）
   - `scripts/a3_stack.sh`：新增动作 `calibrate [model|scale]`；`_cal_common_checks()` 前置校验（真机栈在跑 + `/a3/arm_status`=READY + 探测 `/joint_states` 档位）；`do_calibrate()` 按档位透传 `--joints` 并转发额外参数
   - 文档：QUICKSTART 标定节补 `a3_stack.sh calibrate` 用法；`scripts/README.md`
-- **状态：** `implemented`（2026-10-13；F49 `--joints 6 --dry-run` 打印 6 关节网格通过；`calibrate` 前置校验与档位透传就绪。真机采集/拟合需有人监护在位时执行）
-- **未覆盖项（有意）：** 未做成「一键采集+生效」全自动（真机运动会有人监护，脚本只提供记忆入口 + 前置校验，实际采集仍由操作者确认位姿与急停）；F89 未加 `--joints`（其 `ARM_JOINTS` 本就是 L1–L6，6/7 关节栈通用）
+- **状态：** `implemented`（2026-10-13）
+  - 代码：F49 加 `--joints {6,7}` 全套按 `len()` 自适应（默认 7 不变）；`calibrate` 前置校验与档位透传就绪
+  - 真机（6J，拆掉夹爪）：`calibrate model --joints 6 --no-rest-anchor --anchors <home>` 采集 **68/68 点完成**（SSH 断连未影响已落盘数据）；离线 `--optimize-only` 拟合 **RMSE 0.0619 Nm / R² 0.9938（PASS）**，对照含夹爪旧模型同批数据 RMSE **0.6919** → 确认「拆夹爪后补偿失效」，重拟合修正；`inertia_params.yaml` 已写（旧文件自动备份）
+  - **收尾补漏**：`residual_report` 的 `np.zeros(7)` 是第二处 7 写死（漏改致拟合崩、yaml 未写），已按 `len(records[0][0])` 修正；数据已落盘 → 修复后 `--optimize-only` 离线重拟合即可，**无需重采**
+- **未覆盖项（有意）：** 未做「一键采集+生效」全自动（真机运动须有人监护，脚本只提供记忆入口 + 前置校验）；F89 未加 `--joints`（其 `ARM_JOINTS` 本就是 L1–L6，6/7 关节栈通用）
 
 > 返回索引：[REQUIREMENTS.md](../REQUIREMENTS.md)

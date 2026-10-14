@@ -183,6 +183,8 @@ struct JointMapping
   double kd_min_override{-1.0};
   double kd_max_override{-1.0};
   double adaptive_kd{kDefaultKdMax};
+  // F171 teach assist：滞后保持 setpoint（死区外跟随实测、死区内冻结 → 小 kp 稳得住又能拖）
+  double teach_hold{0.0};
   double cmd_pos{0.0};
   double cmd_vel{0.0};
   double cmd_eff{0.0};
@@ -223,6 +225,10 @@ public:
     if (kd_min_ > kd_max_) {
       std::swap(kd_min_, kd_max_);
     }
+    // F171 teach assist（默认 0 = 关，保持 kp=0 自由拖动）
+    teach_kp_ = std::clamp(ParseDouble(GetParam(hp, "teach_kp", ""), 0.0), 0.0, 200.0);
+    teach_hold_deadband_ = std::clamp(
+      ParseDouble(GetParam(hp, "teach_hold_deadband", ""), 0.05), 0.0, 1.0);
     kd_velocity_ref_ = ParseDouble(
       GetParam(hp, "kd_velocity_ref", ""), kDefaultKdVelocityRef);
     kd_velocity_ref_ = std::max(kd_velocity_ref_, 1e-3);
@@ -480,6 +486,7 @@ public:
       // entry (matches el_a3_hardware adaptive_kd_values_ init).
       std::lock_guard<std::mutex> lock(fb_mutex_);
       j->adaptive_kd = (j->kd_max_override > 0.0) ? j->kd_max_override : kd_max_;
+      j->teach_hold = j->hw_pos;  // F171: 进示教时把保持点锚在当前位姿
       started.push_back(joint_name);
     }
     if (!started.empty()) {
@@ -603,6 +610,9 @@ public:
       health_node_->declare_parameter("kp_" + j.name, j.kp);
       health_node_->declare_parameter("kd_" + j.name, j.kd);
     }
+    // F171: teach assist（小 kp + 滞后保持 setpoint）在线可调，便于现场找手感
+    health_node_->declare_parameter("teach_kp", teach_kp_);
+    health_node_->declare_parameter("teach_hold_deadband", teach_hold_deadband_);
     // Must retain the returned handle: rclcpp stores it as a weak_ptr, so a
     // dropped handle makes the parameter service accept updates while the
     // callback (and these member writes) never runs. LL-126.
@@ -627,6 +637,14 @@ public:
             if (mode == "gravity" || mode == "full") {
               feedforward_mode_ = mode;
             }
+          } else if (p.get_name() == "teach_kp" &&
+            p.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE)
+          {
+            teach_kp_ = std::clamp(p.as_double(), 0.0, 200.0);
+          } else if (p.get_name() == "teach_hold_deadband" &&
+            p.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE)
+          {
+            teach_hold_deadband_ = std::clamp(p.as_double(), 0.0, 1.0);
           } else if (p.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
             // F138: kp_<joint> / kd_<joint> runtime gain update. Plain doubles
             // written here and read in write() on the CM thread; updates are
@@ -1102,18 +1120,28 @@ public:
     }
 
     for (size_t i = 0; i < joints_.size(); ++i) {
-      const auto & j = joints_[i];
+      auto & j = joints_[i];
       CanFrameMessage frame;
       if (j.effort_mode) {
-        // MIT torque mode: kp=0 removes the position spring; kd keeps joint
-        // damping; torque_ff is the joint-space command mapped to the motor
-        // axis (motor τ = joint τ / direction; directions are ±1). Position
-        // field is the current measured motor angle (no position target).
+        // MIT torque mode: 默认 kp=0 去掉位置弹簧；F171 teach_kp>0 时改用
+        // 「滞后保持 setpoint」——死区内冻结（kp 顶住残余力矩、把慢漂拉回），
+        // 死区外才跟随实测（用户拖动），从而"稳得住又能拖"。
+        // torque_ff 是关节域指令映射到电机轴（motor τ = joint τ × direction）。
         const double kd = adaptive_kd_enabled_ ? j.adaptive_kd : effort_kd_;
         const double motor_torque =
           std::clamp(j.cmd_eff, -j.torque_max, j.torque_max) * j.direction;
+        double pos_field = motor_positions[i];
+        double kp_field = 0.0;
+        if (teach_kp_ > 0.0) {
+          const double err = j.hw_pos - j.teach_hold;
+          if (std::abs(err) > teach_hold_deadband_) {
+            j.teach_hold = j.hw_pos - std::copysign(teach_hold_deadband_, err);
+          }
+          pos_field = j.direction * j.teach_hold + j.position_offset;
+          kp_field = teach_kp_;
+        }
         frame = ProtocolCodec::BuildMitControlFrame(
-          bus_, j.motor_id, motor_positions[i], 0.0, 0.0, kd,
+          bus_, j.motor_id, pos_field, 0.0, kp_field, kd,
           motor_torque, j.torque_encode_max, j.speed_max);
       } else {
         // MIT position mode: kp/kd close the loop on the motor; F108/F160 add
@@ -1567,6 +1595,9 @@ private:
   double kd_{kDefaultKd};
   double effort_kd_{kDefaultEffortKd};
   bool adaptive_kd_enabled_{false};
+  // F171 teach assist：0=关（保持原 kp=0 自由拖动）；>0 时示教给一点位置刚度（滞后保持）
+  double teach_kp_{0.0};
+  double teach_hold_deadband_{0.05};
   double kd_min_{kDefaultKdMin};
   double kd_max_{kDefaultKdMax};
   double kd_velocity_ref_{kDefaultKdVelocityRef};
