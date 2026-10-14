@@ -193,6 +193,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 | F169 | 标定子命令集成（`a3_stack.sh calibrate {model\|scale}`）+ F49 脚本 6 关节适配 | implemented | 功能 | [requirements/F169-calibration-entry-and-6j-adaptation.md](requirements/F169-calibration-entry-and-6j-adaptation.md) |
 | F170 | 全行程重力标定网格档（F49 `--mode space`，覆盖真机实际示教行程 L2→2.4/L3→-2.1，消除示教外推下塌） | implemented | 功能 | [requirements/F170-fullspace-calibration-grid.md](requirements/F170-fullspace-calibration-grid.md) |
 | F171 | 示教 assist：小 kp + 滞后保持 setpoint（死区内冻结顶住残余力矩、死区外跟随可拖 → 示教"稳得住又能拖"） | implemented | 功能 | [requirements/F171-teach-assist-lagged-hold-kp.md](requirements/F171-teach-assist-lagged-hold-kp.md) |
+| F172 | 库仑摩擦前馈（每关节 Fc 配置文件驱动，默认仅 L3≈0.13 Nm；位置模式 τ_ff += Fc·tanh(q̇_des/vel_scale)，后续标定只改 `friction_params.yaml`） | implemented-pending-hw | 功能 | [requirements/F172-coulomb-friction-feedforward.md](requirements/F172-coulomb-friction-feedforward.md) |
 
 ## 非功能需求
 

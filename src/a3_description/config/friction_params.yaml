@@ -1,0 +1,35 @@
+# F172 库仑摩擦前馈系数（Coulomb friction feedforward）
+#
+# 模型：τ_ff += Fc_i · tanh(q̇_des_i / vel_scale)   —— 位置模式（正常运行 / 轨迹回放）
+#   Fc_i        第 i 个关节的库仑摩擦力矩（Nm，关节域），正负号随运动方向翻转
+#   vel_scale   tanh 混合宽度（rad/s），速度过零时平滑翻转，避免 sign() 抖振
+#   Fc=0        该关节不加摩擦前馈（默认全部为 0，仅 L3 非零）
+#
+# 数据来源（2026-10-14，/tmp/a3_cal6j_v2.jsonl 离线统计，正反行程实测力矩半差）：
+#   关节   上行均   下行均   Fc≈半差     样本
+#   L2    +0.093  +0.103   -0.005    15/5    （残差为恒定 +0.10 偏置，非摩擦）
+#   L3    +0.061  -0.191   +0.126 ★  32/10   （唯一明显库仑型摩擦）
+#   L4    +0.022  -0.016   +0.019     8/5
+#   L5    -0.017  +0.016   -0.017    21/9
+#   L6      —       —        —       0/0    （网格未扫 L6）
+# 结论：目前只有 L3 有可辨识的库仑摩擦（≈0.13 Nm），其余关节暂置 0。
+#
+# 后续标定流程：重采/统计得到新的 Fc 后，只改下面的 friction_fc 数组，重启栈生效。
+# （friction_vel_scale 亦可在运行时用 ros2 param set /a3_hardware_health friction_vel_scale <val> 调整。）
+
+friction_fc:
+- 0.0      # L1_joint
+- 0.0      # L2_joint
+- 0.13     # L3_joint  ★ 唯一有辨识度的库仑摩擦
+- 0.0      # L4_joint
+- 0.0      # L5_joint
+- 0.0      # L6_joint
+- 0.0      # L7_joint（6J 下不存在，占位保持索引对齐）
+
+friction_vel_scale: 0.05
+
+friction_calibration_metadata:
+  date: '2026-10-14'
+  source: '/tmp/a3_cal6j_v2.jsonl 正反行程力矩半差统计'
+  note: '默认仅 L3 非零（≈0.13 Nm）；后续标定确认后只修改 friction_fc 数组'
+  tool: 'scripts/gravity_calibration.py（采集）+ 离线统计'

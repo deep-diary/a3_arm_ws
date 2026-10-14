@@ -73,6 +73,13 @@
             <param name="use_calibrated_inertia">true</param>
             <param name="inertia_config_path">$(find a3_description)/config/inertia_params.yaml</param>
             <param name="gravity_scales_file">$(find a3_description)/config/gravity_scales.yaml</param>
+            <!-- F172: Coulomb friction feedforward (position mode). Per-joint Fc
+                 (Nm, joint domain) from the in-repo config; t_ff += Fc·tanh(q̇_des
+                 /vel_scale) so the term flips with travel direction. Default file
+                 has only L3 nonzero (≈0.13 Nm per current data). Future friction
+                 calibration = edit friction_params.yaml + restart. -->
+            <param name="friction_params_file">$(find a3_description)/config/friction_params.yaml</param>
+            <param name="friction_vel_scale">0.05</param>
           </xacro:if>
           <xacro:unless value="${use_real_hardware}">
           <!-- Board runtime uses a3_can_bridge topic stack (not this plugin).

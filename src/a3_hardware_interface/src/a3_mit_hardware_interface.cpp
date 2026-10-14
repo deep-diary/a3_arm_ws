@@ -185,6 +185,8 @@ struct JointMapping
   double adaptive_kd{kDefaultKdMax};
   // F171 teach assist：滞后保持 setpoint（死区外跟随实测、死区内冻结 → 小 kp 稳得住又能拖）
   double teach_hold{0.0};
+  // F172 库仑摩擦前馈系数（Nm，关节域；0=该关节不加）
+  double fric_fc{0.0};
   double cmd_pos{0.0};
   double cmd_vel{0.0};
   double cmd_eff{0.0};
@@ -281,6 +283,12 @@ public:
       GetParam(hp, "inertia_params_file", ""));
     gravity_scales_file_ =
       GetParam(hp, "gravity_scales_file", ExpandHome("~/.a3/gravity_scales.yaml"));
+    // F172 库仑摩擦前馈系数文件（每关节一个 Fc；后续标定只改这个文件）
+    friction_params_file_ = GetParam(hp, "friction_params_file", "");
+    // F172：tanh 混合宽度（rad/s）——速度过零时平滑翻转，避免 sign() 抖振。
+    fric_vel_scale_ = std::clamp(
+      ParseDouble(GetParam(hp, "friction_vel_scale", ""), fric_vel_scale_),
+      1e-3, 1.0);
     // F138: default empty = no gains YAML; the xacro passes the in-repo
     // config (a3_description/config/kp_kd_gains.yaml) explicitly.
     gains_config_file_ = ExpandHome(GetParam(hp, "gains_config_file", ""));
@@ -613,6 +621,8 @@ public:
     // F171: teach assist（小 kp + 滞后保持 setpoint）在线可调，便于现场找手感
     health_node_->declare_parameter("teach_kp", teach_kp_);
     health_node_->declare_parameter("teach_hold_deadband", teach_hold_deadband_);
+    // F172: 库仑摩擦前馈 tanh 混合宽度在线可调（系数本身在配置文件，加载后需重启生效）
+    health_node_->declare_parameter("friction_vel_scale", fric_vel_scale_);
     // Must retain the returned handle: rclcpp stores it as a weak_ptr, so a
     // dropped handle makes the parameter service accept updates while the
     // callback (and these member writes) never runs. LL-126.
@@ -645,6 +655,10 @@ public:
             p.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE)
           {
             teach_hold_deadband_ = std::clamp(p.as_double(), 0.0, 1.0);
+          } else if (p.get_name() == "friction_vel_scale" &&
+            p.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE)
+          {
+            fric_vel_scale_ = std::clamp(p.as_double(), 1e-3, 1.0);
           } else if (p.get_type() == rclcpp::ParameterType::PARAMETER_DOUBLE) {
             // F138: kp_<joint> / kd_<joint> runtime gain update. Plain doubles
             // written here and read in write() on the CM thread; updates are
@@ -671,6 +685,7 @@ public:
     rx_thread_ = std::thread(&A3MITHardwareInterface::RxLoop, this);
 
     InitGravityModel();
+    LoadFrictionParams();
 
     // F128: cold-boot telemetry. The component starts INACTIVE
     // (hardware_components_initial_state, LL-086), so on_activate does not
@@ -1147,12 +1162,19 @@ public:
         // MIT position mode: kp/kd close the loop on the motor; F108/F160 add
         // feedforward torque as t_ff. full mode additionally fills the velocity
         // field with q̇_des (VFF) so damping acts on the tracking error.
-        double t_ff = 0.0;
+        // Joint-domain feedforward (gravity/Coriolis/inertia, then friction) is
+        // summed first and mapped to the motor domain by direction at the end.
+        double t_ff_joint = 0.0;
         if (gravity_ff_active && v_index_[i] >= 0) {
-          t_ff = std::clamp(
-              gravity_ff_ratio_ * ff_scale_[i] * ff_tau[v_index_[i]],
-              -j.torque_max, j.torque_max) * j.direction;
+          t_ff_joint = gravity_ff_ratio_ * ff_scale_[i] * ff_tau[v_index_[i]];
         }
+        // F172: Coulomb friction feedforward — sign follows q̇_des (tanh blends
+        // across zero to avoid sign() chatter); only joints with nonzero Fc.
+        if (fric_enabled_ && j.fric_fc != 0.0) {
+          t_ff_joint += j.fric_fc * std::tanh(j.cmd_vel / fric_vel_scale_);
+        }
+        const double t_ff =
+          std::clamp(t_ff_joint, -j.torque_max, j.torque_max) * j.direction;
         const double v_ff = full_ff_active ? (j.direction * j.cmd_vel) : 0.0;
         frame = ProtocolCodec::BuildMitControlFrame(
           bus_, j.motor_id, j.direction * j.cmd_pos + j.position_offset,
@@ -1349,6 +1371,69 @@ private:
       rclcpp::get_logger(kLoggerName),
       "F108: loaded F89 tau_scale for %zu arm joints from %s", n, path.c_str());
     return scales;
+  }
+
+  // F172: per-joint Coulomb friction feedforward coeffs (Nm, joint domain).
+  // Config file (mirrors gravity_scales.yaml), indexed L1..L7:
+  //   friction_fc: [0.0, 0.0, 0.13, 0.0, 0.0, 0.0, 0.0]
+  //   friction_vel_scale: 0.05   # optional tanh blend width (rad/s)
+  // Applied only in position mode: t_ff += fc * tanh(q̇_des / vel_scale), so the
+  // term flips sign with travel direction. A joint with fc=0 is skipped;
+  // fric_enabled_ is true iff any |fc| exceeds eps. Editing the YAML then
+  // restarting is the intended workflow for future friction calibration.
+  void LoadFrictionParams()
+  {
+    for (auto & j : joints_) {
+      j.fric_fc = 0.0;
+    }
+    fric_enabled_ = false;
+
+    const std::string path = ExpandHome(friction_params_file_);
+    if (path.empty()) {
+      RCLCPP_INFO(
+        rclcpp::get_logger(kLoggerName),
+        "F172: no friction_params_file; Coulomb friction feedforward off");
+      return;
+    }
+    YAML::Node root;
+    try {
+      root = YAML::LoadFile(path);
+    } catch (const std::exception & e) {
+      RCLCPP_INFO(
+        rclcpp::get_logger(kLoggerName),
+        "F172: friction params %s not readable (%s); feedforward off",
+        path.c_str(), e.what());
+      return;
+    }
+    YAML::Node node = root["friction_fc"];
+    if (!node) {
+      node = root["a3_hardware_interface"]["ros__parameters"]["friction_fc"];
+    }
+    if (!node || !node.IsSequence()) {
+      RCLCPP_WARN(
+        rclcpp::get_logger(kLoggerName),
+        "F172: no friction_fc sequence in %s; feedforward off", path.c_str());
+      return;
+    }
+    const YAML::Node vs = root["friction_vel_scale"];
+    if (vs && vs.IsScalar()) {
+      fric_vel_scale_ = std::clamp(vs.as<double>(), 1e-3, 1.0);
+    }
+    const size_t n = std::min(node.size(), joints_.size());
+    size_t active = 0;
+    for (size_t i = 0; i < n; ++i) {
+      const double fc = node[i].as<double>();
+      joints_[i].fric_fc = fc;
+      if (std::abs(fc) > 1e-9) {
+        ++active;
+      }
+    }
+    fric_enabled_ = active > 0;
+    RCLCPP_INFO(
+      rclcpp::get_logger(kLoggerName),
+      "F172: Coulomb friction feedforward %s (%zu joint(s) active, "
+      "vel_scale=%.3f rad/s) from %s",
+      fric_enabled_ ? "enabled" : "off", active, fric_vel_scale_, path.c_str());
   }
 
   static std::string ReadFile(const std::string & path)
@@ -1598,6 +1683,9 @@ private:
   // F171 teach assist：0=关（保持原 kp=0 自由拖动）；>0 时示教给一点位置刚度（滞后保持）
   double teach_kp_{0.0};
   double teach_hold_deadband_{0.05};
+  // F172 库仑摩擦前馈（正常运行/轨迹路径）：τ_ff += Fc_i·tanh(q̇_des_i/vel_scale)
+  bool fric_enabled_{false};
+  double fric_vel_scale_{0.05};
   double kd_min_{kDefaultKdMin};
   double kd_max_{kDefaultKdMax};
   double kd_velocity_ref_{kDefaultKdVelocityRef};
@@ -1625,6 +1713,7 @@ private:
   std::string feedforward_mode_{"gravity"};  // F160: gravity | full
   std::string inertia_params_file_;
   std::string gravity_scales_file_;
+  std::string friction_params_file_;  // F172: per-joint Coulomb friction coeffs
   std::string gains_config_file_;
   std::string robot_description_;
   std::string urdf_path_;
