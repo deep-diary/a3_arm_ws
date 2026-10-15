@@ -187,7 +187,8 @@
     # 14. 轨迹文件 / 自由拖动 / 夹爪（F127）
     # ═══════════════════════════════════════════════════════════════════
     trajectories_dir: "~/.a3/trajectories"
-    named_poses_pkg: a3_description
+    # 留空 = 跟随系统级模型配置的描述包（a3_robot_model/config/robot_model.yaml，F174）
+    named_poses_pkg: ""
     freedrive_gripper_controller: gripper_controller
     # L7 夹爪按录制时间序列步进下发：20ms 步进 + 线性插值；l7_max_velocity 硬限速
     l7_seq_tick_s: 0.02

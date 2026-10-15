@@ -153,24 +153,10 @@ def generate_launch_description():
                    "--controller-manager-timeout", "60"],
     )
 
-    gripper_controller_spawner = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=["gripper_controller", "--controller-manager", "/controller_manager",
-                   "--controller-manager-timeout", "60"],
-    )
-
     delay_arm_controller_spawner = RegisterEventHandler(
         event_handler=OnProcessExit(
             target_action=joint_state_broadcaster_spawner,
             on_exit=[arm_controller_spawner],
-        )
-    )
-
-    delay_gripper_controller_spawner = RegisterEventHandler(
-        event_handler=OnProcessExit(
-            target_action=arm_controller_spawner,
-            on_exit=[gripper_controller_spawner],
         )
     )
 
@@ -180,7 +166,6 @@ def generate_launch_description():
         rviz_node,
         joint_state_broadcaster_spawner,
         delay_arm_controller_spawner,
-        delay_gripper_controller_spawner,
     ]
 
     return LaunchDescription(declared_arguments + nodes)

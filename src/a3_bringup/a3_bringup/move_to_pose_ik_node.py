@@ -3,12 +3,11 @@
 
 from __future__ import annotations
 
-import os
 from typing import List, Optional
 
 import numpy as np
 import rclpy
-from ament_index_python.packages import get_package_share_directory
+from a3_robot_model import robot_model
 from geometry_msgs.msg import PoseStamped
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -84,9 +83,7 @@ class MoveToPoseIkNode(Node):
         try:
             import pinocchio as pin
 
-            urdf = os.path.join(
-                get_package_share_directory("a3_description"), "urdf", "el_a3.urdf"
-            )
+            urdf = robot_model.urdf_path()
             model = pin.buildModelFromUrdf(urdf)
             self._pin = pin
             self._model = model

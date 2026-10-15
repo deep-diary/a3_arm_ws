@@ -28,7 +28,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import rclpy
 import yaml
-from ament_index_python.packages import get_package_share_directory
+from a3_robot_model import robot_model
 from builtin_interfaces.msg import Duration as RosDuration
 from control_msgs.action import FollowJointTrajectory
 from controller_manager_msgs.srv import ListControllers
@@ -37,8 +37,9 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectoryPoint
 
-ARM_JOINTS = [f"L{i}_joint" for i in range(1, 7)]
-ALL_JOINTS = [f"L{i}_joint" for i in range(1, 8)]
+# F174：关节集合取自系统级模型配置（默认 6 轴 L1–L6）；夹爪关节（若有）不参与标定。
+ALL_JOINTS = robot_model.joint_names() or [f"L{i}_joint" for i in range(1, 7)]
+ARM_JOINTS = [name for name in ALL_JOINTS if not name.startswith("L7")]
 # URDF angle = sign * motor angle; URDF effort = sign * motor effort.
 JOINT_SIGNS = [-1, 1, -1, 1, -1, 1]
 HOME = [0.0, 0.785, -0.785, 0.0, 0.0, 0.0]
@@ -78,7 +79,7 @@ class GravityScaleCalibrator(Node):
 
     def _build_model(self):
         import pinocchio as pin
-        share = get_package_share_directory("a3_description")
+        share = robot_model.description_share()
         urdf_path = self.args.urdf or os.path.join(
             share, "urdf", "el_a3.urdf")
         model = pin.buildModelFromUrdf(urdf_path)
@@ -124,7 +125,7 @@ class GravityScaleCalibrator(Node):
         self.get_logger().info(f"applied F49 calibrated inertia to {applied} links")
 
     def _parse_limits(self):
-        share = get_package_share_directory("a3_description")
+        share = robot_model.description_share()
         urdf_path = self.args.urdf or os.path.join(
             share, "urdf", "el_a3.urdf")
         root = ET.parse(urdf_path).getroot()
@@ -404,17 +405,18 @@ class GravityScaleCalibrator(Node):
         return scales, r2s, rmses, low_exc
 
     def write_output(self, scales, r2s, rmses, low_exc, n_configs):
-        # Default output: source tree of a3_description (version-controlled,
-        # same home as inertia_params.yaml). User override via --out.
+        # Default output: source tree of the configured description package
+        # (version-controlled, same home as inertia_params.yaml). Override via --out.
         if not self.args.out:
             out_path = None
+            desc_pkg = str(robot_model.load()["description_package"])
             # Walk up from the script location (works for both the scripts/
             # copy and the installed a3_bringup module, incl. symlinks) until
-            # a workspace root containing src/a3_description/config is found.
+            # a workspace root containing src/<desc>/config is found.
             here = os.path.dirname(os.path.realpath(__file__))
             d = here
             for _ in range(6):
-                cand = os.path.join(d, "src", "a3_description", "config",
+                cand = os.path.join(d, "src", desc_pkg, "config",
                                     "gravity_scales.yaml")
                 if os.path.isdir(os.path.dirname(cand)):
                     out_path = cand
@@ -426,8 +428,9 @@ class GravityScaleCalibrator(Node):
             if out_path is None:
                 # Fallback when the source tree layout is unavailable
                 try:
-                    share = get_package_share_directory("a3_description")
-                    out_path = os.path.join(share, "config", "gravity_scales.yaml")
+                    out_path = os.path.join(
+                        robot_model.description_share(), "config",
+                        "gravity_scales.yaml")
                 except Exception:
                     out_path = os.path.expanduser("~/.a3/gravity_scales.yaml")
         else:
@@ -438,11 +441,10 @@ class GravityScaleCalibrator(Node):
         # arrays must be homogeneous, and null leaves are invalid. The
         # metadata therefore lives under a synthetic node name (unmatched ->
         # ignored) and low-excitation R2 is encoded as -1.0.
-        # zero_torque_controller runs on L1-L7 (7 joints); a shorter array
-        # makes it fall back to all-1.0 (length mismatch). L7 is the gripper
-        # (negligible gravity) — append 1.0 as a placeholder. F108's MIT-side
-        # reader takes only the first 6 entries, so this is safe for both.
-        tau_scale_out = list(scales) + [1.0]
+        # zero_torque_controller 按系统配置的关节数读取 tau_scale（长度不符会回退全 1.0）；
+        # 含夹爪形态（L1–L7）末尾追加 1.0 占位（L7 夹爪重力可忽略），6 轴形态不加。
+        tau_scale_out = list(scales) + (
+            [1.0] if robot_model.include_gripper() else [])
         payload = {
             "zero_torque_controller": {
                 "ros__parameters": {"tau_scale": tau_scale_out},
@@ -451,7 +453,7 @@ class GravityScaleCalibrator(Node):
                 "ros__parameters": {
                     "date": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "tool": "scripts/gravity_scale_calibration.py",
-                    "joints": list(ARM_JOINTS) + ["L7_joint"],
+                    "joints": list(ALL_JOINTS),
                     "num_poses": int(n_configs),
                     "r_squared": [-1.0 if v is None else float(v)
                                   for v in r2s],
@@ -482,7 +484,8 @@ class GravityScaleCalibrator(Node):
 def parse_args():
     parser = argparse.ArgumentParser(description="F89 gravity scale calibration")
     parser.add_argument("--out", default="",
-                        help="output CM ParameterFile path (default: a3_description/config/gravity_scales.yaml)")
+                        help="output CM ParameterFile path "
+                             "(default: <描述包>/config/gravity_scales.yaml)")
     parser.add_argument("--quick", action="store_true",
                         help="reduced pose set (~12 vs ~24)")
     parser.add_argument("--no-calibrated-inertia", dest="calibrated_inertia",

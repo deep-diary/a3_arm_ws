@@ -162,6 +162,9 @@ CAN 发送、200 Hz 插值、断连 disable 电机、gate、软限位、急停 G
 
 - [ ] 新功能是否先更新了对应 `docs/*/REQUIREMENTS.md`？（Edge 主线勿只改 cloud_edge）
 - [ ] 话题/安全是否需改 `docs/shared/`？
+- [ ] 涉及机器人描述（URDF/xacro/SRDF/controllers/motor_map）时，是否改的是**系统级模型配置**
+      [src/a3_robot_model](src/a3_robot_model/README.md) 指定的默认档（当前 = 6 轴 + 连杆 `a3_description_6j`，F174），
+      而不是在代码里写死 `a3_description`？
 - [ ] 控制能力对标是否查阅 [docs/shared/CONTROL_ROADMAP.md](docs/shared/CONTROL_ROADMAP.md)？
 - [ ] 若任务是 ESP32 固件：是否应转到外置仓库，而不是在本仓库写 `.c`/`.cpp` 固件？
 - [ ] 联调文档是否需更新对应 `QUICKSTART.md`？

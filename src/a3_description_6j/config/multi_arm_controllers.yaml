@@ -23,7 +23,6 @@ arm1_arm_controller:
       - arm1_L4_joint
       - arm1_L5_joint
       - arm1_L6_joint
-      - arm1_L7_joint  # Gripper joint
 
     command_interfaces:
       - position
@@ -53,8 +52,6 @@ arm1_arm_controller:
         goal: 0.03
       arm1_L6_joint:
         goal: 0.03
-      arm1_L7_joint:
-        goal: 0.03  # Gripper position tolerance
 
 # ========================================
 # arm2 controller configuration
@@ -78,7 +75,6 @@ arm2_arm_controller:
       - arm2_L4_joint
       - arm2_L5_joint
       - arm2_L6_joint
-      - arm2_L7_joint  # Gripper joint
 
     command_interfaces:
       - position
@@ -108,5 +104,3 @@ arm2_arm_controller:
         goal: 0.03
       arm2_L6_joint:
         goal: 0.03
-      arm2_L7_joint:
-        goal: 0.03  # Gripper position tolerance

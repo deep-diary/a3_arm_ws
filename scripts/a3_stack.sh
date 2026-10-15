@@ -144,14 +144,18 @@ recover_can1() {
   esac
 }
 
-# ── 关节档位（6J/7J）────────────────────────────────────────────
-# 7J 档 = L1–L7（含 L7 夹爪，电机 1..7）；6J 档 = L1–L6（拆掉夹爪电机 7）。
-# 权威：a3_can_bridge config/motor_map.yaml（7J）· motor_map_6j.yaml（6J），
-# 与 xacro include_gripper / SRDF / controllers / 编排层 joint_names 配对。
+# ── 关节档位（6J/7J，F52/F168/F174）─────────────────────────────
+# 7J 档 = L1–L7（含 L7 夹爪，电机 1..7）；6J 档 = L1–L6（无夹爪电机 7）。
+# **默认档来自系统级模型配置** a3_robot_model/config/robot_model.yaml 的 include_gripper
+# （当前默认 6 轴 + 末端连杆，F174）；可用 --6j / --7j 显式覆盖。
+# 档位配套由同一份 robot_model.yaml 保证一致：xacro（描述包）/ SRDF / controllers /
+# power_sequence motor_map（motor_map.yaml↔7J、motor_map_6j.yaml↔6J）/ 编排层 joint_names。
 ALL_MOTOR_IDS="1 2 3 4 5 6 7"
 EXPECTED_MOTOR_COUNT=7
-# INCLUDE_GRIPPER=1 → 7J（默认）；=0 → 6J（auto 探测到缺 L7 或显式 --6j 时置 0）
 INCLUDE_GRIPPER=1
+case "$(python3 -m a3_robot_model.robot_model --get include_gripper 2>/dev/null || true)" in
+  false|False|0|no|off) INCLUDE_GRIPPER=0 ;;
+esac
 
 # 起栈前无侵入探测电机：
 #   7J 档：7/7 全在线 → 通过
@@ -747,7 +751,7 @@ do_calibrate() {
 
 usage() {
   cat <<EOF
-用法：$0 {start|stop|restart|status|free|calibrate} [-f|--force] [--rviz] [--no-probe] [--6j] [--keep-rviz] [--sim] [--no-joy]
+用法：$0 {start|stop|restart|status|free|calibrate} [-f|--force] [--rviz] [--no-probe] [--6j|--7j] [--keep-rviz] [--sim] [--no-joy]
   start    启动真机栈（先探测电机：7J 档 7/7、6J 档 1..6 在线，setsid 起栈，日志 $LOG_FILE）
   stop     优雅停栈（臂未失能默认拒绝）
   restart  重启
@@ -761,15 +765,17 @@ usage() {
   -f, --force    停栈时跳过臂状态安全门
   --rviz         启动/重启时随栈一起打开 RViz
   --no-probe     跳过起栈前电机在线探测（降级档/确认无硬件时）
-  --6j           强制 6 关节档（L1–L6，拆掉夹爪电机 7；include_gripper:=false）。
-                 不指定时按探测自动选档：7/7→7J，1..6 在线且缺 7→6J
+  --6j           强制 6 关节档（L1–L6，无夹爪；include_gripper:=false）
+  --7j           强制 7 关节档（L1–L7，含 L7 夹爪；include_gripper:=true）
+                 不指定时默认档取自系统级模型配置（a3_robot_model/config/robot_model.yaml，
+                 当前默认 6 轴 + 连杆）；7J 档探测到「1..6 在线且缺 7」会自动降级 6 关节档
   --keep-rviz    停栈时不关独立手工起的 RViz
   --sim          走全仿真栈 edge_teleop_full_sim（domain $SIM_DOMAIN 隔离真机；可放任意位置）
   --no-joy       仅 --sim：不起 joy_node（/joy 由脚本注入，如 ps4_sim_test.py 合成测试）
 
 6/7 关节示例：
-  $0 start --rviz          # 自动选档（探到 1..6→6 关节栈；7/7→7 关节栈）
-  $0 restart -f --6j       # 强制 6 关节档（不等探测；缺 L7 时用）
+  $0 start --rviz          # 默认档（系统级模型配置：当前 6 轴 + 连杆）
+  $0 restart -f --7j       # 强制 7 关节档（含 L7 夹爪）
   $0 start --no-probe --6j # 跳过探测、直接按 6 关节档起栈
 
 仿真示例：
@@ -814,6 +820,7 @@ main() {
       --rviz) with_rviz=1 ;;
       --no-probe) do_probe=0 ;;
       --6j) INCLUDE_GRIPPER=0 ;;
+      --7j) INCLUDE_GRIPPER=1 ;;
       --keep-rviz) keep_rviz=1 ;;
       --no-joy) do_joy=0 ;;
       on|start) turn_off=0 ;;

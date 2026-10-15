@@ -481,26 +481,44 @@ ros2 launch a3_bringup edge_legacy_stack.launch.py use_power_sequence:=false use
 - **7J 档默认行为不变**：不传这两个参数即 `control_gains.yaml` + `motor_map.yaml`。
 - 注意 `/a3/motor/enable`（执行层）**不查 URDF 限位**，只有编排层 `/a3/arm/enable` 查——「一个拒一个过」不是 bug。
 
-### 6 关节档（F168，拆掉 L7 夹爪电机）
+### 6 轴 + 连杆档（F174，**当前默认档**）
 
-拆掉 L7 夹爪电机（can1 上只剩电机 1..6）后，**产品栈**（`a3_bringup.launch.py`，即 `a3_stack.sh` 起的栈）用**原生 6J 档**整栈去 L7——与 F52 的旧栈降级档（`motor_map_5j` / `edge_legacy_stack`）不同，6J 档保留 MoveIt/JTC/弹琴链路：
+机械形态已是 **6 轴（L1–L6）+ 末端连杆**（L7 夹爪电机取消，轴 6 后接 14 cm 连杆，TCP 在连杆末端；
+连杆暂无 STP，用 φ8×140mm 圆柱占位）。描述与配套档位**整包隔离**在 `a3_description_6j`，
+由**系统级模型配置** [`a3_robot_model`](../../src/a3_robot_model/README.md) 指定默认：
 
-```bash
-# 自动选档：探测到 1..6 在线且缺电机 7 → 自动 6J；7/7 → 7J（默认）
-./scripts/a3_stack.sh restart --rviz -f
-
-# 强制 6 关节档（不等探测 / 无探测时）
-./scripts/a3_stack.sh start --rviz --6j
-./scripts/a3_stack.sh start --no-probe --6j
-
-# 等价的手工起栈（档位由 include_gripper 一个参数切）
-ros2 launch a3_bringup a3_bringup.launch.py hardware:=can can_interface:=can1 include_gripper:=false
+```yaml
+# src/a3_robot_model/config/robot_model.yaml（可被 ~/.a3/robot_model.yaml 字段级覆盖）
+robot_model:
+  description_package: a3_description_6j
+  joint_names: [L1_joint, ..., L6_joint]
+  include_gripper: false
+  srdf: el_a3_6j.srdf              # 相对 a3_moveit_config/config
+  motor_map: motor_map_6j.yaml     # 相对 a3_can_bridge/config
 ```
 
-- **档位文件配对**：`include_gripper:=false` 会整套切换——xacro 不生成 `L7_joint`/`gripper_link`、SRDF 用 `el_a3_6j.srdf`、controllers 用 `el_a3_controllers_6j.yaml`、power_sequence 用 `motor_map_6j.yaml`、编排层 `joint_names`/`switch_controllers` 自动去 L7，`gripper_controller` spawner 跳过。
-- **起栈自检**：`/joint_states` 恰好 `L1..L6`、日志 `a3_arm_controller ready: joints=6`、`power_sequence F52 档位：6 关节`、`zero_torque ... pinocchio nq=6`。`a3_stack.sh` 起栈后会比对 `/joint_states` 关节数与档位。
-- **不传 `include_gripper`（或 `true`）即 7J 默认档，行为逐字不变**。
-- 踩坑（`PythonExpression` 三元拼接优先级）见 [LL-157](../lessons_learned/LL-157-product-6j-profile-include-gripper.md)；需求 [F168](requirements/F168-product-6j-profile.md)。
+```bash
+# 默认即 6 轴 + 连杆档（真机/仿真同一入口都读上面这份配置）
+./scripts/a3_stack.sh restart --rviz -f
+ros2 launch a3_bringup a3_bringup.launch.py hardware:=can can_interface:=can1
+
+# 临时回到 7 轴形态（含 L7 夹爪）：环境/本机覆盖，或显式 --7j
+./scripts/a3_stack.sh start --rviz --7j
+python3 -m a3_robot_model.robot_model --get description_package   # 查当前默认描述包
+```
+
+- **档位来源单一**：`include_gripper` / 描述包 / SRDF / controllers / motor_map / 编排层
+  `joint_names`+`switch_controllers` 全部来自 `robot_model.yaml` 一份配置（不再靠 `*_6j` 后缀人工配对）。
+  旧「同包 `include_gripper:=false` 切档」（F168）仍受支持：`include_gripper:=true|false` 只覆盖
+  「是否有夹爪」，描述包等仍取系统配置。
+- **起栈自检**：`/joint_states` 恰好 `L1..L6`、日志 `a3_arm_controller ready: joints=6`、
+  `zero_torque_controller configured: 6 joints, pinocchio nq=6`、`gravity_torque ... urdf=<a3_description_6j>/urdf/el_a3.urdf`、
+  控制器列表**无** `gripper_controller`。`a3_stack.sh` 起栈后会比对 `/joint_states` 关节数与档位。
+- **连杆参数**（换 STP 只改这几处）：`linkage_offset_z=-0.14` / `linkage_radius=0.004`（φ8mm） /
+  `linkage_length=0.14` / `linkage_mass=0.02`，见 [a3_description_6j/README](../../src/a3_description_6j/README.md)。
+- **待办**：连杆实测（STP/质量）——现有标定即该形态（6 轴 + 连杆）标定值，无需重标；
+  仅当换 STP 后质量与占位（0.02 kg）差异明显时再复核 `./scripts/a3_stack.sh calibrate model|scale`。
+- 需求 [F174](requirements/F174-a3-description-6j-linkage-package.md)（前置形态 F168：同包 6J 档）。
 
 **6 关节臂重标重力（F169，拆夹爪后整臂变轻，零力矩手感变重时做）：**
 ```bash

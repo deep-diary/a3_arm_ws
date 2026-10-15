@@ -22,7 +22,7 @@ from typing import List, Optional
 import numpy as np
 import rclpy
 import yaml
-from ament_index_python.packages import get_package_share_directory
+from a3_robot_model import robot_model
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
@@ -44,6 +44,17 @@ DEFAULT_JOINTS = [
 ]
 
 
+def _model_joint_names() -> List[str]:
+    """系统级模型配置里的关节名（F174）；配置不可用时回退内置默认。"""
+    try:
+        names = robot_model.joint_names()
+        if names:
+            return names
+    except Exception:  # noqa: BLE001
+        pass
+    return list(DEFAULT_JOINTS)
+
+
 class GravityTorqueNode(Node):
     def __init__(self) -> None:
         super().__init__("a3_gravity_torque")
@@ -55,7 +66,7 @@ class GravityTorqueNode(Node):
         )
         self.declare_parameter("enabled", True)
         self.declare_parameter("apply_calibrated_inertia", True)
-        self.declare_parameter("joint_names", DEFAULT_JOINTS)
+        self.declare_parameter("joint_names", _model_joint_names())
         # joint_states from sim/MoveIt are already in URDF frame → default 1.0.
         # Set to motor signs only when feeding motor-frame positions (reBot-style).
         self.declare_parameter(
@@ -148,7 +159,8 @@ class GravityTorqueNode(Node):
         )
 
     def _load_inertia(self) -> dict:
-        share = get_package_share_directory("a3_description")
+        # F174：标定文件随系统级模型配置的描述包走（默认 a3_description_6j）。
+        share = robot_model.description_share()
         path = os.path.join(share, "config", "inertia_params.yaml")
         with open(path, "r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
@@ -157,16 +169,14 @@ class GravityTorqueNode(Node):
         try:
             import pinocchio as pin  # type: ignore
 
-            # Prefer source tree URDF (meshes path not required for dynamics)
+            # F174: 静态 URDF 取自系统级模型配置（描述包可换）；源码树路径仅作兜底。
             candidates = [
-                os.path.join(
-                    get_package_share_directory("a3_description"), "urdf", "el_a3.urdf"
-                ),
+                robot_model.urdf_path(),
                 os.path.join(
                     os.path.dirname(__file__),
                     "..",
                     "..",
-                    "a3_description",
+                    "a3_description_6j",
                     "urdf",
                     "el_a3.urdf",
                 ),

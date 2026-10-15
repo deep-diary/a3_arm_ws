@@ -33,6 +33,7 @@ import os
 
 import yaml
 
+from a3_robot_model import robot_model
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -54,7 +55,8 @@ def load_yaml(package_name, file_path):
 
 
 def generate_launch_description():
-    desc_share = get_package_share_directory("a3_description")
+    # F174：描述包 / xacro 路径来自系统级模型配置（a3_robot_model）
+    desc_share = robot_model.description_share()
     bridge_share = get_package_share_directory("a3_can_bridge")
     moveit_share = get_package_share_directory("a3_moveit_config")
     arm_ctrl_share = get_package_share_directory("a3_arm_controller")
@@ -78,7 +80,7 @@ def generate_launch_description():
     gains_file = LaunchConfiguration("gains_file")
     motor_map_file = LaunchConfiguration("motor_map_file")
 
-    xacro_file = os.path.join(desc_share, "urdf", "el_a3.urdf.xacro")
+    xacro_file = robot_model.xacro_path()
     robot_description = ParameterValue(
         Command([
             "xacro ", xacro_file,
@@ -90,7 +92,7 @@ def generate_launch_description():
 
     # 目标 ghost 模型：读成品 el_a3.urdf 并换色（橙→青蓝 / 深棕→深蓝），
     # 与 urdf_dir_check.launch.py 的颜色替换保持一致
-    with open(os.path.join(desc_share, "urdf", "el_a3.urdf"), "r", encoding="utf-8") as f:
+    with open(robot_model.urdf_path(), "r", encoding="utf-8") as f:
         base_urdf = f.read()
     target_description = (
         base_urdf.replace(
@@ -198,7 +200,8 @@ def generate_launch_description():
     )
 
     # ---- MoveIt：move_group + FJT action（默认关 RViz，见 use_rviz）----
-    with open(os.path.join(moveit_share, "config", "el_a3.srdf"), "r", encoding="utf-8") as f:
+    # F174：SRDF 随系统级模型配置（默认 el_a3_6j.srdf）
+    with open(os.path.join(moveit_share, "config", str(robot_model.load()["srdf"])), "r", encoding="utf-8") as f:
         robot_description_semantic = f.read()
     kinematics_yaml = load_yaml("a3_moveit_config", "config/kinematics.yaml")
     joint_limits_yaml = load_yaml("a3_moveit_config", "config/joint_limits.yaml")

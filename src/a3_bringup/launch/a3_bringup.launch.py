@@ -4,13 +4,13 @@ A3 机械臂唯一产品入口（F78）：hardware:=mock|can，两种模式拓�
 
 拓扑（ros2_control 标准栈，F75–F77 产品形态）：
   robot_state_publisher
-  ros2_control controller_manager @200 Hz（el_a3_controllers.yaml）
+  ros2_control controller_manager @200 Hz（controllers yaml 取自系统级模型配置）
     ├ joint_state_broadcaster（active，标准 /joint_states）
     ├ arm_controller JTC L1–L6（**inactive 启动，编排层 enable 才激活**）
-    ├ gripper_controller effort GAC L7（**inactive 启动**，标准 /gripper_cmd，F87）
     └ zero_torque_controller（inactive 常驻，F73 示教自由拖动时互斥切换）
+  （含夹爪形态才额外有 gripper_controller effort GAC L7，F87）
   move_group（OMPL + Pilz PTP/LIN/CIRC 双规划管线 + Sequence，直连 JTC FJT action）
-  a3_trajectory_processing/retime_trajectory_node（保几何重定时，arm L1–L6，排除 L7）
+  a3_trajectory_processing/retime_trajectory_node（保几何重定时，排除夹爪关节）
   moveit_servo servo_node（TwistStamped + JointJog 双输入，输出 → arm JTC 原生话题）
     + servo_mode_bridge
   a3_arm_controller 编排层（control_backend=fjt_action，
@@ -33,6 +33,7 @@ from datetime import datetime
 
 import yaml
 
+from a3_robot_model import robot_model
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
@@ -100,23 +101,35 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             "include_gripper",
-            default_value="true",
-            description="true=L1–L7（含 L7 夹爪，默认）；"
-                        "false=L1–L6 六关节臂（去掉 L7 夹爪电机）——xacro/SRDF/"
-                        "controllers/编排层/gravity 自动切 6J 档",
+            default_value="",
+            description="关节形态：留空（默认）= 跟随系统级配置 a3_robot_model/"
+                        "config/robot_model.yaml（当前默认 6 轴 L1–L6 + 连杆，F174）；"
+                        "true=L1–L7（含 L7 夹爪）；false=L1–L6 六关节臂。"
+                        "描述包 / SRDF / controllers / motor_map / 编排层 joint_names "
+                        "按同一份配置切换",
         ),
         OpaqueFunction(function=_launch_setup),
     ])
 
 
 def _launch_setup(context, *args, **kwargs):
-    """include_gripper 需要在建 LaunchDescription 时拿到真实布尔值（决定 xacro/
-    SRDF/controllers/编排层档位），故用 OpaqueFunction 在配置解析后构建。"""
-    raw = str(context.launch_configurations.get("include_gripper", "true")).lower()
-    return _build(raw not in ("false", "0", "no", "off"))
+    """include_gripper / 描述包需要在建 LaunchDescription 时拿到真实值（决定
+    xacro/SRDF/controllers/编排层档位），故用 OpaqueFunction 在配置解析后构建。
+
+    档位来源（F174）：系统级配置 a3_robot_model/config/robot_model.yaml
+    （可被 ~/.a3/robot_model.yaml 字段级覆盖）；显式传 include_gripper:=true|false
+    时只覆盖「是否有夹爪」，描述包等仍取系统配置。
+    """
+    cfg = robot_model.load()
+    raw = str(context.launch_configurations.get("include_gripper", "") or "").strip().lower()
+    include_gripper = (
+        bool(cfg.get("include_gripper")) if raw == ""
+        else raw not in ("false", "0", "no", "off")
+    )
+    return _build(cfg, include_gripper)
 
 
-def _build(include_gripper):
+def _build(cfg, include_gripper):
     hardware = LaunchConfiguration("hardware")
     can_interface = LaunchConfiguration("can_interface")
     adaptive_kd_enabled = LaunchConfiguration("adaptive_kd_enabled")
@@ -137,14 +150,16 @@ def _build(include_gripper):
     use_servo_anchor = LaunchConfiguration("use_servo_anchor")
 
     bringup_share = get_package_share_directory("a3_bringup")
-    desc_share = get_package_share_directory("a3_description")
+    desc_share = robot_model.description_share(cfg)
     moveit_share = get_package_share_directory("a3_moveit_config")
     arm_share = get_package_share_directory("a3_arm_controller")
     bridge_share = get_package_share_directory("a3_mqtt_bridge")
     teleop_share = get_package_share_directory("a3_teleop_ps4")
     can_bridge_share = get_package_share_directory("a3_can_bridge")
 
-    xacro_file = os.path.join(desc_share, "urdf", "el_a3.urdf.xacro")
+    # F174：描述包 / xacro / controllers / SRDF / motor_map / joint_names 均来自
+    # 系统级配置（a3_robot_model），本文件不再写死具体包名与档位文件名。
+    xacro_file = robot_model.xacro_path(cfg)
     # mock/can 仅切换 xacro 插件参数；其余拓扑共用同一份描述命令。
     # include_gripper 在此固化为字面量（build 期已知）：false 时 xacro 不生成 L7。
     grip_arg = "true" if include_gripper else "false"
@@ -162,11 +177,7 @@ def _build(include_gripper):
         value_type=str,
     )
 
-    controllers_yaml = os.path.join(
-        desc_share,
-        "config",
-        "el_a3_controllers.yaml" if include_gripper else "el_a3_controllers_6j.yaml",
-    )
+    controllers_yaml = robot_model.controllers_path(cfg)
 
     # F89: gravity scales produced by scripts/gravity_scale_calibration.py.
     # Default output is now in the package config dir (same as
@@ -181,8 +192,9 @@ def _build(include_gripper):
     )
 
     # F89: JTC 前馈链（gravity_torque_node）同样应用标定的 tau_scale。
-    # 标定文件 tau_scale 为 L1-L7 七值（前 6 有效、L7 占位 1.0）；6J 档只取前 6。
-    gravity_tau_scale = [1.0] * (7 if include_gripper else 6)
+    # 标定文件 tau_scale 为 L1-Ln n 值（末位夹爪占位 1.0）；按系统配置的关节数截断。
+    n_joints = len(cfg["joint_names"])
+    gravity_tau_scale = [1.0] * n_joints
     if default_scales and os.path.exists(default_scales):
         try:
             with open(default_scales, "r", encoding="utf-8") as _f:
@@ -192,7 +204,7 @@ def _build(include_gripper):
             if isinstance(_ts, list) and _ts:
                 gravity_tau_scale = [float(v) for v in _ts][:len(gravity_tau_scale)]
         except Exception:
-            gravity_tau_scale = [1.0] * (7 if include_gripper else 6)
+            gravity_tau_scale = [1.0] * n_joints
 
     rsp = Node(
         package="robot_state_publisher",
@@ -205,6 +217,11 @@ def _build(include_gripper):
     # F88: Humble GenericSystem prepare_command_mode_switch 不接受 effort 接口，
     # mock 栈 L7 用 position 版 GAC；真机保持 effort 版（力夹持 + stall 语义）。
     # 用独立 ParameterFile 覆盖（dotted-key dict 会被 launch 写成扁平参数名）。
+    # F174：无夹爪形态（描述包内不再有 gripper 插件文件）时该覆盖不加入参数表。
+    gripper_plugin_available = include_gripper and all(
+        os.path.exists(os.path.join(desc_share, "config", name))
+        for name in ("gripper_position_plugin.yaml", "gripper_effort_plugin.yaml")
+    )
     gripper_plugin_file = ParameterFile(
         PythonExpression([
             "'", desc_share, "/config/gripper_position_plugin.yaml' if '", hardware,
@@ -241,11 +258,11 @@ def _build(include_gripper):
         arm_ff_plugin_file,
         gravity_scales_file_param,
     ]
-    if include_gripper:
+    if gripper_plugin_available:
         # LL-103：rcl 参数文件后者覆盖，且 gravity_scales 留空时解析为
         # controllers_yaml 本身——gripper 覆盖文件必须在最后，否则 mock 的
-        # position 插件覆写会被基础 yaml 冲掉（F88）。6J 档无 gripper_controller，
-        # 不加该覆盖文件。
+        # position 插件覆写会被基础 yaml 冲掉（F88）。无夹爪形态下没有
+        # gripper_controller，不加该覆盖文件。
         cm_parameters.append(gripper_plugin_file)
 
     controller_manager = Node(
@@ -313,10 +330,9 @@ def _build(include_gripper):
     jsb0 = make_jsb_spawner()
 
     # ---- move_group（OMPL + Pilz 双管线；直连官方 JTC FJT action）----
-    # 6J 档用去夹爪的 SRDF（无 gripper / arm_with_gripper 组、无 gripper_link 碰撞对）。
-    srdf_file = os.path.join(
-        moveit_share, "config", "el_a3.srdf" if include_gripper else "el_a3_6j.srdf"
-    )
+    # F174：SRDF 文件名取自系统配置（无夹爪形态用去夹爪版本，无 gripper /
+    # arm_with_gripper 组、无 gripper_link 碰撞对）。
+    srdf_file = os.path.join(moveit_share, "config", str(cfg["srdf"]))
     with open(srdf_file, "r", encoding="utf-8") as f:
         robot_description_semantic = f.read()
     kinematics_yaml = load_yaml("a3_moveit_config", "config/kinematics.yaml")
@@ -451,7 +467,7 @@ def _build(include_gripper):
         parameters=[{
             "enabled": True,
             "apply_calibrated_inertia": True,
-            "joint_direction": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            "joint_direction": [1.0] * n_joints,
             "tau_scale": gravity_tau_scale,
         }],
     )
@@ -474,19 +490,17 @@ def _build(include_gripper):
     )
 
     # ---- 编排层：F74 FJT 后端 + F75 controller_switch 使能后端 ----
-    # 6J 档只需覆盖 joint_names（去 L7）与 switch_controllers（无 gripper_controller，
-    # 否则 STRICT activate 会因未知控制器被拒）；rest（require_gate/joint_rated_torque/
-    # 温度/限位等）沿用 arm_controller.yaml，行为与 7J 保持一致。
+    # F174：joint_names 取自系统配置；无夹爪时 switch_controllers 只留
+    # arm_controller（否则 STRICT activate 会因未知控制器被拒）；
+    # rest（require_gate/joint_rated_torque/温度/限位等）沿用 arm_controller.yaml。
     fsm_overrides = {
         # require_gate 由 arm_controller.yaml 决定（真机 true / 仿真 false）；
         # 不再在 launch 里硬编码覆盖。
         "control_backend": fsm_backend,
         "motor_service_backend": "controller_switch",
+        "joint_names": list(cfg["joint_names"]),
     }
     if not include_gripper:
-        fsm_overrides["joint_names"] = [
-            "L1_joint", "L2_joint", "L3_joint", "L4_joint", "L5_joint", "L6_joint",
-        ]
         fsm_overrides["switch_controllers"] = ["arm_controller"]
 
     fsm = Node(
@@ -667,10 +681,7 @@ def _build(include_gripper):
         output="screen",
         parameters=[
             os.path.join(can_bridge_share, "config", "power_sequence.yaml"),
-            os.path.join(
-                can_bridge_share, "config",
-                "motor_map.yaml" if include_gripper else "motor_map_6j.yaml",
-            ),
+            os.path.join(can_bridge_share, "config", str(cfg["motor_map"])),
         ],
         condition=IfCondition(PythonExpression(["'", hardware, "' == 'can'"])),
     )

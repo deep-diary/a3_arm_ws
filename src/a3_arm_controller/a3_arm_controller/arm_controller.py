@@ -86,6 +86,44 @@ JOINTS = [
     "L7_joint",
 ]
 
+try:  # F174: 系统级模型配置（可选依赖；缺失时回退到 a3_description）
+    from a3_robot_model import robot_model as _robot_model
+except Exception:  # noqa: BLE001  (包未安装/未 source)
+    _robot_model = None
+
+
+def model_description_package() -> str:
+    """默认描述包名（系统级模型配置 a3_robot_model，F174）。"""
+    if _robot_model is not None:
+        try:
+            return str(_robot_model.load()["description_package"])
+        except Exception:  # noqa: BLE001
+            pass
+    return "a3_description"
+
+
+def model_urdf_path() -> str:
+    """静态 URDF 路径（系统级模型配置；缺失时回退 a3_description）。"""
+    if _robot_model is not None:
+        try:
+            return str(_robot_model.urdf_path())
+        except Exception:  # noqa: BLE001
+            pass
+    return os.path.join(
+        get_package_share_directory("a3_description"), "urdf", "el_a3.urdf"
+    )
+
+
+def model_include_gripper() -> bool:
+    """是否含夹爪关节（系统级模型配置；缺失时按 7 轴 True 回退）。"""
+    if _robot_model is not None:
+        try:
+            return bool(_robot_model.include_gripper())
+        except Exception:  # noqa: BLE001
+            pass
+    return True
+
+
 # 编排状态机（F45：11 态）
 STATE_IDLE = "IDLE"            # 上电未初始化
 STATE_INIT = "INIT"
@@ -1091,7 +1129,12 @@ class ArmController(Node):
         self.declare_parameter("motor_service_backend", "can_service")
         self.declare_parameter("controller_manager_switch_srv",
                                "/controller_manager/switch_controller")
-        self.declare_parameter("switch_controllers", ["arm_controller", "gripper_controller"])
+        # F174: 无夹爪形态（系统级模型配置）不含 gripper_controller——
+        # STRICT 切换会因未知控制器被整单拒绝，故默认值随形态。
+        self.declare_parameter(
+            "switch_controllers",
+            ["arm_controller"] + (["gripper_controller"] if model_include_gripper() else []),
+        )
         # F89b: 自由拖动（示教）在标准栈上是 arm_controller ↔ zero_torque_controller
         # 的原子 STRICT 切换；gripper_controller 不动，拖动中夹爪仍可用。
         self.declare_parameter("freedrive_arm_controller", "arm_controller")
@@ -1226,7 +1269,8 @@ class ArmController(Node):
         # 打点操作员反馈话题（ds4_feedback_node 白闪+弱震消费）
         self.declare_parameter("operator_event_topic", "/a3/arm/operator_event")
         self.declare_parameter("trajectories_dir", "~/.a3/trajectories")
-        self.declare_parameter("named_poses_pkg", "a3_description")
+        # F174: 留空 = 跟随系统级模型配置的描述包（a3_robot_model/config/robot_model.yaml）
+        self.declare_parameter("named_poses_pkg", model_description_package())
         # F41/F88: move_to/goto 兜底——最短时长；两点轨迹由 JTC 样条插值
         self.declare_parameter("move_to_min_duration_s", 3.0)
         # F94: 两点轨迹速度限幅 = URDF velocity × scale（1.0=只堵无限速漏洞）
@@ -1629,7 +1673,7 @@ class ArmController(Node):
     def _load_poses(self) -> Dict[str, List[float]]:
         poses: Dict[str, List[float]] = {}
         try:
-            pkg = str(self.get_parameter("named_poses_pkg").value)
+            pkg = str(self.get_parameter("named_poses_pkg").value) or model_description_package()
             share = get_package_share_directory(pkg)
             path = os.path.join(share, "config", "named_poses.yaml")
             with open(path, "r", encoding="utf-8") as f:
@@ -1662,7 +1706,7 @@ class ArmController(Node):
 
     def _named_poses_pkg_path(self) -> str:
         """F114: 包内 named_poses.yaml 路径（symlink-install 下写入即落 src）."""
-        pkg = str(self.get_parameter("named_poses_pkg").value)
+        pkg = str(self.get_parameter("named_poses_pkg").value) or model_description_package()
         share = get_package_share_directory(pkg)
         return os.path.join(share, "config", "named_poses.yaml")
 
@@ -1744,7 +1788,8 @@ class ArmController(Node):
 
     def _load_joint_limits(self) -> Dict[str, Tuple[float, float]]:
         """
-        从 a3_description/urdf/el_a3.urdf 读取各关节 limit lower/upper（与前端滑动条同源）；
+        从系统级模型配置的静态 URDF（默认 a3_description_6j/urdf/el_a3.urdf）读取
+        各关节 limit lower/upper（与前端滑动条同源）；F174 起路径由 a3_robot_model 决定。
         F94: 同时把 velocity 存入 self._joint_vel_limits（两点轨迹地板时长的唯一来源）。
         """
         import xml.etree.ElementTree as ET
@@ -1752,8 +1797,7 @@ class ArmController(Node):
         limits: Dict[str, Tuple[float, float]] = {}
         vel_limits: Dict[str, float] = {}
         try:
-            share = get_package_share_directory("a3_description")
-            path = os.path.join(share, "urdf", "el_a3.urdf")
+            path = model_urdf_path()
             root = ET.parse(path).getroot()
             for joint in root.iter("joint"):
                 name = joint.get("name", "")
@@ -1841,8 +1885,7 @@ class ArmController(Node):
     # ------------------------------------------------------------------
 
     def _read_urdf_text(self) -> str:
-        share = get_package_share_directory("a3_description")
-        with open(os.path.join(share, "urdf", "el_a3.urdf"), "r") as fh:
+        with open(model_urdf_path(), "r") as fh:
             return fh.read()
 
     def _ensure_pin_model(self) -> None:

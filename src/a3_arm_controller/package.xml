@@ -13,6 +13,7 @@
   <exec_depend>a3_msgs</exec_depend>
   <exec_depend>a3_can_bridge</exec_depend>
   <exec_depend>a3_description</exec_depend>
+  <exec_depend>a3_robot_model</exec_depend>
   <exec_depend>app_melodion</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>std_srvs</exec_depend>

@@ -3,7 +3,7 @@
 
 import os
 
-from ament_index_python.packages import get_package_share_directory
+from a3_robot_model import robot_model
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, TimerAction
 from launch.conditions import IfCondition
@@ -17,8 +17,9 @@ def generate_launch_description():
     use_ik = LaunchConfiguration("use_ik")
     run_demo = LaunchConfiguration("run_demo")
     use_rviz = LaunchConfiguration("use_rviz")
-    desc_share = get_package_share_directory("a3_description")
-    urdf = os.path.join(desc_share, "urdf", "el_a3.urdf")
+    # F174：描述包 / 静态 URDF 路径来自系统级模型配置（a3_robot_model）
+    desc_share = robot_model.description_share()
+    urdf = robot_model.urdf_path()
 
     with open(urdf, "r", encoding="utf-8") as f:
         robot_description = f.read()

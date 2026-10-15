@@ -13,6 +13,7 @@ URDF 方向校验（真机，臂不失能）：RViz 双模型 + 目标摆动发�
 """
 import os
 
+from a3_robot_model import robot_model
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction
@@ -26,10 +27,10 @@ def generate_launch_description():
     use_traj = LaunchConfiguration("use_traj")
     use_sw_render = LaunchConfiguration("use_sw_render")
 
-    desc_share = get_package_share_directory("a3_description")
     bringup_share = get_package_share_directory("a3_bringup")
 
-    with open(os.path.join(desc_share, "urdf", "el_a3.urdf"), "r", encoding="utf-8") as f:
+    # F174：静态 URDF 路径来自系统级模型配置（a3_robot_model）
+    with open(robot_model.urdf_path(), "r", encoding="utf-8") as f:
         robot_description = f.read()
 
     # 目标模型换色系（青蓝），与实际模型（橙/深棕）高对比区分。

@@ -7,9 +7,12 @@
 ## 机械结构
 
 - **型号：** EDULITE A3（EL-A3）
-- **自由度：** 7 DOF（6 臂关节 + 1 腕/夹爪关节）
-- **URDF / Xacro：** `src/a3_description/urdf/el_a3.urdf.xacro`
-- **MoveIt 配置：** `src/a3_moveit_config/`
+- **自由度：** 两种形态档位（F174，由系统级模型配置 `a3_robot_model/config/robot_model.yaml` 指定默认）：
+  - **6 轴 + 末端连杆（当前默认）**：L1–L6，轴 6 法兰输出后接 14 cm 连杆，TCP = `end_effector` 在连杆末端；
+    描述包 `src/a3_description_6j/urdf/el_a3.urdf.xacro`（连杆暂无 STP，圆柱占位 φ8×140mm）
+  - **7 轴（含 L7 夹爪）**：L1–L7，描述包 `src/a3_description/urdf/el_a3.urdf.xacro`（`include_gripper:=true`）
+- **URDF / Xacro：** 默认 `src/a3_description_6j/urdf/el_a3.urdf.xacro`；7 轴形态 `src/a3_description/urdf/el_a3.urdf.xacro`
+- **MoveIt 配置：** `src/a3_moveit_config/`（SRDF 随档位：`el_a3_6j.srdf` / `el_a3.srdf`）
 
 ## 关节命名
 
@@ -23,7 +26,7 @@
 | 4 | `L4_joint` | 腕 1 |
 | 5 | `L5_joint` | 腕 2 |
 | 6 | `L6_joint` | 腕 3 |
-| 7 | `L7_joint` | 末端/夹爪 |
+| 7 | `L7_joint` | 末端/夹爪（**仅 7 轴形态**；6 轴 + 连杆形态下不存在，末端为固定连杆 `linkage_link`） |
 
 reBot 工具链可能使用 `joint1`..`joint7`；`a3_bringup/trajectory_bridge` 会自动映射为 `L{n}_joint`。
 
@@ -75,7 +78,9 @@ motor_ids_by_index: [1, 2, 3, 4, 5, 6, 7]
 
 | 包 | 职责 |
 |----|------|
-| `a3_description` | URDF、ros2_control、控制器配置 |
+| `a3_robot_model` | **系统级模型配置**：默认描述包与配套档位文件（SRDF / controllers / motor_map / joint_names，F174） |
+| `a3_description_6j` | **6 轴 + 连杆**形态描述（URDF / ros2_control / 控制器配置，当前默认档） |
+| `a3_description` | **7 轴**形态描述（URDF / ros2_control / 控制器配置，含 L7 夹爪） |
 | `a3_moveit_config` | MoveIt 规划组、关节限位、OMPL |
 | `a3_can_bridge` | MIT 编解码、SocketCAN 传输（Edge） |
 

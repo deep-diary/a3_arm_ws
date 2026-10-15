@@ -18,6 +18,7 @@ import os
 
 import yaml
 
+from a3_robot_model import robot_model
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
@@ -49,12 +50,14 @@ def generate_launch_description():
     use_joy_node = LaunchConfiguration("use_joy_node")
     use_servo_anchor = LaunchConfiguration("use_servo_anchor")
 
-    desc_share = get_package_share_directory("a3_description")
+    # F174：描述包 / 静态 URDF 路径来自系统级模型配置（a3_robot_model）
+    desc_share = robot_model.description_share()
     moveit_share = get_package_share_directory("a3_moveit_config")
 
-    with open(os.path.join(desc_share, "urdf", "el_a3.urdf"), "r", encoding="utf-8") as f:
+    with open(robot_model.urdf_path(), "r", encoding="utf-8") as f:
         robot_description = f.read()
-    with open(os.path.join(moveit_share, "config", "el_a3.srdf"), "r", encoding="utf-8") as f:
+    # F174：SRDF 随系统级模型配置（默认 el_a3_6j.srdf）
+    with open(os.path.join(moveit_share, "config", str(robot_model.load()["srdf"])), "r", encoding="utf-8") as f:
         robot_description_semantic = f.read()
     kinematics_yaml = load_yaml("a3_moveit_config", "config/kinematics.yaml")
 
@@ -183,7 +186,11 @@ def generate_launch_description():
             default_value="true",
             description="RViz 软件渲染 LIBGL_ALWAYS_SOFTWARE=1（RK3588 默认开，LL-027）",
         ),
-        DeclareLaunchArgument("use_gripper", default_value="true"),
+        DeclareLaunchArgument(
+            "use_gripper",
+            default_value="true" if robot_model.include_gripper() else "false",
+            description="是否叠起夹爪力控节点（随系统级模型配置 include_gripper）",
+        ),
         DeclareLaunchArgument(
             "use_joy_node",
             default_value="false",

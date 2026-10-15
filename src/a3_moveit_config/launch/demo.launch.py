@@ -13,6 +13,7 @@ from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
+from a3_robot_model import robot_model
 import yaml
 
 
@@ -54,7 +55,8 @@ def generate_launch_description():
             PathJoinSubstitution([FindExecutable(name="xacro")]),
             " ",
             PathJoinSubstitution(
-                [FindPackageShare("a3_description"), "urdf", "el_a3.urdf.xacro"]
+                [FindPackageShare(str(robot_model.load()["description_package"])),
+                 "urdf", "el_a3.urdf.xacro"]
             ),
             " use_mock_hardware:=true",
         ]
@@ -66,7 +68,7 @@ def generate_launch_description():
         [
             "cat ",
             PathJoinSubstitution(
-                [FindPackageShare("a3_moveit_config"), "config", "el_a3.srdf"]
+                [FindPackageShare("a3_moveit_config"), "config", str(robot_model.load()["srdf"])]
             ),
         ]
     )
@@ -107,7 +109,8 @@ def generate_launch_description():
 
     # ros2_control controllers config
     ros2_controllers_yaml = PathJoinSubstitution(
-        [FindPackageShare("a3_description"), "config", "el_a3_controllers.yaml"]
+        [FindPackageShare(str(robot_model.load()["description_package"])),
+         "config", "el_a3_controllers.yaml"]
     )
 
     # RViz config

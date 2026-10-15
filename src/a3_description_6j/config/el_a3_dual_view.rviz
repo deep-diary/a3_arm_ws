@@ -60,11 +60,6 @@ Visualization Manager:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        gripper_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
         l1_link_urdf_asm:
           Alpha: 1
           Show Axes: false
@@ -134,11 +129,6 @@ Visualization Manager:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        gripper_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
         l1_link_urdf_asm:
           Alpha: 1
           Show Axes: false
@@ -191,8 +181,6 @@ Visualization Manager:
           Value: true
         end_effector:
           Value: true
-        gripper_link:
-          Value: true
         l1_link_urdf_asm:
           Value: true
         l1_urdf_urdf_asm:
@@ -210,8 +198,6 @@ Visualization Manager:
         target/base_link:
           Value: true
         target/end_effector:
-          Value: true
-        target/gripper_link:
           Value: true
         target/l1_link_urdf_asm:
           Value: true
@@ -243,8 +229,6 @@ Visualization Manager:
                       l5_l6_urdf_asm:
                         end_effector:
                           {}
-                        gripper_link:
-                          {}
           target/base_link:
             target/l1_urdf_urdf_asm:
               target/l1_link_urdf_asm:
@@ -254,8 +238,6 @@ Visualization Manager:
                       target/part_9:
                         target/l5_l6_urdf_asm:
                           target/end_effector:
-                            {}
-                          target/gripper_link:
                             {}
       Update Interval: 0
       Value: true

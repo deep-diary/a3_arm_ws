@@ -14,6 +14,7 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
+from a3_robot_model import robot_model
 import yaml
 
 
@@ -74,7 +75,8 @@ def generate_launch_description():
             PathJoinSubstitution([FindExecutable(name="xacro")]),
             " ",
             PathJoinSubstitution(
-                [FindPackageShare("a3_description"), "urdf", "el_a3.urdf.xacro"]
+                [FindPackageShare(str(robot_model.load()["description_package"])),
+                 "urdf", "el_a3.urdf.xacro"]
             ),
             " use_mock_hardware:=false",
             " can_interface:=",
@@ -92,7 +94,7 @@ def generate_launch_description():
         [
             "cat ",
             PathJoinSubstitution(
-                [FindPackageShare("a3_moveit_config"), "config", "el_a3.srdf"]
+                [FindPackageShare("a3_moveit_config"), "config", str(robot_model.load()["srdf"])]
             ),
         ]
     )
@@ -130,14 +132,15 @@ def generate_launch_description():
 
     # ros2_control controllers config
     ros2_controllers_yaml = PathJoinSubstitution(
-        [FindPackageShare("a3_description"), "config", "el_a3_controllers.yaml"]
+        [FindPackageShare(str(robot_model.load()["description_package"])),
+         "config", "el_a3_controllers.yaml"]
     )
 
     # Resolve zero_torque_controller paths dynamically (avoid hardcoded absolute paths)
-    desc_share = get_package_share_directory("a3_description")
+    desc_share = robot_model.description_share()
     zero_torque_path_overrides = {
         "zero_torque_controller.ros__parameters.urdf_path":
-            os.path.join(desc_share, "urdf", "el_a3.urdf"),
+            robot_model.urdf_path(),
         "zero_torque_controller.ros__parameters.inertia_config_path":
             os.path.join(desc_share, "config", "inertia_params.yaml"),
     }

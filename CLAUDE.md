@@ -23,7 +23,7 @@ A3 机械臂（EDULITE_A3 结构 + reBot 工具链 + RK3588/SocketCAN/MIT 平台
 ## 构建
 
 ```bash
-# 全量（各包 build_type：a3_msgs/a3_can_bridge/a3_description/a3_cloud_edge 是 ament_cmake，
+# 全量（各包 build_type：a3_msgs/a3_can_bridge/a3_description/a3_description_6j/a3_cloud_edge 是 ament_cmake，
 # 其余 Python 包是 ament_python）
 colcon build --symlink-install
 
@@ -66,7 +66,7 @@ ros2 launch a3_bringup edge_web_sim.launch.py use_gripper:=true
 
 ## 架构大图
 
-运行时分层（Edge）：Platform（`can-up.service`，can1 @ 1Mbps）→ Execution（`a3_can_bridge`：`can_transport_node` + `motor_protocol_node` + `power_sequence_node`）→ Description（`a3_description` URDF / `a3_moveit_config`）→ Shell（`trajectory_bridge` 桥接 reBot 话题）→ HMI（`a3_teleop_ps4`）→ Orchestration（`a3_arm_controller` 状态机）。
+运行时分层（Edge）：Platform（`can-up.service`，can1 @ 1Mbps）→ Execution（`a3_can_bridge`：`can_transport_node` + `motor_protocol_node` + `power_sequence_node`）→ Description（`a3_robot_model` 指定默认描述，当前 6 轴 + 连杆 `a3_description_6j`（F174；7 轴形态为 `a3_description`）/ `a3_moveit_config`）→ Shell（`trajectory_bridge` 桥接 reBot 话题）→ HMI（`a3_teleop_ps4`）→ Orchestration（`a3_arm_controller` 状态机）。
 
 核心数据流：轨迹走 `/joint_group_effort_controller/joint_trajectory` → `motor_protocol_node`（200 Hz 插值 + MIT 协议）→ CAN → 电机；反馈 `/joint_states` @ 50 Hz（7 关节 `L1_joint`–`L7_joint`，L7 是夹爪）。轨迹下发被 `/power_sequence/gate_open` 门禁。
 

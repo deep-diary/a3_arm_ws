@@ -24,7 +24,6 @@ friction_fc:
 - 0.0      # L4_joint
 - 0.0      # L5_joint
 - 0.0      # L6_joint
-- 0.0      # L7_joint（6J 下不存在，占位保持索引对齐）
 
 friction_vel_scale: 0.05
 

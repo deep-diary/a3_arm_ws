@@ -10,6 +10,7 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <exec_depend>a3_description</exec_depend>
+  <exec_depend>a3_robot_model</exec_depend>
   
   <exec_depend>moveit_ros_move_group</exec_depend>
   <exec_depend>moveit_ros_planning_interface</exec_depend>

@@ -18,6 +18,7 @@
 
   <exec_depend>a3_microros_mock</exec_depend>
   <exec_depend>a3_description</exec_depend>
+  <exec_depend>a3_robot_model</exec_depend>
   <exec_depend>a3_moveit_config</exec_depend>
   <exec_depend>micro_ros_agent</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>

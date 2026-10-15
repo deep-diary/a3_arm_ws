@@ -27,6 +27,7 @@ import os
 
 import yaml
 
+from a3_robot_model import robot_model
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -54,13 +55,14 @@ def generate_launch_description():
     use_moveit = LaunchConfiguration("use_moveit")
     use_servo = LaunchConfiguration("use_servo")
 
-    desc_share = get_package_share_directory("a3_description")
+    # F174：描述包 / 静态 URDF 路径来自系统级模型配置（a3_robot_model）
+    desc_share = robot_model.description_share()
     arm_share = get_package_share_directory("a3_arm_controller")
     bridge_share = get_package_share_directory("a3_mqtt_bridge")
     gripper_share = get_package_share_directory("a3_gripper_controller")
     moveit_share = get_package_share_directory("a3_moveit_config")
 
-    urdf = os.path.join(desc_share, "urdf", "el_a3.urdf")
+    urdf = robot_model.urdf_path()
     with open(urdf, "r", encoding="utf-8") as f:
         robot_description = f.read()
 
@@ -162,7 +164,8 @@ def generate_launch_description():
 
     # ---- MoveIt：move_group + FJT action + retime（F67/F68 仿真验收，与 a3_bringup
     #      launch 同款接法；sim /joint_states 为 RELIABLE，move_group 可直接用）----
-    with open(os.path.join(moveit_share, "config", "el_a3.srdf"), "r", encoding="utf-8") as f:
+    # F174：SRDF 随系统级模型配置（默认 el_a3_6j.srdf，无夹爪组/碰撞对）
+    with open(os.path.join(moveit_share, "config", str(robot_model.load()["srdf"])), "r", encoding="utf-8") as f:
         robot_description_semantic = f.read()
     kinematics_yaml = load_yaml("a3_moveit_config", "config/kinematics.yaml")
     joint_limits_yaml = load_yaml("a3_moveit_config", "config/joint_limits.yaml")
@@ -332,8 +335,9 @@ def generate_launch_description():
         [
             DeclareLaunchArgument(
                 "use_gripper",
-                default_value="true",
-                description="是否叠起夹爪力控节点（sim 由 sim_motor_node 提供 L7 接触弹簧力矩，默认开）",
+                default_value="true" if robot_model.include_gripper() else "false",
+                description="是否叠起夹爪力控节点（随系统级模型配置 include_gripper；"
+                "6 轴 + 连杆形态下默认关）",
             ),
             DeclareLaunchArgument("use_rviz", default_value="false"),
             DeclareLaunchArgument(

@@ -3,6 +3,7 @@
 
 import os
 
+from a3_robot_model import robot_model
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -19,6 +20,18 @@ def generate_launch_description():
 
     default_cfg = os.path.join(share, "config", "arm_controller.yaml")
     monitor_cfg = os.path.join(share, "config", "arm_monitor.yaml")
+
+    # F174：关节形态随系统级模型配置（arm_controller.yaml 里 joint_names 为 7 关节，
+    # 6 轴 + 连杆形态下需覆盖，否则 F52 档位配对校验报错；switch_controllers 同理
+    # 去掉不存在的 gripper_controller，避免 STRICT 切换被拒）。
+    cfg = robot_model.load()
+    include_gripper = bool(cfg.get("include_gripper"))
+    fsm_overrides = {
+        "joint_names": list(cfg["joint_names"]),
+        "named_poses_pkg": "" if include_gripper else str(cfg["description_package"]),
+    }
+    if not include_gripper:
+        fsm_overrides["switch_controllers"] = ["arm_controller"]
 
     return LaunchDescription(
         [
@@ -42,7 +55,7 @@ def generate_launch_description():
                 executable="arm_controller",
                 name="a3_arm_controller",
                 output="screen",
-                parameters=[config_file, {"require_gate": require_gate}],
+                parameters=[config_file, {"require_gate": require_gate}, fsm_overrides],
             ),
             Node(
                 package="a3_arm_controller",

@@ -5,6 +5,7 @@ import os
 
 import yaml
 from ament_index_python.packages import get_package_share_directory
+from a3_robot_model import robot_model
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
@@ -63,7 +64,8 @@ def generate_launch_description():
             PathJoinSubstitution([FindExecutable(name="xacro")]),
             " ",
             PathJoinSubstitution(
-                [FindPackageShare("a3_description"), "urdf", "el_a3.urdf.xacro"]
+                [FindPackageShare(str(robot_model.load()["description_package"])),
+                 "urdf", "el_a3.urdf.xacro"]
             ),
             " use_mock_hardware:=true",
         ]
@@ -76,7 +78,7 @@ def generate_launch_description():
         [
             "cat ",
             PathJoinSubstitution(
-                [FindPackageShare("a3_moveit_config"), "config", "el_a3.srdf"]
+                [FindPackageShare("a3_moveit_config"), "config", str(robot_model.load()["srdf"])]
             ),
         ]
     )

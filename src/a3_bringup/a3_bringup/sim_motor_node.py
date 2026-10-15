@@ -36,6 +36,7 @@ from typing import List, Optional
 
 import rclpy
 from a3_bringup.trajectory_spline import sample_joint_trajectory
+from a3_robot_model import robot_model
 from a3_can_bridge.msg import MotorState, MotorStates
 from a3_can_bridge.srv import (
     MotorCommand,
@@ -63,6 +64,17 @@ JOINTS = [
 L7_IDX = 6
 
 
+def _model_joint_names() -> List[str]:
+    """F174：默认关节名取自系统级模型配置（a3_robot_model）；缺失时回退内置 7 关节。"""
+    try:
+        names = robot_model.joint_names()
+        if names:
+            return names
+    except Exception:  # noqa: BLE001
+        pass
+    return list(JOINTS)
+
+
 class SimMotorNode(Node):
     def __init__(self) -> None:
         super().__init__("motor_protocol_node")
@@ -78,7 +90,7 @@ class SimMotorNode(Node):
         self.declare_parameter("joint_states_topic", "/joint_states")
         self.declare_parameter("rate_hz", 50.0)
         self.declare_parameter("trajectory_interpolation_method", "auto")
-        self.declare_parameter("joint_names", JOINTS)
+        self.declare_parameter("joint_names", _model_joint_names())
         self.declare_parameter("follow_alpha", 0.35)
         self.declare_parameter("contact_q", 0.6)
         self.declare_parameter("contact_k", 20.0)
@@ -509,10 +521,14 @@ class SimMotorNode(Node):
     def _on_feedback_timer(self) -> None:
         with self._lock:
             self._fb_seq += 1
+            # F174: 无夹爪形态（L1–L6）不打印 L7 力矩，避免越界
+            tau_l7 = (
+                f" tau_L7={self._effort[L7_IDX]:.3f}" if self._n > L7_IDX else ""
+            )
             line = (
                 f"sim motor={int(self._fb_seq)} enabled={1 if self._enabled else 0} "
-                f"zt={1 if self._zero_torque else 0} gate={1 if self._gate_open else 0} "
-                f"tau_L7={self._effort[L7_IDX]:.3f}"
+                f"zt={1 if self._zero_torque else 0} gate={1 if self._gate_open else 0}"
+                f"{tau_l7}"
             )
         msg = String()
         msg.data = line

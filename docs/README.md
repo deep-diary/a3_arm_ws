@@ -102,7 +102,7 @@ docs/
 | 文档 | 说明 |
 |------|------|
 | [edge/REQUIREMENTS.md](edge/REQUIREMENTS.md) | 边缘全栈需求（总览 + 索引，正文在 requirements/） |
-| [edge/requirements/](edge/requirements/) | 需求正文 F###-slug.md（一条一文件，F1–F166） |
+| [edge/requirements/](edge/requirements/) | 需求正文 F###-slug.md（一条一文件，F1–F174） |
 | [edge/ARCHITECTURE.md](edge/ARCHITECTURE.md) | 运行时分层与数据流 |
 | [edge/STATE_MACHINE.md](edge/STATE_MACHINE.md) | 编排层状态机（11 态 + 指令×状态×模式矩阵，F53） |
 | [edge/QUICKSTART.md](edge/QUICKSTART.md) | 真机快速上手清单 |
@@ -135,7 +135,8 @@ docs/
 |------|------|
 | [../src/a3_lerobot_config/docs/INTEGRATION.md](../src/a3_lerobot_config/docs/INTEGRATION.md) | LeRobot 集成脚手架 |
 | [../src/a3_can_bridge/README.md](../src/a3_can_bridge/README.md) | Edge CAN 栈节点说明 |
-| [../src/a3_description_6j/README.md](../src/a3_description_6j/README.md) | EL-A3 **6 轴 + 连杆** 描述包（F174，与 7 轴 `a3_description` 整包隔离） |
+| [../src/a3_robot_model/README.md](../src/a3_robot_model/README.md) | **系统级模型配置**：默认描述包与档位文件（F174，可 `~/.a3` 覆盖） |
+| [../src/a3_description_6j/README.md](../src/a3_description_6j/README.md) | EL-A3 **6 轴 + 连杆** 描述包（F174，与 7 轴 `a3_description` 整包隔离；当前默认档） |
 | [../src/app_melodion/README.md](../src/app_melodion/README.md) | 机械臂弹奏口风琴 app（键位/几何/曲谱/IK/播放） |
 
 ## 构建与运行

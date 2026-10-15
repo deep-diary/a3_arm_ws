@@ -128,17 +128,6 @@ def generate_arm_nodes(context, *args, **kwargs):
                     "--controller-manager-timeout", "60"
                 ],
             ),
-
-            # Gripper Controller Spawner
-            Node(
-                package="controller_manager",
-                executable="spawner",
-                arguments=[
-                    f"{prefix}gripper_controller",
-                    "--controller-manager", f"/{arm_name}/controller_manager",
-                    "--controller-manager-timeout", "60"
-                ],
-            ),
         ])
         
         nodes.append(arm_group)
@@ -163,17 +152,15 @@ def generate_arm_nodes(context, *args, **kwargs):
 
 def generate_controller_params(prefix: str, arm_name: str, update_rate: int) -> str:
     """
-Generate controller parameter config file (arm L1-L6 + gripper L7)
+Generate controller parameter config file (arm L1-L6, no gripper)
     
     Returns temporary YAML file path
     """
     
     arm_joints = [f"L{i}_joint" for i in range(1, 7)]   # L1-L6
-    gripper_joints = ["L7_joint"]
     
     jsb_name = f"{prefix}joint_state_broadcaster"
     arm_ctrl_name = f"{prefix}arm_controller"
-    grip_ctrl_name = f"{prefix}gripper_controller"
     
     params = {
         f"/{arm_name}/controller_manager": {
@@ -183,9 +170,6 @@ Generate controller parameter config file (arm L1-L6 + gripper L7)
                     "type": "joint_state_broadcaster/JointStateBroadcaster"
                 },
                 arm_ctrl_name: {
-                    "type": "joint_trajectory_controller/JointTrajectoryController"
-                },
-                grip_ctrl_name: {
                     "type": "joint_trajectory_controller/JointTrajectoryController"
                 },
             }
@@ -204,23 +188,6 @@ Generate controller parameter config file (arm L1-L6 + gripper L7)
                     "stopped_velocity_tolerance": 0.1,
                     "goal_time": 0.0,
                     **{joint: {"goal": 0.03} for joint in arm_joints}
-                }
-            }
-        },
-        f"/{arm_name}/{grip_ctrl_name}": {
-            "ros__parameters": {
-                "joints": gripper_joints,
-                "command_interfaces": ["position"],
-                "state_interfaces": ["position", "velocity"],
-                "open_loop_control": True,
-                "allow_nonzero_velocity_at_trajectory_end": True,
-                "interpolation_method": "splines",
-                "state_publish_rate": 50.0,
-                "action_monitor_rate": 20.0,
-                "constraints": {
-                    "stopped_velocity_tolerance": 0.2,
-                    "goal_time": 0.0,
-                    "L7_joint": {"goal": 0.05}
                 }
             }
         },

@@ -88,13 +88,37 @@ graph TD
 |---|---|---|---|
 | 描述层 | 发两份**静态 URDF**（DM/RS），xacro 只用来 `include` URDF + ros2_control 宏 | **否**。xacro 里 `gripper_tcp` 父 link 硬编码（`end_link`/`gripper_end`） | 分层思路：URDF 只放拓扑/惯性/限位，其余全部外置到 YAML |
 | 配置层 | `rebotarm_hardware.yaml` 的 `models:` 字典，每模型自带 `urdf_path`/`end_effector_frame`/`groups.arm.joints`/增益；启动时按 `model:=dm\|rs` 选档并与 SDK yaml **deep-merge** | **部分**（同构 6-DOF 臂可加 model 条目跑通） | **profile 字典 + deep-merge 选档**——本方案 P1 直接采用这一范式 |
-| 驱动层 | 外部 motorbridge SDK：`add_<vendor>_motor()`，支持 DM/RobStride/MyActuator/HighTorque/Hexfellow，MIT/POS_VEL/VEL 模式；逐关节 `name/motor_id/feedback_id/model/vendor/kp/kd` 全 YAML | **是（同厂商内换型号/ID/PID 只改 YAML）** | transport × protocol 的抽象边界（本方案 P3 自研同类接口） |
+| 驱动层 | 外部 motorbridge SDK：`add_<vendor>_motor()`，支持 DM/RobStride/MyActuator/HighTorque/Hexfellow，MIT/POS_VEL/VEL 模式；逐关节 `name/motor_id/feedback_id/model/vendor/kp/kd` 全 YAML | **是（同厂商内换型号/ID/PID 只改 YAML）** | **Transport × Protocol × ModelSpec 三层边界**（本方案 P3 自研同类接口，见 §3.1） |
 | 跨厂商换电机 | `_write_pv_params` 内按 `vendor` 分支写不同寄存器；DM 走串口桥、RS 走 SocketCAN | **否**（仍需代码分支 + SDK 支持） | 认清边界：抽象到「可配置」而非「魔法通用」 |
 | 控制/规划层 | `rebotarmcontroller` 是**薄适配层**，IK/URDF 逻辑不重复实现；`joint_names` 取自 `groups.arm.joints`（配置驱动） | 主体是 | 薄适配层 + 配置驱动关节名 |
 | 运动学/动力学 | Pinocchio 侧 URDF 路径与末端帧来自配置；`get_joint_names` 遍历 `model.names` 动态获取；`controlled_joints` 支持少于 nq | **是** | URDF 派生关节表的参考实现 |
 | MoveIt 层 | SRDF/kinematics/limits/controllers **逐型号手写副本**；夹爪关节名两套硬编码；6-DOF+夹爪假设贯穿 | **否** | 反面教材：本方案 P1 用生成替代复制 |
 
 **结论**：reBot 是「**驱动层配置化 + 规划层定制**」。它不兼容任意 URDF/任意电机驱动的臂；跨厂商换电机仍需代码分支。本方案要在它之上补的正是**描述层自动派生 + 任意 N 关节 + 统一协议接口**这三块。
+
+### 3.1 motorbridge 的「型号参数」到底放在哪（P3 设计的直接依据）
+
+motorbridge 官网/教程核验（[Vendor Capability Matrix](https://motorbridge.seeedstudio.com/reference/vendor-capability-matrix)、[CAN ID & Model Cheatsheet](https://motorbridge.seeedstudio.com/reference/can-id-and-model-cheatsheet)、[教程 05 寄存器与参数](https://motorbridge.seeedstudio.com/zh/tutorials/05-register-and-params)）后，**「每个电机的不同参数」是两层存放，不是一处**：
+
+| 层 | 内容 | 存放位置 | 谁决定 |
+|---|---|---|---|
+| **型号规格层** | 该型号的 PMAX/VMAX/TMAX 映射范围、额定值、限位与日志用的规格 | **SDK 内置的型号表**，由 `model` 字符串选 | 上游写死，用户只选 model 名 |
+| **参数数值层** | TMAX 实际生效的力矩上限、PID、超时、保护阈值 | **电机固件内部的寄存器/参数** | 上层通过通用寄存器 API 写入 + `store_parameters()` 持久化 |
+
+证据要点：
+
+- 型号字符串就是为规格服务的：`add_damiao_motor(0x01, 0x11, "4340P")`、`add_robstride_motor(127, 0xFD, "rs-06")`；文档反复强调 "Always pass the physical RobStride model (rs-00…rs-06) **for limits and logging**"，CLI 中 `--model rs-06` 也注明 "replace with the actual model **for limits/logging**"。
+- 力矩上限是**电机寄存器**而非 SDK 定值：Damiao `RID 23 = TMAX`，做法 `write_register_f32(RID_TMAX, 10.0)` + `store_parameters()`；RobStride 走 `robstride_write_param_f32(param_id, value)`（通用 4 节表 `0x7005..0x702E`），文档明确 **扭矩/电流「目前只有参数级（write-param）」**。
+- **一个厂商适配器 = 一个电机家族**（靠 model 分派）：Damiao `4310/4340(P)/6001`、RobStride `rs-00…rs-06`、MyActuator `X8`、HighTorque 与 Hexfellow 为 generic。同厂商是「同协议族 + 型号参数表」，跨厂商才是真协议分叉。
+- 未被抽象掉的硬绑定（P3 需正视）：① 传输与厂商部分绑死（`dm-serial` 仅 Damiao；Hexfellow 必须 CAN-FD）；② 反馈 ID 规则按厂商写死（Damiao `motor_id+0x10`、MyActuator `0x240+id`、HighTorque `0x01`、Hexfellow `0x00`）；③ 私有参数路径必须分叉（RobStride `robstride_*_param_*` vs Damiao RID 寄存器）；④ RobStride 的 CiA402/MIT 路径标注 **not production-ready**。
+
+**对本方案的修正**：原方案把下层的抽象写成 `Transport × Protocol` **两层**，漏掉了「型号规格」这一维，现改为**三层 + 参数存放语义**：
+
+```
+Transport（socketcan / canfd / serial）× Protocol（协议族：MIT / 私有扩展帧）× ModelSpec（型号参数表）
+```
+
+且「力矩上限」必须区分**语义与数值**：ModelSpec 给出量程/映射范围（等价我们现在写死在 [protocol_codec.hpp](../../src/a3_can_bridge/include/a3_can_bridge/protocol_codec.hpp) 的 EL05 ±6 Nm / RS00 ±14 Nm），而**生效值**在 profile 里声明 `source: host_clip`（我们现在的做法：host 侧 clip tau）还是 `register`（motorbridge 做法：写电机寄存器并持久化）。两者不能只留一个字段。
 
 ---
 
@@ -117,10 +141,11 @@ flowchart TB
     GEN["生成器<br/>URDF ∪ profile → SRDF / joint_limits / controllers / ros2_control 段"]
   end
 
-  subgraph lower["下层：可换后端（P2/P3）"]
+  subgraph lower["下层：可换后端（P2/P3，三层）"]
     RC["ros2_control 硬件插件"]
-    TR["Transport: SocketCAN / CAN-FD / 串口"]
-    PR["Protocol: MIT(el05) / 厂商私有后端"]
+    TR["① Transport: SocketCAN / CAN-FD / 串口"]
+    PR["② Protocol: MIT(el05) / 厂商私有扩展帧"]
+    MS["③ ModelSpec: 型号参数表<br/>量程 / 额定 / 映射范围 / 支持模式"]
   end
 
   subgraph plat["平台层（保持）"]
@@ -131,7 +156,7 @@ flowchart TB
   URDF --> GEN
   PROF --> GEN
   GEN --> RC
-  RC --> TR --> PR --> CAN
+  RC --> TR --> PR --> MS --> CAN
 ```
 
 **分层职责**（profile 必含字段，由 C1–C21 的硬编码逐条抽取而来）：
@@ -140,9 +165,9 @@ flowchart TB
 |---|---|---|
 | 机械结构与关节 | `joint_names[]`、`n_joints`、`base_link`、`tip_link`、`joint_limits{}` | C2（来自 URDF，profile 只做覆盖） |
 | 规划语义 | `groups{}`（chain/关节表）、`group_states{}`、`disable_collisions` 策略 | C9、C11、C12 |
-| 电机映射 | `motor_ids[]`、`motor_type[]`、`direction[]`、`position_offset[]`、`bus` | C3、C8 |
+| 电机映射 | `motor_ids[]`、`motor_type[]`、`direction[]`、`position_offset[]`、`bus`、反馈 ID 规则 | C3、C8 |
 | 增益与安全 | `kp[]`、`kd[]`、`zero_torque_kd_min/max[]`、`joint_rated_torque[]`、`static_torque_margin` | C3、C7、C13 |
-| 量程 | `motor_torque_range_nm[]`、`motor_speed_range_rad_s[]` | C5、C7 |
+| **电机型号规格（ModelSpec）** | `motor_spec{model, torque_range_nm, speed_range_rad_s, pmax/vmax/tmax 映射范围, supported_modes}`——**逐型号一张表**，等价 motorbridge 的 model string 表；力矩上限额外声明 `source: host_clip \| register`（见 §3.1） | C5（EL05 ±6 / RS00 ±14 现写死在 `protocol_codec.hpp`）、C7 |
 | 动力学参数 | `gravity_scales[]`、`inertia_params`、`friction_Fc[]` | C21 |
 | 末端 | `gripper{enabled, joint_name, motor_id, limits}` | C2、C18 |
 | 集成 | `mqtt_signal_codes[]`、`lerobot_dof/ids` | C17、C19 |
@@ -157,7 +182,7 @@ flowchart TB
 |---|---|---|
 | D1 抽象范围 | **描述层优先**：换 URDF + profile → mock 仿真跑通；真机驱动抽象留到 P3 | P1 是本次核心交付；P3 为第二阶段 |
 | D2 关节模型 | **运行期任意 N 关节，关节名配置驱动** | 去掉 `kMaxArmJoints=7` 语义（改为 sanity 上限）；`"must have 7 elements"` 改 `NumJoints()`；契约层已就绪（变长数组），仅需同步 `TOPIC_CONTRACT.md` |
-| D3 电机抽象 | **自研 `Transport × Protocol` 接口**（不引入 motorbridge） | P3 在 `a3_hardware_interface` 内抽接口，先用现有 MIT 后端填充；同时消重 `motor_model.hpp` 与 `a3_can_bridge` 编解码 |
+| D3 电机抽象 | **自研三层接口 `Transport × Protocol × ModelSpec`**（不引入 motorbridge） | 依据 §3.1：`model` 选型号规格表（量程/额定/映射范围）是独立一维；P3 在 `a3_hardware_interface` 内抽接口，先用现有 MIT 后端填充；同时消重 `motor_model.hpp` 与 `a3_can_bridge` 编解码 |
 
 ---
 
@@ -177,7 +202,8 @@ flowchart TB
 
 | 文件 | 内容 |
 |---|---|
-| `config/profiles/el_a3.yaml` | A3 profile：从 C1–C21 逐条抽取的当前值（**必须与现状逐值一致**，保证 P1 后行为不变） |
+| `config/profiles/el_a3.yaml` | A3 profile：从 C1–C21 逐条抽取的当前值（**必须与现状逐值一致**，保证 P1 后行为不变）；含 `motor_spec` 段（型号规格表，见 §3.1/§6 P3） |
+| `config/motor_specs/*.yaml` | 电机型号规格表：`EL05` / `RS00` 等（量程、映射范围、支持模式）——把 [protocol_codec.hpp](../../src/a3_can_bridge/include/a3_can_bridge/protocol_codec.hpp) 里写死的分段量程提出来，P3 的 ModelSpec 层直接消费 |
 | `a3_robot_profile/loader.py` | 解析 profile + URDF：用 `urdf_parser_py`/`xacro` 读关节表、限位、`tip_link`；输出统一的 in-memory 模型 |
 | `scripts/generate_robot_config.py` | `URDF ∪ profile → 生成物`：(a) ros2_control 段（替代 C3 的逐关节手写）；(b) SRDF（规划组/`group_state`/`disable_collisions` 由 URDF 链邻近关系自动生成）；(c) `joint_limits.yaml`；(d) `moveit_controllers.yaml`；(e) `controllers.yaml`；(f) `named_poses` 校验 |
 | `launch/` | 可选：独立的 profile 校验 launch（不进主入口） |
@@ -206,12 +232,29 @@ flowchart TB
 | [bridge.yaml](../../src/a3_mqtt_bridge/config/bridge.yaml) | **兼容保留**：A3 profile 输出与现状完全一致的 `L1..L7` code；换臂需跨仓同步（见 §8 边界） |
 | [trajectory_bridge.py](../../src/a3_bringup/a3_bringup/trajectory_bridge.py#L26-L87) | 把 `joint1..7 → L{n}_joint` 的映射推广为 profile 的 `joint_alias` 字段 |
 
-### P3 — 电机/驱动抽象（自研，承接 F146）
+### P3 — 电机/驱动抽象（自研三层，承接 F146）
 
-1. 在 `a3_hardware_interface` 新增接口头：`transport.hpp`（`SocketCanTransport` / `CanFdTransport` / `SerialTransport`）、`protocol.hpp`（`writeCommand`/`readFeedback`/`encodeScale`）。
-2. `A3MITHardwareInterface` 改为「按 profile 的 `motor.type` + `bus.type` 组装后端」，先只提供 `el05_mit` 后端（行为与现状一致）。
-3. **消重**：把 `a3_hardware_interface/motor_model.hpp` 与 `a3_can_bridge` 的编解码合并为单一库（Custom message 场景注意 `ament_target_dependencies` 显式链接，参见 LL-148）。
-4. 验收按 [F146](../edge/requirements/F146-multi-vendor-motor-abstraction.md)：新增一个协议后端仅需「新后端实现 + profile 条目」，上层零改动。
+**接口三层**（依据 §3.1 的 motorbridge 对标结论）：
+
+| 层 | 接口 | 内容 | 首批实现 |
+|---|---|---|---|
+| ① Transport | `transport.hpp` | `SocketCanTransport` / `CanFdTransport` / `SerialTransport`；收发原始帧、超时、错误计数 | SocketCAN（现有） |
+| ② Protocol | `protocol.hpp` | `writeCommand` / `readFeedback` / `encodeScale`；协议族：MIT 私有扩展帧、厂商私有总线 | `el05_mit`（行为与现状一致） |
+| ③ ModelSpec | `model_spec.hpp` + profile `motor_spec` 段 | 逐型号规格表：`torque_range_nm`、`speed_range_rad_s`、PMAX/VMAX/TMAX 映射范围、`supported_modes`、反馈 ID 规则 | `EL05` / `RS00`（现写死在 [protocol_codec.hpp](../../src/a3_can_bridge/include/a3_can_bridge/protocol_codec.hpp)） |
+
+**力矩上限的语义拆分**（必须落到字段，不能只留一个值）：
+
+- `motor_spec.torque_range_nm`：型号量程（编解码映射用）——替换写死的 EL05 ±6 / RS00 ±14。
+- `profile.torque_limit_nm{value, source}`：生效上限。`source: host_clip` = 我们现在做法（host 侧对 tau 做 clip，对应 `torque_protection_limit_nm` / `control_gains.yaml`）；`source: register` = motorbridge 做法（写电机寄存器如 Damiao RID 23 TMAX 并 `store_parameters()` 持久化）。
+- 传感器/量程语义与保护语义分开，换型号时二者独立更新（避免再把「量程」与「保护阈值」混为一个字段）。
+
+**落地步骤**：
+
+1. 在 `a3_hardware_interface` 新增上述三个接口头，`A3MITHardwareInterface` 改为「按 profile 的 `motor_spec.model` + `motor.type`(protocol) + `bus.type`(transport) 组装后端」。
+2. 迁移现有 EL05/RS00 分段量程与 MIT 编解码到 `el05_mit` protocol + `EL05/RS00` model spec，**行为与现状一致**。
+3. **消重**：把 `a3_hardware_interface/motor_model.hpp`（自述 "Vendored from a3_can_bridge … Keep in sync"）与 `a3_can_bridge` 的编解码合并为单一库（Custom message 场景注意 `ament_target_dependencies` 显式链接，参见 LL-148）。
+4. **正视未抽象项**（不得假装已通用）：传输与厂商的部分绑定（串口仅某厂商、CAN-FD 仅某厂商）、反馈 ID 规则按厂商分叉、私有参数路径必须分支 —— 这些都放进 ModelSpec/Protocol 后端，而不是硬塞进统一 API。
+5. 验收按 [F146](../edge/requirements/F146-multi-vendor-motor-abstraction.md)：新增一个协议后端仅需「新后端实现 + 一个 ModelSpec 条目 + profile 引用」，上层零改动。
 
 ### P4 — 降级档收敛（消除复制漂移）
 
@@ -227,7 +270,7 @@ flowchart TB
 | V2 | 外来臂仿真：新增 profile（6 关节、关节名 `joint1..joint6`、无夹爪、限位取自其 URDF） | mock 栈起 + RViz 正确显示 + MoveIt 规划到点位 + FJT 执行 + 编排层 init/示教/回放可用（对标 [F38](../edge/requirements/F38-generic-n-joint-init-teach-playback.md) 验收：init 计数确认、示教 ≥200 样本、回放首点无跳变） |
 | V3 | 换 URDF 即跟随：只改 URDF 的关节限位与拓扑 | SRDF 规划组、`joint_limits.yaml`、`moveit_controllers.yaml` 自动跟随，**无需手改**任何 yaml |
 | V4 | 真机切换：同 profile 改 `motor_ids/direction/position_offset` + `hardware:=can` | 帧正确、无甩臂（复用 F66 使能重锚与 0.8 s kp/kd 软起步）；安全门禁（F51 使能新鲜度、静态力矩 gate、温度保护）按 `NumJoints()` 正常工作 |
-| V5 | P3 协议后端扩展：加一个非 MIT 后端 | 仅「新后端 + profile 条目」，上层与 launch 零改动；延迟实测 < 10 ms |
+| V5 | P3 三层后端扩展：加一个非 MIT 协议后端 + 一个新型号规格 | 仅「新后端 + 一个 ModelSpec 条目 + profile 引用」，上层与 launch 零改动；延迟实测 < 10 ms；换型号只改 `motor_spec` 即可，且 `torque_limit_nm` 的 `host_clip` / `register` 两种来源都能正确生效并可在日志中区分 |
 
 **安全回归重点**（LL 里反复踩坑处）：任意 N 关节下必须复测——F51 使能新鲜度门禁范围、静态力矩 gate 采样、温度保护 busy lock 与 COOLING→DISABLED 迁移、L7 夹爪重定时单独路径（`NumJoints()` 越界防护）。
 
@@ -241,6 +284,7 @@ flowchart TB
 2. 规划组名保持 `arm` / `arm_lin` / `gripper` 约定（避免连锁改动 `servo_config.yaml` / pilz / FSM）。
 3. `include_gripper` 参数保留（映射为 `gripper.enabled`），现有脚本与文档不破。
 4. A3 profile 的 `joint_names` 仍为 `L1_joint..L7_joint`，MQTT/deep-trace 的 `code` 契约**本次不变**。
+5. 电机型号规格（量程/映射范围）独立于「保护阈值」存放：前者进 `motor_specs/*.yaml`，后者留在 profile 的安全段（`host_clip` 现状），二者换型号时各自更新。
 
 **边界（本次不做）**
 
@@ -257,6 +301,7 @@ flowchart TB
 | 任意 N 关节触碰安全门禁 | 越界/漏检 | P2 后用 V4 全量安全回归；`NumJoints()` 越界防护 + 静态力矩/温度路径复测 |
 | 生成物分散导致追踪困难 | 排障时不知生效值来自哪 | 生成器输出统一落在 `<profile>_generated/` 并在启动日志打印完整有效配置 |
 | xacro 不具备通用 `for` 循环 | 无法用 xacro 表达任意 N 关节 ros2_control 段 | 用 Python 生成器（而非 xacro 循环）承担该职责，xacro 只保留 A3 实例 + 宏 |
+| 把「型号量程」与「保护阈值」当同一个值 | 换型号后编解码映射或保护强度出错（安全） | 强制拆成 `motor_spec.torque_range_nm`（量程）与 `torque_limit_nm{value, source}`（生效上限），V5 专门验证两种 `source` |
 
 ---
 
@@ -264,6 +309,6 @@ flowchart TB
 
 1. 本方案文档（本文件）。
 2. P0：`docs/edge/requirements/F175-robot-abstraction-layer.md` + 索引登记 + F146 状态修订 + `TOPIC_CONTRACT.md` / `ROBOT_MODEL.md` / `ARCHITECTURE.md` 更新。
-3. P1：`src/a3_robot_profile/`（profile + loader + 生成器 + README）+ `a3_bringup.launch.py` profile 化。
+3. P1：`src/a3_robot_profile/`（profile + `motor_specs/` 型号规格表 + loader + 生成器 + README）+ `a3_bringup.launch.py` profile 化。
 4. P2：执行层与编排层任意 N 关节改造。
-5. P3（第二阶段）：`transport × protocol` 接口 + MIT 后端 + 编解码消重。
+5. P3（第二阶段）：`Transport × Protocol × ModelSpec` 三层接口 + `el05_mit` 后端 + EL05/RS00 型号规格提取 + 力矩上限 `host_clip|register` 语义拆分 + 编解码消重。

@@ -3,6 +3,7 @@
 
 import os
 
+from a3_robot_model import robot_model
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -14,17 +15,18 @@ import yaml
 
 
 def generate_launch_description():
-    desc_share = get_package_share_directory("a3_description")
     moveit_share = get_package_share_directory("a3_moveit_config")
 
-    xacro = os.path.join(desc_share, "urdf", "el_a3.urdf.xacro")
+    # F174：xacro 路径来自系统级模型配置（a3_robot_model）
+    xacro = robot_model.xacro_path()
     robot_description = {
         "robot_description": ParameterValue(
             Command(["xacro ", xacro, " use_mock_hardware:=true"]),
             value_type=str,
         )
     }
-    with open(os.path.join(moveit_share, "config", "el_a3.srdf"), "r", encoding="utf-8") as f:
+    # F174：SRDF 随系统级模型配置（默认 el_a3_6j.srdf）
+    with open(os.path.join(moveit_share, "config", str(robot_model.load()["srdf"])), "r", encoding="utf-8") as f:
         robot_description_semantic = {
             "robot_description_semantic": f.read()
         }

@@ -8,11 +8,12 @@ from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitut
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+from a3_robot_model import robot_model
 
 
 def generate_launch_description():
     pkg = FindPackageShare("a3_cloud_edge")
-    desc_pkg = FindPackageShare("a3_description")
+    desc_pkg = FindPackageShare(str(robot_model.load()["description_package"]))
 
     agent_ip = LaunchConfiguration("agent_ip")
     agent_port = LaunchConfiguration("agent_port")

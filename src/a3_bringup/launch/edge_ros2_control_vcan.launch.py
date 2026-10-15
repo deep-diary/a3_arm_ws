@@ -17,6 +17,7 @@ import os
 
 import yaml
 
+from a3_robot_model import robot_model
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, TimerAction
@@ -41,10 +42,11 @@ def generate_launch_description():
     adaptive_kd_enabled = LaunchConfiguration("adaptive_kd_enabled")
     motor_can_timeout_enabled = LaunchConfiguration("motor_can_timeout_enabled")
 
-    desc_share = get_package_share_directory("a3_description")
+    # F174：描述包 / xacro 路径来自系统级模型配置（a3_robot_model）
+    desc_share = robot_model.description_share()
     moveit_share = get_package_share_directory("a3_moveit_config")
 
-    xacro_file = os.path.join(desc_share, "urdf", "el_a3.urdf.xacro")
+    xacro_file = robot_model.xacro_path()
     robot_description = ParameterValue(
         Command([
             "xacro ",
@@ -57,7 +59,7 @@ def generate_launch_description():
         value_type=str,
     )
 
-    controllers_yaml = os.path.join(desc_share, "config", "el_a3_controllers.yaml")
+    controllers_yaml = robot_model.controllers_path()
     # F160: real-hardware arm_controller claims velocity/acceleration command
     # interfaces for JTC splines v/a feedforward.
     arm_ff_yaml = os.path.join(desc_share, "config", "arm_controller_ff_plugin.yaml")
@@ -114,7 +116,8 @@ def generate_launch_description():
         output="screen",
     )
 
-    with open(os.path.join(moveit_share, "config", "el_a3.srdf"), "r", encoding="utf-8") as f:
+    # F174：SRDF 随系统级模型配置（默认 el_a3_6j.srdf）
+    with open(os.path.join(moveit_share, "config", str(robot_model.load()["srdf"])), "r", encoding="utf-8") as f:
         robot_description_semantic = f.read()
     kinematics_yaml = load_yaml("a3_moveit_config", "config/kinematics.yaml")
     joint_limits_yaml = load_yaml("a3_moveit_config", "config/joint_limits.yaml")

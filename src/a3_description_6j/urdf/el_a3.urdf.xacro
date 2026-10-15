@@ -17,13 +17,27 @@
   <xacro:arg name="motor_can_timeout_s" default="0.2"/>
   <xacro:arg name="active_report_hz" default="10.0"/>
 
-  <!-- 连杆相对轴 6 的偏移（m）。-0.014 为初步估算，待实测后修正（F174）。 -->
-  <xacro:arg name="linkage_offset_z" default="-0.014"/>
+  <!-- 连杆相对轴 6 的偏移（m）。连杆从轴 6 法兰输出向下延伸，末端即 TCP；
+       长度按 14 cm 打印件估算，待实测/STP 到位后修正（F174）。 -->
+  <xacro:arg name="linkage_offset_z" default="-0.14"/>
+  <!-- 连杆圆柱占位参数（无 STP 前用圆柱代替）：
+       radius/length 单位 m，length = |linkage_offset_z|；mass 为打印件占位值（很轻），
+       换 STP 时只需替换下面的 cylinder 几何与 inertial。 -->
+  <xacro:arg name="linkage_radius" default="0.004"/>
+  <xacro:arg name="linkage_length" default="0.14"/>
+  <xacro:arg name="linkage_mass" default="0.02"/>
 
   <!-- Wrist motor parameters (EL05: 6Nm, RS05: 5.5Nm) -->
   <xacro:property name="wrist_motor_type" value="$(arg wrist_motor_type)"/>
   <xacro:property name="wrist_effort" value="${5.5 if wrist_motor_type == 'RS05' else 6.0}"/>
   <xacro:property name="linkage_offset_z" value="$(arg linkage_offset_z)"/>
+  <xacro:property name="linkage_radius" value="$(arg linkage_radius)"/>
+  <xacro:property name="linkage_length" value="$(arg linkage_length)"/>
+  <xacro:property name="linkage_mass" value="$(arg linkage_mass)"/>
+  <!-- 实心圆柱惯量（绕质心）：Izz = m·r²/2，Ixx = Iyy = m(3r²+L²)/12 -->
+  <xacro:property name="linkage_izz" value="${linkage_mass * linkage_radius * linkage_radius / 2.0}"/>
+  <xacro:property name="linkage_ixx"
+                  value="${linkage_mass * (3.0 * linkage_radius * linkage_radius + linkage_length * linkage_length) / 12.0}"/>
 
   <!-- Include ros2_control -->
   <xacro:include filename="$(find a3_description_6j)/urdf/el_a3_ros2_control.xacro"/>
@@ -183,7 +197,11 @@
     </collision>
   </link>
 
-  <!-- Link l5_l6_urdf_asm (轴 6 法兰输出) -->
+  <!-- Link l5_l6_urdf_asm (轴 6 法兰输出)
+       F174: 该 link 的视觉/碰撞为 el05_l6.stl（φ46×106mm 的 EL05 电机壳体，含输出轴段）——
+       对照实物（2026-10-15 确认）**这台电机仍在**，故整段保留（它同时占据连杆根部空间，
+       与连杆共轴：连杆圆柱 φ8 从法兰向下穿出）。原 7 轴形态里同处还有夹爪 jaw.stl（属已拆的
+       L7 输出），那部分已随 L7 一并去掉。 -->
   <link name="l5_l6_urdf_asm">
     <inertial>
       <origin xyz="8.14367e-06 8.87434e-05 0.0699256" rpy="0 0 0"/>
@@ -191,7 +209,6 @@
       <inertia ixx="0.00132624" ixy="1.41465e-05" ixz="9.49712e-08"
                iyy="0.00177268" iyz="-7.87717e-06" izz="0.000610685"/>
     </inertial>
-    <!-- Part el05_l6 -->
     <visual>
       <origin xyz="0 0 -0.0755" rpy="3.14159 0 0"/>
       <geometry>
@@ -268,11 +285,34 @@
     <dynamics damping="0.05" friction="0.05"/>
   </joint>
 
-  <!-- 连杆（6 轴形态的末端被动连杆，F174）
-       - 相对轴 6 法兰输出（l5_l6_urdf_asm）偏移 (0, 0, linkage_offset_z)，默认 -0.014 m（初步估算，待实测）
-       - 几何与惯量待实测：暂不给 visual/collision（RViz 不显示），也不写 <inertial>
-         （缺失 inertial 视为零质量，连杆暂不参与重力前馈模型），实测后补。 -->
-  <link name="linkage_link"/>
+  <!-- 连杆（6 轴形态的末端连杆，F174）
+       - 相对轴 6 法兰输出（l5_l6_urdf_asm）偏移 (0, 0, linkage_offset_z)，默认 -0.14 m
+         （14 cm 打印件；初步估算，待实测）
+       - 暂无 STP：用圆柱占位（radius/length/mass 见上方 xacro arg）。连杆本体在
+         linkage_link 是「法兰 → 末端（TCP）」这一段：linkage_link 原点落在末端，
+         所以圆柱形心在 +linkage_length/2 处，向上延伸到法兰。
+       - 质量 0.02 kg 为打印件占位值（很轻），参与重力前馈；换 STP 后一并修正。 -->
+  <link name="linkage_link">
+    <inertial>
+      <origin xyz="0 0 ${linkage_length / 2.0}" rpy="0 0 0"/>
+      <mass value="${linkage_mass}"/>
+      <inertia ixx="${linkage_ixx}" ixy="0" ixz="0"
+               iyy="${linkage_ixx}" iyz="0" izz="${linkage_izz}"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 ${linkage_length / 2.0}" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="${linkage_radius}" length="${linkage_length}"/>
+      </geometry>
+      <material name="orange"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${linkage_length / 2.0}" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="${linkage_radius}" length="${linkage_length}"/>
+      </geometry>
+    </collision>
+  </link>
 
   <joint name="linkage_joint" type="fixed">
     <origin xyz="0 0 ${linkage_offset_z}" rpy="0 0 0"/>
@@ -280,8 +320,7 @@
     <child link="linkage_link"/>
   </joint>
 
-  <!-- End Effector link (TCP)：连杆末端。
-       连杆长度待实测，暂取连杆原点为 TCP（即 TCP 相对轴 6 = (0,0,-0.014)）。 -->
+  <!-- End Effector link (TCP)：连杆末端（linkage_link 原点即 TCP）。 -->
   <link name="end_effector"/>
 
   <joint name="end_effector_joint" type="fixed">

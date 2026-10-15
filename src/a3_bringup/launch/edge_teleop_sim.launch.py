@@ -3,6 +3,7 @@
 
 import os
 
+from a3_robot_model import robot_model
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -15,7 +16,8 @@ from launch_ros.actions import Node
 def generate_launch_description():
     bringup_share = get_package_share_directory("a3_bringup")
     teleop_share = get_package_share_directory("a3_teleop_ps4")
-    desc_share = get_package_share_directory("a3_description")
+    # F174：RViz 配置所在描述包来自系统级模型配置（a3_robot_model）
+    desc_share = robot_model.description_share()
 
     use_rviz = LaunchConfiguration("use_rviz")
     enable_hid = LaunchConfiguration("enable_hid")

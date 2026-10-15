@@ -10,14 +10,15 @@ from typing import Dict, List
 
 import rclpy
 import yaml
-from ament_index_python.packages import get_package_share_directory
+from a3_robot_model import robot_model
 from builtin_interfaces.msg import Duration
 from rclpy.node import Node
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 
 def _load_poses() -> Dict:
-    share = get_package_share_directory("a3_description")
+    # F174：命名位姿随系统级模型配置的描述包走（默认 a3_description_6j）。
+    share = robot_model.description_share()
     path = os.path.join(share, "config", "named_poses.yaml")
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)

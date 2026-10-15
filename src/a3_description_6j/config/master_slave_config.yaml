@@ -1,6 +1,6 @@
 # EL-A3 master-slave teleoperation configuration file
 # Supports one-to-one, one-to-many, and many-to-many mapping modes
-# Supports 6-axis robot arm + gripper (L7) for 7-joint control
+# Supports 6-axis robot arm (no gripper) for 6-joint control
 
 # Global settings
 rate: 50.0                    # Control rate Hz
@@ -13,9 +13,9 @@ mappings:
     slaves: ["arm4"]          # Slave arm namespace list (can3)
     scale: 1.0                # Position scale ratio
     mirror: false             # Whether to mirror (left-right symmetry)
-    joint_offset: [0, 0, 0, 0, 0, 0, 0]  # Joint offsets (rad), 7 joints
-    include_gripper: true     # Whether to include gripper (L7) following
-    joint_count: 7            # Number of joints (6 or 7)
+    joint_offset: [0, 0, 0, 0, 0, 0]  # Joint offsets (rad), 6 joints
+    include_gripper: false    # Whether to include gripper following (6-axis has no gripper)
+    joint_count: 6            # Number of joints (6)
     enabled: true             # Whether this mapping is enabled
 
   # Mapping 2: arm2 (can1) master -> arm3 (can2) slave
@@ -23,9 +23,9 @@ mappings:
     slaves: ["arm3"]          # Slave arm namespace list (can2)
     scale: 1.0
     mirror: false
-    joint_offset: [0, 0, 0, 0, 0, 0, 0]
-    include_gripper: true
-    joint_count: 7
+    joint_offset: [0, 0, 0, 0, 0, 0]
+    include_gripper: false
+    joint_count: 6
     enabled: true
 
 # Safety settings

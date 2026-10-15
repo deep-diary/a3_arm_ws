@@ -3,6 +3,7 @@
 
 import os
 
+from a3_robot_model import robot_model
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -14,13 +15,13 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
-    desc_share = get_package_share_directory("a3_description")
     bridge_share = get_package_share_directory("a3_can_bridge")
     can0_name = LaunchConfiguration("can0_name")
     use_power_sequence = LaunchConfiguration("use_power_sequence")
     use_gravity_compensation = LaunchConfiguration("use_gravity_compensation")
 
-    xacro_file = os.path.join(desc_share, "urdf", "el_a3.urdf.xacro")
+    # F174：xacro 路径来自系统级模型配置（a3_robot_model）
+    xacro_file = robot_model.xacro_path()
     robot_description = ParameterValue(
         Command(["xacro ", xacro_file, " use_mock_hardware:=true"]),
         value_type=str,
