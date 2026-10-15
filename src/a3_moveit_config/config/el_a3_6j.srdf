@@ -104,6 +104,10 @@ end_effector 元素与所有涉及 gripper_link 的碰撞对。配合 xacro incl
     <disable_collisions link1="part_9" link2="end_effector" reason="Never"/>
     <disable_collisions link1="base_link" link2="l1_urdf_urdf_asm" reason="Adjacent"/>
 
+    <!-- F174: 末端真实件（el05_l6.stl）现在挂在 l5_l6_urdf_asm 本体上（不再是独立的
+         linkage_link 圆柱占位），故 l5_l6_urdf_asm<->end_effector 的 Adjacent 就是
+         二者关系；连杆相关三条 disable_collisions 已随占位件删除而移除。 -->
+
     <disable_collisions link1="l2_l3_urdf_asm" link2="part_9" reason="Never"/>
     <disable_collisions link1="l2_l3_urdf_asm" link2="l5_l6_urdf_asm" reason="Never"/>
 

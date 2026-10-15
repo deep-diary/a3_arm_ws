@@ -50,7 +50,14 @@ gcc -shared -fPIC -o ~/.a3/hide_randr/libhide_randr.so hide_randr.c -lX11 -ldl
 LD_PRELOAD=$HOME/.a3/hide_randr/libhide_randr.so LIBGL_ALWAYS_SOFTWARE=1 rviz2
 ```
 
-shim 已接入 `edge_teleop_full_sim.launch.py` 的 RViz prefix（存在才加），修复后 RViz 稳定输出 `OpenGl version: 4.5 (GLSL 4.5)`，双 RobotModel 长期运行不崩。
+shim 已接入 `edge_teleop_full_sim.launch.py` 的 RViz prefix（存在才加），修复后 RViz 稳定输出
+`OpenGl version: 4.5 (GLSL 4.5)`，双 RobotModel 长期运行不崩。
+
+**2026-10-16 补充（真机入口漏了同一 shim）**：`a3_bringup.launch.py`（真机/仿真统一产品入口）
+的 RViz prefix 只加了 `LIBGL_ALWAYS_SOFTWARE=1`，**没有** `LD_PRELOAD=hide_randr` → 真机栈起栈时
+`rviz2` 立刻 `process has died [exit code -11]`（同一 RANDR 空模式表崩溃），而仿真栈正常，容易误判成
+"真机没显示"。修：该文件的 rviz 节点按 `edge_teleop_full_sim` 同款写法 preload（文件存在才加），
+已随栈重启验证 RViz 正常（模型 = 6 轴 + 连杆）。**两处前缀必须同时维护**。
 
 ## 排查附注（同场另外两个本机坑）
 
@@ -61,5 +68,6 @@ shim 已接入 `edge_teleop_full_sim.launch.py` 的 RViz prefix（存在才加�
 ## 相关路径
 
 - `~/.a3/hide_randr/hide_randr.c` / `libhide_randr.so`（shim 源码与产物，不入仓）
-- `src/a3_bringup/launch/edge_teleop_full_sim.launch.py`（RViz prefix 自动 LD_PRELOAD）
+- `src/a3_bringup/launch/edge_teleop_full_sim.launch.py`（仿真入口 RViz prefix 自动 LD_PRELOAD）
+- `src/a3_bringup/launch/a3_bringup.launch.py`（真机/仿真统一产品入口，同样 preload，2026-10-16 补）
 - 关联：[[LL-027-rviz-panfrost-freeze-software-render]]（RViz 在本机的另一必备前缀 LIBGL_ALWAYS_SOFTWARE=1）

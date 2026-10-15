@@ -17,27 +17,25 @@
   <xacro:arg name="motor_can_timeout_s" default="0.2"/>
   <xacro:arg name="active_report_hz" default="10.0"/>
 
-  <!-- 连杆相对轴 6 的偏移（m）。连杆从轴 6 法兰输出向下延伸，末端即 TCP；
-       长度按 14 cm 打印件估算，待实测/STP 到位后修正（F174）。 -->
-  <xacro:arg name="linkage_offset_z" default="-0.14"/>
-  <!-- 连杆圆柱占位参数（无 STP 前用圆柱代替）：
-       radius/length 单位 m，length = |linkage_offset_z|；mass 为打印件占位值（很轻），
-       换 STP 时只需替换下面的 cylinder 几何与 inertial。 -->
-  <xacro:arg name="linkage_radius" default="0.004"/>
-  <xacro:arg name="linkage_length" default="0.14"/>
-  <xacro:arg name="linkage_mass" default="0.02"/>
+  <!-- 末端件（真实 STL，F174）：el05_l6.stl 由 CAD 导出，**单位 mm、坐标系与链接系不同**：
+       件自身轴线沿 mesh x，位于 mesh 的 (y,z) ≈ (0.5, 135.5) mm；贴合面 = mesh x = -42.15 mm 平面
+       （φ46 法兰盘那端），远端细杆端面 x = -192.15 mm → 件总长 150 mm。
+       下面 origin/scale 把它摆成「与轴 6 共轴、贴合面贴轴 6 法兰面 (link z = 0)、向末端伸出 150 mm」：
+         rpy = (0, -90°, 0)  → mesh +x 映射到 link +z（故 mesh 的 -x 方向 = 向末端）
+         xyz = (0.1355, -0.0005, 0.04215) m → 把 mesh 的轴线与贴合面搬到 link z 轴 / 原点
+       换件或重新导出 CAD 时只需改这两个值 + 下面的 TCP 偏移。 -->
+  <xacro:arg name="linkage_mesh_scale" default="0.001 0.001 0.001"/>
+  <xacro:arg name="linkage_mesh_origin" default="0.1355 -0.0005 0.04215"/>
+  <xacro:arg name="linkage_mesh_rpy" default="0 -1.5708 0"/>
+  <xacro:arg name="linkage_tcp_z" default="-0.150"/>
 
   <!-- Wrist motor parameters (EL05: 6Nm, RS05: 5.5Nm) -->
   <xacro:property name="wrist_motor_type" value="$(arg wrist_motor_type)"/>
   <xacro:property name="wrist_effort" value="${5.5 if wrist_motor_type == 'RS05' else 6.0}"/>
-  <xacro:property name="linkage_offset_z" value="$(arg linkage_offset_z)"/>
-  <xacro:property name="linkage_radius" value="$(arg linkage_radius)"/>
-  <xacro:property name="linkage_length" value="$(arg linkage_length)"/>
-  <xacro:property name="linkage_mass" value="$(arg linkage_mass)"/>
-  <!-- 实心圆柱惯量（绕质心）：Izz = m·r²/2，Ixx = Iyy = m(3r²+L²)/12 -->
-  <xacro:property name="linkage_izz" value="${linkage_mass * linkage_radius * linkage_radius / 2.0}"/>
-  <xacro:property name="linkage_ixx"
-                  value="${linkage_mass * (3.0 * linkage_radius * linkage_radius + linkage_length * linkage_length) / 12.0}"/>
+  <xacro:property name="linkage_mesh_scale" value="$(arg linkage_mesh_scale)"/>
+  <xacro:property name="linkage_mesh_origin" value="$(arg linkage_mesh_origin)"/>
+  <xacro:property name="linkage_mesh_rpy" value="$(arg linkage_mesh_rpy)"/>
+  <xacro:property name="linkage_tcp_z" value="$(arg linkage_tcp_z)"/>
 
   <!-- Include ros2_control -->
   <xacro:include filename="$(find a3_description_6j)/urdf/el_a3_ros2_control.xacro"/>
@@ -198,10 +196,9 @@
   </link>
 
   <!-- Link l5_l6_urdf_asm (轴 6 法兰输出)
-       F174: 该 link 的视觉/碰撞为 el05_l6.stl（φ46×106mm 的 EL05 电机壳体，含输出轴段）——
-       对照实物（2026-10-15 确认）**这台电机仍在**，故整段保留（它同时占据连杆根部空间，
-       与连杆共轴：连杆圆柱 φ8 从法兰向下穿出）。原 7 轴形态里同处还有夹爪 jaw.stl（属已拆的
-       L7 输出），那部分已随 L7 一并去掉。 -->
+       F174: 视觉/碰撞 = 真实末端件 el05_l6.stl（CAD 导出，mm 单位、外置坐标系，
+       见文件头 origin/scale 说明；旧电机壳网格留档为 meshes/el05_l6_bk.stl）。
+       惯量沿用腕部组件标定值（含末端件，标定即该形态实测）——换件后若质量差异明显再复核。 -->
   <link name="l5_l6_urdf_asm">
     <inertial>
       <origin xyz="8.14367e-06 8.87434e-05 0.0699256" rpy="0 0 0"/>
@@ -210,16 +207,18 @@
                iyy="0.00177268" iyz="-7.87717e-06" izz="0.000610685"/>
     </inertial>
     <visual>
-      <origin xyz="0 0 -0.0755" rpy="3.14159 0 0"/>
+      <origin xyz="${linkage_mesh_origin}" rpy="${linkage_mesh_rpy}"/>
       <geometry>
-        <mesh filename="package://a3_description_6j/meshes/el05_l6.stl"/>
+        <mesh filename="package://a3_description_6j/meshes/el05_l6.stl"
+              scale="${linkage_mesh_scale}"/>
       </geometry>
-      <material name="dark_brown"/>
+      <material name="orange"/>
     </visual>
     <collision>
-      <origin xyz="0 0 -0.0755" rpy="3.14159 0 0"/>
+      <origin xyz="${linkage_mesh_origin}" rpy="${linkage_mesh_rpy}"/>
       <geometry>
-        <mesh filename="package://a3_description_6j/meshes/el05_l6.stl"/>
+        <mesh filename="package://a3_description_6j/meshes/el05_l6.stl"
+              scale="${linkage_mesh_scale}"/>
       </geometry>
     </collision>
   </link>
@@ -285,47 +284,14 @@
     <dynamics damping="0.05" friction="0.05"/>
   </joint>
 
-  <!-- 连杆（6 轴形态的末端连杆，F174）
-       - 相对轴 6 法兰输出（l5_l6_urdf_asm）偏移 (0, 0, linkage_offset_z)，默认 -0.14 m
-         （14 cm 打印件；初步估算，待实测）
-       - 暂无 STP：用圆柱占位（radius/length/mass 见上方 xacro arg）。连杆本体在
-         linkage_link 是「法兰 → 末端（TCP）」这一段：linkage_link 原点落在末端，
-         所以圆柱形心在 +linkage_length/2 处，向上延伸到法兰。
-       - 质量 0.02 kg 为打印件占位值（很轻），参与重力前馈；换 STP 后一并修正。 -->
-  <link name="linkage_link">
-    <inertial>
-      <origin xyz="0 0 ${linkage_length / 2.0}" rpy="0 0 0"/>
-      <mass value="${linkage_mass}"/>
-      <inertia ixx="${linkage_ixx}" ixy="0" ixz="0"
-               iyy="${linkage_ixx}" iyz="0" izz="${linkage_izz}"/>
-    </inertial>
-    <visual>
-      <origin xyz="0 0 ${linkage_length / 2.0}" rpy="0 0 0"/>
-      <geometry>
-        <cylinder radius="${linkage_radius}" length="${linkage_length}"/>
-      </geometry>
-      <material name="orange"/>
-    </visual>
-    <collision>
-      <origin xyz="0 0 ${linkage_length / 2.0}" rpy="0 0 0"/>
-      <geometry>
-        <cylinder radius="${linkage_radius}" length="${linkage_length}"/>
-      </geometry>
-    </collision>
-  </link>
-
-  <joint name="linkage_joint" type="fixed">
-    <origin xyz="0 0 ${linkage_offset_z}" rpy="0 0 0"/>
-    <parent link="l5_l6_urdf_asm"/>
-    <child link="linkage_link"/>
-  </joint>
-
-  <!-- End Effector link (TCP)：连杆末端（linkage_link 原点即 TCP）。 -->
+  <!-- End Effector link (TCP)：真实末端件（el05_l6.stl）的远端端面。
+       F174: 圆柱占位连杆 linkage_link 已删除——末端几何由上面 l5_l6_urdf_asm 的真实
+       STL 承担（该件从轴 6 法兰面伸出 150 mm，细杆端面即 TCP）。 -->
   <link name="end_effector"/>
 
   <joint name="end_effector_joint" type="fixed">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <parent link="linkage_link"/>
+    <origin xyz="0 0 ${linkage_tcp_z}" rpy="0 0 0"/>
+    <parent link="l5_l6_urdf_asm"/>
     <child link="end_effector"/>
   </joint>
 

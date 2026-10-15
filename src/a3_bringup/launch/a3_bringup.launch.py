@@ -558,15 +558,19 @@ def _build(cfg, include_gripper):
         condition=IfCondition(use_teleop),
     )
 
+    # LL-065：本机 X RANDR 报告尺寸但零刷新率 → Ogre 视频模式表为空 → rviz2 启动即崩
+    # （真机栈此前会 "process has died exit code -11"）；与仿真入口 edge_teleop_full_sim
+    # 一致地 preload hide_randr（存在才加）。LL-027：软件渲染规避 RK3588 panfrost GPU hang。
+    hide_randr_so = os.path.expanduser("~/.a3/hide_randr/libhide_randr.so")
+    rviz_preload = f"LD_PRELOAD={hide_randr_so} " if os.path.exists(hide_randr_so) else ""
     rviz = Node(
         package="rviz2",
         executable="rviz2",
         name="rviz2",
         arguments=["-d", os.path.join(desc_share, "config", "el_a3_view.rviz")],
-        # 软件渲染规避 RK3588 panfrost GPU hang（LL-027）
         prefix=PythonExpression([
-            "'env LIBGL_ALWAYS_SOFTWARE=1' if '", use_sw_render,
-            "' in ('true', '1', 'True') else ''",
+            "'env ", rviz_preload, "LIBGL_ALWAYS_SOFTWARE=1' if '", use_sw_render,
+            "' in ('true', '1', 'True') else 'env ", rviz_preload, "'",
         ]),
         condition=IfCondition(use_rviz),
         output="screen",

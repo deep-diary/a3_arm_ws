@@ -8,8 +8,10 @@
 
 - **型号：** EDULITE A3（EL-A3）
 - **自由度：** 两种形态档位（F174，由系统级模型配置 `a3_robot_model/config/robot_model.yaml` 指定默认）：
-  - **6 轴 + 末端连杆（当前默认）**：L1–L6，轴 6 法兰输出后接 14 cm 连杆，TCP = `end_effector` 在连杆末端；
-    描述包 `src/a3_description_6j/urdf/el_a3.urdf.xacro`（连杆暂无 STP，圆柱占位 φ8×140mm）
+  - **6 轴 + 末端连杆（当前默认）**：L1–L6，轴 6 法兰输出后接**真实末端件 CAD STL**（`el05_l6.stl`，
+    法兰盘 + φ46 段 + φ10 细杆，贴法兰面伸出 150 mm，TCP 在细杆端面），TCP = `end_effector`；
+    描述包 `src/a3_description_6j/urdf/el_a3.urdf.xacro`（mesh 为 mm 单位，URDF 用 `scale=0.001`
+    + 显式 `origin` 摆位）
   - **7 轴（含 L7 夹爪）**：L1–L7，描述包 `src/a3_description/urdf/el_a3.urdf.xacro`（`include_gripper:=true`）
 - **URDF / Xacro：** 默认 `src/a3_description_6j/urdf/el_a3.urdf.xacro`；7 轴形态 `src/a3_description/urdf/el_a3.urdf.xacro`
 - **MoveIt 配置：** `src/a3_moveit_config/`（SRDF 随档位：`el_a3_6j.srdf` / `el_a3.srdf`）

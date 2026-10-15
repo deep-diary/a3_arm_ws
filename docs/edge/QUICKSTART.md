@@ -483,8 +483,8 @@ ros2 launch a3_bringup edge_legacy_stack.launch.py use_power_sequence:=false use
 
 ### 6 轴 + 连杆档（F174，**当前默认档**）
 
-机械形态已是 **6 轴（L1–L6）+ 末端连杆**（L7 夹爪电机取消，轴 6 后接 14 cm 连杆，TCP 在连杆末端；
-连杆暂无 STP，用 φ8×140mm 圆柱占位）。描述与配套档位**整包隔离**在 `a3_description_6j`，
+机械形态已是 **6 轴（L1–L6）+ 真实末端件**（L7 夹爪电机取消；轴 6 法兰后接 CAD 导出的
+`el05_l6.stl`：法兰盘 + φ46 段 + φ10 细杆，伸出 150 mm，TCP 在细杆端面）。描述与配套档位**整包隔离**在 `a3_description_6j`，
 由**系统级模型配置** [`a3_robot_model`](../../src/a3_robot_model/README.md) 指定默认：
 
 ```yaml
@@ -514,10 +514,12 @@ python3 -m a3_robot_model.robot_model --get description_package   # 查当前默
 - **起栈自检**：`/joint_states` 恰好 `L1..L6`、日志 `a3_arm_controller ready: joints=6`、
   `zero_torque_controller configured: 6 joints, pinocchio nq=6`、`gravity_torque ... urdf=<a3_description_6j>/urdf/el_a3.urdf`、
   控制器列表**无** `gripper_controller`。`a3_stack.sh` 起栈后会比对 `/joint_states` 关节数与档位。
-- **连杆参数**（换 STP 只改这几处）：`linkage_offset_z=-0.14` / `linkage_radius=0.004`（φ8mm） /
-  `linkage_length=0.14` / `linkage_mass=0.02`，见 [a3_description_6j/README](../../src/a3_description_6j/README.md)。
-- **待办**：连杆实测（STP/质量）——现有标定即该形态（6 轴 + 连杆）标定值，无需重标；
-  仅当换 STP 后质量与占位（0.02 kg）差异明显时再复核 `./scripts/a3_stack.sh calibrate model|scale`。
+- **末端件摆位参数**（该 CAD mesh 是 mm 单位、坐标系外置，换件/重导出后重算这 4 个值）：
+  `linkage_mesh_scale=0.001…` / `linkage_mesh_origin=0.1355 -0.0005 0.04215` /
+  `linkage_mesh_rpy=0 -1.5708 0` / `linkage_tcp_z=-0.150`，见
+  [a3_description_6j/README](../../src/a3_description_6j/README.md)。
+- **待办**：末端件质量复核（有意保留占位标定值）——现有标定即该形态（6 轴 + 连杆）标定值，无需重标；
+  仅当实测质量差异明显时再跑 `./scripts/a3_stack.sh calibrate model|scale`。
 - 需求 [F174](requirements/F174-a3-description-6j-linkage-package.md)（前置形态 F168：同包 6J 档）。
 
 **6 关节臂重标重力（F169，拆夹爪后整臂变轻，零力矩手感变重时做）：**

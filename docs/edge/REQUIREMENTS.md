@@ -195,7 +195,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 | F171 | 示教 assist：小 kp + 滞后保持 setpoint（死区内冻结顶住残余力矩、死区外跟随可拖 → 示教"稳得住又能拖"） | implemented | 功能 | [requirements/F171-teach-assist-lagged-hold-kp.md](requirements/F171-teach-assist-lagged-hold-kp.md) |
 | F172 | 库仑摩擦前馈（每关节 Fc 配置文件驱动，默认仅 L3≈0.13 Nm；位置模式 τ_ff += Fc·tanh(q̇_des/vel_scale)，后续标定只改 `friction_params.yaml`） | implemented-pending-hw | 功能 | [requirements/F172-coulomb-friction-feedforward.md](requirements/F172-coulomb-friction-feedforward.md) |
 | F173 | 笛卡尔 xyz 直接巡游（`random_pose_tour` 请求直给 x/y/z，逐点 IK 后走既有巡游链；姿态默认不限、可选 hold_start/lock_quat） | implemented | 功能 | [requirements/F173-cartesian-xyz-tour.md](requirements/F173-cartesian-xyz-tour.md) |
-| F174 | 6 轴 + 连杆形态：独立描述包 `a3_description_6j`（φ8×140mm 圆柱占位连杆；相对 7 轴原形态只去夹爪，腕部 EL05 电机壳体保留）+ 系统级模型配置 `a3_robot_model` 指定默认描述（真机/仿真栈默认切 6 轴；`--7j` 可回退） | implemented-pending-hw | 功能 | [requirements/F174-a3-description-6j-linkage-package.md](requirements/F174-a3-description-6j-linkage-package.md) |
+| F174 | 6 轴 + 连杆形态：独立描述包 `a3_description_6j`（末端件用**真实 CAD STL** el05_l6.stl：法兰盘+φ46 段+细杆，伸出 150mm，TCP 在杆端；相对 7 轴原形态只去夹爪）+ 系统级模型配置 `a3_robot_model` 指定默认描述（真机/仿真栈默认切 6 轴；`--7j` 可回退） | implemented-pending-hw | 功能 | [requirements/F174-a3-description-6j-linkage-package.md](requirements/F174-a3-description-6j-linkage-package.md) |
 
 ## 非功能需求
 

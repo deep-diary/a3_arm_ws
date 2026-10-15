@@ -1,11 +1,9 @@
 # F174 — 6 轴 + 连杆形态：独立描述包 `a3_description_6j` + 系统级模型配置（默认档接入真机/仿真栈）
 
-- **说明：** 机械形态从「7 轴（L1–L6 + L7 夹爪电机）」改为「**6 轴 + 末端连杆**」：
-  L7 电机取消；轴 6（L6 法兰输出）后接一根**连杆**作为末端，相对轴 6 偏移 `(0, 0, -0.14)` m
-  （14 cm 打印件，待实测/STP 修正），TCP（`end_effector`）位于连杆末端；连杆尚无 STP，
-  先用 **φ8mm × 140mm 圆柱**占位（`radius=0.004`、`length=0.14`、占位质量 `0.02 kg`）；
-  去掉的只有**夹爪**（`jaw.stl`，属 L7 输出）；轴 6 法兰处那台 **EL05 电机壳体 `el05_l6.stl`
-  （φ46×106mm，一台）保留**（2026-10-15 对照实物确认仍在，连杆与其共轴穿出）。
+- **说明：** 机械形态从「7 轴（L1–L6 + L7 夹爪电机）」改为「**6 轴 + 末端连杆件**」：
+  L7 电机取消；轴 6（L6 法兰输出）后接**真实末端件**（CAD 导出 `el05_l6.stl`：法兰盘 + φ46 段
+  + φ10 细杆，贴法兰面伸出 **150 mm**），TCP（`end_effector`）在细杆端面（z = −0.150 m）。
+  去掉的只有**夹爪**（`jaw.stl`，属 L7 输出）；旧电机壳网格留档 `meshes/el05_l6_bk.stl`。
   三件事一起落地：
   1. **独立描述包** `a3_description_6j`（原 7 轴包 `a3_description` 零改动、与主仓库逐字一致），
      6 轴 + 连杆的 URDF 与配置在此独立演进——F168 的「同包 `include_gripper` + `*_6j` 后缀切换」
@@ -17,8 +15,8 @@
 
 - **验收标准：**
   1. `a3_description_6j` 可独立构建；xacro 解析出恰 6 个可动关节（`L1_joint`..`L6_joint`），
-     无 `L7_joint`/`gripper_link`；轴 6 后有 `linkage_joint`（fixed，origin `0 0 -0.14`）→ `linkage_link`
-     （圆柱占位）→ `end_effector`（TCP）；Pinocchio 载入 `nq=6`
+     无 `L7_joint`/`gripper_link`；轴 6 法兰后 `end_effector_joint`（fixed，`0 0 -0.150`）→ `end_effector`
+     （TCP 在真实末端件细杆端面）；Pinocchio 载入 `nq=6`
   2. `python3 -m a3_robot_model.robot_model` 打印默认档：`description_package=a3_description_6j`、
      `joint_names` 6 个、`include_gripper=false`、`srdf=el_a3_6j.srdf`、`motor_map=motor_map_6j.yaml`；
      `~/.a3/robot_model.yaml` 可字段级覆盖
@@ -31,11 +29,12 @@
 
 - **实现：**
   - **新包** `src/a3_description_6j/`（整包隔离：`urdf/` + `config/` + `meshes/` + `launch/`）
-    - `urdf/el_a3.urdf.xacro`：无 `include_gripper` 分支、无 L7；新增 `linkage_link`
-      （`<inertial>` 圆柱惯量 + `visual`/`collision` cylinder）+ `linkage_joint`（fixed，父
-      `l5_l6_urdf_asm`，origin `0 0 $(arg linkage_offset_z)`，默认 `-0.14`）；`end_effector_joint`
-      挂连杆末端（TCP）；圆柱几何/质量由 xacro arg 参数化（`linkage_offset_z` / `linkage_radius` /
-      `linkage_length` / `linkage_mass`），换 STP 只改这几处
+    - `urdf/el_a3.urdf.xacro`：无 `include_gripper` 分支、无 L7；
+      `l5_l6_urdf_asm` 的 visual/collision = **真实末端件 `el05_l6.stl`**，用 `scale` + `origin` 摆位
+      （该 CAD mesh 单位 mm、坐标系外置：件自轴沿 mesh x 位于 (y,z)≈(0.5,135.5)mm，贴合面 = mesh x=−42.15mm；
+      URDF 参数 `linkage_mesh_scale` / `linkage_mesh_origin` / `linkage_mesh_rpy`）；
+      `end_effector_joint`（fixed，`0 0 linkage_tcp_z`，默认 −0.150）挂 TCP；
+      早期版本用的 **圆柱占位连杆 `linkage_link` 已删除**（末端几何由真实件承担）
     - `urdf/el_a3_ros2_control.xacro`：只声明 L1–L6，参数路径指向本包
     - `urdf/el_a3.urdf`：由 xacro 生成的静态 URDF（Pinocchio / 限位读取）
     - `config/`、`launch/` 6 轴化：`el_a3_controllers.yaml` 用无夹爪版（删 `gripper_controller` 与
@@ -60,29 +59,42 @@
   - `scripts/a3_stack.sh`：默认档从 `robot_model.yaml` 读取（`--6j` / `--7j` 可覆盖），帮助文本更新
   - `src/a3_description`：**不改动**（并回退此前的未提交空白差异，与主仓库一致）
 
-- **验证记录（2026-10-15，WSL mock 栈，`ROS_DOMAIN_ID=77`）：**
-  `hardware:=mock`（不传任何档位参数）起栈后：`/joint_states` 关节数 = **6**；
-  `a3_arm_controller ready: joints=6 state=IDLE`；`zero_torque_controller: configured: 6 joints, pinocchio nq=6`；
-  `gravity_torque_node: Pinocchio model nq=6 ... urdf=install/a3_description_6j/share/.../el_a3.urdf`；
-  `ros2 control list_controllers` = joint_state_broadcaster(active) + arm_controller + zero_torque_controller
-  （**无 gripper_controller**）；`switch_controllers=['arm_controller']`；xacro 在 `use_mock_hardware` /
-  `use_real_hardware` / `linkage_offset_z` 覆盖三种参数下均解析出 6 个可动关节 + 固定连杆。
+- **验证记录：**
+  - **mock 栈（2026-10-15，`ROS_DOMAIN_ID=77`）**：`hardware:=mock`（不传任何档位参数）起栈后
+    `/joint_states` 关节数 = **6**；`a3_arm_controller ready: joints=6 state=IDLE`；
+    `zero_torque_controller: configured: 6 joints, pinocchio nq=6`；
+    `gravity_torque_node: Pinocchio model nq=6 ... urdf=install/a3_description_6j/share/.../el_a3.urdf`；
+    `ros2 control list_controllers` = joint_state_broadcaster(active) + arm_controller + zero_torque_controller
+    （**无 gripper_controller**）；`switch_controllers=['arm_controller']`；xacro 在 `use_mock_hardware` /
+    `use_real_hardware` / `linkage_mesh_origin` 覆盖三种参数下均解析出 6 个可动关节 + 固定末端。
+  - **真机（2026-10-16，can1 + 6 电机在线）**：电机探测 6/6（ID 1–6）→ 自动 6 关节档；
+    `power_sequence F52 档位：6 关节`；`arm_controller ready: joints=6`；`/joint_states` = L1–L6；
+    控制器无 `gripper_controller`；CAN `ERROR-ACTIVE`（berr-counter 0/0）。
+    首次实测发现 MoveIt 起点无效（连杆碰撞对未登记，方形长按 PTP 回放 error 99999），
+    补 SRDF 后 `moveit_msgs/GetStateValidity → valid=true`、`/plan_kinematic_path` 到路点第 1 点
+    `error_code=1 (SUCCESS)`
 
 - **未覆盖项（有意）：**
-  1. **连杆几何/质量待实测**：当前为 φ8×140mm 圆柱 + 0.02 kg 占位；STP 到位后替换
-     `linkage_radius` / `linkage_length` / `linkage_mass` 与几何即可（TCP 偏移随之修正）。
-     注意连杆与腕部 EL05 电机壳体（0…106mm）共轴，实测后按实际装配修正 `linkage_offset_z`；
-     模型相对 7 轴原形态**只少夹爪 `jaw.stl`**（`el05_l6.stl` 电机壳体保留）
+  1. **末端件质量待复核**：几何已是真实 CAD STL（150 mm）；`l5_l6_urdf_asm` 惯量沿用腕部组件
+     标定值（含末端件，F169/F170 标定即该形态实测）。若实测质量差异明显，再跑
+     `calibrate model`；换件或重导出 CAD 后按新 mesh 的 bbox/自轴/贴合面重算
+     `linkage_mesh_origin` / `linkage_mesh_rpy` / `linkage_tcp_z`（方法与陷阱见
+     [LL-166](../../lessons_learned/LL-166-new-mesh-mm-units-foreign-frame.md)）
   2. **标定文件即该形态标定值（无需重标）**：新包 `inertia_params.yaml` / `gravity_scales.yaml` /
      `friction_params.yaml` / `kp_kd_gains.yaml` 沿用现有 6 关节标定数据——该批标定（F169/F170）
      **本就是在装好连杆的状态下做的**（用户 2026-10-15 确认）。仅当连杆换 STP 后实测质量/几何
-     与占位（0.02 kg、φ8×140mm）差异明显时，再复核 `calibrate model|scale`
+     与实测值差异明显时，再复核 `calibrate model|scale`
   3. **MoveIt `moveit_controllers.yaml` 仍列 `gripper_controller`**（F168 已知项，日志一条
-     "Added GripperCommand controller"，无功能影响）；`el_a3_6j.srdf` 未登记 `linkage_link` 的
-     adjacent 碰撞对（连杆为圆柱、不与自身碰撞，暂无影响）
-  4. **真机未上机验证**：本次仅 mock 栈验证；上板需确认 CAN 上只剩电机 1..6、`motor_map_6j.yaml`
-     与 power_sequence 档位一致
+     "Added GripperCommand controller"，无功能影响）。
+     SRDF 碰撞对：末端件挂在 `l5_l6_urdf_asm` 本体后，`l5_l6_urdf_asm↔end_effector`（Adjacent）
+     与 `part_9↔end_effector`（Never）已够；此前圆柱占位件 `linkage_link` 的三条登记已随占位件删除
+     （真机 2026-10-16 实测：不登记时 MoveIt 判起点无效、所有走 move_group 的动作 `error 99999`，
+     见 [LL-165](../../lessons_learned/LL-165-fixed-link-needs-srdf-disable-collisions.md)）
+  4. **真机操作层验证进行中**：起栈/使能/规划已通过（见上）；示教回放、巡游、servo jog 等
+     依赖 move_group 的动作需按操作员流程逐个复测（操作手册见 `QUICKSTART` / `PS4_OPERATOR_GUIDE`）
 
-- **状态：** `implemented-pending-hw`（2026-10-15；独立包 + 圆柱连杆 + 系统级配置 + 真机/仿真默认档接入完成，mock 栈验证通过）
+- **状态：** `implemented-pending-hw`（2026-10-15/16；独立包 + **真实末端件 STL** + 系统级配置 +
+  真机/仿真默认档接入完成，mock 栈验证通过；真机已起栈、修掉末端件 SRDF 碰撞对导致
+  `error 99999` 的问题，操作层复测中）
 
 > 返回索引：[REQUIREMENTS.md](../REQUIREMENTS.md)
