@@ -3564,7 +3564,7 @@ class ArmController(Node):
         return np.array(data.oMf[fid].rotation, dtype=float)
 
     def _solve_ik_position(
-        self, pose: dict, ref_orientation=None,
+        self, pose: dict, ref_orientation=None, seed: Optional[List[float]] = None,
     ) -> Optional[List[float]]:
         """Pinocchio IK，返回 L1..L6 关节角或 None。
 
@@ -3573,6 +3573,8 @@ class ArmController(Node):
         ref_orientation 非 None（3x3 旋转矩阵）时改为 6D IK：末端姿态软约束到
         ref_orientation（log3 旋转误差），用于 via 过点保持相邻按压点的腕部姿态、
         避免 L4/L5 大幅摆动导致关节路径绕远路（弹琴提速关键）。
+        seed 非 None（6 关节角）时用作迭代初值，默认用当前关节实测值；F173 多点
+        巡游用上一点解作种子，保证多解时腕部连续。
         """
         try:
             if not self._pin_ready:
@@ -3595,8 +3597,9 @@ class ArmController(Node):
         q_idx = self._pin_q_idx[:6]
         lo = [float(model.lowerPositionLimit[qi]) + 0.05 for qi in q_idx]
         hi = [float(model.upperPositionLimit[qi]) - 0.05 for qi in q_idx]
-        x0 = [float(self._positions[i]) for i in range(6)]
-        x0 = [min(max(x0[i], lo[i]), hi[i]) for i in range(6)]
+        x0_src = list(seed[:6]) if seed and len(seed) >= 6 else [
+            float(self._positions[i]) for i in range(6)]
+        x0 = [min(max(float(x0_src[i]), lo[i]), hi[i]) for i in range(6)]
         fid = model.getFrameId("end_effector")
         ref_R = None if ref_orientation is None else np.asarray(ref_orientation, dtype=float)
         data = model.createData()  # 复用，避免每次迭代重建（6D IK 迭代次数多时省时）
@@ -5384,12 +5387,73 @@ class ArmController(Node):
         self.get_logger().info(f"random tour ({n} legs, {total:.1f}s): {sequence}")
         return resp
 
+    def _cartesian_tour_targets(
+        self, req: RandomPoseTour.Request
+    ) -> Tuple[Optional[List[str]], Optional[List[List[float]]], str]:
+        """F173: 把请求里的笛卡尔 xyz 点解成巡游关节目标。
+
+        返回 (names, targets, err)；err 非空 = 整批拒绝（显式失败，不静默跳点：
+        某点不可达时报出序号与坐标，由调用方直接回 fail）。
+        姿态策略 orientation_mode：0=free 姿态不限；1=hold_start 锁巡游起始末端姿态；
+        2=lock_quat 锁 ref_quat。逐点用上一点解作 IK 种子，保证多解时腕部连续。
+        """
+        n = len(req.xyz)
+        if n == 0 or n % 3 != 0:
+            return None, None, f"xyz length {n} not a positive multiple of 3"
+        npts = n // 3
+        mode = int(req.orientation_mode)
+        if mode not in (0, 1, 2):
+            return None, None, (
+                f"invalid orientation_mode {mode} (0=free/1=hold_start/2=lock_quat)")
+
+        ref_R = None
+        if mode == 1:
+            ref_R = self._fk_ee_orientation(list(self._positions)[:6])
+            if ref_R is None:
+                return None, None, "orientation_mode=1 but pinocchio FK unavailable"
+        elif mode == 2:
+            if len(req.ref_quat) != 4:
+                return None, None, (
+                    f"orientation_mode=2 needs ref_quat length 4, got {len(req.ref_quat)}")
+            import numpy as np  # type: ignore
+            import pinocchio as pin  # type: ignore
+
+            quat = pin.Quaternion(*[float(v) for v in req.ref_quat])
+            ref_R = np.array(quat.normalized().matrix(), dtype=float)
+
+        names: List[str] = []
+        targets: List[List[float]] = []
+        seed = [self._positions[self._joint_names.index(jn)] for jn in JOINTS[:6]]
+        for i in range(npts):
+            x, y, z = (float(req.xyz[3 * i]), float(req.xyz[3 * i + 1]),
+                       float(req.xyz[3 * i + 2]))
+            q6 = self._solve_ik_position(
+                {"position": {"x": x, "y": y, "z": z}}, ref_R, seed=seed)
+            if q6 is None and ref_R is not None:
+                # 锁姿态是该点无解（位置+姿态不可兼得）：退化为姿态自由并 WARN，
+                # 不因一个点的姿态约束否掉整条巡游（姿态锁定语义=尽量锁定）
+                q6 = self._solve_ik_position(
+                    {"position": {"x": x, "y": y, "z": z}}, seed=seed)
+                if q6 is not None:
+                    self.get_logger().warn(
+                        f"F173 xyz point {i + 1}/{npts} 姿态锁定无解 "
+                        "-- 该点退化为姿态自由")
+            if q6 is None:
+                return None, None, (
+                    f"xyz point {i + 1}/{npts} ({x:+.3f},{y:+.3f},{z:+.3f}) IK failed "
+                    "(unreachable or joint-limit)")
+            names.append(f"xyz{i + 1}[{x:+.3f},{y:+.3f},{z:+.3f}]")
+            targets.append(self._pad_pose7(q6))
+            seed = list(q6)
+        return names, targets, ""
+
     def _random_pose_tour_cb(
         self, req: RandomPoseTour.Request, resp: RandomPoseTour.Response
     ) -> RandomPoseTour.Response:
-        """F116/F134/F161: 命名点位巡游（随机或固定序列）。
+        """F116/F134/F161/F173: 巡游（随机命名点 / 固定命名序列 / 笛卡尔 xyz 直给）。
 
         F161: req.fixed_sequence 非空 → 跳过随机抽取与相邻去重，按给定序列执行；
+        F173: req.xyz 非空 → 逐点 IK 成关节目标后走同一链（优先于 fixed_sequence）；
         random_tour_smooth_mode ∈ {blend, s_curve, quintic} 选平滑后端，
         任一环节失败 WARN 并回退 F134 sequence / F116 逐腿链。
         """
@@ -5417,7 +5481,18 @@ class ArmController(Node):
         pool: List[str] = []
 
         # ── 1. 解析点位序列 ──
-        if req.fixed_sequence:
+        if req.xyz:
+            # F173: 笛卡尔直给——逐点 IK；任一点不可达即整批拒绝（显式失败不跳点）
+            tour_names, targets, err = self._cartesian_tour_targets(req)
+            if err:
+                resp.success = False
+                resp.message = err
+                return resp
+            count = len(tour_names)
+            self.get_logger().info(
+                f"F173 cartesian tour: {count} xyz point(s), "
+                f"orientation_mode={int(req.orientation_mode)}")
+        elif req.fixed_sequence:
             tour_names = [str(n) for n in req.fixed_sequence]
             missing = [n for n in tour_names if n not in self._poses]
             if missing:

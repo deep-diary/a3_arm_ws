@@ -1,0 +1,6 @@
+# F88: 真机栈 L7 插件——effort 版 GripperActionController（max_effort 力夹持，
+# allow_stalling 接触即 SUCCEEDED）。mock 栈用 gripper_position_plugin.yaml。
+controller_manager:
+  ros__parameters:
+    gripper_controller:
+      type: effort_controllers/GripperActionController

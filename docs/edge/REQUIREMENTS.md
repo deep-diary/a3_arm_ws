@@ -194,6 +194,8 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 | F170 | 全行程重力标定网格档（F49 `--mode space`，覆盖真机实际示教行程 L2→2.4/L3→-2.1，消除示教外推下塌） | implemented | 功能 | [requirements/F170-fullspace-calibration-grid.md](requirements/F170-fullspace-calibration-grid.md) |
 | F171 | 示教 assist：小 kp + 滞后保持 setpoint（死区内冻结顶住残余力矩、死区外跟随可拖 → 示教"稳得住又能拖"） | implemented | 功能 | [requirements/F171-teach-assist-lagged-hold-kp.md](requirements/F171-teach-assist-lagged-hold-kp.md) |
 | F172 | 库仑摩擦前馈（每关节 Fc 配置文件驱动，默认仅 L3≈0.13 Nm；位置模式 τ_ff += Fc·tanh(q̇_des/vel_scale)，后续标定只改 `friction_params.yaml`） | implemented-pending-hw | 功能 | [requirements/F172-coulomb-friction-feedforward.md](requirements/F172-coulomb-friction-feedforward.md) |
+| F173 | 笛卡尔 xyz 直接巡游（`random_pose_tour` 请求直给 x/y/z，逐点 IK 后走既有巡游链；姿态默认不限、可选 hold_start/lock_quat） | implemented | 功能 | [requirements/F173-cartesian-xyz-tour.md](requirements/F173-cartesian-xyz-tour.md) |
+| F174 | 独立描述包 `a3_description_6j`（6 轴 + 连杆形态、相对轴 6 偏移 (0,0,-0.014)；与原 7 轴 `a3_description` 整包隔离） | partial | 功能 | [requirements/F174-a3-description-6j-linkage-package.md](requirements/F174-a3-description-6j-linkage-package.md) |
 
 ## 非功能需求
 

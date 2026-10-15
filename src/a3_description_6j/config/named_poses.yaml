@@ -1,0 +1,137 @@
+# EL-A3 named joint poses (rad). Shared by MoveIt SRDF and non-MoveIt scripts.
+# L7 gripper defaults to close (0) unless overridden.
+
+joint_names:
+  - L1_joint
+  - L2_joint
+  - L3_joint
+  - L4_joint
+  - L5_joint
+  - L6_joint
+  - L7_joint
+
+poses:
+  # Power-on / mechanical zero
+  zero:
+    positions: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+  # F113: 折叠自然下垂位（重力稳定，F40/F44 safe-park 失能保护位）——原真机
+  # ~/.a3/poses.yaml 的 home 标定值（2026-09-13 抽掉 L4 泡沫垫后按自然下垂实测
+  # 读数保存）；改名 idle 收回包内统一定义，EDULITE 半抬 home 退役。
+  # 2026-10-05：L4 0.3351 失能后自然下垂(+0.0015)→0.3366 碰 L2，下调到 0.3 留出干涉余量。
+  idle:
+    positions: [-0.0002, 0.0006, 0.0002, 0.3, 0.0121, -0.0002, -0.0002]
+
+  # F109: folded-upright ready; arm CoM projects over base center (|CoM_x|=8 mm),
+  # static gravity torque sum 1.90 Nm. Real-machine value in ~/.a3/poses.yaml override
+  ready:
+    positions: [0.0, 1.05, -1.575, 0.0, 0.0, 0.0, 0.0]
+
+  # Legacy half-raised (EDULITE SRDF home)
+  home:
+    positions: [0.0, 0.785, -0.785, 0.0, 0.0, 0.0, 0.0]
+
+  # F115: 以 legacy home 为基准、末端保持 home 姿态不变的笛卡尔偏移点
+  # （base_link 系；Pinocchio 严格 6D IK 探针，el_a3.urdf，2026-09-26）。
+  # home 末端 (-0.177, 0, 0.326) m；距离取物理可达包络最大值：
+  # 前 +X 20cm 越水平臂展（取 15cm），上 +Z 20cm 仅腕翻限位边缘分支（取 15cm），
+  # 下 -Z 15/20cm 严格保姿态不可达（取 10cm），后 -X 20cm 可达。
+  # D-pad：上=home_up / 下=home_down / 左=home_back / 右=home_front。
+  home_back:
+    positions: [0.0, 1.8674, -1.6192, -0.2482, 0.0, 0.0, 0.0]
+  home_front:
+    positions: [0.0, 0.1266, -0.8918, 0.7653, 0.0, 0.0, 0.0]
+  home_up:
+    positions: [0.0, 1.2862, -1.9643, 0.6780, 0.0, 0.0, 0.0]
+  home_down:
+    positions: [0.0, 0.7154, -0.2479, -0.4675, 0.0, 0.0, 0.0]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-09-27 11:45:43
+  snap_20260927_114543:
+    positions: [-0.0040, 0.1287, -0.8879, 0.7659, 0.0021, 0.0017, -0.0006]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-09-27 11:51:43
+  snap_20260927_115143:
+    positions: [0.0048, 0.7931, -0.7828, -0.0075, -0.0021, 0.0079, -0.0010]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-10-01 14:06:39
+  snap_20261001_140639:
+    positions: [-0.0207, 0.8325, -1.1202, 0.2929, -0.0063, -0.0006, 0.6987]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-10-01 14:19:57
+  snap_20261001_141957:
+    positions: [-0.0366, 2.2439, -2.2723, -0.1517, -0.0021, -0.0021, -0.0002]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-10-01 14:20:50
+  snap_20261001_142050:
+    positions: [1.9873, 2.3506, -2.2489, -1.1150, 0.0324, 0.0351, 0.6289]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-10-01 14:21:13
+  snap_20261001_142113:
+    positions: [0.1463, 0.5484, -0.3443, -1.1150, -0.0029, 0.1751, 0.8031]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-10-01 17:43:40
+  snap_20261001_174340:
+    positions: [0.0190, 0.6780, -0.6090, 0.2580, -0.0025, -0.0002, -0.0002]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-10-01 17:43:46
+  snap_20261001_174346:
+    positions: [0.0125, 0.9899, -1.1146, 0.1920, -0.0025, -0.0002, -0.0002]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-10-01 21:44:56
+  snap_20261001_214456:
+    positions: [0.0082, 0.7782, -0.4076, -0.6378, -0.0163, 0.0485, 0.6957]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-10-02 20:08:53
+  snap_20261002_200853:
+    positions: [0.0010, 0.7835, -0.7774, 0.0010, 0.0102, 0.0017, -0.0002]
+
+  # F16x: 口风琴关键对位点（playing_geometry press=5/approach=10/retreat=20，
+  # scripts/melodion_dpad_ik.py position-only IK 解算）
+  # D-pad 左/上 = F3 未按下（低音4）；下 = F3 下压；右 = C6 未按下（高高音1）。
+  melodion_F3_up:
+    positions: [0.6971, 1.3320, -1.0584, 0.2127, -0.0290, 0.0000, 0.0000]
+  melodion_F3_down:
+    positions: [0.7187, 1.5820, -1.4367, 0.8908, 0.0555, 0.0000, 0.0000]
+  melodion_C6_up:
+    positions: [-0.7078, 1.3329, -1.0596, 0.2138, -0.0106, 0.0000, 0.0000]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-10-10 20:28:33
+  snap_20261010_202833:
+    positions: [-0.0071, 0.0017, -0.0194, 0.3025, 0.0190, 0.0040, 0.0002]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-10-13 19:45:33
+  snap_20261013_194533:
+    positions: [0.0013, 0.0056, -0.0205, 0.2979, 0.0194, -0.0029, 0.2073]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-10-14 07:25:30
+  snap_20261014_072530:
+    positions: [0.0059, 0.0036, -0.0136, 0.3500, 0.0205, 0.0002]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-10-14 19:30:25
+  snap_20261014_193025:
+    positions: [-1.1200, 1.9167, -1.7863, 0.5211, -0.0021, -0.0002]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-10-14 19:30:34
+  snap_20261014_193034:
+    positions: [0.8200, 0.3424, -1.1403, 0.9922, -0.0025, -0.0002]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-10-14 19:30:38
+  snap_20261014_193038:
+    positions: [0.8641, 2.3590, -2.4442, 0.3125, -0.0021, -0.0002]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-10-14 19:30:47
+  snap_20261014_193047:
+    positions: [-1.1664, 1.9532, -1.2105, 0.3125, -0.0021, -0.0002]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-10-14 19:30:48
+  snap_20261014_193048:
+    positions: [-1.1652, 1.9290, -1.2101, 0.3128, -0.0021, -0.0002]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-10-14 19:30:57
+  snap_20261014_193057:
+    positions: [-0.5300, 0.4751, -1.6052, 1.7794, -0.0033, -0.0002]
+
+  # F114: saved via /a3/arm/save_named_pose at 2026-10-14 19:31:07
+  snap_20261014_193107:
+    positions: [-0.5683, 0.4970, -1.5427, 0.6976, -0.9224, -0.0002]

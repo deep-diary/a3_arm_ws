@@ -1,0 +1,136 @@
+# ros2_control controller configuration for EL-A3 robot arm
+
+controller_manager:
+  ros__parameters:
+    update_rate: 200  # Hz
+
+    # F83/LL-086: hardware starts INACTIVE — the operator enable (controller
+    # switch claiming command interfaces) is the first activation. Humble
+    # otherwise eagerly activates hardware at controller_manager boot.
+    # The active JSB claims state interfaces only and does NOT trigger this.
+    hardware_components_initial_state:
+      inactive:
+        - RsA3System
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    arm_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    gripper_controller:
+      type: effort_controllers/GripperActionController
+
+    zero_torque_controller:
+      type: a3_hardware_interface/GravityCompensationController
+
+joint_state_broadcaster:
+  ros__parameters:
+    publish_rate: 100.0
+
+arm_controller:
+  ros__parameters:
+    joints:
+      - L1_joint
+      - L2_joint
+      - L3_joint
+      - L4_joint
+      - L5_joint
+      - L6_joint
+
+    # calculate_dynamics mock 不支持同一关节同时声明位置+速度起始指令接口，
+    # 且 MIT 电机执行层以位置指令为准：工业标准 position-only
+    command_interfaces:
+      - position
+
+    state_interfaces:
+      - position
+      - velocity
+
+    open_loop_control: true
+    allow_nonzero_velocity_at_trajectory_end: true
+    interpolation_method: splines
+
+    # F99: hard cap for stale commands on the topic interface, counted from
+    # the last trajectory point; must be strictly greater than
+    # constraints.goal_time (1.0), otherwise silently ignored at configure.
+    cmd_timeout: 2.0
+
+    state_publish_rate: 200.0
+    action_monitor_rate: 50.0
+
+    constraints:
+      stopped_velocity_tolerance: 0.1
+      # F97: goal_time <= 0 disables the goal-time check — a goal the state
+      # can never converge to would hang forever (F81 freeze-hold proved it).
+      # Allow 1.0 s past the last trajectory point, then abort.
+      goal_time: 1.0
+      # F112 (2026-09-25): per-joint trajectory (tracking) tolerance widened
+      # 0.05 -> 0.15 rad for L1-L6. Real-arm steady-state tracking lag on
+      # home<->ready goto measured 0.050-0.055 rad -> old 0.05 tolerance
+      # aborted normal motion (PATH_TOLERANCE_VIOLATED, control-command
+      # takeoff shudder on re-press). 0.15 is 3x the sys limit bound by F81
+      # stall watchdog (>0.5 rad) and F110-covered heavy checks; still catches
+      # blocked/stalled motion orders of magnitude before thermal limits.
+      # goal tolerance still gates convergence after the trajectory end.
+      #
+      # F117 (2026-09-26) TEMPORARY: widened 0.15 -> 0.30 / goal 0.03 -> 0.05,
+      # persisting the live-validated hot-set combo. NOT anti-collision — this
+      # is a stall/zero-tracking detector; anti-collision lives in URDF limits +
+      # MoveIt + safety_limits.py + power gate + F107/F110/F48. 0.30 << F81
+      # stall bound 0.5 rad; zero-tracking under degraded CAN (error grows to
+      # fold-around ~1.6 rad) still aborts. Real fix = CAN health. Re-tighten
+      # trigger: run scripts/a3_test/f117_jtc_tolerance_deg_acceptance.py green
+      # on trajectory: 0.15 after CAN health is restored.
+      L1_joint:
+        trajectory: 0.30
+        goal: 0.05
+      L2_joint:
+        trajectory: 0.30
+        goal: 0.05
+      L3_joint:
+        trajectory: 0.30
+        goal: 0.05
+      L4_joint:
+        trajectory: 0.30
+        goal: 0.05
+      L5_joint:
+        trajectory: 0.30
+        goal: 0.05
+      L6_joint:
+        trajectory: 0.30
+        goal: 0.05
+
+gripper_controller:
+  ros__parameters:
+    joint: L7_joint
+    action_monitor_rate: 20.0
+    # L7 标定：开=0.0、闭≈1.79 rad
+    goal_tolerance: 0.02
+    # Default clamp used when a goal does not specify max_effort.
+    max_effort: 1.0
+    # Contact = stall; report success (stalled=true) instead of aborting.
+    allow_stalling: true
+    stall_velocity_threshold: 0.01
+    stall_timeout: 0.5
+    # Effort adapter PID: error -> joint effort, clamped to goal max_effort.
+    gains:
+      L7_joint: {p: 8.0, i: 0.0, d: 0.2, i_clamp: 0.0}
+
+zero_torque_controller:
+  ros__parameters:
+    joints:
+      - L1_joint
+      - L2_joint
+      - L3_joint
+      - L4_joint
+      - L5_joint
+      - L6_joint
+      # F127: 示教自由拖动（ZERO_TORQUE）期间 L7 随 L1-L6 一并释放；
+      # STRICT 互斥要求 enter 时把 gripper_controller 原子 swap 出（LL-136）
+      - L7_joint
+    # URDF resolved at configure time: controller node robot_description param,
+    # then urdf_path file, then the controller_manager node parameter.
+    robot_description: ""
+    urdf_path: ""
+    controller_manager_name: controller_manager

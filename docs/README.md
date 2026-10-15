@@ -135,6 +135,7 @@ docs/
 |------|------|
 | [../src/a3_lerobot_config/docs/INTEGRATION.md](../src/a3_lerobot_config/docs/INTEGRATION.md) | LeRobot 集成脚手架 |
 | [../src/a3_can_bridge/README.md](../src/a3_can_bridge/README.md) | Edge CAN 栈节点说明 |
+| [../src/a3_description_6j/README.md](../src/a3_description_6j/README.md) | EL-A3 **6 轴 + 连杆** 描述包（F174，与 7 轴 `a3_description` 整包隔离） |
 | [../src/app_melodion/README.md](../src/app_melodion/README.md) | 机械臂弹奏口风琴 app（键位/几何/曲谱/IK/播放） |
 
 ## 构建与运行

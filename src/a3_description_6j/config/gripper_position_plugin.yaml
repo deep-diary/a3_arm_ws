@@ -1,0 +1,7 @@
+# F88: mock 栈 L7 插件覆盖——GenericSystem 的 prepare_command_mode_switch
+# 不接受 effort 接口，仿真用 position 版 GripperActionController。
+# 真机栈用 gripper_effort_plugin.yaml（力夹持 + LL-090 stall 语义）。
+controller_manager:
+  ros__parameters:
+    gripper_controller:
+      type: position_controllers/GripperActionController

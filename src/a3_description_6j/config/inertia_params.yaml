@@ -1,0 +1,42 @@
+# EL-A3 arm inertia parameters
+# For Pinocchio gravity compensation
+# Fitted by scripts/gravity_calibration.py (F49, 6 关节) — override URDF defaults
+#
+# Calibration date: 2026-10-14 22:48:40
+# RMSE: 0.1013 Nm
+# R^2: 0.9884
+# effort domain: motor（拟合前 ×joint_signs 换算，LL-037）
+# RMSE per joint: {"L2": 0.1599, "L3": 0.1438, "L4": 0.0402, "L5": 0.05, "L6": 0.0304}
+
+use_calibrated_params: true
+
+inertia_params:
+  L2:
+    mass: 0.7070
+    com: [0.060306896837741826, 1.32911e-06, 0.000626283]
+
+  L3:
+    mass: 0.2027
+    com: [0.047108294139942705, 0.06379933191785948, -0.00326782]
+
+  L4:
+    mass: 0.4416
+    com: [0.02251333540353437, -0.018876415737520254, 0.000368105]
+
+  L5:
+    mass: 0.0213
+    com: [0.00527533, 0.0, 0.015853866648875423]
+
+  L6:
+    mass: 0.5185
+    com: [8.14367e-06, 8.87434e-05, -0.02220168539070831]
+
+calibration_info:
+  date: "2026-10-14 22:48:40"
+  num_samples: 73
+  rmse: 0.1013
+  r_squared: 0.9884
+  effort_domain: motor
+  rmse_fric_free: 0.0865
+  accepted: true  # F49 验收 RMSE ≤ 0.15
+  rmse_per_joint: {"L2": 0.1599, "L3": 0.1438, "L4": 0.0402, "L5": 0.05, "L6": 0.0304}  # err = 实测 − 模型，URDF 域

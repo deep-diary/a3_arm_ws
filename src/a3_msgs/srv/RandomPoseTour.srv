@@ -6,8 +6,18 @@ uint64 seed
 # F161: 非空时跳过随机抽取与相邻去重，按给定命名点位序列执行（验收专用）；
 # 空则走随机抽取，seed/count 语义不变。
 string[] fixed_sequence
+# F173: 笛卡尔直给入口——扁平三元组 x1,y1,z1,x2,y2,z2,...（base_link 系 end_effector
+# 目标点，单位 m）。非空时优先于 fixed_sequence 与随机抽取：编排层逐点解 IK 转关节目标，
+# 再走既有巡游链（F161 平滑链 → F134 pilz Sequence → F116 逐腿链）。长度须为 3 的倍数。
+float64[] xyz
+# F173 姿态策略：0=free（默认，姿态不限，position-only IK）
+#                    1=hold_start（锁巡游起始末端姿态）
+#                    2=lock_quat（锁 ref_quat 给定姿态）
+uint8 orientation_mode
+# F173: orientation_mode=2 时的参考姿态四元数 (x,y,z,w)；非 2 时忽略。
+float64[] ref_quat
 ---
 bool success
 string message
-string[] sequence       # 实际抽取并执行的点位名（顺序）
+string[] sequence       # 实际抽取并执行的点位名（顺序）；F173 下为 xyz<序号>[x,y,z]
 float64 total_duration_s

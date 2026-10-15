@@ -1,0 +1,10 @@
+# F160: 真机栈 arm_controller 增加 velocity/acceleration 命令接口，
+# 供 JTC splines 的 v/a 前馈（VFF + AFF + 科氏/离心）。mock 栈
+# GenericSystem(calculate_dynamics) 不支持 position+velocity 同时起始，
+# 故本覆盖文件仅在 hardware:=can / vcan 验收时加载。
+arm_controller:
+  ros__parameters:
+    command_interfaces:
+      - position
+      - velocity
+      - acceleration
