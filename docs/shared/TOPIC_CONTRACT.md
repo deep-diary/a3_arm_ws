@@ -25,6 +25,8 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | 夹爪配置 | `a3_msgs/srv/GripperSetConfig` | 键值下发（`max_torque_nm` 等），返回是否接受与原因 |
 | 夹爪状态 | `a3_msgs/msg/GripperStatus` | 模式、目标/实际力矩、目标/实际位置、接触/抓稳标志、错误码、时间戳 |
 | DS4 IMU | `sensor_msgs/Imu` | 可选 hidraw（陀螺/加速度） |
+| 摄像头图像 | `sensor_msgs/Image` | F177：`/camera/image_raw`，`encoding=bgr8`，**默认 1280×720 MJPG @30fps**（`a3_bringup/usb_camera_node`；640×480 只有 25fps，是本机设备上限）；**QoS=sensor-data（BEST_EFFORT/KEEP_LAST 5）**，消费者需同样选 Best Effort（RViz Image display 的 Topic 已配 Best Effort）；**随真机栈启动**（`use_camera` 默认 true，设备可 `camera_device` 覆盖） |
+| 摄像头内参 | `sensor_msgs/CameraInfo` | 同上节点的 `/camera/camera_info`（`frame_id=camera_optical_frame`，未标定，仅占位；同图消息同循环发布，可用来量发布节拍） |
 ## 标准话题（单臂，无 namespace）
 
 ### 轨迹输入（订阅侧 / 执行层监听）

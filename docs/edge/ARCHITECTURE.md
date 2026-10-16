@@ -17,6 +17,7 @@ A3 Edge 将完整 ROS 2 控制栈部署在 RK3588 板载 Linux 上，通过 Sock
 | 4. Shell | `a3_arm_vendor` + `trajectory_bridge` | reBot 规划/遥操作话题桥接 |
 | 5. HMI | `a3_teleop_ps4` | PS4 电源序列（F3）、YAML 笛卡尔 Servo + 夹爪 + 命名姿态（F16） |
 | 6. Orchestration | `a3_arm_controller` | 状态机/初始化闭环/示教/状态聚合/模式仲裁/对外门面（F21） |
+| 7. Peripheral | `a3_bringup`（`usb_camera_node`、`ee_pose_publisher`、`can_bus_monitor`、`topic_rate_monitor` 等） | 相机 F177、末端位姿 F175、健康/限速监控等旁路节点，不参与控制闭环 |
 
 ## 数据流
 
@@ -93,7 +94,8 @@ a3_bringup.launch.py
 ├── a3_gripper_controller（产品节点；出口指 gripper JTC 话题）
 ├── a3_mqtt_bridge（use_mqtt，默认开；web 遥测/指令 F18/F23）
 ├── ps4_teleop.launch.py（use_teleop，默认开）
-└── rviz（use_rviz，默认关；单模型 el_a3_view.rviz）
+├── usb_camera_node（use_camera，默认开；F177 → /camera/image_raw，设备打不开只告警）
+└── rviz（use_rviz，默认关；单模型 el_a3_view.rviz，内含 "USB Camera" Image display）
 ```
 
 硬件模式：`hardware:=mock`（mock_components/GenericSystem，无 CAN/电机可起栈）；

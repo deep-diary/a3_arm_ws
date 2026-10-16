@@ -57,6 +57,17 @@ python3 -m app_melodion.melodion_score2stream --sweep
 # 相对位置模式（frame=relative + anchor，换口风琴位置只改 anchor）
 python3 -m app_melodion.melodion_score2stream --score scale --relative
 
+# 实测定位点 → 4 键按压 stream（F176）：读路点录制滚动槽 trajectories/waypoints/latest.yaml
+# （white1/white19/black13/black1，未按压基准点），z 下压 6mm；起手先到「第 1 点上方 40mm」悬停、
+# 收尾抬回同一悬停位；键间 3 过点抬升弧（源点正上方 +40 / 两按压点中垂线上方 +80 / 目标点正上方 +40 mm），
+# mode=ptp_blend（过点 blend 切角）、hold_orientation=true（各点用示教姿态做 6D IK，防横压）、speed 0.2
+python3 ~/a3_arm_ws/scripts/melodion_pts2stream.py
+# 产物：trajectories/streams/latest.yaml（长按 Triangle 回放槽；文件头附 F166 九模式速查，
+# 直接改各段 mode: 存盘即生效，无需重建/重启栈）；stdout 另打印
+# melodion_white1/white19/black13/black1 命名点关节值（粘贴到 named_poses.yaml，D-pad 对位用）
+# 换规划方式：python3 ~/a3_arm_ws/scripts/melodion_pts2stream.py --mode jnt_g64_quintic [--exact]
+# 要回旧的 position-only IK（不保姿态）：加 --no-hold-orientation
+
 # 预烘焙缓存（把逐段 via 关节轨迹算好存 <name>.yaml.baked.yaml，playback 直接下发提速）
 python3 ~/a3_arm_ws/scripts/melodion_bake.py --stream scale
 

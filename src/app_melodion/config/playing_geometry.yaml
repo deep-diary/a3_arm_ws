@@ -19,7 +19,7 @@ keyboard:
 ik_position_only: true
 
 # 按压物理量（mm）
-press_depth_mm: 5.0        # 下压深度（键面下方，-z；实测按下约 5mm）
+press_depth_mm: 6.0        # 下压深度（键面下方，-z；F176 实测要求 ≥6mm，原 5.0）
 approach_height_mm: 10.0   # 抬起/悬停高度（键面上方，+z；实测抬起约 10mm）
 # F163: 键间过渡「中间抬高点」策略（via 过点）
 via_apex:

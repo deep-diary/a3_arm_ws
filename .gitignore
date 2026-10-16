@@ -39,6 +39,9 @@ venv/
 id_rsa
 id_ed25519
 
+# 本机 sudo 密码（工作区规则，仅本机有效，勿入库）
+.trae/rules/local-sudo.md
+
 # micro-ROS host build tree (~hundreds of MB, nested clones + install)
 # Copy via tar to RK3588 instead of committing; see docs/lessons_learned/LL-001
 src/third_party/micro_ros_host/

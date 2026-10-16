@@ -18,8 +18,14 @@
 
 **短按 Triangle（▲），臂运行到 home 工作位（F120；约 2 s）**，过程中灯为 **紫色**，到位后回 **绿色**。
 
-> **长按 Triangle 1.5s**：回放多模式 stream 对比轨迹（`gen_stream_modes.py` 产物
-> `modes_sweep`，5 种轨迹模式 × 4 档速度，供真机对比不同规划方式的平滑度/时长/跟踪）。
+> **长按 Triangle 1.5s**：回放 4 键按压 stream 滚动槽 `latest`（`trajectories/streams/latest.yaml`，
+> `scripts/melodion_pts2stream.py` 产物）——起手先到「第 1 点上方 40mm」悬停，再依次下压
+> white1→white19→black13→black1（各 6mm），末段抬回同一悬停位；键间 3 过点抬升弧
+> （源点正上方 +40mm / 两按压点中垂线上方 +80mm / 目标点正上方 +40mm），模式 `ptp_blend`
+> （过点 blend 切角、不停车），速度 0.2。各段带 `hold_orientation: true` → 用录制点的
+> **示教姿态**做 6D IK（不再"只求末端到位"而横着压键）。
+> 想换规划方式：直接改该文件各段的 `mode:` 存盘即生效（文件头有 F166 九模式速查，无需重建/重启）。
+> （原多模式对比流 `modes_sweep` 改用 service 调。需 READY + gate open。）
 
 > **重要：必须先在 home（或 idle）位再推摇杆。** 机械折叠零位是 IK 奇异点，
 > 直接推摇杆会不动或乱扭。
@@ -32,7 +38,7 @@
 | 按住 **L1** + 左摇杆上下 | 末端上下平移（Z） |
 | 按住 **L1** + 右摇杆上下 | 末端前后平移（X） |
 | 按住 **R1** + 右摇杆左右 | 末端偏航旋转（绕 Z 转） |
-| **D-pad 上 / 下 / 左 / 右** | 一键 goto 口风琴关键对位点：上=首键 F3 抬高 10mm / 下=首键 F3 下压 5mm / 左=最左键 F3 未按下 / 右=最右键 C6 未按下（F16x，`melodion_F3_up`/`melodion_F3_down`/`melodion_C6_up`） |
+| **D-pad 上 / 下 / 左 / 右** | 一键 goto 口风琴实测定位点（均「未按压」基准点，按键盘空间）：左=white1（F3）/ 右=white19（C6）/ 上=black13（A#5）/ 下=black1（F#3）（F176，`melodion_white1`/`melodion_white19`/`melodion_black13`/`melodion_black1`） |
 | **R2**（不用按 L1/R1） | 夹爪直接力控：按得越深抓得越紧，松开自动全开 |
 
 - **L1 / R1 是两个死人开关**：L1 只放行平移摇杆，R1 只放行旋转摇杆；

@@ -56,6 +56,11 @@ from launch.substitutions import (
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterFile, ParameterValue
 
+# F177：本机 USB 相机默认设备（by-id 稳定路径；换机改 camera_device 参数即可）
+DEFAULT_CAMERA_DEVICE = (
+    "/dev/v4l/by-id/usb-DHZJ-250731-A_Nozzle_Alignment_Camera-video-index0"
+)
+
 
 def make_spawner_stage(make_node, first_node, on_success, max_retries=2, gap=2.0):
     """
@@ -137,6 +142,7 @@ def _build(cfg, include_gripper):
     active_report_hz = LaunchConfiguration("active_report_hz")
     use_rviz = LaunchConfiguration("use_rviz")
     use_sw_render = LaunchConfiguration("use_sw_render")
+    use_camera = LaunchConfiguration("use_camera")
     use_mqtt = LaunchConfiguration("use_mqtt")
     use_teleop = LaunchConfiguration("use_teleop")
     use_self_test = LaunchConfiguration("use_self_test")
@@ -472,6 +478,15 @@ def _build(cfg, include_gripper):
         }],
     )
 
+    # ---- F175：末端位姿话题（base_link → end_effector 的 FK，联调/测量用）----
+    ee_pose = Node(
+        package="a3_bringup",
+        executable="ee_pose_publisher",
+        name="a3_ee_pose",
+        output="screen",
+        parameters=[{"ee_frame": "end_effector", "rate_hz": 20.0}],
+    )
+
     # F118：薄桥接累积器（绝对目标）。downstream 在 JTC 原生话题前，非 arm 关节透传。
     servo_anchor_node = Node(
         package="a3_bringup",
@@ -573,6 +588,23 @@ def _build(cfg, include_gripper):
             "' in ('true', '1', 'True') else 'env ", rviz_preload, "'",
         ]),
         condition=IfCondition(use_rviz),
+        output="screen",
+    )
+
+    # ---- F177：USB 相机（/camera/image_raw）；rviz 配置里已带 "USB Camera" Image display ----
+    # 设备缺失/被占用时节点只告警不退出，不影响栈其余部分。
+    camera = Node(
+        package="a3_bringup",
+        executable="usb_camera_node",
+        name="usb_cam",
+        namespace="camera",
+        parameters=[
+            {
+                "video_device": LaunchConfiguration("camera_device"),
+                "frame_id": LaunchConfiguration("camera_frame_id"),
+            }
+        ],
+        condition=IfCondition(use_camera),
         output="screen",
     )
 
@@ -714,6 +746,7 @@ def _build(cfg, include_gripper):
             servo_node,
             servo_bridge,
             gravity_torque_node,
+            ee_pose,
             servo_anchor_node,
             self_test_node,
             teleop,
@@ -755,6 +788,22 @@ def _build(cfg, include_gripper):
             "use_sw_render",
             default_value="true",
             description="RViz 软件渲染 LIBGL_ALWAYS_SOFTWARE=1（RK3588 默认开，LL-027）",
+        ),
+        DeclareLaunchArgument(
+            "use_camera",
+            default_value="true",
+            description="F177 USB 相机：发布 /camera/image_raw，rviz 里 'USB Camera' 面板显示；"
+                        "无相机/不用时 use_camera:=false",
+        ),
+        DeclareLaunchArgument(
+            "camera_device",
+            default_value=DEFAULT_CAMERA_DEVICE,
+            description="F177 摄像头 v4l2 设备（默认走 /dev/v4l/by-id 稳定路径，插拔不变号）",
+        ),
+        DeclareLaunchArgument(
+            "camera_frame_id",
+            default_value="camera_optical_frame",
+            description="F177 图像/camera_info 的 frame_id（Image display 不依赖 TF）",
         ),
         DeclareLaunchArgument(
             "use_mqtt",
@@ -835,4 +884,5 @@ def _build(cfg, include_gripper):
         stage_free_drive,
         stage_jsb,
         rviz,
+        camera,
     ]

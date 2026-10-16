@@ -440,7 +440,7 @@ do_set_zero() {
 
   info "设零（写零点，不带使能）：$desc"
   local out
-  out="$(timeout 8 ros2 service call /a3/maintenance/set_zero a3_msgs/srv/MotorIdCommand "{motor_id: $motor_id}" --no-daemon 2>&1)"
+  out="$(timeout 8 ros2 service call /a3/maintenance/set_zero a3_msgs/srv/MotorIdCommand "{motor_id: $motor_id}" 2>&1)"
   if ! printf '%s' "$out" | grep -qE 'success: true|success=True'; then
     err "set_zero 失败：$(printf '%s' "$out" | tr '\n' ' ')"
     kill -TERM "$maint_pid" 2>/dev/null || true
@@ -449,7 +449,7 @@ do_set_zero() {
   ok "set_zero 完成（$desc，不带使能）"
 
   info "保存参数到 flash …"
-  out="$(timeout 8 ros2 service call /a3/maintenance/save_parameters a3_msgs/srv/MotorIdCommand "{motor_id: $motor_id}" --no-daemon 2>&1)"
+  out="$(timeout 8 ros2 service call /a3/maintenance/save_parameters a3_msgs/srv/MotorIdCommand "{motor_id: $motor_id}" 2>&1)"
   if ! printf '%s' "$out" | grep -qE 'success: true|success=True'; then
     err "save_parameters 失败：$(printf '%s' "$out" | tr '\n' ' ')"
     kill -TERM "$maint_pid" 2>/dev/null || true

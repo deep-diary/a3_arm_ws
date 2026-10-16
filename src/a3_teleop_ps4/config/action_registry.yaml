@@ -99,7 +99,7 @@ functions:
 
   playback_stream:
     kind: discrete
-    description: 'F16x Triangle 长按 1.5s: 回放多模式 stream {type:"stream", name:"modes_sweep"}（gen_stream_modes.py 产物，5 模式×4 速度对比）'
+    description: 'F176 Triangle 长按 1.5s: 回放 4 键按压 stream {type:"stream", name:"latest"}（trajectories/streams/latest.yaml，melodion_pts2stream.py 产物）'
 
   random_pose_tour:
     kind: discrete

@@ -3606,6 +3606,26 @@ class ArmController(Node):
         pin.updateFramePlacement(self._pin_model, data, fid)
         return np.array(data.oMf[fid].rotation, dtype=float)
 
+    @staticmethod
+    def _pose_ref_rotation(pose: Optional[dict]):
+        """F176: 从 pose.orientation（四元数 x,y,z,w）构造 3x3 旋转矩阵；无/异常返回 None。
+
+        供 hold_orientation 段使用——把「示教姿态」作为 6D IK 的姿态目标（_solve_ik_position
+        的 ref_orientation），而不是只求末端 xyz 到位导致腕部横着压。
+        """
+        ori = (pose or {}).get("orientation") if isinstance(pose, dict) else None
+        if not isinstance(ori, dict):
+            return None
+        try:
+            import numpy as np  # type: ignore
+            import pinocchio as pin  # type: ignore
+
+            quat = pin.Quaternion(float(ori["x"]), float(ori["y"]),
+                                  float(ori["z"]), float(ori["w"]))
+            return np.array(quat.normalized().matrix(), dtype=float)
+        except Exception:  # noqa: BLE001
+            return None
+
     def _solve_ik_position(
         self, pose: dict, ref_orientation=None, seed: Optional[List[float]] = None,
     ) -> Optional[List[float]]:
@@ -4333,6 +4353,7 @@ class ArmController(Node):
         label: str,
         profile: str = "l1p5",
         exact: Optional[List[bool]] = None,
+        hold_orientation: bool = False,
     ) -> Tuple[bool, str, float]:
         """F163/F16x: 当前位 → via 过点数组 → target 规划为一条平滑轨迹（gotoby 原语）。
 
@@ -4349,7 +4370,8 @@ class ArmController(Node):
         """
         GJ = JOINTS[:6]
 
-        def resolve(point: Dict[str, Any], ref_R=None) -> Optional[List[float]]:
+        def resolve(point: Dict[str, Any], ref_R=None,
+                    seed: Optional[List[float]] = None) -> Optional[List[float]]:
             positions = point.get("positions")
             if positions:
                 q = [float(v) for v in positions]
@@ -4358,24 +4380,37 @@ class ArmController(Node):
                 return q[:6]
             pose = point.get("pose")
             if pose and "position" in pose:
-                return self._solve_ik_position(pose, ref_orientation=ref_R)
+                return self._solve_ik_position(pose, ref_orientation=ref_R, seed=seed)
             return None
 
         q_cur = [self._positions[self._joint_names.index(jn)] for jn in GJ]
         # 先解 target（position-only），其末端姿态作为 via 点的姿态参考，
         # 避免 via 点姿态自由导致腕部 L4/L5 大幅摆动、关节路径绕远路（提速关键）。
-        qt = resolve(target)
+        # F176 hold_orientation=True：target/via 各自用**自身 pose.orientation（示教姿态）**
+        # 做 6D IK，并以链上前一点的解作种子；不可达时回落参考姿态 / position-only。
+        tgt_R = self._pose_ref_rotation(target.get("pose")) if hold_orientation else None
+        qt = resolve(target, tgt_R)
+        if qt is None and tgt_R is not None:
+            qt = resolve(target)
         if qt is None:
             return False, "via target IK/resolve failed", 0.0
-        ref_R = self._fk_ee_orientation(qt)
+        ref_R = tgt_R if tgt_R is not None else self._fk_ee_orientation(qt)
         via_q: List[List[float]] = [q_cur]
+        seed: Optional[List[float]] = None
         for p in via:
-            q = resolve(p, ref_R)
-            if q is None and ref_R is not None:
-                q = resolve(p)  # 姿态保持失败时回落 position-only（保底）
+            p_R = ref_R
+            if hold_orientation:
+                own_R = self._pose_ref_rotation(p.get("pose"))
+                if own_R is not None:
+                    p_R = own_R
+            q = resolve(p, p_R, seed)
+            if q is None and p_R is not None:
+                q = resolve(p, None, seed)  # 姿态保持失败时回落 position-only（保底）
             if q is None:
                 return False, "via point IK/resolve failed", 0.0
             via_q.append(q)
+            if hold_orientation:
+                seed = q
         via_q.append(qt)
 
         resample_n = max(20, int(self.get_parameter("goto_via_resample_n").value))
@@ -4546,16 +4581,20 @@ class ArmController(Node):
         label: str,
         blend_radius: Optional[float] = None,
         exact: Optional[List[bool]] = None,
+        hold_orientation: bool = False,
     ) -> Tuple[bool, str, float]:
         """F166: 当前位 → via 过点 → target 走 pilz PTP Sequence（关节空间，blend 不停车）。
 
         via/target 解析成关节（positions 直取；pose 走 _solve_ik_position）。逐项 pilz PTP +
         自适应 blend 半径（F134 语义）。exact（长度=len(via)）为 True 的点 blend=0 → 精确过点。
+        F176 hold_orientation=True：每个点用**其自身 pose.orientation（示教姿态）**做 6D IK，
+        并以链上前一点的解作种子（腕部连续）；该点姿态不可达时回落 position-only（WARN）。
         返回 (成功, 说明, 运动时长秒)；失败返回 (False, msg, 0.0)。
         """
         GJ = JOINTS[:6]
 
-        def resolve(point: Dict[str, Any]) -> Optional[List[float]]:
+        def resolve(point: Dict[str, Any], ref_R=None,
+                    seed: Optional[List[float]] = None) -> Optional[List[float]]:
             positions = point.get("positions")
             if positions:
                 q = [float(v) for v in positions]
@@ -4564,17 +4603,32 @@ class ArmController(Node):
                 return q[:6]
             pose = point.get("pose")
             if pose and "position" in pose:
-                return self._solve_ik_position(pose)
+                return self._solve_ik_position(pose, ref_orientation=ref_R, seed=seed)
             return None
+
+        def resolve_hold(point: Dict[str, Any],
+                         seed: Optional[List[float]] = None) -> Optional[List[float]]:
+            if not hold_orientation:
+                return resolve(point)
+            ref_R = self._pose_ref_rotation(point.get("pose"))
+            if ref_R is not None:
+                q = resolve(point, ref_R, seed)
+                if q is not None:
+                    return q
+                self.get_logger().warn(
+                    f"{label}: 6D IK 未收敛（保持示教姿态不可达），该点回落 position-only")
+            return resolve(point)
 
         chain: List[List[float]] = [
             [self._positions[self._joint_names.index(jn)] for jn in GJ]]
+        seed: Optional[List[float]] = None
         for p in via:
-            q = resolve(p)
+            q = resolve_hold(p, seed)
             if q is None:
                 return False, "ptp_blend via IK/resolve failed", 0.0
             chain.append(q)
-        qt = resolve(target)
+            seed = q
+        qt = resolve_hold(target, seed)
         if qt is None:
             return False, "ptp_blend target IK/resolve failed", 0.0
         chain.append(qt)
@@ -4735,7 +4789,8 @@ class ArmController(Node):
         self._duty_record(duration)
         return True, duration, f"{label}: CIRC {len(pts)} pts, {duration:.1f}s"
 
-    def _plan_single(self, spec, target: Dict[str, Any], speed, label: str):
+    def _plan_single(self, spec, target: Dict[str, Any], speed, label: str,
+                     hold_orientation: bool = False):
         """单腿（无 via）：按 spec.space 走笛卡尔 _lin_move 或关节 _moveit_move。"""
         if spec.space == "cartesian":
             pose = target.get("pose")
@@ -4751,7 +4806,11 @@ class ArmController(Node):
             pose = target.get("pose")
             if not pose or "position" not in pose:
                 return False, f"{label}: target missing positions/pose", 0.0
-            q6 = self._solve_ik_position(pose)
+            # F176 hold_orientation：用目标点自身示教姿态做 6D IK（不可达回落 position-only）
+            ref_R = self._pose_ref_rotation(pose) if hold_orientation else None
+            q6 = self._solve_ik_position(pose, ref_orientation=ref_R)
+            if q6 is None and ref_R is not None:
+                q6 = self._solve_ik_position(pose)
             if q6 is None:
                 return False, f"{label}: pose IK failed", 0.0
             q = q6 + [0.0]
@@ -4766,21 +4825,27 @@ class ArmController(Node):
     def _plan_mode(
         self, spec: "TrajModeSpec", via: List[Dict[str, Any]],
         target: Dict[str, Any], speed, label: str, exact: List[bool],
+        hold_orientation: bool = False,
     ) -> Tuple[bool, str, float]:
         """F166 统一分派：按 spec.kind 执行「当前位 → via → target」段，返回 (ok, msg, dur)。
 
         新增/切换模式只需在 TRAJ_MODES 加一条注册（+ 对应 kind 实现），调用方无需改动。
+        F176 hold_orientation：关节空间段（ptp_legs / soft_smooth / 无 via 单腿）用各点自身示教
+        姿态做 6D IK；笛卡尔段（lin_*/circ）本就按 6D 位姿走，无需该开关。
         """
         k = spec.kind
         if k == "ptp_legs" and via:
             # 历史兼容：`mode: ptp` + via 旧行为=关节 G64 过点（等价 jnt_g64_quintic）；
             # 真「逐腿停」用多个无 via 的 ptp 段表达（每段 _plan_single）。
             return self._goto_via_smooth(
-                via, target, speed, label, profile="l1p5", exact=exact)
+                via, target, speed, label, profile="l1p5", exact=exact,
+                hold_orientation=hold_orientation)
         if not via:
-            return self._plan_single(spec, target, speed, label)
+            return self._plan_single(spec, target, speed, label,
+                                     hold_orientation=hold_orientation)
         if k == "pilz_ptp_seq":
-            return self._goto_via_ptp_blend(via, target, speed, label, exact=exact)
+            return self._goto_via_ptp_blend(via, target, speed, label, exact=exact,
+                                            hold_orientation=hold_orientation)
         if k == "pilz_lin_seq":
             return self._goto_via_lin_blend(via, target, speed, label, exact=exact)
         if k == "lin_single":
@@ -4793,7 +4858,8 @@ class ArmController(Node):
             return ok, msg, dur
         if k == "soft_smooth":
             return self._goto_via_smooth(
-                via, target, speed, label, profile=spec.profile, exact=exact)
+                via, target, speed, label, profile=spec.profile, exact=exact,
+                hold_orientation=hold_orientation)
         return False, f"unhandled mode kind '{k}'", 0.0
 
     def _auto_fallback_spec(self, via: List[Dict[str, Any]]) -> "TrajModeSpec":
@@ -4808,7 +4874,7 @@ class ArmController(Node):
     def _execute_segment(self, seg: Dict[str, Any], label: str) -> Tuple[bool, str, float]:
         """执行一个「轨迹段」（F166 统一模式分派）。
 
-        段模型：{target, mode, speed, sleep, via:[{positions|pose, exact}]}。
+        段模型：{target, mode, speed, sleep, via:[{positions|pose, exact}], hold_orientation}。
         mode 为规范名/别名（`TRAJ_MODES`）；'auto' 运行时保守兜底（正式由离线
         `scripts/traj_plan_auto.py` 解析为具体模式）。exact=该点是否必须精确过点。
         返回 (成功, 说明, 运行时长秒 = 运动时长 + sleep)。
@@ -4832,8 +4898,11 @@ class ArmController(Node):
                 return False, (
                     f"unknown mode '{mode}' (have: {sorted(TRAJ_MODES)})"), 0.0
         exact = [bool(p.get("exact", False)) for p in via]
+        # F176: 段级可选开关——true 时各点用自身示教姿态做 6D IK（防"只求末端到位"横压）
+        hold_orientation = bool(seg.get("hold_orientation", False))
 
-        ok, msg, vdur = self._plan_mode(spec, via, target, speed, label, exact)
+        ok, msg, vdur = self._plan_mode(spec, via, target, speed, label, exact,
+                                        hold_orientation=hold_orientation)
         if not ok:
             return False, msg, 0.0
         if sleep_s > 0.0:

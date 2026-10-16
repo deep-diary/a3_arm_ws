@@ -22,7 +22,10 @@
 
 ## 段模型（stream/cp 共用）
 
-- `stream` 段：`{target: {positions|pose, exact?}, mode, speed, sleep, via:[{positions|pose, exact?}]}`。
+- `stream` 段：`{target: {positions|pose, exact?}, mode, speed, sleep, via:[{positions|pose, exact?}], hold_orientation?}`。
+  - `hold_orientation`（F176，可选，默认 false）：true 时关节空间段（ptp_legs/soft_smooth/无 via 单腿）
+    用该点 `pose.orientation` 做 **6D IK**（并以链上前一点解作种子），姿态不可达时回落 position-only；
+    笛卡尔段（lin_*/circ）本就按 6D 位姿走，无需该开关。
   - `mode`：**9 种规范名**（`arm_controller.TRAJ_MODES`）——`ptp`/`ptp_blend`/`lin_exact`/`lin_blend`/
     `jnt_g64_quintic`/`jnt_g64_trapezoid`/`jnt_spline_bell`/`circ`/`jnt_spline_approx`；
     旧名 `pilz/blend/l1p5/l2/l3/lin/ptp` 为**别名**（F166，`resolve_traj_mode`）。

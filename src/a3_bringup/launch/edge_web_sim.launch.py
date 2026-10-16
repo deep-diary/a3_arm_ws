@@ -143,6 +143,15 @@ def generate_launch_description():
         parameters=[{"enabled": True}],
     )
 
+    # F175：末端位姿话题（base_link → end_effector 的 FK，联调/测量用）
+    ee_pose = Node(
+        package="a3_bringup",
+        executable="ee_pose_publisher",
+        name="a3_ee_pose",
+        output="screen",
+        parameters=[{"ee_frame": "end_effector", "rate_hz": 20.0}],
+    )
+
     arm_controller = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(arm_share, "launch", "arm_controller.launch.py")
@@ -369,6 +378,7 @@ def generate_launch_description():
             sim_motor,
             sim_power,
             gravity,
+            ee_pose,
             arm_controller,
             mqtt_bridge,
             gripper,

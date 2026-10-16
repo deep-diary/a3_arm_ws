@@ -35,6 +35,7 @@
 | `melodion_bake.py` | 口风琴 stream 预烘焙：把逐段 via 关节轨迹算好存 `<name>.yaml.baked.yaml`，playback 直接下发跳过实时 IK+重定时 | `python3 scripts/melodion_bake.py --stream scale` |
 | `melodion_impact_eval.py` | 口风琴跨键冲击评估（approach/速度 vs j_rms/a_rms/时长） | `python3 scripts/melodion_impact_eval.py` |
 | `melodion_speed_diag.py` | 口风琴跨键 via 关节空间 nominal 时长扫参（approach/vmax/amax） | `python3 scripts/melodion_speed_diag.py` |
+| `melodion_pts2stream.py` | F176 口风琴实测定位点（路点录制滚动槽 `trajectories/waypoints/latest.yaml`）→ 4 键按压 stream（写 `trajectories/streams/latest.yaml`，长按 Triangle 回放槽；press 6mm + 起手/收尾悬停「第 1 点上方 40mm」+ 键间 3 过点抬升 40/80/40mm、`mode=ptp_blend`、`hold_orientation=true`、speed 0.2，文件头附 F166 九模式速查）+ 打印 D-pad 命名点片段（纯离线，仅 PyYAML） | `python3 scripts/melodion_pts2stream.py [--mode ptp_blend] [--hold-orientation/--no-hold-orientation] [--lift-src 40 --lift-apex 80 --lift-dst 40] [--exact]` |
 | `traj_modes_bench.py` | 多路点轨迹模式基准（离线）：ptp/L1/L2/L3/L1.5 × 速度，命令平滑度 j_rms/a_rms + 时长 + SVG/MD | `python3 scripts/traj_modes_bench.py --config src/a3_arm_controller/config/traj_modes_bench.yaml` |
 | `gen_stream_modes.py` | 路点轨迹 → 多模式 stream 生成器（离线，不触发运动）：读 waypoints/latest.yaml 取前 6 点，生成 **9 模式**(ptp/ptp_blend/lin_exact/lin_blend/jnt_g64_quintic/jnt_g64_trapezoid/jnt_spline_bell/circ/jnt_spline_approx)×N 速度的 stream（段间自动回起点） | `python3 scripts/gen_stream_modes.py [--speeds 0.4 0.8] [--modes ptp circ] [--out <path>]` |
 | `traj_mode_recommend.py` | F165 轨迹模式离线推荐器：给定轨迹算各模式时长/a_rms/j_rms/过冲 + 推荐（最快/最平滑 + 场景提示） | `python3 scripts/traj_mode_recommend.py --poses home_up,home_front,...` |

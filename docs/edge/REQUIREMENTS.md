@@ -196,6 +196,9 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 | F172 | 库仑摩擦前馈（每关节 Fc 配置文件驱动，默认仅 L3≈0.13 Nm；位置模式 τ_ff += Fc·tanh(q̇_des/vel_scale)，后续标定只改 `friction_params.yaml`） | implemented-pending-hw | 功能 | [requirements/F172-coulomb-friction-feedforward.md](requirements/F172-coulomb-friction-feedforward.md) |
 | F173 | 笛卡尔 xyz 直接巡游（`random_pose_tour` 请求直给 x/y/z，逐点 IK 后走既有巡游链；姿态默认不限、可选 hold_start/lock_quat） | implemented | 功能 | [requirements/F173-cartesian-xyz-tour.md](requirements/F173-cartesian-xyz-tour.md) |
 | F174 | 6 轴 + 连杆形态：独立描述包 `a3_description_6j`（末端件用**真实 CAD STL** el05_l6.stl：法兰盘+φ46 段+细杆，伸出 150mm，TCP 在杆端；相对 7 轴原形态只去夹爪）+ 系统级模型配置 `a3_robot_model` 指定默认描述（真机/仿真栈默认切 6 轴；`--7j` 可回退） | implemented-pending-hw | 功能 | [requirements/F174-a3-description-6j-linkage-package.md](requirements/F174-a3-description-6j-linkage-package.md) |
+| F175 | 末端位姿话题 `/a3/ee_pose`（base_link → end_effector 的 Pinocchio FK 直读，20 Hz PoseStamped；免 tf2_echo） | implemented-pending-hw | 功能 | [requirements/F175-ee-pose-topic.md](requirements/F175-ee-pose-topic.md) |
+| F176 | 口风琴实测定位点：路点录制 4 点（white1/white19/black13/black1）→ D-pad 对位覆盖 + 4 键按压 stream（`melodion_pts2stream.py` → `trajectories/streams/latest.yaml`，press=6mm + 起手/收尾悬停「第 1 点上方 40mm」+ 键间 3 过点抬升 40/80/40mm、mode=ptp_blend、段级 `hold_orientation` 6D IK 保示教姿态、speed=0.2；文件头附 F166 九模式速查） | implemented-pending-hw | 功能 | [requirements/F176-melodion-measured-points-dpad-stream.md](requirements/F176-melodion-measured-points-dpad-stream.md) |
+| F177 | USB 摄像头 ROS 接入：板载 apt 装不了 ROS 相机驱动（rkmpp pin 挡 `libav*-dev`）→ 自写 `a3_bringup/usb_camera_node`（cv2，仅依赖 `python3-opencv`），发 `/camera/image_raw`+`/camera/camera_info`，配 `usb_cam.launch.py` + `usb_cam.rviz` 在 RViz 显示 | implemented | 功能 | [requirements/F177-usb-camera-rviz-bringup.md](requirements/F177-usb-camera-rviz-bringup.md) |
 
 ## 非功能需求
 

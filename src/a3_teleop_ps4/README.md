@@ -27,14 +27,14 @@
 | **R2** | 模拟 | 夹爪力控（**不需要 L1/R1**），松开全开 | gripper_force |
 | 左摇杆 X / Y | 模拟（L1） | 平移 Y（左右）/ Z（上下） | servo_lin_y / servo_lin_z |
 | 右摇杆 Y / X | 模拟 | 平移 X（前后，gate l1）/ 偏航（gate r1） | servo_lin_x / servo_ang_z |
-| **D-pad 上 / 下** | 点按 | goto 口风琴首键 F3 抬高 10mm / 下压 5mm（melodion_F3_up/down），F16x | `goto_named_pose {name: melodion_F3_up/melodion_F3_down}` |
-| **D-pad 左 / 右** | 点按 | goto 口风琴最左键 F3 未按下 / 最右键 C6 未按下（melodion_F3_up/C6_up），F16x | `goto_named_pose {name: melodion_F3_up/melodion_C6_up}` |
+| **D-pad 上 / 下** | 点按 | goto 口风琴黑键 A#5 / F#3 未按压基准点（melodion_black13/black1），F176 | `goto_named_pose {name: melodion_black13/melodion_black1}` |
+| **D-pad 左 / 右** | 点按 | goto 口风琴白键 F3 / C6 未按压基准点（melodion_white1/white19），F176 | `goto_named_pose {name: melodion_white1/melodion_white19}` |
 | **L2** | 短按 | 保存当前位姿为 snap_YYYYMMDD_HHMMSS（F114，写包内 named_poses.yaml） | `/a3/arm/save_named_pose {name: ""}` |
 | touchpad | 单击（tap） | **预留不绑**（蓝牙无键事件 LL-052；hidraw 触摸偏移缺陷 LL-143，F132 修复后在 `default.yaml` 取消注释即绑 LIN 回放） | — |
 
 > F115 起 D-pad 不再调速，平移/旋转恒用 `speed_normal`（默认 0.35）；`step_linear_scale/step_angular_scale` 动作函数保留，自定义映射可自行绑定。
 
-口诀：**L3 开工、R3 收工、✕ 长按急停；▲ home、● idle（F120）；Share-Options-■ = 连续示教-保存-回放；Share 长按+L2 打点 = 路点示教（F131），■ 长按 PTP、● 长按 LIN；L1+R1 同按 2 s 设零（F135，PS 已解绑）；L1 平移、R1 旋转、十字键直达 home 四周四点。**
+口诀：**L3 开工、R3 收工、✕ 长按急停；▲ home、● idle（F120）；Share-Options-■ = 连续示教-保存-回放；Share 长按+L2 打点 = 路点示教（F131），■ 长按 PTP、● 长按 LIN；L1+R1 同按 2 s 设零（F135，PS 已解绑）；L1 平移、R1 旋转、十字键直达口风琴四点（F176）。**
 
 ## DS4 灯带 / 震动（F61，`ds4_feedback_node`）
 
