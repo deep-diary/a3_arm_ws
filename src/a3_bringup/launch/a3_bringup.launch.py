@@ -786,8 +786,10 @@ def _build(cfg, include_gripper):
         DeclareLaunchArgument("use_rviz", default_value="false"),
         DeclareLaunchArgument(
             "use_sw_render",
-            default_value="true",
-            description="RViz 软件渲染 LIBGL_ALWAYS_SOFTWARE=1（RK3588 默认开，LL-027）",
+            default_value="false",
+            description="RViz 软件渲染 LIBGL_ALWAYS_SOFTWARE=1；默认 false = 走 panfrost 硬件 GL"
+                        "（2026-10-16 复测通过：4K 全屏 1-2fps → 11-15fps，CPU 190%→41%，见 LL-027）；"
+                        "若遇 GPU hang 卡死则置 true 回退软件渲染",
         ),
         DeclareLaunchArgument(
             "use_camera",

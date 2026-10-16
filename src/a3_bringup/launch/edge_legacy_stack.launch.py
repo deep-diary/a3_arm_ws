@@ -350,8 +350,9 @@ def generate_launch_description():
         DeclareLaunchArgument("use_rviz", default_value="false"),
         DeclareLaunchArgument(
             "use_sw_render",
-            default_value="true",
-            description="RViz 软件渲染 LIBGL_ALWAYS_SOFTWARE=1（RK3588 默认开，LL-027）",
+            default_value="false",
+            description="RViz 软件渲染 LIBGL_ALWAYS_SOFTWARE=1；默认 false = panfrost 硬件 GL"
+                        "（2026-10-16 复测通过，见 LL-027）；遇 GPU hang 置 true 回退",
         ),
         DeclareLaunchArgument("use_teleop", default_value="true"),
         DeclareLaunchArgument(

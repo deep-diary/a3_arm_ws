@@ -134,5 +134,6 @@ pkill -f 'edge_teleop|ps4_mapper|servo_node'
 
 ## 10. 本机 RViz 注意
 
-- RK3588 上必须软件渲染：`LIBGL_ALWAYS_SOFTWARE=1`（LL-027）。
+- RK3588 上 RViz 默认走 **panfrost 硬件 GL**（LL-027 2026-10-16 复测：4K 全屏 1–2 → 11–15 fps，CPU 190%→41%）；
+  遇整机卡死用 `use_sw_render:=true`（或 `LIBGL_ALWAYS_SOFTWARE=1`）回退软件渲染；两种模式都必须带 `LD_PRELOAD=~/.a3/hide_randr/libhide_randr.so`（LL-065）。
 - 本 X server 的 RANDR 零刷新率会致 RViz 启动段错误：`LD_PRELOAD=~/.a3/hide_randr/libhide_randr.so`（LL-065）。两者在 `edge_teleop_full_sim.launch.py` 已自动加。

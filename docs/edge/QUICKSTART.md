@@ -11,7 +11,7 @@
 3. **唯一产品入口 `ros2 launch a3_bringup a3_bringup.launch.py hardware:=mock|can ...`（F78）**：ros2_control 标准栈，mock/can 两种模式拓扑完全一致（编排层 + MQTT 桥 + MoveIt OMPL/Pilz + Servo + 夹爪 + PS4）
    - `hardware:=mock`（默认）：`mock_components/GenericSystem`，无需 CAN/电机即可起栈（仿真/开发用）；mock 栈同时启动 `sim_power_sequence_node`（同名/同话题/同锁存 QoS 对齐真机执行层 power_sequence_node，F110），故 `/power_sequence/gate_open`/`state` 行为、PS4 L3 使能与 F61 灯效（READY 绿）与真机完全一致，不会出现离线红闪
    - `hardware:=can can_interface:=can1`：`a3_hardware_interface/A3MITHardwareInterface` 直连 SocketCAN（真机先 `sudo systemctl start can-up.service`；vcan 验收 `can_interface:=vcan0`）。非法 hardware 值会被 launch 硬拒，mock 不触碰任何 CAN socket
-   - 组件开关：`use_mqtt` / `use_teleop` 默认 true，`use_rviz` / `use_monitor` 默认 false；`teleop_mapping:=default|simple`；`use_sw_render` 默认 true（LL-027）
+   - 组件开关：`use_mqtt` / `use_teleop` 默认 true，`use_rviz` / `use_monitor` 默认 false；`teleop_mapping:=default|simple`；`use_sw_render` 默认 **false**（走 panfrost 硬件 GL，LL-027 2026-10-16 复测；卡死时置 true 回退软件渲染）
    - JTC 默认 **inactive 启动**，需经 `/a3/arm/enable`（或 PS4 L3）激活后才会运动
 
 #### 真机栈 启停 / 重启（手工 setsid 方式）
@@ -32,7 +32,7 @@
 > **不想重启栈、单独开 RViz**（另开终端）：
 > ```bash
 > source scripts/a3_shell_env.sh
-> export LIBGL_ALWAYS_SOFTWARE=1                              # LL-027 必须软件渲染
+> export LIBGL_ALWAYS_SOFTWARE=1                              # 仅当遇 GPU 卡死时回退（LL-027；默认走硬件 GL）
 > export LD_PRELOAD="$HOME/.a3/hide_randr/libhide_randr.so"   # LL-065
 > rviz2 -d install/a3_description/share/a3_description/config/el_a3_view.rviz
 > ```
@@ -165,7 +165,8 @@ ps aux | grep -E "ros2_control_node|a3_arm_controller|move_group" | grep -v grep
     python3 scripts/a3_test/f161_tour_smooth_acceptance.py
     ```
     - RViz 双模型：实体色 = 实际反馈（`/joint_states`），半透明 = 目标 ghost（`target/` TF）。
-    - 本机 RViz 两个必备前缀已由 launch 自动加：`LIBGL_ALWAYS_SOFTWARE=1`（LL-027）、`LD_PRELOAD=~/.a3/hide_randr/libhide_randr.so`（LL-065）。
+    - 本机 RViz 前缀已由 launch 自动加：`LD_PRELOAD=~/.a3/hide_randr/libhide_randr.so`（LL-065，两模式都必须）。
+      渲染默认走 **panfrost 硬件 GL**（LL-027 复测：4K 全屏 1–2 → 11–15 fps）；`use_sw_render:=true` 才加 `LIBGL_ALWAYS_SOFTWARE=1` 回退软件渲染。
     - S0 基线检查只能在干净栈上通过；重复跑须重启栈（编排层/位姿状态有记忆；F115 起速度档已不可调），首次干净栈结果为准。
     - 合成全绿后手柄实操：`./scripts/a3_stack.sh start --sim --rviz`（默认已 `use_joy_node:=true`）；手工入口则加 `use_joy_node:=true`（域不变）。
 
@@ -590,7 +591,7 @@ ros2 service call /a3/arm/goto_named_pose a3_msgs/srv/GotoNamedPose "{pose_name:
 ```bash
 # 1) 硬件栈（can1 已 UP）
 ros2 launch a3_can_bridge can_bridge.launch.py
-# 2) RViz 双模型（HDMI :0；use_sw_render 默认开，LL-027 必须软件渲染）
+# 2) RViz 双模型（HDMI :0；默认硬件 GL，LL-027 复测；卡死才加 use_sw_render:=true）
 DISPLAY=:0 ros2 launch a3_bringup urdf_dir_check.launch.py
 # 无窗口环境只跑数据流：use_rviz:=false
 ```

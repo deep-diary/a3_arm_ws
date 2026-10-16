@@ -70,4 +70,5 @@ shim 已接入 `edge_teleop_full_sim.launch.py` 的 RViz prefix（存在才加�
 - `~/.a3/hide_randr/hide_randr.c` / `libhide_randr.so`（shim 源码与产物，不入仓）
 - `src/a3_bringup/launch/edge_teleop_full_sim.launch.py`（仿真入口 RViz prefix 自动 LD_PRELOAD）
 - `src/a3_bringup/launch/a3_bringup.launch.py`（真机/仿真统一产品入口，同样 preload，2026-10-16 补）
-- 关联：[[LL-027-rviz-panfrost-freeze-software-render]]（RViz 在本机的另一必备前缀 LIBGL_ALWAYS_SOFTWARE=1）
+- 关联：[[LL-027-rviz-panfrost-freeze-software-render]]（RViz 在本机的另一前缀；注意该条 2026-10-16 已复测：
+  默认改走 panfrost 硬件 GL，`LIBGL_ALWAYS_SOFTWARE=1` 仅作卡死回退；而本条的 `hide_randr` **两种模式都必须加**）
