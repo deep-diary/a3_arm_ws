@@ -82,3 +82,28 @@ twist≈0 时 servo 每 20 ms 下发的目标≈当前反馈（|Δ|≈0.003 rad�
 - `src/a3_moveit_config/config/servo_config.yaml`（现值 90/300）
 - `docs/edge/requirements/F178-servo-singularity-threshold-recalibration.md`
 - 复现脚本（一次性，可重建）：`drive_and_log.py` / `x_test.py` / `eval_x.py` / `push_in_motion.py`（pinocchio cond + FK + `/servo_node/status` + `/a3/servo/joint_trajectory` 三路对齐）
+
+## 附录二（2026-10-22，F180 实测）— "运动期变软"的定量证据：任何水平运动都在掉 z
+
+在**单 servo 实例**（先清孤儿）、home、`/servo_node/status` 全 0、命令流 50.0 Hz 下，
+用 `/arm_controller/joint_trajectory` 的 FK 量"命令流本身"的笛卡尔方向（不受下垂污染）：
+
+| 命令 | 命令流实际方向（单位化） |
+|---|---|
+| `+x` 0.1 m/s | (+0.849, −0.004, **−0.528**) |
+| `+y` 0.1 m/s | (−0.177, +0.758, **−0.628**) |
+
+两向都带 −0.53…−0.63 的 z，且两向**不正交**（点积 +0.18）→ **不是坐标旋转**，是"任何水平运动都在掉 z"。
+关节层面 `+x`：L2/L4 与 Jacobian 期望吻合（0.91/0.97×），**只有 L3 多走 1.76×**（L3 的 z 分量最大），
+多出的量正好等于观测到的 −z。**与 IK 插件无关**：pick_ik（原/收紧）、KDL、乃至 servo 的
+`No kinematics solver … Will use inverse Jacobian` 伪逆分支，四组完全一致。
+servo 内部状态 vs `/joint_states` ≤1.5 mrad；xacro 与静态 URDF 运动学一致；twist 帧、URDF 速度上限均排除。
+
+→ 结论：**不是运动学耦合，而是 LL-082 主条描述的"目标不领先反馈"在运动期的直接后果**：
+目标只领先 1 个 tick（0.1 m/s = 1 mm ≈ 1 mrad）→ `kp·e ≈ 0.08 Nm ≪ 抗重力 2.4 Nm` →
+重力在运动期获胜、下垂被 `实测+Δθ` 吸收进命令流。修法见 [F180](../edge/requirements/F180-servo-absolute-target-integrator.md)
+（外部积分的绝对目标）；**F118 的 `a3_servo_anchor` 修不了**（它假设出参是冻结目标，
+实测运动期出参会跟随下垂，锚只能按 `max_joint_delta_rad` 限速慢跟）。
+
+**方法论**：判"servo 方向对不对"必须看**出参命令流的 FK**，不能看实测末端（实测被重力/滞后污染）；
+出参采样要用 `ros2 topic hz` 校核节拍与发布者数量。修复前后都用同一套（单实例 + 后台线程发 twist + 主线程全速 spin）。

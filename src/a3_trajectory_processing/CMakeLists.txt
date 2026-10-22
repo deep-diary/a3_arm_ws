@@ -13,6 +13,9 @@ find_package(trajectory_msgs REQUIRED)
 find_package(moveit_core REQUIRED)
 find_package(moveit_ros_planning REQUIRED)
 find_package(ruckig CONFIG REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 
 add_executable(retime_trajectory_node src/retime_trajectory_node.cpp)
 ament_target_dependencies(
@@ -29,7 +32,21 @@ target_link_libraries(retime_trajectory_node ruckig::ruckig)
 add_executable(otg_demo src/otg_demo.cpp)
 target_link_libraries(otg_demo ruckig::ruckig)
 
-install(TARGETS retime_trajectory_node otg_demo
+# F180: servo 绝对目标（外部积分 + Ruckig 在线 OTG）
+add_executable(servo_target_node src/servo_target_node.cpp)
+ament_target_dependencies(
+  servo_target_node
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  std_srvs
+  trajectory_msgs
+  moveit_core
+  moveit_ros_planning
+)
+target_link_libraries(servo_target_node ruckig::ruckig)
+
+install(TARGETS retime_trajectory_node otg_demo servo_target_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -64,7 +64,9 @@
                  full = computed-torque VFF+AFF+Coriolis（真机弹琴回放 A/B 改善
                  显著：峰值误差 -72%、稳态滞后 -76%、PD 负担 -65%，2026-10-07）。
                  异常/抖动时可运行时 ros2 param set ... gravity 回落。 -->
-            <param name="feedforward_mode">full</param>
+            <!-- F180 实测：servo/流式单点(10ms)命令下，JTC 由 spline 反算的 v/a 前馈会放大抖动
+         （实测 z 抖 22.9mm→3.4mm、速度抖 240→56 rad/s²）。轨迹回放如需 VFF/AFF 再按模式切回 full。 -->
+            <param name="feedforward_mode">gravity</param>
             <!-- on_configure runs on the CM executor thread, so the plugin cannot
                  query /controller_manager for robot_description (the server is
                  blocked inside configure). Read the same kinematics from the
