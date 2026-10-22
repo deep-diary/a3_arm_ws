@@ -12,7 +12,8 @@
 #   a3_stack.sh status                查看 can1 / 进程 / arm_status
 #   a3_stack.sh free [on|off]         零重力矩补偿自由拖动（on=进入，off=退出恢复闭环）
 #   a3_stack.sh set-zero [id]         停栈状态下设电机零点（不带使能）；id=1..7 单电机，
-#                                      省略=全部(255)。设零后自动 save_param 写 flash
+#                                      省略=全部(255)。设零后自动 save_param 写 flash，
+#                                      再自动回读各电机 angle 校验零位（±0.02 rad）
 #   可选参数：-f|--force（停栈跳过臂状态安全门）
 #             --rviz（启动/重启时随栈打开 RViz）
 #             --no-probe（跳过起栈前电机在线探测；降级档/确认无硬件时用）
@@ -389,9 +390,73 @@ do_free() {
   return 1
 }
 
+# 零位回读容差（rad）：设零后角度应回到 ~0，超出即判定异常
+ZERO_VERIFY_TOL=0.02
+
+# 设零后回读校验：用 mit_noenable_stream.py probe（get_device_id + 零增益 MIT 帧，
+# 无侵入、不使能）读取各电机 angle，逐个比对是否落在 ±ZERO_VERIFY_TOL 内。
+_verify_zero() {
+  local motor_id="$1" ids out rc=0
+
+  if [ "$motor_id" = "255" ]; then ids="1..7"; else ids="$motor_id"; fi
+  info "回读零位验证（probe 无侵入：get_device_id + 零增益 MIT 帧）…"
+  out="$(timeout 30 python3 "$SCRIPT_DIR/mit_noenable_stream.py" probe \
+           --iface can1 --ids "$ids" 2>&1)"
+  rc=$?
+  printf '%s\n' "$out" | sed 's/^/    /'
+  if [ "$rc" -ne 0 ]; then
+    err "零位回读失败（probe 退出码 $rc）：无法确认设零结果"
+    return 1
+  fi
+
+  # 解析每行 "motor_id= N 反馈OK angle=+0.0002 ..." / "motor_id= N 无反馈"
+  local parsed
+  parsed="$(printf '%s\n' "$out" | awk '
+    /^  motor_id=/ {
+      mid = $2
+      if ($0 ~ /反馈OK/) {
+        a = ""
+        for (i = 1; i <= NF; i++) if ($i ~ /^angle=/) { a = $i; sub(/angle=/, "", a) }
+        print mid, a
+      } else if ($0 ~ /无反馈/) {
+        print mid, "nofeedback"
+      }
+    }')"
+
+  local mid ang bad="" missing="" okcnt=0
+  while read -r mid ang; do
+    [ -z "$mid" ] && continue
+    if [ "$ang" = "nofeedback" ]; then
+      missing="$missing $mid"
+      continue
+    fi
+    if awk -v a="$ang" -v t="$ZERO_VERIFY_TOL" 'BEGIN{exit !(a <= t && a >= -t)}'; then
+      okcnt=$((okcnt + 1))
+    else
+      bad="$bad $mid(${ang}rad)"
+    fi
+  done <<< "$parsed"
+
+  if [ -n "$bad" ]; then
+    err "零位回读异常（容差 ±${ZERO_VERIFY_TOL} rad）：$bad"
+    err "确认设零后电机未被扳动；需要时重设：$0 set-zero$([ "$motor_id" = "255" ] || echo " $motor_id")"
+    return 1
+  fi
+  if [ "$okcnt" -eq 0 ]; then
+    err "无任何电机回读成功，无法确认零位（检查 can1 状态与反馈帧）"
+    return 1
+  fi
+  ok "零位回读通过：$okcnt 个电机 angle≈0（容差 ±${ZERO_VERIFY_TOL} rad）"
+  if [ -n "$missing" ]; then
+    warn "以下电机无反馈、未参与校验：$missing$([ "$motor_id" = "255" ] && echo "（6J 档无电机 7 属正常）")"
+  fi
+  return 0
+}
+
 # 设零（F91 motor_maintenance）：停栈状态下把电机当前编码器位置写为零点，不带使能。
 # 前提：栈必须已停（motor_maintenance 独占 can1 socket + 控制器 inactive 互锁）。
-# id=1..7 单个电机；省略/255 = 全部。设零后自动 save_param 写 flash 持久化。
+# id=1..7 单个电机；省略/255 = 全部。设零后自动 save_param 写 flash 持久化，
+# 再自动回读校验零位（_verify_zero），用结果证明设零是否真正生效。
 do_set_zero() {
   local motor_id="${1:-255}"
 
@@ -457,9 +522,20 @@ do_set_zero() {
   fi
   ok "save_parameters 完成"
 
+  # 等维护节点真正退出（释放 can1 独占）再回读，最多 2s，超时强制结束
   kill -TERM "$maint_pid" 2>/dev/null || true
-  info "维护节点已退出；验证零位：python3 scripts/mit_noenable_stream.py probe --iface can1 --ids 1..7"
-  return 0
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$maint_pid" 2>/dev/null || break
+    sleep 0.2
+  done
+  if kill -0 "$maint_pid" 2>/dev/null; then
+    warn "motor_maintenance 未在 2s 内退出，强制结束（零点已写 flash）"
+    kill -KILL "$maint_pid" 2>/dev/null || true
+    sleep 0.3
+  fi
+
+  _verify_zero "$motor_id"
 }
 
 do_start() {
@@ -761,7 +837,7 @@ usage() {
   free     零重力矩补偿自由拖动：free / free on 进入（软 kp + 重力前馈），
            free off 退出恢复位置闭环；需栈已运行且电机已使能（READY）
   set-zero 设电机零点（不带使能，需栈已停）：set-zero [id]，id=1..7 单个、省略=全部(255)
-           设零后自动 save_param 写 flash
+           设零后自动 save_param 写 flash，并回读各电机 angle 校验零位（±0.02 rad）
   -f, --force    停栈时跳过臂状态安全门
   --rviz         启动/重启时随栈一起打开 RViz
   --no-probe     跳过起栈前电机在线探测（降级档/确认无硬件时）

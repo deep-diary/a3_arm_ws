@@ -5,16 +5,28 @@ arm:
   kinematics_solver_timeout: 0.01
   kinematics_solver_attempts: 1
   mode: local
-  position_threshold: 0.001
+  # F179（2026-10-22 真机）：servo 每 tick 的目标位移/转角必须 **大于**对应阈值，否则
+  # pick_ik local 第一步 `stop_optimization_on_valid_solution && solution_fn(seed)` 直接
+  # 返回 seed → `Δθ≈0` → servo 出帧但关节全零。LL-063 当年只修了 orientation 那一路，
+  # **position_threshold 仍是 1mm** → 每 tick 位移 ≤1mm（即 twist ≤0.05 m/s）完全无权限。
+  # 真机实测（home）：±z 命令恒 0、x/y 仅 6–16%，5cm 方形走不动。
+  # 收紧到 0.1mm / 0.1mrad，并放大 local 搜索预算（gd_iter×step 0.01→0.5 rad）：
+  # 4 个 x/y 方向符号全部恢复正确（幅度仍 ~10–20%，属 servo 目标基准+平滑的本征衰减）。
+  position_threshold: 0.0001
   # 必须与 servo publish_period(0.02s) 联动：阈值 ≥ 每 tick 角度增量时 local 求解器
   # 直接把 seed 当解返回，偏航静默（LL-063）。满杆常速档每 tick=1.0*0.35*0.02=0.007。
-  orientation_threshold: 0.001
+  orientation_threshold: 0.0001
   cost_threshold: 0.001
   minimal_displacement_weight: 0.001
-  gd_step_size: 0.0001
+  gd_step_size: 0.001
+  gd_max_iters: 500
   position_scale: 1.0
   rotation_scale: 0.5
   stop_optimization_on_valid_solution: true
+  # 近似解门限：pick_ik 默认允许"离目标 5cm/0.05rad 也算解"；servo 逐 tick 小步长下
+  # 会把方向误差放大成"似乎有解但方向乱"，收紧到 5mm/0.01rad。
+  approximate_solution_position_threshold: 0.005
+  approximate_solution_orientation_threshold: 0.01
 
 # F131: 路点 LIN 专用组——global memetic 求解（arm 组 local 模式为 servo 保留, LL-063）。
 # 段间目标位姿离当前位形较远时 local 种子落不进目标收敛盆（pilz LIN -31）。

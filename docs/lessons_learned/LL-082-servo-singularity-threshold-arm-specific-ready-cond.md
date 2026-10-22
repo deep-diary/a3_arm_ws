@@ -46,7 +46,39 @@ twist≈0 时 servo 每 20 ms 下发的目标≈当前反馈（|Δ|≈0.003 rad�
 
 ## 相关路径
 
-- `src/a3_moveit_config/config/servo_config.yaml`（阈值 25/50 + 注释依据）
+- `src/a3_moveit_config/config/servo_config.yaml`（F69 时 25/50 → **F178 现值 90/300**，见附录）
 - `~/.a3/poses.yaml`（ready 覆盖；F39 用户点位文件）
 - `docs/shared/SAFETY.md`（F69 奇异阈值标定条目）
 - `/tmp/f69_grid*.py /tmp/f69_minimax.py /tmp/f69_condtrace.py`（pinocchio 分析脚本，可按路径重建）
+
+## 附录（2026-10-17，F178）— 阈值被后续点位演进架空：25/50 必须重标定为 90/300
+
+**现象（真机复现）**：L1（平移死人开关）+ 摇杆做 servo 平移时臂**一震一震**，且**运动过程中保持力下降/始终没劲**；与 LL-082 主体同族（F69 后的新触发位姿）。
+
+**根因（两个独立项，本次只修第 1 项）**
+
+1. **阈值 vs 点位集失配（本次修复）**：25/50 是按 F69 当时的点位集定的（旧 ready cond 13.5、四方向 jog 峰值 22.2）。此后 `F109` 把 ready 改成 `[0,1.05,-1.575,0,0,0]`（**cond 30.5**），`F115/F176` 又加入 `home_front`(62.4)、`idle`(49.8)、`zero`(47.6)、`home_up`(28.7)、`melodion_*`(15–24)。实测生产 **35 个命名位姿 cond 中位 25、49% >25、20% ≥50、最大 66.6** → 正常 jog 长期落在减速带；越过 50（朝奇异）/75（离开）时**整帧 hard-stop（速度=0）**，下一帧又恢复 → 停-走交替。
+2. **运动期间目标跟随实测位（未修，另立方案）**：`internalServoCalcs` 每周期 `internal_joint_state_ = original_joint_state_`（实测位）后 `+= delta_theta` → **运动指令目标 = 测量位 + Δθ**，外力推动会让目标跟着走（下节实测）。零 twist 时走 `*joint_trajectory = *last_sent_command_` 分支 = 「钉住最后指令」。→ 运动中回复力矩≈0（「软」）。绝对目标方案见 F118 `a3_servo_anchor`（默认 false）。
+
+**关键实测（domain 99 全仿真栈 `edge_teleop_full_sim`，非真机）**
+
+- `/servo_node/status`（**`std_msgs/Int8`**，每 `publish_period` 一帧；不是 `moveit_msgs/ServoStatus`，订错类型会 0 帧）在纯 x 运动窗口 **398/399 帧 = 1（DECEL_APPROACHING）**；EE 实测速度与「cond 代入缩放律」相关 **0.785**。
+- 从 `home` 纯 +x jog 后落到 **cond≈77** 的位姿：`25/50` 下 **±x 双向 13 s 位移 0.000 mm**（hard-stop 钉死，status 1/2 全帧）；同栈放宽阈值后**同位姿恢复 ±5.9 mm/s、status 全 0**。
+- 度量自证：本机 pinocchio（URDF + `end_effector` 帧 + `LOCAL_WORLD_ALIGNED`）复现 LL-082 全部记载值 —— home 23.7（记 23）、旧 ready 13.5（记 13.3）、肘锁死 993.8（记 982），误差 <2% → 可直接用同一度量的分布来标定阈值，不必猜。
+- 归因交叉验证：用「离开方向上限 = (hard−lower)×2+lower」反解，同一位姿 ±x 两向的「本征速度比」一致（0.0475 / 0.0499）→ 缩放律归属正确。
+- **顺带发现（未修，另需需求）**：纯 x twist 下**servo 命令本身**就不严格直线/匀速——末端寄生 z 位移占 x 行程 **12–28%**，逐周期位移 CV 0.12–0.34；嫌疑在 `pick_ik`（`mode: local` + servo 侧 `opts.return_approximate_solution = true`）与关节空间 Butterworth 平滑。
+
+**修复**：`servo_config.yaml` `lower` 25 → **90**（≈1.17× 实测正常运动峰值 77，覆盖全部 35 个生产位姿）、`hard` 50 → **300**（真奇异 994 的 ≈3× 裕量，仍在真奇异之前）；`leaving_singularity_threshold_multiplier: 2.0` 不变（离开硬停线 600）。安全层未动。
+
+**教训（纳入方法论）**
+
+- **标定项必须绑定它依赖的数据集**：F69 的阈值依赖「点位集」，而点位集是会随 F109/F115/F176 单独演进的**独立变更面**。改点位/URDF 的**同一轮**应重跑 cond 分布，或在 `servo_config.yaml` 里写明「本值按 X 点位集标定，点位变更须重标」。
+- **别信"某条路径测过就没问题"**：F69 验收只在旧 ready 起步测了四方向（峰值 22.2），而故障位姿是连续 jog 后漂过去的（cond 77）。回归测试应包含**连续 jog 后的漂移位姿**，不只起点位姿。
+- **`/servo_node/status` 的坑**：话题名 `/servo_node/status` 但类型是 `std_msgs/Int8`（值是 `StatusCode`），且**每周期都发**（可当心跳/循环速率探针，也能直接看出是否在减速/停）。
+- **诊断顺序**：先看 status 帧率与码分布 → 再算 cond 分布 → 再 A/B 调阈值；不要凭"感觉臂软"去改 kp/重力补偿（LL-082 已证 kp 全程未变）。
+
+## 相关路径（附录）
+
+- `src/a3_moveit_config/config/servo_config.yaml`（现值 90/300）
+- `docs/edge/requirements/F178-servo-singularity-threshold-recalibration.md`
+- 复现脚本（一次性，可重建）：`drive_and_log.py` / `x_test.py` / `eval_x.py` / `push_in_motion.py`（pinocchio cond + FK + `/servo_node/status` + `/a3/servo/joint_trajectory` 三路对齐）

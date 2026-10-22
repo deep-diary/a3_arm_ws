@@ -42,13 +42,21 @@ incoming_command_timeout: 0.2  # Command timeout (seconds)
 num_outgoing_halt_msgs_to_publish: 4
 
 ## Configure handling of singularities and joint limits
-# F69（2026-09-22）：MoveIt 默认 17/30 对本臂过保守——全臂 Jacobian 条件数
-# 天然偏高（工作区谷底 13.3，常见 13–25），ready 附近正常遥操作即越过 17，
-# 速度被缩放→整臂变软下坠（pinocchio 网格分析 + 真机复现确认）。
-# 真正的危险奇异（L2/L3 肘锁死）cond≥100（SRDF ready 实测 982）。
-# 放宽至 25/50：25 以下全速度，25–50 减速区，≥50 硬停仍远在真奇异之前。
-lower_singularity_threshold: 25.0  # Singularity deceleration threshold
-hard_stop_singularity_threshold: 50.0  # Singularity stop threshold
+# F69（2026-09-22）→ F178（2026-10-17）重新标定：25/50 是在「当时」工作区
+# （ready=[0,1.6,-0.7,0,0,0] cond 13.5、四方向 jog 峰值 22.2）定的。其后点位集演进
+# （F109 ready=[0,1.05,-1.575,0,0,0] cond 30.5；F115/F176 又加入 home_front 62.4、
+# home_up 28.7、zero 47.6、idle 49.8 等），现生产 35 个命名位姿 cond 中位 25、
+# **49% 越过 lower、20% ≥ hard_stop**：正常遥操作里伺服长期被减速，越过 50/75 还会
+# 整帧 hard-stop（速度缩放=0）→ 真机现象「一震一震 + 臂始终没劲」（F178 定位）。
+# 本机 pinocchio 度量与 LL-082 记载一致（home 23.7≈23、旧 ready 13.5≈13.3、
+# L2/L3 肘锁死 993.8≈982），故按分布标定：
+#   正常运动 cond 峰值 77（纯 x 连续 jog 实测）→ lower = 90（≈1.17× 裕量）
+#   真奇异参考 994（L2/L3 肘锁死）→ hard = 300（约 3× 裕量，仍在真奇异之前）
+# 语义不变：<90 全速；90–300 减速（离开方向上限 ×2 = 600）；≥ 上限硬停。
+# 安全层不受影响：URDF 关节速度上限（33/50 rad/s）、joint_limit_margin、
+# 执行层 command_max_velocity_rad_s=1.5、gate/急停。
+lower_singularity_threshold: 90.0  # Singularity deceleration threshold
+hard_stop_singularity_threshold: 300.0  # Singularity stop threshold
 joint_limit_margin: 0.1  # Joint limit margin (rad)
 
 ## Collision checking (disabled for better performance)
