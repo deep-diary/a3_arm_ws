@@ -21,6 +21,7 @@
 | `verify_wave_a_sim.sh` | Wave A 仿真验证（Pinocchio 重力 + zero→ready + 双域） | `./scripts/verify_wave_a_sim.sh` |
 | `verify_wave_b_sim.sh` | Wave B 仿真验证（F10–F15 + Servo smoke） | `./scripts/verify_wave_b_sim.sh` |
 | `dual_domain_zero_to_ready.sh` | 双域仿真（Edge + CloudEdge executor）zero→ready 轨迹扇出对比 | `./scripts/dual_domain_zero_to_ready.sh` |
+| `a3_test/f181_servo_track.py` | **F181 servo 跟踪验收**（真机，默认栈即 `a3_servo_target`，臂 READY）：`sweep`=回 home 后三轴 +10→−20→+10cm；`random`=随机轴/方向/速度方形跟踪（60s 或 home±10cm 边界先到先停）。输出命令CV/纹波/跟随误差/回home/停稳漂移，结果落 `~/.a3/servo_track/` | `python3 scripts/a3_test/f181_servo_track.py sweep` · `... random --vmax 0.05 --duration 60 --bound 0.10` |
 
 ## 标定调试
 
@@ -71,6 +72,7 @@
 # 跑测试
 ./scripts/a3_test/a3_test.sh env         # 环境自检
 python3 scripts/a3_test/ps4_sim_test.py  # PS4 全功能仿真（需仿真栈在跑）
+python3 scripts/a3_test/f181_servo_track.py sweep   # F181 真机三轴往返（默认栈即可）
 python3 scripts/a3_test/f116_random_tour_sim_acceptance.py  # 随机巡游验收
 python3 scripts/a3_test/f161_tour_smooth_acceptance.py      # 巡游平滑链 A/B 验收（仿真）
 python3 scripts/a3_test/f161_real_acceptance.py             # 巡游平滑链 A/B 验收（真机，需 gate open）

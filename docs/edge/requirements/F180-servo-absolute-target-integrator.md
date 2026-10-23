@@ -286,3 +286,16 @@ a_des = acc_gain * (v_ref - qd)         // acc_gain 默认 20 1/s
 - launch 开关 `use_servo_target` 尚未接入（当前手工起节点 + 停 moveit_servo 验证）。
 - 清理节点里已不用的 Ruckig/`lookahead_` 遗留字段。
 
+## v7（2026-10-23 凌晨，F181：接 launch + twist 平滑 + 门控修正）
+
+- **launch 接线**：`use_servo_target`（**默认 true**）互斥替换 moveit_servo，`--moveit-servo` 可回退；
+  `a3_stack.sh restart` 默认走本链路；`servo_anchor` 在本模式下强制不叠加。Ruckig/`lookahead_` 遗留字段已清理。
+- **twist 平滑**：模长上限 → 逐轴加速度限幅（1.0 m/s² / 3.0 rad/s²）→ 一阶低通（τ=60ms）。
+  修掉"正→0 / 正→负"的目标速度阶跃；random 60s 内 20 次换向后停稳漂移 **0.74mm**、无来回过冲。
+- **门控修正（真机验证发现）**：`/a3/control_mode` 是多写者槽位，goto 期间 TRAJ_RUNNING/IDLE 十几毫秒交替；
+  旧逻辑把 IDLE 当“中性” → goto 开始 1.5ms 后就恢复下发，把 10s 的 goto home 顶掉（停在 idle，
+  sweep 全程 CLIK 失败 1405 次）。改为按 **`/a3/arm_status.state`**（单写者）门控：仅 READY/SERVO 放行。
+- **实测（真机 home）**：sweep 命令 CV **0.004–0.006**、纹波 **0.4–0.7%**、回 home **0.49mm**、命令流 99.6Hz；
+  random 跟踪 RMS **2.4mm** / 最大 5.8mm。详见 [F181](F181-servo-target-launch-twist-smoothing.md)。
+
+

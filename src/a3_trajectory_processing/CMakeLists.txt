@@ -32,11 +32,12 @@ target_link_libraries(retime_trajectory_node ruckig::ruckig)
 add_executable(otg_demo src/otg_demo.cpp)
 target_link_libraries(otg_demo ruckig::ruckig)
 
-# F180: servo 绝对目标（外部积分 + Ruckig 在线 OTG）
+# F180/F181: servo 绝对目标（外部积分 + CLIK + 有状态速度积分 + twist 平滑）
 add_executable(servo_target_node src/servo_target_node.cpp)
 ament_target_dependencies(
   servo_target_node
   rclcpp
+  a3_msgs
   sensor_msgs
   geometry_msgs
   std_srvs
@@ -44,7 +45,6 @@ ament_target_dependencies(
   moveit_core
   moveit_ros_planning
 )
-target_link_libraries(servo_target_node ruckig::ruckig)
 
 install(TARGETS retime_trajectory_node otg_demo servo_target_node
   DESTINATION lib/${PROJECT_NAME}

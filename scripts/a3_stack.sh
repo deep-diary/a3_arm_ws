@@ -7,6 +7,8 @@
 #
 # 用法：
 #   a3_stack.sh start                 启动真机栈（已在跑会拒绝）
+#                                     servo 链默认 = a3_servo_target（F181 绝对目标 + CLIK + twist 平滑）
+#   a3_stack.sh start --moveit-servo  回退到 moveit_servo（旧链路，调试/对照用）
 #   a3_stack.sh stop                  优雅停栈（臂未失能会拒绝，-f 跳过）
 #   a3_stack.sh restart               重启 = stop + start
 #   a3_stack.sh status                查看 can1 / 进程 / arm_status
@@ -36,9 +38,9 @@ WS_DIR="$(dirname "$SCRIPT_DIR")"
 LOG_FILE="/tmp/a3_real_stack.log"
 
 # 栈节点命令行特征（孤儿兜底名单，与 QUICKSTART 一键关停一致）
-NODE_PATTERN='ros2 launch a3_bringup|ros2_control_node|install/a3_arm_controller/lib/a3_arm_controller/arm_controller|power_sequence_node|ps4_mapper|ds4_feedback_node|ros2mqtt_bridge|move_group|retime_trajectory_node|a3_self_test|/joy/joy_node|can_bus_monitor|topic_rate_monitor|aggregator_node|diagnostic_common_diagnostics|ros2 bag record|robot_state_publisher|a3_sim_executor|gravity_torque_node|a3_bringup/servo_mode_bridge|moveit_servo/servo_node_main|servo_anchor'
+NODE_PATTERN='ros2 launch a3_bringup|ros2_control_node|install/a3_arm_controller/lib/a3_arm_controller/arm_controller|power_sequence_node|ps4_mapper|ds4_feedback_node|ros2mqtt_bridge|move_group|retime_trajectory_node|a3_self_test|/joy/joy_node|can_bus_monitor|topic_rate_monitor|aggregator_node|diagnostic_common_diagnostics|ros2 bag record|robot_state_publisher|a3_sim_executor|gravity_torque_node|a3_bringup/servo_mode_bridge|moveit_servo/servo_node_main|servo_target_node|servo_anchor'
 # 复核名单（精简）
-CHECK_PATTERN='ros2 launch a3_bringup|ros2_control_node|a3_arm_controller|power_sequence_node|ps4_mapper|ds4_feedback_node|ros2mqtt_bridge|move_group|joy_node|ros2 bag|robot_state_publisher'
+CHECK_PATTERN='ros2 launch a3_bringup|ros2_control_node|a3_arm_controller|power_sequence_node|ps4_mapper|ds4_feedback_node|ros2mqtt_bridge|move_group|joy_node|ros2 bag|robot_state_publisher|servo_node_main|servo_target_node'
 
 # ── 仿真模式（--sim）──────────────────────────────────────────────
 # 全仿真栈 edge_teleop_full_sim：sim_motor_node 软实时执行层（无 ros2_control_node/
@@ -539,7 +541,8 @@ do_set_zero() {
 }
 
 do_start() {
-  local with_rviz="${1:-0}" do_probe="${2:-1}" do_joy="${3:-1}"
+  local with_rviz="${1:-0}" do_probe="${2:-1}" do_joy="${3:-1}" servo_target="${4:-1}" \
+        do_camera="${5:-1}" do_mqtt="${6:-1}"
   if [ "$SIM" = 1 ]; then
     do_start_sim "$with_rviz" "$do_joy"
     return
@@ -579,9 +582,23 @@ do_start() {
     grip_arg="false"
     joints_desc="6 关节（L1–L6，无夹爪）"
   fi
+  # F181：servo 链路选择（默认 a3_servo_target；--moveit-servo 回退旧链路）
+  local servo_arg="use_servo_target:=true"
+  if [ "$servo_target" = 0 ]; then
+    servo_arg="use_servo_target:=false"
+    info "servo 链路：moveit_servo（--moveit-servo 回退档）"
+  else
+    info "servo 链路：a3_servo_target（绝对目标 + CLIK + twist 平滑，默认）"
+  fi
   info "启动档位：$joints_desc（include_gripper:=$grip_arg）"
+  # F177/F181：servo 验收建议关掉相机/MQTT（USB 相机 + MQTT 各占 20~35% CPU，
+  # 观测到会把 200Hz 控制循环挤出 200ms 级停顿 → feedback stale → freeze-hold）
+  local cam_arg="use_camera:=true" mqtt_arg="use_mqtt:=true"
+  [ "$do_camera" = 0 ] && cam_arg="use_camera:=false"
+  [ "$do_mqtt" = 0 ] && mqtt_arg="use_mqtt:=false"
+  info "附加节点：camera=$([ "$do_camera" = 1 ] && echo on || echo off)，mqtt=$([ "$do_mqtt" = 1 ] && echo on || echo off)"
   info "setsid 启动真机栈，日志：$LOG_FILE"
-  setsid bash -c "source '$SCRIPT_DIR/a3_shell_env.sh' && export PYTHONNOUSERSITE=1 && cd '$WS_DIR' && ros2 launch a3_bringup a3_bringup.launch.py hardware:=can can_interface:=can1 use_rviz:=$rviz_arg include_gripper:=$grip_arg" \
+  setsid bash -c "source '$SCRIPT_DIR/a3_shell_env.sh' && export PYTHONNOUSERSITE=1 && cd '$WS_DIR' && ros2 launch a3_bringup a3_bringup.launch.py hardware:=can can_interface:=can1 use_rviz:=$rviz_arg include_gripper:=$grip_arg $servo_arg $cam_arg $mqtt_arg" \
     </dev/null >"$LOG_FILE" 2>&1 &
 
   info "等待 15s 起栈 …"
@@ -681,7 +698,7 @@ do_status() {
   pgrep -af "ros2 launch a3_bringup.*hardware:=can" 2>/dev/null | grep -v a3_stack.sh || echo "（无）"
 
   echo "── 核心子节点 ──────────────────────"
-  for name in ros2_control_node move_group arm_controller power_sequence_node ps4_mapper ros2mqtt_bridge joy_node; do
+  for name in ros2_control_node move_group arm_controller power_sequence_node ps4_mapper ros2mqtt_bridge joy_node servo_node servo_target_node; do
     local_n="$(pgrep -af "$name" 2>/dev/null | grep -v a3_stack.sh | head -1)"
     if [ -n "$local_n" ]; then
       printf '  %-22s PID %s\n' "$name" "$(echo "$local_n" | awk '{print $1}')"
@@ -846,6 +863,10 @@ usage() {
                  不指定时默认档取自系统级模型配置（a3_robot_model/config/robot_model.yaml，
                  当前默认 6 轴 + 连杆）；7J 档探测到「1..6 在线且缺 7」会自动降级 6 关节档
   --keep-rviz    停栈时不关独立手工起的 RViz
+  --servo-target servo 链 = a3_servo_target（F181 绝对目标 + CLIK + twist 平滑，**默认**）
+  --moveit-servo 回退旧链路 moveit_servo（调试/对照）
+  --no-camera    不起 USB 相机节点（servo 验收建议；省 ~20-30% CPU）
+  --no-mqtt      不起 MQTT 桥（servo 验收建议；省 ~30% CPU）
   --sim          走全仿真栈 edge_teleop_full_sim（domain $SIM_DOMAIN 隔离真机；可放任意位置）
   --no-joy       仅 --sim：不起 joy_node（/joy 由脚本注入，如 ps4_sim_test.py 合成测试）
 
@@ -889,7 +910,8 @@ main() {
     exit $?
   fi
 
-  local force=0 keep_rviz=0 with_rviz=0 do_probe=1 do_joy=1 turn_off=0 set_zero_id=255
+  local force=0 keep_rviz=0 with_rviz=0 do_probe=1 do_joy=1 turn_off=0 set_zero_id=255 servo_target=1 \
+        do_camera=1 do_mqtt=1
   while [ $# -gt 0 ]; do
     case "$1" in
       -f|--force) force=1 ;;
@@ -899,6 +921,10 @@ main() {
       --7j) INCLUDE_GRIPPER=1 ;;
       --keep-rviz) keep_rviz=1 ;;
       --no-joy) do_joy=0 ;;
+      --servo-target) servo_target=1 ;;
+      --moveit-servo) servo_target=0 ;;
+      --no-camera) do_camera=0 ;;
+      --no-mqtt) do_mqtt=0 ;;
       on|start) turn_off=0 ;;
       off|stop) turn_off=1 ;;
       -h|--help) usage; exit 0 ;;
@@ -914,12 +940,12 @@ main() {
   done
 
   case "$action" in
-    start)   do_start "$with_rviz" "$do_probe" "$do_joy" ;;
+    start)   do_start "$with_rviz" "$do_probe" "$do_joy" "$servo_target" "$do_camera" "$do_mqtt" ;;
     stop)    do_stop "$force" "$keep_rviz" ;;
     free)    do_free "$turn_off" ;;
     set-zero) do_set_zero "$set_zero_id" ;;
     restart) do_stop "$force" "$keep_rviz" || exit 1
-             do_start "$with_rviz" "$do_probe" "$do_joy" ;;
+             do_start "$with_rviz" "$do_probe" "$do_joy" "$servo_target" "$do_camera" "$do_mqtt" ;;
     status)  do_status ;;
     *) err "未知动作：$action"; usage; exit 1 ;;
   esac

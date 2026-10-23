@@ -13,6 +13,8 @@ A3 机械臂唯一产品入口（F78）：hardware:=mock|can，两种模式拓�
   a3_trajectory_processing/retime_trajectory_node（保几何重定时，排除夹爪关节）
   moveit_servo servo_node（TwistStamped + JointJog 双输入，输出 → arm JTC 原生话题）
     + servo_mode_bridge
+    （F181：默认改用 a3_trajectory_processing/servo_target_node，与 servo_node 互斥；
+      use_servo_target:=false 回退 moveit_servo；twist 话题不变）
   a3_arm_controller 编排层（control_backend=fjt_action，
     motor_service_backend=controller_switch，require_gate 由 yaml 决定）
   a3_mqtt_bridge（默认包含；broker 不可达自行重连，节点不退出）
@@ -44,13 +46,15 @@ from launch.actions import (
     RegisterEventHandler,
     TimerAction,
 )
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (
+    AndSubstitution,
     Command,
     IfElseSubstitution,
     LaunchConfiguration,
+    NotSubstitution,
     PythonExpression,
 )
 from launch_ros.actions import Node
@@ -154,6 +158,7 @@ def _build(cfg, include_gripper):
     use_rosbag = LaunchConfiguration("use_rosbag")
     bag_dir_cfg = LaunchConfiguration("bag_dir")
     use_servo_anchor = LaunchConfiguration("use_servo_anchor")
+    use_servo_target = LaunchConfiguration("use_servo_target")
 
     bringup_share = get_package_share_directory("a3_bringup")
     desc_share = robot_model.description_share(cfg)
@@ -428,11 +433,13 @@ def _build(cfg, include_gripper):
     )
 
     # ---- servo_node 常驻（TwistStamped + JointJog 双输入），出口指 arm JTC 话题 ----
+    # F181：use_servo_target:=true 时由 a3_servo_target 等价替换本节点（二者互斥）。
     servo_node = Node(
         package="moveit_servo",
         executable="servo_node_main",
         name="servo_node",
         output="screen",
+        condition=UnlessCondition(use_servo_target),
         parameters=[
             {"robot_description": robot_description},
             {"robot_description_semantic": robot_description_semantic},
@@ -451,6 +458,40 @@ def _build(cfg, include_gripper):
         remappings=[
             ("~/delta_twist_cmds", "/servo_node/delta_twist_cmds"),
             ("~/delta_joint_cmds", "/servo_node/delta_joint_cmds"),
+        ],
+    )
+
+    # ---- F180/F181：绝对目标 servo（等价替换 moveit_servo）----
+    # 同一 twist 输入；目标绝对（松手保持）+ CLIK + twist 加速度限幅/一阶低通。
+    # 直接输出 arm JTC 原生话题，因此不与 servo_anchor 叠加（见下方 anchor 条件）。
+    servo_target_node = Node(
+        package="a3_trajectory_processing",
+        executable="servo_target_node",
+        name="a3_servo_target",
+        output="screen",
+        condition=IfCondition(use_servo_target),
+        parameters=[
+            {"robot_description": robot_description},
+            {"robot_description_semantic": robot_description_semantic},
+            {"robot_description_kinematics": kinematics_yaml},
+            {"group_name": "arm"},
+            {"base_frame": "base_link"},
+            {"tip_frame": "end_effector"},
+            {"twist_topic": "/servo_node/delta_twist_cmds"},
+            {"out_topic": "/arm_controller/joint_trajectory"},
+            {"publish_period": 0.01},
+            {"hold_z": True},
+            {"max_step_trans": 0.004},
+            {"twist_timeout": 0.30},
+            {"max_ik_jump": 0.05},
+            {"pos_gain": 4.0},
+            {"acc_gain": 20.0},
+            # F181 twist 平滑（真机验证档）
+            {"twist_max_linear": 0.40},
+            {"twist_max_angular": 1.2},
+            {"twist_max_accel": 1.0},
+            {"twist_max_ang_accel": 3.0},
+            {"twist_lpf_tau": 0.06},
         ],
     )
 
@@ -501,7 +542,9 @@ def _build(cfg, include_gripper):
                 "max_joint_delta_rad": 0.05,
             }
         ],
-        condition=IfCondition(use_servo_anchor),
+        # F181：绝对目标节点已直接输出 JTC 原生话题，不能再叠锚定器（会双积分）
+        condition=IfCondition(AndSubstitution(use_servo_anchor,
+                                              NotSubstitution(use_servo_target))),
     )
 
     # ---- 编排层：F74 FJT 后端 + F75 controller_switch 使能后端 ----
@@ -744,6 +787,7 @@ def _build(cfg, include_gripper):
             watchdog_feed,
             mqtt_bridge,
             servo_node,
+            servo_target_node,
             servo_bridge,
             gravity_torque_node,
             ee_pose,
@@ -870,6 +914,12 @@ def _build(cfg, include_gripper):
             default_value="false",
             description="F118: 在 servo 下游叠 a3_servo_anchor 累积器（绝对目标/外力回弹）；"
                         "true 时 servo command_out 改道 /a3/servo/joint_trajectory/cmd 经锚定转发回 JTC",
+        ),
+        DeclareLaunchArgument(
+            "use_servo_target",
+            default_value="true",
+            description="F181: 默认用 a3_trajectory_processing/servo_target_node"
+                        "（绝对目标 + CLIK + twist 加速度限幅/低通）；false 回退 moveit_servo",
         ),
         rsp,
         sim_power_sequence,

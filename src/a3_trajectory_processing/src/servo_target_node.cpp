@@ -1,18 +1,21 @@
-// F180: servo 绝对目标（外部积分）+ Ruckig 在线 OTG。
+// F180/F181: servo 绝对目标（外部积分）+ CLIK + 有状态速度积分。
 //
-// 背景（见 docs/edge/requirements/F180-servo-absolute-target-integrator.md）：
+// 背景（见 docs/edge/requirements/F180-servo-absolute-target-integrator.md、F181-...）：
 // moveit_servo 每周期 target = 实测 + Δθ，运动期目标只领先 1 个 tick（0.1 m/s 档 1mm≈1mrad），
-// MIT 位置环 kp·e ≈ 0.08 Nm ≪ 抗重力 2.4 Nm → 重力在运动中获胜（x 一动 z 就掉），
-// 且命令流逐周期 CV 0.16（震动）。本节点复用同一条 twist 输入，改成：
+// MIT 位置环 kp·e ≈ 0.08 Nm ≪ 抗重力 2.4 Nm → 重力在运动中获胜（x 一动 z 就掉）。
+// 本节点复用同一条 twist 输入，改成：
 //
-//   twist ──积分──> 绝对末端目标 T_target（z 锁 / 工作空间 / 单周期步长夹紧）
-//        ──IK───>  q_goal（复用 MoveIt RobotState::setFromIK = 本仓 pick_ik 配置）
-//        ──Ruckig OTG（start=实测 q/q̇, target=q_goal, target_velocity=J⁻¹·v_cmd）──>
-//        ──> /arm_controller/joint_trajectory（单点，time_from_start=publish_period）
+//   twist ──限幅/低通──> v（F181：模长上限 + 逐轴加速度限幅 + 一阶低通）──积分──>
+//         绝对末端目标 T_target（z 锁 / 工作空间 / 单周期步长夹紧）
+//        ──CLIK──> q_goal（阻尼最小二乘，种子=上一拍解，解连续）
+//        ──有状态加速度环──> /arm_controller/joint_trajectory（单点，time_from_start=实际步长）
 //
-// 与 moveit_servo 的差异只有两点：**目标绝对**（twist=0 时目标不动 → 保持位姿/抗外力），
-// 输出经 **jerk-limited OTG（C² 连续）** → 没有 20 ms 跳变与 spline 二阶项跳变。
-// 关节限位/速度上限/门禁/急停仍由原有安全层负责（本节点另按 Ruckig 限幅自我约束）。
+// 与 moveit_servo 的差异：**目标绝对**（twist=0 时目标经平滑减速后停住 → 保持位姿/抗外力），
+// 输出经 acc/jerk 限幅（C² 连续）。关节限位/速度上限/门禁/急停仍由原有安全层负责。
+//
+// 为什么先限加速度再低通：twist 从 +v 直接跳到 0 / −v 时，目标速度是阶跃；只靠下游关节级
+// max_acc/max_jerk 兜底会让位置误差瞬间变大（过冲/抖动）。在 twist 层先做有限加速度的
+// 减速/反向段，再一阶低通，目标位置就始终 C¹；代价是松手后目标多走 v·(v/a + τ) ≈ 3–4mm。
 
 #include <algorithm>
 #include <array>
@@ -28,25 +31,30 @@
 
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
+#include <a3_msgs/msg/arm_status.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
 #include <moveit/robot_model_loader/robot_model_loader.h>
 #include <moveit/robot_state/robot_state.h>
-#include <ruckig/ruckig.hpp>
 
 namespace
 {
 constexpr size_t kDof = 6;  // arm 组恒为 L1..L6（夹爪是独立组）
-using Otg = ruckig::Ruckig<kDof>;
-using OtgInput = ruckig::InputParameter<kDof>;
-using OtgTraj = ruckig::Trajectory<kDof>;
 
 double clampd(double v, double lo, double hi) { return std::max(lo, std::min(hi, v)); }
+
+// 只缩不放大：把向量模长夹到 max_norm
+void capNorm(Eigen::Vector3d& v, double max_norm)
+{
+  const double n = v.norm();
+  if (n > max_norm && n > 1e-12) v *= max_norm / n;
+}
 }  // namespace
 
 class ServoTargetNode : public rclcpp::Node
@@ -66,11 +74,18 @@ public:
     twist_timeout_ = declare_parameter<double>("twist_timeout", 0.30);    // [s]
     ik_timeout_ = declare_parameter<double>("ik_timeout", 0.005);         // [s] 须 < publish_period
     mode_topic_ = declare_parameter<std::string>("control_mode_topic", "/a3/control_mode");
+    stale_topic_ = declare_parameter<std::string>("stale_topic", "/a3/hardware/feedback_stale");
     mode_topic_timeout_ = declare_parameter<double>("control_mode_timeout", 0.5);
-    max_vel_ = declare_parameter<double>("ruckig_max_velocity", 1.5);     // [rad/s]
-    max_acc_ = declare_parameter<double>("ruckig_max_acceleration", 5.0);
-    max_jerk_ = declare_parameter<double>("ruckig_max_jerk", 50.0);
+    max_vel_ = declare_parameter<double>("max_joint_velocity", 1.5);      // [rad/s]
+    max_acc_ = declare_parameter<double>("max_joint_acceleration", 5.0);  // [rad/s²]
+    max_jerk_ = declare_parameter<double>("max_joint_jerk", 50.0);        // [rad/s³]
     max_ik_jump_ = declare_parameter<double>("max_ik_jump", 0.05);        // [rad]/周期
+    // F181 twist 平滑：模长上限 → 逐轴加速度限幅 → 一阶低通
+    twist_max_linear_ = declare_parameter<double>("twist_max_linear", 0.40);      // [m/s]
+    twist_max_angular_ = declare_parameter<double>("twist_max_angular", 1.2);     // [rad/s]
+    twist_max_accel_ = declare_parameter<double>("twist_max_accel", 1.0);         // [m/s²]
+    twist_max_ang_accel_ = declare_parameter<double>("twist_max_ang_accel", 3.0); // [rad/s²]
+    twist_lpf_tau_ = declare_parameter<double>("twist_lpf_tau", 0.06);            // [s]，≤1e-3 关闭
     // CLIK（默认）：阻尼最小二乘，种子=上一拍解 → 解连续
     use_clik_ = (declare_parameter<std::string>("ik_solver", "clik") == "clik");
     clik_iters_ = declare_parameter<int>("clik_iters", 12);
@@ -79,16 +94,13 @@ public:
     clik_tol_rot_ = declare_parameter<double>("clik_tol_rot", 1e-3);      // [rad]
     clik_max_dq_ = declare_parameter<double>("clik_max_dq", 0.15);        // [rad]/迭代
     // IK 解低通时间常数：pick_ik 在 position_threshold(1e-4) 容差内的落点逐帧抖动约 0.01 rad，
-    // 折成速度是 ~1 rad/s 的"假速度"；直接喂 OTG 会放大成 1.3Hz 的 0↔0.45rad/s 摆振（实测 L1/L5）。
+    // 折成速度是 ~1 rad/s 的"假速度"；不过滤会放大成 1.3Hz 的 0↔0.45rad/s 摆振（实测 L1/L5）。
     goal_filter_tau_ = declare_parameter<double>("goal_filter_tau", 0.06);  // [s]，0=关闭
     // 跟踪误差保护阈值：**必须大于正常工作时的领先量**（L1 约 8.6mm/rad，30mm/s 下实测领先 0.6~1.1rad）。
     // 设成 0.30 会每 ~0.7s 误触发一次"目标重锚"→ 绝对目标被打回实测 → 冲一下/退回/再冲 = "一快一慢"（实测）。
     max_track_err_ = declare_parameter<double>("max_track_err", 3.0);      // [rad]
-    // OTG 前瞻：目标只领先 1 个周期(~0.002rad)时，配非零 target_velocity 是病态的
-    // （加速/减速/反转每帧重选 → 输出 ±0.25rad/s 摆振）。给 0.06~0.1s 的前瞻让 OTG 真正"巡航"。
-    lookahead_ = declare_parameter<double>("lookahead", 0.08);             // [s]，0=关闭
     // vj 一阶低通：J⁻¹ 对 q_goal 的亚毫弧度抖动敏感，实测 vj 逐帧抖 23%；
-    // 直接当 OTG 的 target_velocity 会让它每帧重选加/减速 → 输出摆振。
+    // 不过滤会让速度前馈逐帧跳变。
     vj_filter_tau_ = declare_parameter<double>("vj_filter_tau", 0.05);     // [s]，0=关闭
     pos_gain_ = declare_parameter<double>("pos_gain", 4.0);               // [1/s] 位置闭环增益
     // 加速度环增益：a_des = acc_gain*(v_ref - v)。
@@ -154,8 +166,6 @@ public:
     state_ = std::make_unique<moveit::core::RobotState>(model_);
     state_->setToDefaultValues();
 
-    otg_ = std::make_unique<Otg>(dt_);
-
     sub_js_ = create_subscription<sensor_msgs::msg::JointState>(
       js_topic_, rclcpp::SensorDataQoS(),
       [this](const sensor_msgs::msg::JointState::SharedPtr msg) { onJointState(msg); });
@@ -170,6 +180,32 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         mode_ = msg->data;
         mode_t_ = now();
+      });
+    // 编排层状态（单写者）：goto/回放期间必须让路。
+    // 不用 /a3/control_mode 做门控——那是多写者槽位，TRAJ_RUNNING 与 IDLE 以十几毫秒交替，
+    // 若把 IDLE 当“中性”，goto 刚开始 1.5ms 后本节点就恢复 100Hz 下发，会把 goto 轨迹顶掉
+    // （实测 goto home 10s 停在 idle 不动，sweep 全程 CLIK 失败 1405 次）。
+    sub_arm_ = create_subscription<a3_msgs::msg::ArmStatus>(
+      "/a3/arm_status", rclcpp::QoS(10),
+      [this](const a3_msgs::msg::ArmStatus::SharedPtr msg) {
+        std::lock_guard<std::mutex> lk(mu_);
+        arm_state_ = msg->state;
+        arm_state_t_ = now();
+      });
+    // F81 硬件看门狗（latched）：任一电机反馈 stale 时插件整臂 freeze-hold，命令被丢弃、
+    // 实测冻结。此时若继续积分目标，目标会一路跑飞（实测 L6 掉线 20s → 目标顶到工作空间
+    // 边界，恢复瞬间臂猛追 + CLIK 换支/撞限位 → 剧烈震荡）。stale=true 时按“非激活”处理：
+    // 每拍把目标/命令重锚到实测，恢复瞬间从当前位姿无缝续上。
+    auto stale_qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable();
+    sub_stale_ = create_subscription<std_msgs::msg::Bool>(
+      stale_topic_, stale_qos,
+      [this](const std_msgs::msg::Bool::SharedPtr msg) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (msg->data != feedback_stale_) {
+          RCLCPP_WARN(get_logger(), "硬件反馈 stale=%d（%s）", msg->data ? 1 : 0,
+                      msg->data ? "暂停跟踪并重锚实测" : "恢复跟踪");
+        }
+        feedback_stale_ = msg->data;
       });
     pub_ = create_publisher<trajectory_msgs::msg::JointTrajectory>(out_topic_, rclcpp::QoS(10));
     srv_reanchor_ = create_service<std_srvs::srv::Trigger>(
@@ -267,15 +303,17 @@ private:
     std::lock_guard<std::mutex> lk(mu_);
     if (!have_state_) return;
 
-    // ---- 0) 模式互锁（F21/F119）----
-    // /a3/control_mode 是**多写者槽位**：servo_mode_bridge 写 SERVO，而 gravity_torque_node /
-    // follow_joint_trajectory_action 周期性写 IDLE/READY → 值以 ~17Hz 交替。
-    // 因此绝不能按 "值 == SERVO" 门控（实测一次会话误退出 34 次，每次都停发+重锚 = "隔几秒顿一下"）。
-    // 判据改为：① 有新鲜 twist；② 不处于编排层的轨迹/异常态（那些必须让路）。
-    const bool mode_blocked = (mode_ == "TRAJ_RUNNING" || mode_ == "READY" || mode_ == "FAULT" ||
-                              mode_ == "ZERO_TORQUE" || mode_ == "COOLING" || mode_ == "DISABLED");
+    // ---- 0) 编排层互锁（F21/F65/F181）----
+    // 判据：① 有新鲜 twist；② **编排层状态**（单写者 /a3/arm_status.state）在 READY/SERVO，
+    // 且 /a3/control_mode 当前值不是 ZERO_TORQUE（自由拖动的兜底）。
+    // 绝不能用 /a3/control_mode 的 TRAJ_RUNNING 来判“轨迹中”：它是多写者槽位，TRAJ_RUNNING 与
+    // IDLE 以十几毫秒交替；把 IDLE 当“中性”会让本节点在 goto 开始 1.5ms 后就恢复下发 → 顶掉轨迹。
+    const bool state_fresh = arm_state_t_.nanoseconds() > 0 &&
+                             (now() - arm_state_t_).seconds() < 1.0;
+    const bool state_ok = state_fresh && (arm_state_ == "READY" || arm_state_ == "SERVO");
+    const bool mode_blocked = (mode_ == "ZERO_TORQUE");
     const bool twist_fresh = have_twist_ && (now() - twist_t_).seconds() < twist_timeout_;
-    const bool active = !mode_blocked && twist_fresh;
+    const bool active = state_ok && !mode_blocked && !feedback_stale_ && twist_fresh;
     if (!active) {
       last_step_t_ = now();
       target_ = state_->getGlobalLinkTransform(tip_frame_);
@@ -286,17 +324,20 @@ private:
         qd_cmd_[i] = qd_meas_[i];
         qa_cmd_[i] = 0.0;
       }
+      v_lim_.setZero();  // 平滑器状态清零，避免恢复时带旧速度
+      v_lp_.setZero();
       if (was_in_servo_) {
         was_in_servo_ = false;
-        RCLCPP_INFO(get_logger(), "停止下发（mode=%s twist_fresh=%d）→ 重锚实测",
-                    mode_.c_str(), twist_fresh ? 1 : 0);
+        RCLCPP_INFO(get_logger(), "停止下发（state=%s mode=%s stale=%d twist_fresh=%d）→ 重锚实测",
+                    arm_state_.c_str(), mode_.c_str(), feedback_stale_ ? 1 : 0, twist_fresh ? 1 : 0);
       }
       return;
     }
     if (!was_in_servo_) {
       was_in_servo_ = true;
       last_step_t_ = now();
-      RCLCPP_INFO(get_logger(), "开始下发（mode=%s）→ 以当前实测位姿为绝对目标起点", mode_.c_str());
+      RCLCPP_INFO(get_logger(), "开始下发（state=%s）→ 以当前实测位姿为绝对目标起点",
+                  arm_state_.c_str());
     }
 
     // 实际步长：定时器在 100Hz 上有抖动（实测偶发 2.8ms 连发两拍、17ms 迟一拍）。
@@ -311,13 +352,35 @@ private:
     }
     last_step_t_ = t_now;
 
-    // ---- 1) 指令有效性（超时 = 零速：目标不动 = 绝对保持）----
-    Eigen::Matrix<double, 6, 1> v = Eigen::Matrix<double, 6, 1>::Zero();
+    // ---- 1) 指令有效性 + twist 平滑（F181）----
+    // 超时 = 零速（绝对保持）；否则先模长限幅、再逐轴加速度限幅、最后一阶低通。
+    Eigen::Matrix<double, 6, 1> v_raw = Eigen::Matrix<double, 6, 1>::Zero();
     if (have_twist_ && (now() - twist_t_).seconds() < twist_timeout_) {
-      v << twist_.twist.linear.x, twist_.twist.linear.y, twist_.twist.linear.z,
+      v_raw << twist_.twist.linear.x, twist_.twist.linear.y, twist_.twist.linear.z,
         twist_.twist.angular.x, twist_.twist.angular.y, twist_.twist.angular.z;
+      Eigen::Vector3d lin = v_raw.head<3>();
+      Eigen::Vector3d ang = v_raw.tail<3>();
+      capNorm(lin, twist_max_linear_);
+      capNorm(ang, twist_max_angular_);
+      v_raw.head<3>() = lin;
+      v_raw.tail<3>() = ang;
     }
-    const bool moving = v.head<3>().norm() > 1e-6 || v.tail<3>().norm() > 1e-6;
+    // 逐轴加速度限幅：正→0 / 正→负都变成有限斜率，不再给下游丢速度台阶
+    const double a_lin = twist_max_accel_ * dt_step;
+    const double a_ang = twist_max_ang_accel_ * dt_step;
+    for (size_t i = 0; i < 3; ++i) {
+      v_lim_[i] += clampd(v_raw[i] - v_lim_[i], -a_lin, a_lin);
+      v_lim_[i + 3] += clampd(v_raw[i + 3] - v_lim_[i + 3], -a_ang, a_ang);
+    }
+    // 一阶低通（τ=0 时直通）
+    if (twist_lpf_tau_ > 1e-3) {
+      const double al = std::min(1.0, dt_step / twist_lpf_tau_);
+      v_lp_ += al * (v_lim_ - v_lp_);
+    } else {
+      v_lp_ = v_lim_;
+    }
+    const Eigen::Matrix<double, 6, 1> v = v_lp_;
+    const bool moving = v.head<3>().norm() > 1e-4 || v.tail<3>().norm() > 1e-3;
 
     // ---- 2) 绝对目标积分（twist 在 base 系 → 左乘）----
     if (moving) {
@@ -337,7 +400,7 @@ private:
         cand.translation()[i] = clampd(cand.translation()[i], ws_min_[i], ws_max_[i]);
       }
       // z 锁：没有 z 指令时锁在当前高度；有 z 指令时跟随并更新锁点
-      if (hold_z_ && std::abs(v[2]) < 1e-6) {
+      if (hold_z_ && std::abs(v[2]) < 1e-4) {
         cand.translation().z() = z_lock_;
       } else {
         z_lock_ = cand.translation().z();
@@ -367,7 +430,7 @@ private:
       for (size_t i = 0; i < kDof; ++i) dmax = std::max(dmax, std::abs(qsol[i] - q_goal_[i]));
       if (dmax < max_ik_jump_) {  // 防换支
         if (goal_filter_tau_ > 1e-3) {
-          const double a = std::min(1.0, dt_ / goal_filter_tau_);
+          const double a = std::min(1.0, dt_step / goal_filter_tau_);
           for (size_t i = 0; i < kDof; ++i) q_goal_[i] += a * (qsol[i] - q_goal_[i]);
         } else {
           q_goal_ = qsol;
@@ -395,15 +458,14 @@ private:
     }
     // vj 低通
     {
-      const double a = (vj_filter_tau_ > 1e-3) ? std::min(1.0, dt_ / vj_filter_tau_) : 1.0;
+      const double a = (vj_filter_tau_ > 1e-3) ? std::min(1.0, dt_step / vj_filter_tau_) : 1.0;
       for (size_t i = 0; i < kDof; ++i) vj_f_[i] += a * (vj[i] - vj_f_[i]);
     }
 
     // ---- 5) 有状态速度积分器（前馈 + 位置闭环 + 加速度/加加速度限幅）----
-    // 为什么不用"每拍 Ruckig 重规划"：目标只领先 1 个周期时，Ruckig 的时间最优解对
-    // 目标的亚毫弧度抖动极其敏感（实测 IK 落点抖 0.5mrad → 输出 ±150% 速度摆振、
-    // 甚至反向）。有状态积分器对同样的抖动只产生 Kp*0.5mrad 的响应，结构上不会自激；
-    // 加速度/加加速度仍按 max_acc/max_jerk 限幅，输出照样是 C² 连续。
+    // 为什么不用"每拍重规划"：目标只领先 1 个周期时，时间最优解对目标的亚毫弧度抖动极其
+    // 敏感（实测 IK 落点抖 0.5mrad → 输出 ±150% 速度摆振、甚至反向）。有状态积分器对同样的
+    // 抖动只产生 Kp*0.5mrad 的响应，结构上不会自激；加速度另经阻尼加速度环（acc_gain）。
     const double a_step = max_jerk_ * dt_step;  // 每拍允许的加速度变化
     std::array<double, kDof> q_out{}, qd_out{}, qa_out{};
     for (size_t i = 0; i < kDof; ++i) {
@@ -417,7 +479,6 @@ private:
       qd_out[i] = qd_cmd_[i];
       qa_out[i] = qa_cmd_[i];
     }
-    const int otg_res = 0;  // 兼容调试 CSV 字段
 
     // ---- 5b) 安全：命令跑得太前（被挡/跟不上）→ 命令状态回拉到实测并重锚 ----
     double track_err = 0.0;
@@ -434,6 +495,8 @@ private:
       target_ = state_->getGlobalLinkTransform(tip_frame_);
       z_lock_ = target_.translation().z();
       q_goal_ = q_meas_;
+      v_lim_.setZero();
+      v_lp_.setZero();
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                            "跟踪误差 %.2f rad 超限 → 命令重锚实测（累计 %d 次）",
                            track_err, track_err_resets_);
@@ -462,7 +525,7 @@ private:
       for (size_t i = 0; i < kDof; ++i) dbg_ << ',' << vj[i];
       for (size_t i = 0; i < kDof; ++i) dbg_ << ',' << qd_out[i];
       for (size_t i = 0; i < kDof; ++i) dbg_ << ',' << vj_f_[i];
-      dbg_ << ',' << (ik_ok ? 1 : 0) << ',' << otg_res << '\n';
+      dbg_ << ',' << (ik_ok ? 1 : 0) << ",0\n";
     }
 
     // ---- 7) 低频诊断 ----
@@ -472,9 +535,9 @@ private:
       const Eigen::Vector3d err =
         target_.translation() - state_->getGlobalLinkTransform(tip_frame_).translation();
       RCLCPP_INFO(get_logger(),
-                  "err=%.1fmm z=%.4f ik_fail=%d/%d ik_jump_rej=%d otg_fail=%d moving=%d |v|=%.3f",
+                  "err=%.1fmm z=%.4f ik_fail=%d/%d ik_jump_rej=%d moving=%d |v|=%.3f",
                   err.norm() * 1e3, target_.translation().z(), ik_fail_streak_, ik_fail_total_,
-                  ik_jump_reject_, otg_fail_total_, moving ? 1 : 0, v.head<3>().norm());
+                  ik_jump_reject_, moving ? 1 : 0, v.head<3>().norm());
     }
   }
 
@@ -489,6 +552,8 @@ private:
   double clik_damping_{ 0.02 }, clik_tol_pos_{ 1e-4 }, clik_tol_rot_{ 1e-4 }, clik_max_dq_{ 0.15 };
   std::vector<double> joint_lo_, joint_hi_;
   double goal_filter_tau_{ 0.06 };
+  double twist_max_linear_{ 0.40 }, twist_max_angular_{ 1.2 };
+  double twist_max_accel_{ 1.0 }, twist_max_ang_accel_{ 3.0 }, twist_lpf_tau_{ 0.06 };
   double log_period_{ 1.0 };
   std::string debug_csv_;
   std::ofstream dbg_;
@@ -501,12 +566,15 @@ private:
   const moveit::core::JointModelGroup* jmg_{ nullptr };
   std::vector<std::string> joint_names_;
   std::unique_ptr<moveit::core::RobotState> state_;
-  std::unique_ptr<Otg> otg_;
 
   // ros
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr sub_js_;
   rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr sub_tw_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_mode_;
+  rclcpp::Subscription<a3_msgs::msg::ArmStatus>::SharedPtr sub_arm_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr sub_stale_;
+  bool feedback_stale_{ false };
+  std::string stale_topic_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr pub_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_reanchor_;
   rclcpp::TimerBase::SharedPtr timer_;
@@ -515,15 +583,18 @@ private:
   std::mutex mu_;
   bool have_state_{ false }, have_twist_{ false }, published_{ false }, was_in_servo_{ false };
   std::string mode_;
+  std::string arm_state_;
+  rclcpp::Time arm_state_t_{ 0, 0, RCL_ROS_TIME };
   rclcpp::Time mode_t_{ 0, 0, RCL_ROS_TIME };
   std::vector<double> q_meas_, qd_meas_, q_goal_;
   std::array<double, kDof> q_cmd_{}, qd_cmd_{}, qa_cmd_{};
   double max_track_err_{ 3.0 };  // [rad] 命令-实测偏差上限（只在真的被挡/失速时才重锚）
-  double lookahead_{ 0.08 };     // [s] OTG 前瞻
   double vj_filter_tau_{ 0.05 };
   double pos_gain_{ 4.0 };
   double acc_gain_{ 20.0 };
   std::array<double, kDof> vj_f_{};
+  Eigen::Matrix<double, 6, 1> v_lim_{ Eigen::Matrix<double, 6, 1>::Zero() };  // 加速度限幅后
+  Eigen::Matrix<double, 6, 1> v_lp_{ Eigen::Matrix<double, 6, 1>::Zero() };   // 低通输出
   int track_err_resets_{ 0 };
   geometry_msgs::msg::TwistStamped twist_;
   rclcpp::Time twist_t_{ 0, 0, RCL_ROS_TIME };
@@ -531,7 +602,7 @@ private:
   rclcpp::Time last_step_t_{ 0, 0, RCL_ROS_TIME };
   Eigen::Isometry3d target_{ Eigen::Isometry3d::Identity() };
   double z_lock_{ 0.0 };
-  int ik_fail_streak_{ 0 }, ik_fail_total_{ 0 }, ik_jump_reject_{ 0 }, otg_fail_total_{ 0 };
+  int ik_fail_streak_{ 0 }, ik_fail_total_{ 0 }, ik_jump_reject_{ 0 };
 };
 
 int main(int argc, char** argv)

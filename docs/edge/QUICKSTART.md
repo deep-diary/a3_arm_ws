@@ -183,6 +183,27 @@ ps aux | grep -E "ros2_control_node|a3_arm_controller|move_group" | grep -v grep
     - **操作员手册：[PS4_OPERATOR_GUIDE.md](PS4_OPERATOR_GUIDE.md)；完整参考表：`src/a3_teleop_ps4/README.md`。**
     - 改键位只编 `config/mappings/default.yaml`（零代码）；轴索引校准见 `config/ds4_linux.yaml`。
     - 勿另开 `servo.launch.py`（双 RSP + sim_executor 冲突）。
+    - **F181 绝对目标 servo（默认链路）**：
+      ```bash
+      ./scripts/a3_stack.sh restart                  # 默认 = a3_servo_target
+      ./scripts/a3_stack.sh restart --moveit-servo   # 回退 moveit_servo（调试/对照）
+      ros2 launch a3_bringup a3_bringup.launch.py hardware:=can use_servo_target:=false  # 直接 launch 时回退
+      ```
+      `a3_servo_target` 维护绝对末端目标（松手保持）+ CLIK + twist 加速度限幅/一阶低通；
+      twist 话题仍是 `/servo_node/delta_twist_cmds`，PS4 L1+摇杆操作不变；goto home/idle、示教等由
+      `/a3/arm/status.state` 互锁自动让路。参数可在 launch 覆盖：`twist_max_accel=1.0`、`twist_lpf_tau=0.06`。
+      **servo 验收/调平滑度请用精简栈**（RViz+相机+MQTT 会把 200Hz 控制循环挤停 → feedback stale →
+      freeze-hold，见 [LL-180](../lessons_learned/LL-180-servo-move-jerk-cpu-starvation-feedback-stale.md)）：
+      ```bash
+      ./scripts/a3_stack.sh restart --no-camera --no-mqtt   # 不要 --rviz
+      ros2 topic hz /joint_states        # 期望 ≈200Hz、max gap <30ms
+      ```
+      验收脚本（自动回 home，输出指标表 + `~/.a3/servo_track/<时间戳>/`）：
+      ```bash
+      python3 scripts/a3_test/f181_servo_track.py sweep                  # 三轴 +10 → -20 → +10 cm @0.03 m/s
+      python3 scripts/a3_test/f181_servo_track.py random --vmax 0.05 --duration 60 --bound 0.10
+      ```
+
 
 11. **机械臂编排节点（F21，a3_arm_controller）：**
     ```bash

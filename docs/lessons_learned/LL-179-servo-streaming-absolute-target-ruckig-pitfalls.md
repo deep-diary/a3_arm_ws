@@ -86,3 +86,22 @@ qd   += qa * dt;
 静止保持段一列一列看：`q_goal` 静 → IK 无问题；`vj_f` 为 0 → 前馈无问题；
 `q_cmd` 仍在摆 → **命令生成器自激**（不要去调 IK 参数）。
 
+## 附录三（2026-10-23）：流式命令源必须按“状态机 state”让路，不能按 `/a3/control_mode`
+
+把 `a3_servo_target` 接进统一 launch 后，真机 `goto home` 完全失效：服务返回成功、规划 12 点、
+10s 后“trajectory finished”，但机械臂一直停在 idle。同一份 sweep 因此全程在 idle 位形跑
+（CLIK 失败 1405 次、命令速度 CV 2.0）。
+
+原因：门控用了 `/a3/control_mode` 的值，而它是**多写者槽位**——`TRAJ_RUNNING` 与 `IDLE`
+以十几毫秒交替。把 IDLE 当“中性”后，goto 开始 **1.5ms** 本节点就恢复 100Hz 单点下发，
+和 move_group 的轨迹在同一 JTC 话题上互相覆盖，goto 被顶掉。
+
+正确做法：用 `/a3/arm_status.state`（arm_controller 单写者）做互锁，
+只有 `READY`/`SERVO` 才允许流式下发；`TRAJ`/`SAFE_PARK`/`TEACH`/`WAYPOINT_TEACH`/`INIT`/`FAULT`/`COOLING`/`DISABLED`
+期间静默并把目标贴回实测。`/a3/control_mode` 只能作为补充信号（如 `ZERO_TORQUE` 兜底），
+**不能用来判断“是否正在跑轨迹”**。
+
+验证方法：`ros2 topic echo /a3/arm_status --field state` 与 `--field mode` 对比——
+goto 期间 state=TRAJ 稳定 10s，而 mode 在 TRAJ_RUNNING/IDLE 之间跳。
+
+

@@ -26,6 +26,22 @@
 ./scripts/a3_test/a3_test.sh all        # env→gripper→hw→telemetry→mqtt_cmd→servo→motor_debug→incident
 ```
 
+F181 绝对目标 servo 跟踪验收（真机，**不经 `a3_test.sh`**）：
+```bash
+./scripts/a3_stack.sh restart --no-camera --no-mqtt   # 精简栈：RViz/相机/MQTT 会挤停 200Hz 控制循环（LL-180）
+# 想回退旧链路：./scripts/a3_stack.sh restart --moveit-servo
+# 臂 READY、gate open 后：
+python3 scripts/a3_test/f181_servo_track.py sweep                          # 三轴 +10→−20→+10cm @0.03m/s
+python3 scripts/a3_test/f181_servo_track.py random --vmax 0.05 --duration 60 --bound 0.10
+python3 scripts/a3_test/f181_servo_track.py random --continuous --vmax 0.05 --duration 60 --axes xy
+```
+`random` 默认是**分段**方形（每步间停 0.15–0.35s，专测 正→0 / 正→负）；
+`--continuous` 改为 OU 随机速度连续跟踪（中途不停，更接近人脸跟踪）。
+若当前已在 home（关节差 <0.03rad），脚本会跳过 goto，避免 0.1s 微调轨迹带来的"抖一下"。
+脚本自动 `goto home`（期间暂停 twist 泵）、记录命令/关节/`/a3/ee_pose`，
+输出命令速度 CV、0.3–3Hz 纹波、跟随误差、回 home、停稳漂移与命令流速率，
+结果落 `~/.a3/servo_track/<时间戳>/<mode>.json`。
+
 LL-039 事故回归（F51，`incident`）：
 - 八a **执行层**：Python mock 电机（对接 `/can_tx_frames` ↔ `/can_rx_frames`，**不走 SocketCAN**，无需 root）
   对接真 `motor_protocol_node`；脚本按事故时间线注入：使能 → 零力矩 → 拖到 1.98 rad → 退出零力矩（执行层 F38 重锚）
