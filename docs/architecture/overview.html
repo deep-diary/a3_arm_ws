@@ -271,7 +271,7 @@ flowchart TB
   CB --> PS["power_sequence_node（use_power_sequence 默认开）"]
   MAIN --> TB0["trajectory_bridge<br/>reBot 话题 ↔ 轨迹总线"]
   MAIN --> ARMCTRL["arm_controller + arm_monitor<br/>（use_arm_controller 默认开）"]
-  MAIN --> MQTT["a3_mqtt_bridge<br/>（use_mqtt 默认开）"]
+  MAIN --> MQTT["a3_mqtt_bridge<br/>（use_mqtt 默认关）"]
   MAIN --> MOVEIT["move_group + FJT action<br/>（use_moveit 默认开）"]
   MAIN --> GRIP["a3_gripper_controller<br/>（use_gripper 默认开）"]
   MAIN --> GRAV["gravity_torque_node（use_gravity_compensation 默认关）"]

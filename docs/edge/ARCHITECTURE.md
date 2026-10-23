@@ -92,7 +92,7 @@ a3_bringup.launch.py
 ├── servo_node + servo_mode_bridge（常驻；TwistStamped + JointJog 双输入 → arm JTC 话题）
 ├── a3_arm_controller（编排层；fjt_action + controller_switch 后端）
 ├── a3_gripper_controller（产品节点；出口指 gripper JTC 话题）
-├── a3_mqtt_bridge（use_mqtt，默认开；web 遥测/指令 F18/F23）
+├── a3_mqtt_bridge（use_mqtt，**默认关**，需 web 遥测时开；web 遥测/指令 F18/F23）
 ├── ps4_teleop.launch.py（use_teleop，默认开）
 ├── usb_camera_node（use_camera，默认开；F177 → /camera/image_raw，设备打不开只告警）
 └── rviz（use_rviz，默认关；单模型 el_a3_view.rviz，内含 "USB Camera" Image display）

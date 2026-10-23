@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>a3_perception</name>
+  <version>0.1.0</version>
+  <description>A3 视觉感知：F183 人脸检测与视觉伺服跟踪</description>
+  <maintainer email="dev@example.com">a3_arm</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>a3_msgs</exec_depend>
+  <!-- face_detect_node 另需 mediapipe + numpy：装在 ~/.a3/venv/face_track，
+       不声明为 rosdep（apt 无包），由 scripts/setup_face_track_env.sh 准备 -->
+  <exec_depend>python3-numpy</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

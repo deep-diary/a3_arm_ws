@@ -32,7 +32,7 @@ colcon build --symlink-install --packages-select a3_bringup
 # 真机（F78 唯一产品入口）
 sudo systemctl start can-up.service
 ros2 launch a3_bringup a3_bringup.launch.py hardware:=can
-# 组件开关：use_mqtt/use_teleop（默认开）；use_rviz/use_monitor（默认关）；
+# 组件开关：use_mqtt（默认关，需 web 遥测时置 true）/use_teleop（默认开）；use_rviz/use_monitor（默认关）；
 #           can_interface（默认 can1）；move_group / servo 常驻不可关
 
 # 全仿真（无 CAN；与真机同构）

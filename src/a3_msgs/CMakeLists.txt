@@ -24,6 +24,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/MotorIdCommand.srv"
   "srv/SetPayload.srv"
   "msg/ArmStatus.msg"
+  "msg/FaceTarget.msg"
   "msg/GripperStatus.msg"
   "msg/MonitorStatus.msg"
   "msg/TorqueComponents.msg"

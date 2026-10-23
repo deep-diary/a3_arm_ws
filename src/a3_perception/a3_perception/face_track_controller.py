@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+"""F183 人脸跟踪控制器：a3_msgs/FaceTarget → TwistStamped（base 系）。
+
+  /a3/face_target  (检测节点)
+  /a3/ee_pose      (F175，取 R_base_ee 用于把相机系速度转到 base 系)
+  /a3/arm_status   (门控：只允许 READY / SERVO)
+  /a3/control_mode (门控：ZERO_TORQUE 时闭嘴)
+        ↓
+  /servo_node/delta_twist_cmds (a3_servo_target 输入，50 Hz)
+
+控制律（相机系 → base 系）：
+  v_cam  = [kp·X/1000, kp·Y/1000, kz·(Z-z_ref)/1000]      # X/Y/Z 来自 FaceTarget.xyz_mm
+  v_base = R_base_ee · R_ee_cam(45° 外参) · v_cam
+  死区内输出 0；|v| ≤ v_max；逐拍斜坡 ≤ ramp_accel·dt
+
+安全：
+  - 默认**未使能**，必须调 /a3/face_track/enable (std_srvs/SetBool) 打开；
+  - 未使能时**完全不发** twist（避免与 PS4 遥操作抢同一话题）；
+  - 使能但门控不满足 → 发 0 并保持；
+  - 任何异常/退出 → 发 0。
+"""
+
+from __future__ import annotations
+
+import math
+import sys
+from collections import deque
+
+import numpy as np
+import rclpy
+from geometry_msgs.msg import PoseStamped, TwistStamped
+from rcl_interfaces.msg import SetParametersResult
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import String
+from std_srvs.srv import SetBool
+
+try:
+    from a3_msgs.msg import ArmStatus, FaceTarget
+except ImportError:
+    print("[x] 找不到 a3_msgs：先 colcon build --packages-select a3_msgs", file=sys.stderr)
+    raise
+
+
+def rpy_to_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    """R = Rz(yaw)·Ry(pitch)·Rx(roll)，角度为弧度。"""
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    return np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr],
+    ])
+
+
+def quat_to_matrix(x: float, y: float, z: float, w: float) -> np.ndarray:
+    n = math.sqrt(x * x + y * y + z * z + w * w)
+    if n < 1e-9:
+        return np.eye(3)
+    x, y, z, w = x / n, y / n, z / n, w / n
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ])
+
+
+class FaceTrackController(Node):
+    def __init__(self) -> None:
+        super().__init__("face_track_controller")
+
+        self.declare_parameter("target_topic", "/a3/face_target")
+        self.declare_parameter("twist_topic", "/servo_node/delta_twist_cmds")
+        self.declare_parameter("ee_pose_topic", "/a3/ee_pose")
+        self.declare_parameter("arm_status_topic", "/a3/arm_status")
+        self.declare_parameter("control_mode_topic", "/a3/control_mode")
+        self.declare_parameter("base_frame", "base_link")
+        self.declare_parameter("rate_hz", 50.0)
+
+        # 控制增益与限幅
+        self.declare_parameter("kp_img", 0.9)        # [1/s] 横向/纵向
+        self.declare_parameter("kz", 1.2)            # [1/s] 深度
+        self.declare_parameter("v_max", 0.05)        # [m/s] F181 已验证档位
+        self.declare_parameter("ramp_accel", 0.5)    # [m/s²]
+        self.declare_parameter("deadband", 0.025)    # 归一化图像误差死区
+        self.declare_parameter("deadband_exit", 0.055)  # 滞环：出死区阈值（防边界抖动）
+        self.declare_parameter("edge_hold", 0.88)    # |err| 超过则视为不可信（人脸被裁切）
+        self.declare_parameter("settle_time_s", 0.6)  # 重新捕获后增益从 0 渐变到 1 的时长
+        self.declare_parameter("dz_deadband_mm", 20.0)
+        self.declare_parameter("z_ref_m", 0.45)
+        self.declare_parameter("z_min_m", 0.15)
+        self.declare_parameter("z_max_m", 0.90)
+        # 只做平面跟踪（不标定单目深度时用）：vz 恒 0，死区不看 dz
+        self.declare_parameter("enable_depth", True)
+
+        # 相机相对杆轴下偏 45°。由 FK + 实测反推（2026-10-23）：
+        # 画面右 = 基座 +Y、画面上 = +Z、光轴 = -X（前后，暂不跟踪）。
+        # 该值在旧 home(L4=0，光轴俯 45°) 与新 home(L4=-0.785，光轴水平) 下同时成立。
+        self.declare_parameter("cam_rpy_deg", [135.0, 0.0, 0.0])
+        # 采样一致性：取最近 median_n 个目标的逐分量中位数（抗单帧跳变），
+        # 且最近若干帧的离散度超过 agree_tol（归一化误差）时判为"不稳定"→ 停发
+        self.declare_parameter("median_n", 3)
+        self.declare_parameter("agree_tol", 0.10)
+        self.declare_parameter("enable_angular", False)
+        self.declare_parameter("ka", 0.8)            # [1/s] 角速度增益（enable_angular 时）
+
+        self.declare_parameter("target_timeout", 0.5)
+        self.declare_parameter("ee_timeout", 0.5)
+        # 工作空间虚拟墙：接近边界时把朝外的速度分量置 0，避免目标顶到夹紧值后
+        # 继续积分 → 目标跑到够不到的地方（真机实测会引发 IK 大量失败 + 手臂乱扭）
+        self.declare_parameter("workspace_min", [-0.60, -0.45, 0.02])
+        self.declare_parameter("workspace_max", [0.45, 0.45, 0.70])
+        self.declare_parameter("workspace_margin_m", 0.03)
+
+        p = self.get_parameter
+        self.twist_topic = str(p("twist_topic").value)
+        self.base_frame = str(p("base_frame").value)
+        self.kp = float(p("kp_img").value)
+        self.kz = float(p("kz").value)
+        self.v_max = abs(float(p("v_max").value))
+        self.ramp = abs(float(p("ramp_accel").value))
+        self.deadband = abs(float(p("deadband").value))
+        self.deadband_exit = max(self.deadband, abs(float(p("deadband_exit").value)))
+        self.edge_hold = min(1.5, abs(float(p("edge_hold").value)))
+        self.settle_time = max(1e-3, float(p("settle_time_s").value))
+        self._in_dead = True
+        self.dz_dead = abs(float(p("dz_deadband_mm").value))
+        self.z_ref = float(p("z_ref_m").value)
+        self.z_min = float(p("z_min_m").value)
+        self.z_max = float(p("z_max_m").value)
+        self.enable_angular = bool(p("enable_angular").value)
+        self.median_n = max(1, int(p("median_n").value))
+        self.agree_tol = abs(float(p("agree_tol").value))
+        self._hist = deque(maxlen=9)
+        self._hist_t = 0.0
+        self.enable_depth = bool(p("enable_depth").value)
+        self.ka = float(p("ka").value)
+        self.target_timeout = float(p("target_timeout").value)
+        self.ee_timeout = float(p("ee_timeout").value)
+        self.ws_min = np.array([float(v) for v in p("workspace_min").value])
+        self.ws_max = np.array([float(v) for v in p("workspace_max").value])
+        self.ws_margin = abs(float(p("workspace_margin_m").value))
+        self.ee_pos = None
+        rpy = [math.radians(float(v)) for v in p("cam_rpy_deg").value]
+        self.r_ee_cam = rpy_to_matrix(rpy[0], rpy[1], rpy[2])
+
+        rel = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
+                         durability=DurabilityPolicy.VOLATILE)
+        self.create_subscription(FaceTarget, str(p("target_topic").value), self._on_target, rel)
+        self.create_subscription(PoseStamped, str(p("ee_pose_topic").value), self._on_ee, rel)
+        self.create_subscription(ArmStatus, str(p("arm_status_topic").value),
+                                 self._on_status, rel)
+        self.create_subscription(String, str(p("control_mode_topic").value),
+                                 self._on_mode, rel)
+        self.pub = self.create_publisher(TwistStamped, self.twist_topic, rel)
+        self.create_service(SetBool, "/a3/face_track/enable", self._on_enable)
+
+        self.enabled = False
+        self.target: FaceTarget | None = None
+        self.target_t = 0.0
+        self.r_base_ee = np.eye(3)
+        self.ee_t = 0.0
+        self.arm_state = ""
+        self.control_mode = ""
+        self.v_cmd = np.zeros(3)
+        self.w_cmd = np.zeros(3)
+        self.hold_until = 0.0        # 失能后仍发 0 的截止时间
+        self._last_reason = ""
+
+        # 联调期允许运行时改增益/限速/深度轴（不用重启节点）
+        self.add_on_set_parameters_callback(self._on_params)
+
+        dt = 1.0 / max(1.0, float(p("rate_hz").value))
+        self.dt = dt
+        self.create_timer(dt, self._tick)
+        self.get_logger().info(
+            f"face_track 就绪：{p('target_topic').value} → {self.twist_topic}；"
+            f"v_max {self.v_max:.3f} m/s，kp {self.kp:.2f}，z_ref {self.z_ref:.2f} m，"
+            f"深度轴 {'开' if self.enable_depth else '关（平面跟踪）'}，"
+            f"cam_rpy {[round(math.degrees(a), 1) for a in rpy]}°；"
+            "当前**未使能**（调 /a3/face_track/enable）")
+
+    def _on_params(self, params):
+        for prm in params:
+            if prm.name == "enable_depth":
+                self.enable_depth = bool(prm.value)
+                self.get_logger().warn(f"深度轴 → {'开' if self.enable_depth else '关（平面跟踪）'}")
+            elif prm.name == "v_max":
+                self.v_max = abs(float(prm.value))
+                self.get_logger().warn(f"v_max → {self.v_max:.3f} m/s")
+            elif prm.name == "kp_img":
+                self.kp = float(prm.value)
+            elif prm.name == "kz":
+                self.kz = float(prm.value)
+            elif prm.name == "deadband":
+                self.deadband = abs(float(prm.value))
+                self.deadband_exit = max(self.deadband, self.deadband_exit)
+            elif prm.name == "deadband_exit":
+                self.deadband_exit = max(self.deadband, abs(float(prm.value)))
+            elif prm.name == "edge_hold":
+                self.edge_hold = min(1.5, abs(float(prm.value)))
+            elif prm.name == "settle_time_s":
+                self.settle_time = max(1e-3, float(prm.value))
+            elif prm.name == "dz_deadband_mm":
+                self.dz_dead = abs(float(prm.value))
+            elif prm.name == "z_ref_m":
+                self.z_ref = float(prm.value)
+            elif prm.name == "enable_angular":
+                self.enable_angular = bool(prm.value)
+            elif prm.name == "cam_rpy_deg":
+                r = [math.radians(float(v)) for v in prm.value]
+                self.r_ee_cam = rpy_to_matrix(r[0], r[1], r[2])
+                self.get_logger().warn(
+                    f"cam_rpy_deg → {[round(math.degrees(a), 1) for a in r]}°")
+        return SetParametersResult(successful=True)
+
+    # ------------------------------------------------------------------ 回调
+    def _on_target(self, msg: FaceTarget) -> None:
+        now = self.get_clock().now().nanoseconds * 1e-9
+        self.target = msg
+        self.target_t = now
+        if msg.detected and msg.valid:
+            if now - self._hist_t > 0.4:      # 断档超过 0.4s 就丢弃旧样本
+                self._hist.clear()
+            self._hist.append((msg.image_error.x, msg.image_error.y,
+                               msg.xyz_mm.x, msg.xyz_mm.y, msg.xyz_mm.z))
+            self._hist_t = now
+
+    def _on_ee(self, msg: PoseStamped) -> None:
+        q = msg.pose.orientation
+        self.r_base_ee = quat_to_matrix(q.x, q.y, q.z, q.w)
+        self.ee_pos = np.array([msg.pose.position.x, msg.pose.position.y,
+                                msg.pose.position.z])
+        self.ee_t = self.get_clock().now().nanoseconds * 1e-9
+
+    def _on_status(self, msg: ArmStatus) -> None:
+        self.arm_state = msg.state
+
+    def _on_mode(self, msg: String) -> None:
+        self.control_mode = msg.data
+
+    def _on_enable(self, req: SetBool.Request, resp: SetBool.Response) -> SetBool.Response:
+        if req.data == self.enabled:
+            resp.success, resp.message = True, f"already {'enabled' if self.enabled else 'disabled'}"
+            return resp
+        self.enabled = bool(req.data)
+        self.v_cmd[:] = 0.0
+        self.w_cmd[:] = 0.0
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if self.enabled:
+            self.hold_until = 0.0
+            resp.message = "face tracking ENABLED"
+        else:
+            self.hold_until = now + 1.0     # 失能后补发 1s 的 0，确保下游立刻停
+            resp.message = "face tracking DISABLED"
+        resp.success = True
+        self.get_logger().warn(resp.message)
+        return resp
+
+    # -------------------------------------------------------------- 主控制环
+    def _gate_reason(self, now: float) -> str:
+        """返回空串表示可动；否则返回不可动原因（用于日志与零速）。"""
+        if self.target is None:
+            return "no target yet"
+        dt = now - self.target_t
+        if dt > self.target_timeout:
+            return "target stale"
+        if not self.target.detected:
+            return "no face"
+        if not self.target.valid:
+            return "target invalid (coasting)"
+        # 人脸贴边时地标被裁切，中心误差会突变 → 不采信（进出画面晃动的主因之一）
+        if max(abs(self.target.image_error.x), abs(self.target.image_error.y)) > self.edge_hold:
+            return "face near edge"
+        if self.arm_state not in ("READY", "SERVO"):
+            return f"arm state={self.arm_state or '?'}"
+        if self.control_mode == "ZERO_TORQUE":
+            return "control_mode=ZERO_TORQUE"
+        if (now - self.ee_t) > self.ee_timeout:
+            return "ee_pose stale"
+        z = self.target.xyz_mm.z / 1000.0
+        if not (self.z_min <= z <= self.z_max):
+            return "z out of range"
+        return ""
+
+    def _tick(self) -> None:
+        now = self.get_clock().now().nanoseconds * 1e-9
+
+        if not self.enabled:
+            if now < self.hold_until:
+                self._publish(np.zeros(3), np.zeros(3), now)
+            return
+
+        reason = self._gate_reason(now)
+        if reason:
+            if reason != self._last_reason:
+                self.get_logger().warn(f"hold：{reason}")
+                self._last_reason = reason
+            self.v_cmd[:] = 0.0
+            self.w_cmd[:] = 0.0
+            self._publish(self.v_cmd, self.w_cmd, now)
+            return
+        if self._last_reason:
+            self.get_logger().info(f"恢复跟踪（原 hold：{self._last_reason}）")
+            self._last_reason = ""
+
+        t = self.target
+        if not self._hist:
+            return
+        # 逐分量中位数（抗单帧跳变）+ 一致性门：最近几帧离散太大 = 检测不稳 → 停发
+        last = list(self._hist)[-self.median_n:]
+        ex = float(np.median([h[0] for h in last]))
+        ey = float(np.median([h[1] for h in last]))
+        x_mm = float(np.median([h[2] for h in last]))
+        y_mm = float(np.median([h[3] for h in last]))
+        z_mm = float(np.median([h[4] for h in last]))
+        spread = max(max(h[0] for h in last) - min(h[0] for h in last),
+                     max(h[1] for h in last) - min(h[1] for h in last))
+        if spread > self.agree_tol:
+            self.v_cmd[:] = 0.0
+            self.w_cmd[:] = 0.0
+            self._publish(self.v_cmd, self.w_cmd, now)
+            self.get_logger().warn(
+                f"目标不一致（最近 {len(last)} 帧离散 {spread:.3f} > {self.agree_tol}）→ 停发",
+                throttle_duration_sec=2.0)
+            return
+        e_xy = max(abs(ex), abs(ey))
+        dz_mm = z_mm - self.z_ref * 1000.0
+        depth_ok = (not self.enable_depth) or abs(dz_mm) < self.dz_dead
+        # 死区带滞环：进 2.5%、出 5.5%，避免在边界上来回启停
+        thr = self.deadband_exit if self._in_dead else self.deadband
+        self._in_dead = e_xy < thr and depth_ok
+        in_dead = self._in_dead
+
+        v_cam = np.zeros(3) if in_dead else np.array([
+            self.kp * x_mm / 1000.0,
+            self.kp * y_mm / 1000.0,
+            (self.kz * dz_mm / 1000.0) if self.enable_depth else 0.0,
+        ])
+        w_cam = np.zeros(3)
+        if self.enable_angular and not in_dead:
+            w_cam = np.array([-self.ka * ey, self.ka * ex, 0.0])
+
+        # 相机系 → base 系（45° 外参在这里，眼在手上）
+        r_base_cam = self.r_base_ee @ self.r_ee_cam
+        v_des = r_base_cam @ v_cam
+        w_des = r_base_cam @ w_cam
+
+        # 重新捕获后增益从 0 线性升到 1（track_age 在丢脸后归零）：
+        # 人脸从画面边上重新出现时不会立刻按满速冲过去，消除"进出画面晃动"
+        scale = min(1.0, max(0.0, t.track_age_s / self.settle_time))
+        v_des *= scale
+        w_des *= scale
+
+        # 工作空间虚拟墙：贴边时不再朝外推（否则目标被夹在边界面而实测跟不上，
+        # 目标越积越远 → IK 大量失败、手臂乱扭）。也顺带避免"往上够不到还硬顶"。
+        clamped = []
+        if self.ee_pos is not None:
+            for i in range(3):
+                if v_des[i] > 0.0 and self.ee_pos[i] >= self.ws_max[i] - self.ws_margin:
+                    v_des[i] = 0.0
+                    clamped.append("xyz"[i] + "+")
+                elif v_des[i] < 0.0 and self.ee_pos[i] <= self.ws_min[i] + self.ws_margin:
+                    v_des[i] = 0.0
+                    clamped.append("xyz"[i] + "-")
+        if clamped:
+            self.get_logger().warn(
+                f"工作空间挡板：{'/'.join(clamped)} 方向已置零（EE={np.round(self.ee_pos, 3)}）",
+                throttle_duration_sec=2.0)
+
+        n = float(np.linalg.norm(v_des))
+        if n > self.v_max:
+            v_des *= self.v_max / n
+        # 逐拍斜坡（只对线速度；角速度默认关闭）
+        dv = v_des - self.v_cmd
+        max_dv = self.ramp * self.dt
+        if np.linalg.norm(dv) > max_dv:
+            dv *= max_dv / float(np.linalg.norm(dv))
+            v_des = self.v_cmd + dv
+        self.v_cmd = v_des
+        self.w_cmd = w_des
+
+        self._publish(self.v_cmd, self.w_cmd, now)
+
+    def _publish(self, v: np.ndarray, w: np.ndarray, now: float) -> None:
+        msg = TwistStamped()
+        msg.header.stamp.sec = int(now)
+        msg.header.stamp.nanosec = int((now - int(now)) * 1e9)
+        msg.header.frame_id = self.base_frame
+        msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z = map(float, v)
+        msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z = map(float, w)
+        self.pub.publish(msg)
+
+
+def main(args=None) -> int:
+    rclpy.init(args=args)
+    node = FaceTrackController()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # 退出前补一帧 0，避免下游保持最后一拍速度
+        try:
+            node._publish(np.zeros(3), np.zeros(3),
+                          node.get_clock().now().nanoseconds * 1e-9)
+        except Exception:  # noqa: BLE001
+            pass
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -11,7 +11,7 @@
 3. **唯一产品入口 `ros2 launch a3_bringup a3_bringup.launch.py hardware:=mock|can ...`（F78）**：ros2_control 标准栈，mock/can 两种模式拓扑完全一致（编排层 + MQTT 桥 + MoveIt OMPL/Pilz + Servo + 夹爪 + PS4）
    - `hardware:=mock`（默认）：`mock_components/GenericSystem`，无需 CAN/电机即可起栈（仿真/开发用）；mock 栈同时启动 `sim_power_sequence_node`（同名/同话题/同锁存 QoS 对齐真机执行层 power_sequence_node，F110），故 `/power_sequence/gate_open`/`state` 行为、PS4 L3 使能与 F61 灯效（READY 绿）与真机完全一致，不会出现离线红闪
    - `hardware:=can can_interface:=can1`：`a3_hardware_interface/A3MITHardwareInterface` 直连 SocketCAN（真机先 `sudo systemctl start can-up.service`；vcan 验收 `can_interface:=vcan0`）。非法 hardware 值会被 launch 硬拒，mock 不触碰任何 CAN socket
-   - 组件开关：`use_mqtt` / `use_teleop` 默认 true，`use_rviz` / `use_monitor` 默认 false；`teleop_mapping:=default|simple`；`use_sw_render` 默认 **false**（走 panfrost 硬件 GL，LL-027 2026-10-16 复测；卡死时置 true 回退软件渲染）
+   - 组件开关：`use_teleop` 默认 true；**`use_mqtt` 默认 false**（2026-10-23 起，MQTT 常驻 30~57% CPU 会触发 freeze-hold，见 LL-180；需要 web 遥测时 `--mqtt` / `use_mqtt:=true`）；`use_rviz` / `use_monitor` 默认 false；`teleop_mapping:=default|simple`；`use_sw_render` 默认 **false**（走 panfrost 硬件 GL，LL-027 2026-10-16 复测；卡死时置 true 回退软件渲染）
    - JTC 默认 **inactive 启动**，需经 `/a3/arm/enable`（或 PS4 L3）激活后才会运动
 
 #### 真机栈 启停 / 重启（手工 setsid 方式）
@@ -276,7 +276,7 @@ ps aux | grep -E "ros2_control_node|a3_arm_controller|move_group" | grep -v grep
     浏览器经 MQTT 直连 EMQX 下发机械臂指令，无需 Django 经手；编排状态实时回显。
     ```bash
     # 设备侧：统一入口默认已含编排节点 + MQTT 桥接（bridge.yaml 已含 /a3/arm_status 展平）
-    ros2 launch a3_bringup a3_bringup.launch.py hardware:=can   # 真机；use_mqtt 默认 true
+    ros2 launch a3_bringup a3_bringup.launch.py hardware:=can   # 真机；use_mqtt 默认 false（需要 web 遥测再加 use_mqtt:=true）
     ```
     - 前端（外部仓 `/home/cat/deep-trace`，分支 `rk3588`）：RK3588 详情页 → 「机械臂编排节点」(`a3_arm_controller`) 卡片 → 点击展开控制面板。
     - 面板含状态区（`arm_state`/`arm_mode`/`arm_message`，随 `/a3/arm_status` 刷新）、10 个动作按钮（初始化/使能/失能/示教起止/保存/回放/goto/进入退出 AI）、操作消息列表。

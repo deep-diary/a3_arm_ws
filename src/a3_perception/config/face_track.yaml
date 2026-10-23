@@ -1,0 +1,65 @@
+# F183 人脸跟踪参数
+# 用户级覆盖放 ~/.a3/camera/face_calib.yaml（同名键，后加载者优先），不要改这里。
+
+/face_detect_node:
+  ros__parameters:
+    image_topic: /camera/image_raw
+    output_topic: /a3/face_target
+    model_path: ~/.a3/models/face_landmarker.task
+    debug_image: false
+    debug_topic: /a3/face_track/debug_image
+    # 无内参时的水平视场角估算（只影响 X/Y 的毫米换算，控制器用归一化误差做死区）
+    hfov_deg: 60.0
+    # 单目深度标定：z_mm = 规范单位 × depth_units_mm × depth_scale
+    # 把脸放已知距离 200mm 处读 Z 中位数 R，令 depth_units_mm ← depth_units_mm × 200/R
+    depth_units_mm: 14.0
+    depth_scale: 1.0
+    # One-Euro：静止强平滑，快速转头自动放松（min_cutoff 越小越平滑但越滞后）
+    min_cutoff: 1.0
+    filter_beta: 0.05
+    coast_timeout_s: 0.30
+    # 检测节流上限；实测 640×480 约 18 Hz，设 20 即为不节流
+    max_rate_hz: 20.0
+    min_confidence: 0.4
+    jump_reject_frac: 0.25
+
+/face_track_controller:
+  ros__parameters:
+    target_topic: /a3/face_target
+    twist_topic: /servo_node/delta_twist_cmds
+    ee_pose_topic: /a3/ee_pose
+    arm_status_topic: /a3/arm_status
+    control_mode_topic: /a3/control_mode
+    base_frame: base_link
+    rate_hz: 50.0
+    # 增益：v = kp × 横向偏移[m]，v_z = kz × 深度误差[m]
+    kp_img: 0.9
+    kz: 1.2
+    v_max: 0.05          # F181 已验证的人脸跟踪档位
+    ramp_accel: 0.5      # m/s²
+    deadband: 0.04        # 归一化图像误差死区（4% 半幅 ≈ 13px）
+    deadband_exit: 0.055  # 滞环出死区阈值（防边界反复启停）
+    edge_hold: 0.88       # |err| 超过视为不可信（人脸被画面裁切）
+    settle_time_s: 0.6    # 重新捕获后增益 0→1 的渐变时长（消除进出画面晃动）
+    dz_deadband_mm: 20.0
+    z_ref_m: 0.45
+    z_min_m: 0.15
+    z_max_m: 0.90
+    # end_effector → camera_optical_frame。
+    # FK 反推 + 实测确认（2026-10-23）：画面右 = 基座 +Y、画面上 = +Z、光轴 = -X（前后不跟踪）。
+    # 旧 home(L4=0) 光轴俯 45°、新 home(L4=-0.785) 光轴水平，两者都被该值同时满足。
+    # 若换相机支架必须重标；左右反了就把第一个数改成 -45。
+    cam_rpy_deg: [135.0, 0.0, 0.0]
+    # 采样一致性：取最近 median_n 帧的逐分量中位数（抗单帧跳变）；
+    # 最近几帧离散超过 agree_tol（归一化误差）判为"检测不稳"→ 停发，防进出画面抽动。
+    median_n: 3
+    agree_tol: 0.10
+    enable_angular: false
+    ka: 0.8
+    target_timeout: 0.5
+    ee_timeout: 0.5
+    # 工作空间虚拟墙（与 a3_servo_target 默认一致）：贴边时不再朝外推，
+    # 否则目标被夹在边界面、实测跟不上 → 目标越积越远 → IK 大量失败 + 手臂乱扭
+    workspace_min: [-0.60, -0.45, 0.02]
+    workspace_max: [0.45, 0.45, 0.70]
+    workspace_margin_m: 0.03

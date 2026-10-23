@@ -62,3 +62,10 @@
 - 出参 `ros2 topic hz` 出现 **≈2×publish_period 的整倍数且 min=0.000s** → 先怀疑双发布者。
 - 用 Python 统计节拍会被 rclpy 拖慢（本轮 50 Hz 流只记到 ~9.5 Hz，误判成"命令恒 0"）：
   速率一律以 `ros2 topic hz` 或 rosbag 为准；逐帧数据用"后台线程发 + 主线程全速 spin"。
+
+**附录（2026-10-23，F183 期间发现）**：`a3_bringup/ee_pose_publisher` 也**不在** `NODE_PATTERN` 里，
+本机实测累积 **16 个孤儿**（`pgrep -af ee_pose_publisher` 数 `/usr/bin/python3 … lib/a3_bringup/ee_pose_publisher`，
+每次 restart 留一个），合计约 5 核、把 load average 顶到 22，直接导致：
+① 人脸检测只有 8 Hz（干净时应 ~17 Hz）；② `/a3/ee_pose` 有多个同内容发布者，排查时容易误判；
+③ `stop` 报"已清干净"但进程仍在。已把 `a3_bringup/ee_pose_publisher` 追加进 `NODE_PATTERN`。
+自查一行：`pgrep -af 'lib/a3_bringup/ee_pose_publisher' | wc -l`，正常 ≤1（栈在跑）。

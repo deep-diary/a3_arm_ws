@@ -27,6 +27,8 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | DS4 IMU | `sensor_msgs/Imu` | 可选 hidraw（陀螺/加速度） |
 | 摄像头图像 | `sensor_msgs/Image` | F177：`/camera/image_raw`，`encoding=bgr8`，**默认 1280×720 MJPG @30fps**（`a3_bringup/usb_camera_node`；640×480 只有 25fps，是本机设备上限）；**QoS=sensor-data（BEST_EFFORT/KEEP_LAST 5）**，消费者需同样选 Best Effort（RViz Image display 的 Topic 已配 Best Effort）；**随真机栈启动**（`use_camera` 默认 true，设备可 `camera_device` 覆盖） |
 | 摄像头内参 | `sensor_msgs/CameraInfo` | 同上节点的 `/camera/camera_info`（`frame_id=camera_optical_frame`，未标定，仅占位；同图消息同循环发布，可用来量发布节拍） |
+| 人脸跟踪目标 | `a3_msgs/msg/FaceTarget` | F183：`/a3/face_target`，由 `a3_perception/face_detect_node`（mediapipe FaceLandmarker，478 点）发布，约 12–20 Hz。6 个控制参数 `xyz_mm`（相机光学系，mm）+ `yaw/pitch/roll_deg`（yaw>0 朝画面右、pitch>0 抬头、roll>0 头向画面右下歪）；`image_error` 为归一化像素误差；`detected`/`valid` 区分“帧内检出”与“滤波后可控制”（coasting 期为 false）。RELIABLE depth 10 |
+
 ## 标准话题（单臂，无 namespace）
 
 ### 轨迹输入（订阅侧 / 执行层监听）
@@ -143,6 +145,10 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/arm_status` | `a3_msgs/msg/ArmStatus` | 聚合状态快照（`state` + `mode` + 7 关节位置 + `temperatures`（F44）+ `max_torques`（F43，无数据 0.0）+ `temp_warn`（F44）+ 时间戳 + `ff_gravity/ff_coriolis/ff_inertia/ff_total/pd_feedback/command_torque`（F160 力矩分量分解，关节空间 N·m，L7 无前馈恒 0）），默认 10 Hz，作为前端唯一状态入口 |
 | `/a3/hardware/torque_components` | `a3_msgs/msg/TorqueComponents` | F160 力矩分量分解源（重力/科氏+离心/惯量 AFF/总前馈/PD 反馈/总指令/实测），由 `a3_hardware_interface` 插件发布，`a3_arm_controller` 订阅后镜像进 `/a3/arm_status` |
 | `/a3/arm/operator_event` | `std_msgs/String` | F131 操作事件通知：`waypoint_captured`（路点打点成功）等；ds4_feedback_node 消费（白闪 0.4s + 弱震 0.12s） |
+| `/a3/face_target` | `a3_msgs/msg/FaceTarget` | F183 人脸检测结果（`a3_perception/face_detect_node`），见上表“人脸跟踪目标” |
+| `/a3/face_track/debug_image` | `sensor_msgs/Image` | F183 标注图（关键点 + 包围盒 + 6 参数面板），仅 `debug_image:=true` 时发布，BEST_EFFORT |
+| `/a3/face_track/enable` | `std_srvs/SetBool` | F183 跟踪使能（**默认关闭**）；未使能时控制器不向 `/servo_node/delta_twist_cmds` 发任何消息，避免与 PS4 遥操作抢同一话题 |
+| `/servo_node/delta_twist_cmds` | `geometry_msgs/TwistStamped` | F181/F183：`a3_servo_target` 的输入，**按 base 系解释**（节点内左乘积分）。PS4 mapper 50 Hz，人脸跟踪控制器 50 Hz（限速 0.05 m/s、加速度斜坡 0.5 m/s²） |
 
 ## 故障监视看门狗（a3_arm_monitor，需求 F50）
 

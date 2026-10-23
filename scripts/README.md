@@ -6,8 +6,9 @@
 
 | 脚本 | 功能 | 用法 |
 |---|---|---|
-| `a3_stack.sh` | **真机/仿真栈一键启停 + 重力标定**。真机：can1 检查→电机探测（7/7→7J，1..6 在线缺 L7→自动切 6J 档，F168）→setsid 起栈→健康验证；`calibrate` 子命令收口 F49 模型/F89 比例标定（F169）；仿真：`edge_teleop_full_sim`（domain 99 隔离真机，默认带 PS4 手柄 joy_node） | `./scripts/a3_stack.sh {start\|stop\|restart\|status\|calibrate} [-f] [--rviz] [--no-probe] [--6j] [--keep-rviz] [--sim] [--no-joy]` · `./scripts/a3_stack.sh calibrate {model\|scale}` |
+| `a3_stack.sh` | **真机/仿真栈一键启停 + 重力标定**。真机：can1 检查→电机探测（7/7→7J，1..6 在线缺 L7→自动切 6J 档，F168）→setsid 起栈→健康验证；`calibrate` 子命令收口 F49 模型/F89 比例标定（F169）；`--face-track` 起栈后顺带拉起人脸跟踪（F183，stop/restart 先停它）；仿真：`edge_teleop_full_sim`（domain 99 隔离真机，默认带 PS4 手柄 joy_node） | `./scripts/a3_stack.sh {start\|stop\|restart\|status\|calibrate} [-f] [--rviz] [--no-probe] [--6j] [--keep-rviz] [--sim] [--no-joy] [--face-track]` · `./scripts/a3_stack.sh calibrate {model\|scale}` |
 | `a3_shell_env.sh` | ROS 环境 source 脚本（含 PYTHONNOUSERSITE、DISPLAY 处理、micro-ROS prefix 剥离） | `source scripts/a3_shell_env.sh` |
+| `setup_face_track_env.sh` | F183 人脸检测环境：建 `~/.a3/venv/face_track`（`--system-site-packages`）+ 装 mediapipe + 下 `face_landmarker.task` 到 `~/.a3/models/`；解决系统 pyparsing/numpy 抢占问题 | `./scripts/setup_face_track_env.sh [--force]` |
 | `setup/install_a3_service.sh` | F93 安装 a3-arm.service 到 systemd（只安装，不 enable） | `sudo scripts/setup/install_a3_service.sh` |
 | `setup/setup_realtime.sh` | F100 配置 ros2_control 实时调度权限（pam_limits） | `sudo scripts/setup/setup_realtime.sh [USER]` |
 | `setup/setup_dds_network.sh` | F105 DDS 网络栈硬化（sysctl 缓冲 + CycloneDDS XML） | `sudo scripts/setup/setup_dds_network.sh [wlan0\|eth0]` |
@@ -33,6 +34,7 @@
 | `mit_noenable_stream.py` | MIT 电机 CAN 无使能探测 + 零增益流式工具（纯标准库，无 ROS） | `python3 scripts/mit_noenable_stream.py probe --iface can1 --ids 1..7` |
 | `traj_smoothness_calibration.py` | F136 轨迹平滑度标定脚手架：标准 quintic 轨迹 vs 录制轨迹 + 指标 J + 参数扫描（离线，无 ROS） | `python3 scripts/traj_smoothness_calibration.py --scan v_scaling` |
 | `traj_smooth.py` | F137 录制轨迹几何去噪 + 平滑重规划：逐关节五次 B 样条光顺 + quintic 重定时，三列对比 + ε 扫描 + 报告（离线） | `python3 scripts/traj_smooth.py --dir ~/.a3/trajectories --latest 3 --eps 0.01` |
+| `face_landmark_overlay.py` | 人脸 6DoF 离线叠加（F183 前置验证）：mediapipe FaceLandmarker 478 点 + 自带姿态矩阵 + One-Euro 滤波，输出 X/Y/Z(mm) 与 YAW/PITCH/ROLL(deg)、建议 twist，绘制关键点/包围盒/死区/滚动曲线 | `env -u PYTHONPATH ~/.a3/venv/face_track/bin/python scripts/face_landmark_overlay.py <video.avi> --z-ref 0.45 --units-mm 14` |
 | `melodion_bake.py` | 口风琴 stream 预烘焙：把逐段 via 关节轨迹算好存 `<name>.yaml.baked.yaml`，playback 直接下发跳过实时 IK+重定时 | `python3 scripts/melodion_bake.py --stream scale` |
 | `melodion_impact_eval.py` | 口风琴跨键冲击评估（approach/速度 vs j_rms/a_rms/时长） | `python3 scripts/melodion_impact_eval.py` |
 | `melodion_speed_diag.py` | 口风琴跨键 via 关节空间 nominal 时长扫参（approach/vmax/amax） | `python3 scripts/melodion_speed_diag.py` |
@@ -52,6 +54,7 @@
 
 | 脚本 | 功能 | 用法 |
 |---|---|---|
+| `camera_capture_ui.py` | **F182 相机采集小 UI**（独立于 ROS）：PyQt5 窗口实时预览 USB 相机（直接 V4L2，by-id 设备自动选），拍照（JPEG）+ 开始/停止录制（MJPG AVI），产物落 `capture/face/{images,videos}/`（已 gitignore），供人脸算法取素材。与真机栈 `usb_camera_node` 争用同一相机，二选一 | `python3 scripts/camera_capture_ui.py [--out capture/face/<name>] [--width 1280 --height 720 --fps 30]`；`Space` 拍照、`R` 录制 |
 | `ps4/deep_dog_ds4_hid.py` | DS4 HID 报告解析器（deep-dog I06 touchpad + I07 motion） | 库文件，被其他 ps4 脚本引用 |
 | `ps4/deep_dog_ds4_touchpad_probe.py` | DS4 touchpad + buttons 并发解析探针（I06 stage-1） | `python3 scripts/ps4/deep_dog_ds4_touchpad_probe.py` |
 | `ps4/deep_dog_handle_bridge.py` | PC 手柄 → MQTT handle/input 桥接（deep-dog） | `python3 scripts/ps4/deep_dog_handle_bridge.py` |

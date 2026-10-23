@@ -38,9 +38,17 @@ WS_DIR="$(dirname "$SCRIPT_DIR")"
 LOG_FILE="/tmp/a3_real_stack.log"
 
 # 栈节点命令行特征（孤儿兜底名单，与 QUICKSTART 一键关停一致）
-NODE_PATTERN='ros2 launch a3_bringup|ros2_control_node|install/a3_arm_controller/lib/a3_arm_controller/arm_controller|power_sequence_node|ps4_mapper|ds4_feedback_node|ros2mqtt_bridge|move_group|retime_trajectory_node|a3_self_test|/joy/joy_node|can_bus_monitor|topic_rate_monitor|aggregator_node|diagnostic_common_diagnostics|ros2 bag record|robot_state_publisher|a3_sim_executor|gravity_torque_node|a3_bringup/servo_mode_bridge|moveit_servo/servo_node_main|servo_target_node|servo_anchor'
+NODE_PATTERN='ros2 launch a3_bringup|ros2_control_node|install/a3_arm_controller/lib/a3_arm_controller/arm_controller|power_sequence_node|ps4_mapper|ds4_feedback_node|ros2mqtt_bridge|move_group|retime_trajectory_node|a3_self_test|/joy/joy_node|can_bus_monitor|topic_rate_monitor|aggregator_node|diagnostic_common_diagnostics|ros2 bag record|robot_state_publisher|a3_sim_executor|gravity_torque_node|a3_bringup/servo_mode_bridge|moveit_servo/servo_node_main|servo_target_node|servo_anchor|a3_bringup/ee_pose_publisher|a3_perception face_track.launch|a3_perception.face_detect_node|lib/a3_perception/face_track_controller'
 # 复核名单（精简）
 CHECK_PATTERN='ros2 launch a3_bringup|ros2_control_node|a3_arm_controller|power_sequence_node|ps4_mapper|ds4_feedback_node|ros2mqtt_bridge|move_group|joy_node|ros2 bag|robot_state_publisher|servo_node_main|servo_target_node'
+
+# ── 人脸跟踪（F183，--face-track）────────────────────────────────
+# 独立 launch（检测节点跑 mediapipe venv + 控制器跑系统 python），与主栈同生命周期：
+# start --face-track 起栈后拉起、stop/restart 先停它再停栈。
+FACE_LOG_FILE="/tmp/a3_face_track.log"
+FACE_PATTERN='a3_perception face_track.launch|a3_perception.face_detect_node|lib/a3_perception/face_track_controller'
+# --face-debug：同时发 /a3/face_track/debug_image（首次调方向/看关键点用，多耗一点 CPU）
+FACE_DEBUG=0
 
 # ── 仿真模式（--sim）──────────────────────────────────────────────
 # 全仿真栈 edge_teleop_full_sim：sim_motor_node 软实时执行层（无 ros2_control_node/
@@ -243,6 +251,9 @@ do_stop() {
     do_stop_sim
     return
   fi
+
+  # F183：先停人脸跟踪（它会往 /servo_node/delta_twist_cmds 发 twist），再停栈
+  stop_face_track
 
   if ! stack_alive; then
     warn "真机栈未在运行"
@@ -540,9 +551,70 @@ do_set_zero() {
   _verify_zero "$motor_id"
 }
 
+# ── 人脸跟踪（F183，--face-track）────────────────────────────────
+# 检测节点必须跑在 ~/.a3/venv/face_track（mediapipe），控制器走系统 python；
+# 由 a3_perception 的 launch 负责这个分裂，这里只负责进程生命周期。
+# 枚举时排除 agent wrapper（命令行里含 pattern 的 bash -c/toolhost，LL-066）。
+face_pids() {
+  local pid
+  for pid in $(pgrep -af "$FACE_PATTERN" 2>/dev/null | _not_wrapper | awk '{print $1}'); do
+    [ "$pid" = "$$" ] && continue
+    tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -qx "ROS_DOMAIN_ID=$SIM_DOMAIN" && continue
+    echo "$pid"
+  done
+}
+
+start_face_track() {
+  if [ -n "$(face_pids)" ]; then
+    warn "人脸跟踪已在运行，跳过"
+    return 0
+  fi
+  if [ ! -x "$HOME/.a3/venv/face_track/bin/python3" ]; then
+    err "缺 mediapipe 环境：先跑 ./scripts/setup_face_track_env.sh"
+    return 1
+  fi
+  info "setsid 启动人脸跟踪（F183），日志：$FACE_LOG_FILE"
+  local dbg="false"
+  [ "$FACE_DEBUG" = 1 ] && dbg="true"
+  setsid bash -c "source '$SCRIPT_DIR/a3_shell_env.sh' && export PYTHONNOUSERSITE=1 && cd '$WS_DIR' && ros2 launch a3_perception face_track.launch.py debug_image:=$dbg" \
+    </dev/null >"$FACE_LOG_FILE" 2>&1 &
+  info "等待 8s（mediapipe 首次加载模型较慢）…"
+  sleep 8
+  local det ctl
+  det="$(pgrep -af 'a3_perception.face_detect_node' 2>/dev/null | _not_wrapper | awk '{print $1}' | head -1)"
+  ctl="$(pgrep -af 'lib/a3_perception/face_track_controller' 2>/dev/null | _not_wrapper | awk '{print $1}' | head -1)"
+  if [ -n "$det" ] && [ -n "$ctl" ]; then
+    ok "人脸跟踪已起：face_detect(PID ${det}) / face_track_controller(PID ${ctl})"
+  else
+    err "人脸跟踪未完全起来（detect=${det:-无} controller=${ctl:-无}），末尾日志："
+    tail -n 15 "$FACE_LOG_FILE" >&2
+    return 1
+  fi
+  info "当前**未使能**（默认安全）。确认相机朝向/外参符号无误后再开："
+  info "  ros2 service call /a3/face_track/enable std_srvs/srv/SetBool \"{data: true}\""
+  info "标注图：/a3/face_track/debug_image（launch 加 debug_image:=true）"
+  return 0
+}
+
+stop_face_track() {
+  local pids
+  pids="$(face_pids)"
+  [ -z "$pids" ] && return 0
+  info "停人脸跟踪（F183）：$(echo "$pids" | tr '\n' ' ')"
+  echo "$pids" | xargs -r kill -TERM 2>/dev/null || true
+  sleep 3
+  pids="$(face_pids)"
+  if [ -n "$pids" ]; then
+    warn "补 SIGTERM：$(echo "$pids" | tr '\n' ' ')"
+    echo "$pids" | xargs -r kill -TERM 2>/dev/null || true
+    sleep 2
+  fi
+  return 0
+}
+
 do_start() {
   local with_rviz="${1:-0}" do_probe="${2:-1}" do_joy="${3:-1}" servo_target="${4:-1}" \
-        do_camera="${5:-1}" do_mqtt="${6:-1}"
+        do_camera="${5:-1}" do_mqtt="${6:-1}" face_track="${7:-0}"
   if [ "$SIM" = 1 ]; then
     do_start_sim "$with_rviz" "$do_joy"
     return
@@ -591,14 +663,19 @@ do_start() {
     info "servo 链路：a3_servo_target（绝对目标 + CLIK + twist 平滑，默认）"
   fi
   info "启动档位：$joints_desc（include_gripper:=$grip_arg）"
-  # F177/F181：servo 验收建议关掉相机/MQTT（USB 相机 + MQTT 各占 20~35% CPU，
-  # 观测到会把 200Hz 控制循环挤出 200ms 级停顿 → feedback stale → freeze-hold）
-  local cam_arg="use_camera:=true" mqtt_arg="use_mqtt:=true"
+  # F177/F181：MQTT 桥默认**关**（2026-10-23）：常驻 30~57% CPU，会把 200Hz 控制循环
+  # 挤出 200ms 级停顿 → feedback stale → freeze-hold（LL-180）。需要 web 遥测加 --mqtt。
+  local cam_arg="use_camera:=true" mqtt_arg="use_mqtt:=false"
   [ "$do_camera" = 0 ] && cam_arg="use_camera:=false"
-  [ "$do_mqtt" = 0 ] && mqtt_arg="use_mqtt:=false"
+  [ "$do_mqtt" = 1 ] && mqtt_arg="use_mqtt:=true"
+  # F183：带人脸跟踪时关掉画面上烧的接收帧率文字，否则会压进检测输入与标注图
+  local cam_overlay_arg="camera_overlay_fps:=true"
+  if [ "$face_track" = 1 ] && [ "$do_camera" = 1 ]; then
+    cam_overlay_arg="camera_overlay_fps:=false"
+  fi
   info "附加节点：camera=$([ "$do_camera" = 1 ] && echo on || echo off)，mqtt=$([ "$do_mqtt" = 1 ] && echo on || echo off)"
   info "setsid 启动真机栈，日志：$LOG_FILE"
-  setsid bash -c "source '$SCRIPT_DIR/a3_shell_env.sh' && export PYTHONNOUSERSITE=1 && cd '$WS_DIR' && ros2 launch a3_bringup a3_bringup.launch.py hardware:=can can_interface:=can1 use_rviz:=$rviz_arg include_gripper:=$grip_arg $servo_arg $cam_arg $mqtt_arg" \
+  setsid bash -c "source '$SCRIPT_DIR/a3_shell_env.sh' && export PYTHONNOUSERSITE=1 && cd '$WS_DIR' && ros2 launch a3_bringup a3_bringup.launch.py hardware:=can can_interface:=can1 use_rviz:=$rviz_arg include_gripper:=$grip_arg $servo_arg $cam_arg $mqtt_arg $cam_overlay_arg" \
     </dev/null >"$LOG_FILE" 2>&1 &
 
   info "等待 15s 起栈 …"
@@ -633,6 +710,15 @@ do_start() {
   fi
   [ -n "$power" ] && info "power_sequence: $power"
   ok "真机栈已启动"
+
+  # F183：人脸跟踪随栈拉起（独立 launch，默认不使能；需相机）
+  if [ "$face_track" = 1 ]; then
+    if [ "$do_camera" = 0 ]; then
+      warn "--face-track 与 --no-camera 冲突（人脸检测需要 /camera/image_raw），跳过"
+    else
+      start_face_track || warn "人脸跟踪未能启动，可手动：ros2 launch a3_perception face_track.launch.py"
+    fi
+  fi
 }
 
 # 仿真起栈：edge_teleop_full_sim（sim_motor 执行层 + MoveIt/Servo + PS4 teleop），
@@ -706,6 +792,17 @@ do_status() {
       printf '  %-22s --\n' "$name"
     fi
   done
+
+  echo "── 人脸跟踪（F183）─────────────────"
+  local fpids
+  fpids="$(face_pids)"
+  if [ -n "$fpids" ]; then
+    echo "$fpids" | while read -r p; do
+      printf '  PID %-7s %s\n' "$p" "$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | cut -c1-90)"
+    done
+  else
+    echo "  （未运行；$0 start --face-track 可随栈拉起）"
+  fi
 
   echo "── arm_status ──────────────────────"
   if stack_alive; then
@@ -844,7 +941,7 @@ do_calibrate() {
 
 usage() {
   cat <<EOF
-用法：$0 {start|stop|restart|status|free|calibrate} [-f|--force] [--rviz] [--no-probe] [--6j|--7j] [--keep-rviz] [--sim] [--no-joy]
+用法：$0 {start|stop|restart|status|free|calibrate} [-f|--force] [--rviz] [--no-probe] [--6j|--7j] [--keep-rviz] [--sim] [--no-joy] [--face-track] [--mqtt]
   start    启动真机栈（先探测电机：7J 档 7/7、6J 档 1..6 在线，setsid 起栈，日志 $LOG_FILE）
   stop     优雅停栈（臂未失能默认拒绝）
   restart  重启
@@ -866,7 +963,14 @@ usage() {
   --servo-target servo 链 = a3_servo_target（F181 绝对目标 + CLIK + twist 平滑，**默认**）
   --moveit-servo 回退旧链路 moveit_servo（调试/对照）
   --no-camera    不起 USB 相机节点（servo 验收建议；省 ~20-30% CPU）
-  --no-mqtt      不起 MQTT 桥（servo 验收建议；省 ~30% CPU）
+  --mqtt         起 MQTT 桥（web 遥测/指令 F18/F23）。**默认关**：它常驻 30~57% CPU，
+                 会把 200Hz 控制环挤出停顿 → feedback stale → freeze-hold（LL-180）
+  --no-mqtt      显式关 MQTT（默认已是关，保留兼容）
+  --face-track   起栈后顺带拉起人脸跟踪（F183，独立 launch + mediapipe venv）；
+                 默认**不使能**，需再调 /a3/face_track/enable；与 --no-camera 冲突。
+                 stop/restart 会先停它（它往 /servo_node/delta_twist_cmds 发 twist）
+  --face-debug   仅配合 --face-track：同时发 /a3/face_track/debug_image 标注图
+                 （首次核对相机方向/关键点用，多耗一点 CPU）
   --sim          走全仿真栈 edge_teleop_full_sim（domain $SIM_DOMAIN 隔离真机；可放任意位置）
   --no-joy       仅 --sim：不起 joy_node（/joy 由脚本注入，如 ps4_sim_test.py 合成测试）
 
@@ -911,7 +1015,7 @@ main() {
   fi
 
   local force=0 keep_rviz=0 with_rviz=0 do_probe=1 do_joy=1 turn_off=0 set_zero_id=255 servo_target=1 \
-        do_camera=1 do_mqtt=1
+        do_camera=1 do_mqtt=0 do_face_track=0
   while [ $# -gt 0 ]; do
     case "$1" in
       -f|--force) force=1 ;;
@@ -925,6 +1029,9 @@ main() {
       --moveit-servo) servo_target=0 ;;
       --no-camera) do_camera=0 ;;
       --no-mqtt) do_mqtt=0 ;;
+      --mqtt) do_mqtt=1 ;;
+      --face-track) do_face_track=1 ;;
+      --face-debug) FACE_DEBUG=1 ;;
       on|start) turn_off=0 ;;
       off|stop) turn_off=1 ;;
       -h|--help) usage; exit 0 ;;
@@ -939,13 +1046,18 @@ main() {
     shift
   done
 
+  if [ "$SIM" = 1 ] && [ "$do_face_track" = 1 ]; then
+    warn "仿真栈不起相机，--face-track 不适用；已忽略"
+    do_face_track=0
+  fi
+
   case "$action" in
-    start)   do_start "$with_rviz" "$do_probe" "$do_joy" "$servo_target" "$do_camera" "$do_mqtt" ;;
+    start)   do_start "$with_rviz" "$do_probe" "$do_joy" "$servo_target" "$do_camera" "$do_mqtt" "$do_face_track" ;;
     stop)    do_stop "$force" "$keep_rviz" ;;
     free)    do_free "$turn_off" ;;
     set-zero) do_set_zero "$set_zero_id" ;;
     restart) do_stop "$force" "$keep_rviz" || exit 1
-             do_start "$with_rviz" "$do_probe" "$do_joy" "$servo_target" "$do_camera" "$do_mqtt" ;;
+             do_start "$with_rviz" "$do_probe" "$do_joy" "$servo_target" "$do_camera" "$do_mqtt" "$do_face_track" ;;
     status)  do_status ;;
     *) err "未知动作：$action"; usage; exit 1 ;;
   esac

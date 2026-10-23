@@ -645,6 +645,7 @@ def _build(cfg, include_gripper):
             {
                 "video_device": LaunchConfiguration("camera_device"),
                 "frame_id": LaunchConfiguration("camera_frame_id"),
+                "overlay_fps": LaunchConfiguration("camera_overlay_fps"),
             }
         ],
         condition=IfCondition(use_camera),
@@ -852,9 +853,17 @@ def _build(cfg, include_gripper):
             description="F177 图像/camera_info 的 frame_id（Image display 不依赖 TF）",
         ),
         DeclareLaunchArgument(
-            "use_mqtt",
+            "camera_overlay_fps",
             default_value="true",
-            description="MQTT 桥（web 遥测/指令，F18/F23）",
+            description="F177 在画面左上角烧接收帧率（调试用）；F183 视觉处理时置 false，"
+                        "否则文字会压进 /camera/image_raw 与标注图",
+        ),
+        DeclareLaunchArgument(
+            "use_mqtt",
+            default_value="false",
+            description="MQTT 桥（web 遥测/指令，F18/F23）。**默认关**（2026-10-23）："
+                        "常驻约 30-57% CPU，会把 200Hz 控制循环挤出停顿 → feedback stale "
+                        "→ freeze-hold（LL-180）。需要 web 遥测时显式 use_mqtt:=true",
         ),
         DeclareLaunchArgument("use_teleop", default_value="true"),
         DeclareLaunchArgument(
