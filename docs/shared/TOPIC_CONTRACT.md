@@ -149,7 +149,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/face_track/debug_image` | `sensor_msgs/Image` | F183 标注图（关键点 + 包围盒 + 6 参数面板），仅 `debug_image:=true` 时发布，BEST_EFFORT |
 | `/a3/face_track/enable` | `std_srvs/SetBool` | F183 跟踪使能（**默认关闭**）；未使能时控制器不向 `/servo_node/delta_twist_cmds` 发任何消息，避免与 PS4 遥操作抢同一话题 |
 | `/a3/face_track/reload_jacobian` | `std_srvs/Trigger` | F183 重读图像雅可比标定（`~/.a3/camera/face_jacobian.yaml`，含标定距离 `distance_mm`，用于 Z/Z0 缩放） |
-| `/servo_node/delta_twist_cmds` | `geometry_msgs/TwistStamped` | F181/F183：`a3_servo_target` 的输入，**按 base 系解释**（节点内左乘积分）。PS4 mapper 50 Hz，人脸跟踪控制器 50 Hz（限速 0.05 m/s、加速度斜坡 0.5 m/s²） |
+| `/servo_node/delta_twist_cmds` | `geometry_msgs/TwistStamped` | F181/F183：`a3_servo_target` 的输入，**按 base 系解释**：`linear` 平移；`angular` **绕末端点旋转**（姿态变、末端位置不变，`rotation_about_tip:=false` 可回退旧语义“绕基座原点画弧”）。PS4 mapper 50 Hz，人脸跟踪控制器 50 Hz（限速 0.05 m/s、加速度斜坡 0.5 m/s²）。IK 连续失败时目标回退到最近成功位姿（不再继续积分） |
 
 ## 故障监视看门狗（a3_arm_monitor，需求 F50）
 

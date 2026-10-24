@@ -205,6 +205,7 @@ EDULITE A3 机械臂在 RK3588（LubanCat 等）上运行完整 ROS 2 Humble 栈
 | F178 | MoveIt Servo 奇异阈值按工作区重标定（F69 的 25/50 被 F109/F115/F176 点位演进架空：生产 35 点位姿 49% >lower、20% ≥hard_stop → 正常 jog 长期被减速/整帧 hard-stop，真机「一震一震 + 运动时保持力下降」）→ lower/hard 25/50 → **90/300** | implemented（仿真） | 功能 | [requirements/F178-servo-singularity-threshold-recalibration.md](requirements/F178-servo-singularity-threshold-recalibration.md) |
 | F177 | USB 摄像头 ROS 接入：板载 apt 装不了 ROS 相机驱动（rkmpp pin 挡 `libav*-dev`）→ 自写 `a3_bringup/usb_camera_node`（cv2，仅依赖 `python3-opencv`），发 `/camera/image_raw`+`/camera/camera_info`，配 `usb_cam.launch.py` + `usb_cam.rviz` 在 RViz 显示 | implemented | 功能 | [requirements/F177-usb-camera-rviz-bringup.md](requirements/F177-usb-camera-rviz-bringup.md) |
 | F182 | 独立相机采集小 UI（`scripts/camera_capture_ui.py`）：脱离 ROS 的 PyQt5 窗口，直接读 V4L2 设备实时预览 + 一键拍照（JPEG）+ 开始/停止录制（MJPG AVI），产物落 `capture/face/{images,videos}/`，供人脸算法取素材 | implemented | 功能 | [requirements/F182-camera-capture-ui.md](requirements/F182-camera-capture-ui.md) |
+| F184 | R1 三轴旋转 + servo 旋转语义修复：`a3_servo_target` 角速度改为**绕末端点**旋转（姿态变、位置不变，`rotation_about_tip` 可回退），IK 失败目标回退防跑飞；PS4 mapping 支持一轴多绑定 → R1 下右摇杆左右=偏航、上下=俯仰、左摇杆左右=滚转（L1 平移不变）；验收脚本 `scripts/a3_test/f183_servo_rotation_check.py`（三轴定向 6 次 + 随机 60 s/60°） | implemented-pending-hw | 功能 | [requirements/F183-face-tracking-servo.md](requirements/F183-face-tracking-servo.md) |
 
 ## 非功能需求
 

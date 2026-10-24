@@ -481,9 +481,20 @@ def _build(cfg, include_gripper):
             {"out_topic": "/arm_controller/joint_trajectory"},
             {"publish_period": 0.01},
             {"hold_z": True},
+            # 角速度语义：绕末端点旋转（姿态变、位置不变）。false 回退旧语义（绕基座原点画弧）
+            {"rotation_about_tip": True},
             {"max_step_trans": 0.004},
             {"twist_timeout": 0.30},
             {"max_ik_jump": 0.05},
+            # CLIK 每拍只做 1~2 次迭代（局部增量 IK）：目标已经按 twist 逐拍小步推进，
+            # 迭代多了会在腕部"伸直"位形收敛到另一支（实测 0.1 rad 指令走出 0.88 rad）
+            {"clik_iters": 2},
+            # IK 解与种子差 > max_ik_jump 时限步跟进（而不是整帧丢弃，后者会死锁）；
+            # 超过 max_ik_jump_hard 判为真换支，仍丢弃并回退目标
+            {"ik_jump_clip": True},
+            {"max_ik_jump_hard": 0.60},
+            # IK 解离实测关节 > 该值 → 判为姿态等价的另一分支（腕部伸直位形），拒绝跟随
+            {"max_ik_jump_meas": 0.20},
             {"pos_gain": 4.0},
             {"acc_gain": 20.0},
             # F181 twist 平滑（真机验证档）

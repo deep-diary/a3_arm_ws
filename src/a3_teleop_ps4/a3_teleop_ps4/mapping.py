@@ -248,7 +248,11 @@ def validate_mapping(
             errors.append(f"{where}: {fn} is {want}, binding says {kind}")
 
     for axis, spec in (mapping.get("axes") or {}).items():
-        check(str(spec.get("fn")), str(spec.get("kind", "")), f"axes.{axis}")
+        # F183：同一根摇杆在 L1/R1 下做不同事 → list 多条绑定
+        specs = spec if isinstance(spec, list) else [spec]
+        for i, s in enumerate(specs):
+            where = f"axes.{axis}" if not isinstance(spec, list) else f"axes.{axis}[{i}]"
+            check(str(s.get("fn")), str(s.get("kind", "")), where)
     for btn, spec in (mapping.get("buttons") or {}).items():
         specs = spec if isinstance(spec, list) else [spec]
         for i, s in enumerate(specs):
@@ -271,7 +275,19 @@ def iter_touch_bindings(
 
 
 def iter_axis_bindings(mapping: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
-    return list((mapping.get("axes") or {}).items())
+    """展开轴绑定为 (axis_name, spec) 列表.
+
+    - 普通 dict 条目：单绑定；
+    - list 条目（F183：同一根摇杆在 L1/R1 下做不同事）：逐条展开，axis_name 相同，
+      各条按自己的 gates 独立判定，互不影响。
+    """
+    out: List[Tuple[str, Dict[str, Any]]] = []
+    for name, spec in (mapping.get("axes") or {}).items():
+        if isinstance(spec, list):
+            out.extend((name, s) for s in spec)
+        else:
+            out.append((name, spec))
+    return out
 
 
 def iter_button_bindings(

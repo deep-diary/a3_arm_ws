@@ -93,6 +93,7 @@ class Ps4SimTest(Node):
         self._grip = None
         self._fb_hist = deque(maxlen=4000)  # (monotonic, dict)
         self._twist_hist = deque(maxlen=8000)  # (monotonic, |lin|, |ang|)
+        self._twist_comp = deque(maxlen=8000)  # (monotonic, (lx,ly,lz,ax,ay,az))
 
         sensor_qos = QoSProfile(
             depth=10, reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -162,6 +163,16 @@ class Ps4SimTest(Node):
         lin = math.sqrt(t.x * t.x + t.y * t.y + t.z * t.z)
         ang = math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z)
         self._twist_hist.append((time.monotonic(), lin, ang))
+        self._twist_comp.append((time.monotonic(),
+                                 (abs(t.x), abs(t.y), abs(t.z),
+                                  abs(a.x), abs(a.y), abs(a.z))))
+
+    def twist_comp_max(self, t0):
+        """窗口内 6 个分量的最大绝对值：[lx, ly, lz, ax, ay, az]。"""
+        vals = [c for t, c in self._twist_comp if t >= t0]
+        if not vals:
+            return [0.0] * 6
+        return [max(v[i] for v in vals) for i in range(6)]
 
     def twist_max(self, t0):
         vals = [(l, a) for t, l, a in self._twist_hist if t >= t0]
@@ -461,6 +472,26 @@ def main():
     rep.check("S5b R1 门控：偏航动（L1+L5 合 Δ≥0.05rad）",
               abs(dl1) + abs(dl5) >= 0.05,
               f"ΔL1={dl1:+.3f} ΔL5={dl5:+.3f} twist|ang|max={v_ang_base:.3f}")
+
+    # F183：R1 三轴旋转 → twist.angular 三个分量各自独立（只看指令分量，不等机械臂走完）
+    print("[INFO] 场景5b-2: R1 三轴 → angular.x/.y/.z 分量互不串扰", flush=True)
+    for idx, label, ax_id in ((3, "roll(X) ← left_x", AX_LX),
+                              (4, "pitch(Y) ← right_y", AX_RY),
+                              (5, "yaw(Z) ← right_x", AX_RX)):
+        node.press(B_R1)
+        node.sleep(0.2)
+        t0 = node.marker()
+        node._axes[ax_id] = 1.0
+        node.sleep(0.8)
+        node._axes[ax_id] = 0.0
+        node.release(B_R1)
+        node.sleep(0.6)
+        comp = node.twist_comp_max(t0)
+        others = [comp[3 + i] for i in range(3) if 3 + i != idx]
+        rep.check(f"S5b-2 R1+{label}：只出 angular.{'xyz'[idx - 3]}（>0.2），其余 <0.02",
+                  comp[idx] > 0.2 and max(others) < 0.02 and max(comp[:3]) < 0.02,
+                  f"lin={['%.3f' % v for v in comp[:3]]} "
+                  f"ang={['%.3f' % v for v in comp[3:]]}")
 
     # F64 门控互斥 3：R1 按住推左摇杆，平移必须不动
     print("[INFO] 场景5b: R1+left_x：平移必须不动", flush=True)

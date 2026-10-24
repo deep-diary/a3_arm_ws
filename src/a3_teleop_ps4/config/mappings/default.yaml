@@ -12,9 +12,11 @@
 #              Options 长按 3s=F116 随机点位巡游（READY 态才执行；TEACH/WAYPOINT_TEACH 等态被服务端拒绝）
 #   点位:      L2 短按=保存当前位姿为 snap_YYYYMMDD_HHMMSS（F114，写包内 named_poses.yaml）
 #   功能:      L1+R1 同按长按 2s=init(设零，不带使能)（F135：PS 为开机键易误触，已解绑）
-#   运动:      L1 按住+摇杆=末端平移死人开关 / R1 按住+摇杆=末端旋转死人开关(首批仅偏航)
+#   运动:      L1 按住+摇杆=末端平移死人开关 / R1 按住+摇杆=末端旋转死人开关
 #              左摇杆=平移 Y(左右)/Z(上下)；右摇杆上下=平移 X(前后)，右摇杆左右=偏航
 #              （F115 起 D-pad 调速退役，平移/旋转恒用 speed_normal 默认档）
+#              F183 R1 三轴旋转：右摇杆左右=偏航(Z) / 右摇杆上下=俯仰(Y) / 左摇杆左右=滚转(X)
+#              旋转语义=绕末端点转（姿态变、末端位置不变），由 a3_servo_target 保证
 #   夹爪:      R2=直接力控（不需要 L1/R1），按得越深抓得越紧，松开即全开
 #   触摸:      触摸板单击 tap=路点 LIN 回放（F132，与 Circle 长按等效；需 hid 节点）
 #              物理触摸板"点击键"蓝牙仍不可用（LL-052），手势走 HID 数据链另测
@@ -27,20 +29,27 @@ axes:
     fn: gripper_force
     kind: analog_01
     source: trigger
+  # F183：同一根摇杆在 L1 / R1 下做不同事 → 一个轴可以有多条绑定，按各自 gates 独立判定
   left_x:
-    fn: servo_lin_y
-    kind: analog_n11
-    gates: [l1]
+    - fn: servo_lin_y        # L1：平移 Y（左右）
+      kind: analog_n11
+      gates: [l1]
+    - fn: servo_ang_x        # R1：绕基座 X 滚转
+      kind: analog_n11
+      gates: [r1]
   left_y:
     fn: servo_lin_z
     kind: analog_n11
     gates: [l1]
   right_y:
-    fn: servo_lin_x
-    kind: analog_n11
-    gates: [l1]
+    - fn: servo_lin_x        # L1：平移 X（前后）
+      kind: analog_n11
+      gates: [l1]
+    - fn: servo_ang_y        # R1：绕基座 Y 俯仰（抬腕/低头）
+      kind: analog_n11
+      gates: [r1]
   right_x:
-    fn: servo_ang_z
+    fn: servo_ang_z          # R1：绕基座 Z 偏航
     kind: analog_n11
     gates: [r1]
 

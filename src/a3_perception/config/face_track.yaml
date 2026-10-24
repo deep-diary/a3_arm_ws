@@ -82,3 +82,9 @@
     stall_min_progress: 0.05
     stall_v_frac: 0.5
     stall_hold_s: 0.6
+    # 俯仰辅助（F183 Step C）：竖向平移被虚拟墙挡死 / 追不动时，用绕标定帧 Y 的俯仰继续追。
+    # 典型场景：人要抬高、末端已顶到高度上限，平移无解但抬腕还能让相机看向人脸。
+    pitch_assist: false      # 需先标定角雅可比并确认真机符号后再开
+    pitch_gain: 0.5          # [1/s]
+    pitch_max: 0.35          # [rad/s]
+    pitch_stall_window_s: 2.0

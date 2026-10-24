@@ -70,6 +70,8 @@ public:
     js_topic_ = declare_parameter<std::string>("joint_states_topic", "/joint_states");
     dt_ = declare_parameter<double>("publish_period", 0.01);
     hold_z_ = declare_parameter<bool>("hold_z", true);
+    // 角速度语义：true = 绕末端点旋转（姿态变、末端位置不变）；false = 旧行为（绕基座原点画弧）
+    rotation_about_tip_ = declare_parameter<bool>("rotation_about_tip", true);
     max_step_trans_ = declare_parameter<double>("max_step_trans", 0.02);  // [m]/周期
     twist_timeout_ = declare_parameter<double>("twist_timeout", 0.30);    // [s]
     ik_timeout_ = declare_parameter<double>("ik_timeout", 0.005);         // [s] 须 < publish_period
@@ -80,6 +82,11 @@ public:
     max_acc_ = declare_parameter<double>("max_joint_acceleration", 5.0);  // [rad/s²]
     max_jerk_ = declare_parameter<double>("max_joint_jerk", 50.0);        // [rad/s³]
     max_ik_jump_ = declare_parameter<double>("max_ik_jump", 0.05);        // [rad]/周期
+    // IK 解与当前种子相差超过 max_ik_jump 时：true=限步逼近（推荐，避免死锁）；false=整帧丢弃（旧行为）
+    ik_jump_clip_ = declare_parameter<bool>("ik_jump_clip", true);
+    max_ik_jump_hard_ = declare_parameter<double>("max_ik_jump_hard", 0.60);  // 超过则判为真换支
+    // IK 解相对**实测关节**的最大允许偏离：超过即认为是姿态等价的另一分支（腕部伸直时常见）
+    max_ik_jump_meas_ = declare_parameter<double>("max_ik_jump_meas", 0.20);  // [rad]
     // F181 twist 平滑：模长上限 → 逐轴加速度限幅 → 一阶低通
     twist_max_linear_ = declare_parameter<double>("twist_max_linear", 0.40);      // [m/s]
     twist_max_angular_ = declare_parameter<double>("twist_max_angular", 1.2);     // [rad/s]
@@ -92,6 +99,9 @@ public:
     clik_damping_ = declare_parameter<double>("clik_damping", 0.02);
     clik_tol_pos_ = declare_parameter<double>("clik_tol_pos", 3e-4);      // [m]
     clik_tol_rot_ = declare_parameter<double>("clik_tol_rot", 1e-3);      // [rad]
+    // 伺服是逐拍小步推进的：允许"还没完全收敛但误差已经很小"的解，否则每拍都判失败 → 目标回退死锁
+    clik_tol_pos_loose_ = declare_parameter<double>("clik_tol_pos_loose", 0.005);  // [m]
+    clik_tol_rot_loose_ = declare_parameter<double>("clik_tol_rot_loose", 0.02);   // [rad]
     clik_max_dq_ = declare_parameter<double>("clik_max_dq", 0.15);        // [rad]/迭代
     // IK 解低通时间常数：pick_ik 在 position_threshold(1e-4) 容差内的落点逐帧抖动约 0.01 rad，
     // 折成速度是 ~1 rad/s 的"假速度"；不过滤会放大成 1.3Hz 的 0↔0.45rad/s 摆振（实测 L1/L5）。
@@ -220,6 +230,8 @@ public:
         }
         target_ = state_->getGlobalLinkTransform(tip_frame_);
         z_lock_ = target_.translation().z();
+        target_ok_ = target_;
+        have_target_ok_ = true;
         q_goal_ = q_meas_;
         resp->success = true;
         resp->message = "reanchored to measured";
@@ -227,8 +239,9 @@ public:
 
     timer_ = create_wall_timer(std::chrono::duration<double>(dt_), [this] { step(); });
     RCLCPP_INFO(get_logger(),
-                "a3_servo_target: group=%s dt=%.3fs hold_z=%d out=%s twist=%s",
-                group_name_.c_str(), dt_, hold_z_ ? 1 : 0, out_topic_.c_str(), twist_topic_.c_str());
+                "a3_servo_target: group=%s dt=%.3fs hold_z=%d rot_about_tip=%d out=%s twist=%s",
+                group_name_.c_str(), dt_, hold_z_ ? 1 : 0, rotation_about_tip_ ? 1 : 0,
+                out_topic_.c_str(), twist_topic_.c_str());
   }
 
 private:
@@ -263,6 +276,13 @@ private:
       st.setJointGroupPositions(jmg_, q);
       st.updateLinkTransforms();
     }
+    if (!ok) {
+      // 没到严格容差：只要姿态/位置残差已足够小，就当"可用解"接受（伺服逐拍推进，不必拍拍收敛）
+      const Eigen::Isometry3d cur = st.getGlobalLinkTransform(tip_frame_);
+      const double pe = (target.translation() - cur.translation()).norm();
+      const double re = std::abs(Eigen::AngleAxisd(cur.linear().transpose() * target.linear()).angle());
+      ok = (pe < clik_tol_pos_loose_ && re < clik_tol_rot_loose_);
+    }
     return ok;
   }
   void onJointState(const sensor_msgs::msg::JointState::SharedPtr msg)
@@ -281,6 +301,8 @@ private:
     if (!have_state_) {
       target_ = state_->getGlobalLinkTransform(tip_frame_);
       z_lock_ = target_.translation().z();
+      target_ok_ = target_;
+      have_target_ok_ = true;
       q_goal_ = q;
       for (size_t i = 0; i < kDof; ++i) { q_cmd_[i] = q[i]; qd_cmd_[i] = qd[i]; qa_cmd_[i] = 0.0; }
       have_state_ = true;
@@ -318,6 +340,8 @@ private:
       last_step_t_ = now();
       target_ = state_->getGlobalLinkTransform(tip_frame_);
       z_lock_ = target_.translation().z();
+      target_ok_ = target_;
+      have_target_ok_ = true;
       q_goal_ = q_meas_;
       for (size_t i = 0; i < kDof; ++i) {
         q_cmd_[i] = q_meas_[i];
@@ -382,19 +406,51 @@ private:
     const Eigen::Matrix<double, 6, 1> v = v_lp_;
     const bool moving = v.head<3>().norm() > 1e-4 || v.tail<3>().norm() > 1e-3;
 
-    // ---- 2) 绝对目标积分（twist 在 base 系 → 左乘）----
+    // ---- 1b) 已到位且无指令：直接锚住实测，不再解 IK ----
+    // 腕部接近伸直时 IK 存在姿态等价的两个分支，即使目标静止也会被"限步跟进"一路拖到另一支
+    // （实测停发后工具继续转 10°→29°）。到位后重锚即可彻底消除这种漂移。
+    if (!moving) {
+      const Eigen::Isometry3d cur = state_->getGlobalLinkTransform(tip_frame_);
+      const double pe = (target_.translation() - cur.translation()).norm();
+      const double re = std::abs(Eigen::AngleAxisd(cur.linear().transpose() * target_.linear()).angle());
+      if (pe < 3e-3 && re < 1e-2) {
+        q_goal_ = q_meas_;
+        target_ = cur;
+        target_ok_ = cur;
+        have_target_ok_ = true;
+      }
+    }
+
+    // ---- 2) 绝对目标积分（twist 在 base 系）----
     if (moving) {
-      Eigen::Isometry3d d = Eigen::Isometry3d::Identity();
+      Eigen::Isometry3d cand = target_;
       const Eigen::Vector3d w = v.tail<3>();
-      const double th = w.norm();
-      if (th > 1e-9) d.linear() = Eigen::AngleAxisd(th, w / th).toRotationMatrix();
-      d.translation() = v.head<3>() * dt_step;
-      Eigen::Isometry3d cand = d * target_;
-      // 单周期步长夹紧
-      Eigen::Vector3d dp = cand.translation() - target_.translation();
-      const double n = dp.norm();
-      if (n > max_step_trans_ && n > 1e-9) dp *= max_step_trans_ / n;
-      cand.translation() = target_.translation() + dp;
+      // 本拍转角 = |w|·dt_step。**必须乘 dt_step**：漏乘会让目标姿态每拍前进 |w| 弧度
+      // （相当于 100 倍速），CLIK 追不上 → 每拍判"远离实测/换支"回退 → 实测超转 2~4 倍，
+      // 且超转量与指令时长无关（实测指令 0.10 rad 走出 0.394 rad，减半到 0.05 仍是 0.353）。
+      const double wnorm = w.norm();
+      const double th = wnorm * dt_step;
+      if (rotation_about_tip_) {
+        // 绕末端点旋转：只改姿态，末端位置不变（R1 旋转 / 抬腕看向目标的语义）
+        if (th > 1e-12) {
+          const Eigen::Matrix3d rd = Eigen::AngleAxisd(th, w / wnorm).toRotationMatrix();
+          cand.linear() = rd * target_.linear();
+        }
+        Eigen::Vector3d dp = v.head<3>() * dt_step;
+        const double n = dp.norm();
+        if (n > max_step_trans_ && n > 1e-9) dp *= max_step_trans_ / n;
+        cand.translation() = target_.translation() + dp;
+      } else {
+        // 旧语义（rotation_about_tip:=false 时保留）：绕基座原点左乘，位置会画弧
+        Eigen::Isometry3d d = Eigen::Isometry3d::Identity();
+        if (th > 1e-12) d.linear() = Eigen::AngleAxisd(th, w / wnorm).toRotationMatrix();
+        d.translation() = v.head<3>() * dt_step;
+        cand = d * target_;
+        Eigen::Vector3d dp = cand.translation() - target_.translation();
+        const double n = dp.norm();
+        if (n > max_step_trans_ && n > 1e-9) dp *= max_step_trans_ / n;
+        cand.translation() = target_.translation() + dp;
+      }
       // 工作空间夹紧
       for (int i = 0; i < 3; ++i) {
         cand.translation()[i] = clampd(cand.translation()[i], ws_min_[i], ws_max_[i]);
@@ -427,8 +483,20 @@ private:
     }
     if (ik_ok) {
       double dmax = 0.0;
-      for (size_t i = 0; i < kDof; ++i) dmax = std::max(dmax, std::abs(qsol[i] - q_goal_[i]));
-      if (dmax < max_ik_jump_) {  // 防换支
+      double dmeas = 0.0;
+      for (size_t i = 0; i < kDof; ++i) {
+        dmax = std::max(dmax, std::abs(qsol[i] - q_goal_[i]));
+        dmeas = std::max(dmeas, std::abs(qsol[i] - q_meas_[i]));
+      }
+      if (dmeas > max_ik_jump_meas_) {
+        // 解离"实测关节"太远 → 姿态等价的另一分支（腕部伸直位形最典型）。
+        // 这种解即便姿态正确，跟过去也会让工具多转几十度，必须拒绝。
+        ++ik_far_rej_;
+        if (have_target_ok_) target_ = target_ok_;
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                             "IK 解远离实测 %.3f rad > %.3f → 判为另一分支，保持当前目标（累计 %d）",
+                             dmeas, max_ik_jump_meas_, ik_far_rej_);
+      } else if (dmax < max_ik_jump_) {  // 正常：低通后接受
         if (goal_filter_tau_ > 1e-3) {
           const double a = std::min(1.0, dt_step / goal_filter_tau_);
           for (size_t i = 0; i < kDof; ++i) q_goal_[i] += a * (qsol[i] - q_goal_[i]);
@@ -436,12 +504,33 @@ private:
           q_goal_ = qsol;
         }
         ik_fail_streak_ = 0;
+        target_ok_ = target_;       // 记录"可达"的目标，失败时回退到这里
+        have_target_ok_ = true;
+      } else if (ik_jump_clip_ && dmax < max_ik_jump_hard_) {
+        // 解与种子相差较远（低通滞后，或腕部近奇异时两个近邻解）：**限步逼近**而不是整帧丢弃。
+        // 丢弃会死锁：q_goal_ 冻住 → 下一拍 dmax 依旧超标 → 每拍都拒（实测 100 次/秒，
+        // 指令 0.15 rad/s 只走出来 0.05 rad）。限步后每拍最多走 max_ik_jump_，连续且可控。
+        const double s = max_ik_jump_ / dmax;
+        for (size_t i = 0; i < kDof; ++i) q_goal_[i] += s * (qsol[i] - q_goal_[i]);
+        ik_fail_streak_ = 0;
+        ++ik_jump_clip_cnt_;
+        target_ok_ = target_;
+        have_target_ok_ = true;
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                             "IK 限步跟进：dmax=%.3f rad > %.3f → 本拍走 %.3f（累计 %d）",
+                             dmax, max_ik_jump_, max_ik_jump_, ik_jump_clip_cnt_);
       } else {
         ++ik_jump_reject_;
+        if (have_target_ok_) target_ = target_ok_;   // 跳变过大（真换支）：目标回退，别继续积分
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                             "IK 换支被拒：dmax=%.3f rad ≥ %.3f（累计 %d）",
+                             dmax, max_ik_jump_hard_, ik_jump_reject_);
       }
     } else {
       ++ik_fail_streak_;
       ++ik_fail_total_;
+      // 目标不可达：回退到上次成功位姿，避免"目标跑飞、残差无限涨"（实测可达 700mm）
+      if (have_target_ok_) target_ = target_ok_;
     }
 
     // ---- 4) 目标速度前馈 J⁻¹·v（关键：否则远目标每周期都在刹车）----
@@ -494,6 +583,8 @@ private:
       }
       target_ = state_->getGlobalLinkTransform(tip_frame_);
       z_lock_ = target_.translation().z();
+      target_ok_ = target_;
+      have_target_ok_ = true;
       q_goal_ = q_meas_;
       v_lim_.setZero();
       v_lp_.setZero();
@@ -547,9 +638,15 @@ private:
   double mode_topic_timeout_{ 0.5 };
   double dt_{ 0.01 }, max_step_trans_{ 0.02 }, twist_timeout_{ 0.3 }, ik_timeout_{ 0.02 };
   double max_vel_{ 1.5 }, max_acc_{ 8.0 }, max_jerk_{ 200.0 }, max_ik_jump_{ 0.05 };
+  bool ik_jump_clip_{ true };
+  double max_ik_jump_hard_{ 0.60 };
+  double max_ik_jump_meas_{ 0.20 };
+  int ik_jump_clip_cnt_{ 0 };
+  int ik_far_rej_{ 0 };
   bool use_clik_{ true };
   int clik_iters_{ 8 };
   double clik_damping_{ 0.02 }, clik_tol_pos_{ 1e-4 }, clik_tol_rot_{ 1e-4 }, clik_max_dq_{ 0.15 };
+  double clik_tol_pos_loose_{ 0.005 }, clik_tol_rot_loose_{ 0.02 };
   std::vector<double> joint_lo_, joint_hi_;
   double goal_filter_tau_{ 0.06 };
   double twist_max_linear_{ 0.40 }, twist_max_angular_{ 1.2 };
@@ -601,6 +698,10 @@ private:
   rclcpp::Time last_log_t_{ 0, 0, RCL_ROS_TIME };
   rclcpp::Time last_step_t_{ 0, 0, RCL_ROS_TIME };
   Eigen::Isometry3d target_{ Eigen::Isometry3d::Identity() };
+  // 最近一次 IK 解算成功的目标：IK 失败时回退到这里，避免目标继续积分跑飞（实测残差可达 700mm）
+  Eigen::Isometry3d target_ok_{ Eigen::Isometry3d::Identity() };
+  bool have_target_ok_{ false };
+  bool rotation_about_tip_{ true };
   double z_lock_{ 0.0 };
   int ik_fail_streak_{ 0 }, ik_fail_total_{ 0 }, ik_jump_reject_{ 0 };
 };

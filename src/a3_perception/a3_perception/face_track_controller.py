@@ -130,6 +130,13 @@ class FaceTrackController(Node):
         self.declare_parameter("stall_v_frac", 0.5)          # 输出 > frac*v_max 才算"在使劲"
         self.declare_parameter("stall_hold_s", 0.6)          # 停发时长
 
+        # 俯仰辅助（F183 Step C）：竖向平移被虚拟墙挡死 / 追不动时，改由绕标定帧 Y 的俯仰
+        # 继续收敛竖向误差（典型场景：人要抬高、末端已顶到高度上限，平移无解但抬腕可以继续看）。
+        self.declare_parameter("pitch_assist", False)
+        self.declare_parameter("pitch_gain", 0.5)            # [1/s]
+        self.declare_parameter("pitch_max", 0.35)            # [rad/s]
+        self.declare_parameter("pitch_stall_window_s", 2.0)  # 追不动后多久内允许启用
+
         p = self.get_parameter
         self.twist_topic = str(p("twist_topic").value)
         self.base_frame = str(p("base_frame").value)
@@ -177,6 +184,11 @@ class FaceTrackController(Node):
         self.stall_progress = abs(float(p("stall_min_progress").value))
         self.stall_v_frac = abs(float(p("stall_v_frac").value))
         self.stall_hold = max(0.35, float(p("stall_hold_s").value))
+        self.pitch_assist = bool(p("pitch_assist").value)
+        self.pitch_gain = float(p("pitch_gain").value)
+        self.pitch_max = abs(float(p("pitch_max").value))
+        self.pitch_stall_win = max(0.0, float(p("pitch_stall_window_s").value))
+        self._stall_last = 0.0
         self.ee_pos = None
         # 估计的「伺服内部积分目标」：EE 实测 + 累计发出的位移。
         # 虚拟墙必须作用在目标上——只看实测评测会在目标跑飞后永远不触发（真机已复现）。
@@ -236,6 +248,15 @@ class FaceTrackController(Node):
                 self.kp = float(prm.value)
             elif prm.name == "kz":
                 self.kz = float(prm.value)
+            elif prm.name == "pitch_assist":
+                self.pitch_assist = bool(prm.value)
+                self.get_logger().warn(f"俯仰辅助 → {'开' if self.pitch_assist else '关'}")
+            elif prm.name == "pitch_gain":
+                self.pitch_gain = float(prm.value)
+                self.get_logger().warn(f"pitch_gain → {self.pitch_gain:.2f}")
+            elif prm.name == "pitch_max":
+                self.pitch_max = abs(float(prm.value))
+                self.get_logger().warn(f"pitch_max → {self.pitch_max:.3f} rad/s")
             elif prm.name == "deadband":
                 self.deadband = abs(float(prm.value))
                 self.deadband_exit = max(self.deadband, self.deadband_exit)
@@ -499,6 +520,7 @@ class FaceTrackController(Node):
                         and prog < self.stall_progress
                         and v_now > self.stall_v_frac * self.v_max):
                     self._stall_until = now + self.stall_hold
+                    self._stall_last = now
                     self._stall_hist.clear()
                     self.v_cmd[:] = 0.0
                     self.w_cmd[:] = 0.0
@@ -589,6 +611,24 @@ class FaceTrackController(Node):
         if clamped:
             self.get_logger().warn(
                 f"工作空间挡板：{'/'.join(clamped)} 方向已置零（目标≈{np.round(wall_ref, 3)}）",
+                throttle_duration_sec=2.0)
+
+        # ---- 俯仰辅助：竖向平移无解时改由"抬腕/低头"继续追竖向误差 ----
+        # 触发（同时满足）：pitch_assist 开、整体转动环关、竖向误差出死区，
+        #   且竖向平移被虚拟墙挡死（clamped 含 z±）或最近发生过"追不动"。
+        z_blocked = any(c.startswith("z") for c in clamped)
+        recent_stall = (self.pitch_stall_win > 0.0
+                        and (now - self._stall_last) < self.pitch_stall_win)
+        if (self.pitch_assist and not self.enable_angular
+                and (z_blocked or recent_stall) and abs(ey) > self.deadband_exit):
+            wp = float(np.clip(-self.pitch_gain * ey, -self.pitch_max, self.pitch_max))
+            if self.r_cal is not None:
+                w_des = w_des + self.r_base_ee @ (self.r_cal.T @ np.array([0.0, wp, 0.0]))
+            else:
+                w_des = w_des + np.array([0.0, wp, 0.0])
+            self.get_logger().warn(
+                f"俯仰辅助：竖向平移受限（{'wall' if z_blocked else 'stall'}），"
+                f"e_v={ey:+.3f} → w_pitch={wp:+.3f} rad/s",
                 throttle_duration_sec=2.0)
 
         n = float(np.linalg.norm(v_des))
