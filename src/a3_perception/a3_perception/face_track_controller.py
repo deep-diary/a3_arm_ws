@@ -23,17 +23,19 @@
 from __future__ import annotations
 
 import math
+import os
 import sys
 from collections import deque
 
 import numpy as np
 import rclpy
+import yaml
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
-from std_srvs.srv import SetBool
+from std_srvs.srv import SetBool, Trigger
 
 try:
     from a3_msgs.msg import ArmStatus, FaceTarget
@@ -94,24 +96,39 @@ class FaceTrackController(Node):
         # 只做平面跟踪（不标定单目深度时用）：vz 恒 0，死区不看 dz
         self.declare_parameter("enable_depth", True)
 
-        # 相机相对杆轴下偏 45°。由 FK + 实测反推（2026-10-23）：
+        # 相机相对杆轴下偏约 45°（home 的 L4=0 时相机正对桌面）。由 FK + 实测反推（2026-10-23）：
         # 画面右 = 基座 +Y、画面上 = +Z、光轴 = -X（前后，暂不跟踪）。
-        # 该值在旧 home(L4=0，光轴俯 45°) 与新 home(L4=-0.785，光轴水平) 下同时成立。
+        # 该解析外参只在 mapping=extrinsic 或未标定雅可比时使用。
         self.declare_parameter("cam_rpy_deg", [135.0, 0.0, 0.0])
         # 采样一致性：取最近 median_n 个目标的逐分量中位数（抗单帧跳变），
         # 且最近若干帧的离散度超过 agree_tol（归一化误差）时判为"不稳定"→ 停发
         self.declare_parameter("median_n", 3)
         self.declare_parameter("agree_tol", 0.10)
+        # 视觉伺服映射：auto（有标定用雅可比，否则解析外参）| jacobian | extrinsic
+        # jacobian 由 scripts/a3_test/f183_calib_jacobian.py 实测生成（与安装角无关）
+        self.declare_parameter("mapping", "auto")
+        self.declare_parameter("jacobian_file", "~/.a3/camera/face_jacobian.yaml")
         self.declare_parameter("enable_angular", False)
         self.declare_parameter("ka", 0.8)            # [1/s] 角速度增益（enable_angular 时）
+        self.declare_parameter("w_max", 0.6)         # [rad/s] 角速度上限
+        self.declare_parameter("w_ramp", 2.0)        # [rad/s²] 角速度斜坡
+        # 开转动时把平移增益按此比例降低，避免"平移 + 转动"双重增益造成过冲
+        self.declare_parameter("lin_frac", 0.5)
 
         self.declare_parameter("target_timeout", 0.5)
         self.declare_parameter("ee_timeout", 0.5)
         # 工作空间虚拟墙：接近边界时把朝外的速度分量置 0，避免目标顶到夹紧值后
-        # 继续积分 → 目标跑到够不到的地方（真机实测会引发 IK 大量失败 + 手臂乱扭）
-        self.declare_parameter("workspace_min", [-0.60, -0.45, 0.02])
+        # 继续积分 → 目标跑到够不到的地方（真机实测会引发 IK 大量失败 + 手臂乱扭）。
+        # 注意 z 下限必须高于"够不到基座"的高度，否则目标会一路钻到 servo 的 z 夹紧面。
+        self.declare_parameter("workspace_min", [-0.55, -0.45, 0.15])
         self.declare_parameter("workspace_max", [0.45, 0.45, 0.70])
         self.declare_parameter("workspace_margin_m", 0.03)
+        # 追不动保护：图像误差在窗口内没下降、且输出接近饱和 → 判定"够不到/被夹死"，
+        # 停发一段（> servo twist_timeout 0.3s，强制其重锚实测）后重试，避免持续满速硬顶。
+        self.declare_parameter("stall_window_s", 1.5)
+        self.declare_parameter("stall_min_progress", 0.05)   # 窗口内 |e| 至少应下降这么多
+        self.declare_parameter("stall_v_frac", 0.5)          # 输出 > frac*v_max 才算"在使劲"
+        self.declare_parameter("stall_hold_s", 0.6)          # 停发时长
 
         p = self.get_parameter
         self.twist_topic = str(p("twist_topic").value)
@@ -130,8 +147,23 @@ class FaceTrackController(Node):
         self.z_min = float(p("z_min_m").value)
         self.z_max = float(p("z_max_m").value)
         self.enable_angular = bool(p("enable_angular").value)
+        self.w_max = abs(float(p("w_max").value))
+        self.w_ramp = abs(float(p("w_ramp").value))
+        self.lin_frac = float(np.clip(float(p("lin_frac").value), 0.0, 1.0))
         self.median_n = max(1, int(p("median_n").value))
         self.agree_tol = abs(float(p("agree_tol").value))
+        self.mapping = str(p("mapping").value)
+        self.jac_file = str(p("jacobian_file").value)
+        self.jac_z0 = None
+        self.r_cal = None          # 标定时的 R_base_ee（标定帧）
+        self.depth_dir = 1.0       # 标定帧 +X 是远离(+1)还是靠近(-1)人脸
+        self.jac_a = None          # 实测角雅可比 d(u,v)/d(θ_y, θ_z)（1/rad）
+        self.z_ref_auto = self.z_ref <= 0.0   # 0 = 沿用标定距离（固定距离跟踪）
+        self.jac = self._load_jacobian(self.jac_file)
+        if self.z_ref_auto and self.jac_z0 is not None:
+            self.z_ref = self.jac_z0
+        if self.z_ref <= 0.0:
+            self.z_ref = 0.45
         self._hist = deque(maxlen=9)
         self._hist_t = 0.0
         self.enable_depth = bool(p("enable_depth").value)
@@ -141,7 +173,16 @@ class FaceTrackController(Node):
         self.ws_min = np.array([float(v) for v in p("workspace_min").value])
         self.ws_max = np.array([float(v) for v in p("workspace_max").value])
         self.ws_margin = abs(float(p("workspace_margin_m").value))
+        self.stall_window = max(0.3, float(p("stall_window_s").value))
+        self.stall_progress = abs(float(p("stall_min_progress").value))
+        self.stall_v_frac = abs(float(p("stall_v_frac").value))
+        self.stall_hold = max(0.35, float(p("stall_hold_s").value))
         self.ee_pos = None
+        # 估计的「伺服内部积分目标」：EE 实测 + 累计发出的位移。
+        # 虚拟墙必须作用在目标上——只看实测评测会在目标跑飞后永远不触发（真机已复现）。
+        self._est = None
+        self._stall_hist = deque(maxlen=128)
+        self._stall_until = 0.0
         rpy = [math.radians(float(v)) for v in p("cam_rpy_deg").value]
         self.r_ee_cam = rpy_to_matrix(rpy[0], rpy[1], rpy[2])
 
@@ -155,6 +196,8 @@ class FaceTrackController(Node):
                                  self._on_mode, rel)
         self.pub = self.create_publisher(TwistStamped, self.twist_topic, rel)
         self.create_service(SetBool, "/a3/face_track/enable", self._on_enable)
+        self.create_service(Trigger, "/a3/face_track/reload_jacobian",
+                            self._on_reload_jacobian)
 
         self.enabled = False
         self.target: FaceTarget | None = None
@@ -206,8 +249,30 @@ class FaceTrackController(Node):
                 self.dz_dead = abs(float(prm.value))
             elif prm.name == "z_ref_m":
                 self.z_ref = float(prm.value)
+                self.z_ref_auto = self.z_ref <= 0.0
+                if self.z_ref_auto and self.jac_z0 is not None:
+                    self.z_ref = self.jac_z0
+                self.get_logger().warn(
+                    f"z_ref → {self.z_ref:.2f} m"
+                    f"{'（跟随标定距离）' if self.z_ref_auto else ''}")
+            elif prm.name == "z_min_m":
+                self.z_min = float(prm.value)
+                self.get_logger().warn(f"z_min → {self.z_min:.2f} m")
+            elif prm.name == "z_max_m":
+                self.z_max = float(prm.value)
+                self.get_logger().warn(f"z_max → {self.z_max:.2f} m")
             elif prm.name == "enable_angular":
                 self.enable_angular = bool(prm.value)
+                self.get_logger().warn(f"转动跟踪 → {'开' if self.enable_angular else '关'}")
+            elif prm.name == "ka":
+                self.ka = float(prm.value)
+                self.get_logger().warn(f"ka → {self.ka:.2f} 1/s")
+            elif prm.name == "w_max":
+                self.w_max = abs(float(prm.value))
+                self.get_logger().warn(f"w_max → {self.w_max:.2f} rad/s")
+            elif prm.name == "lin_frac":
+                self.lin_frac = float(np.clip(float(prm.value), 0.0, 1.0))
+                self.get_logger().warn(f"lin_frac → {self.lin_frac:.2f}")
             elif prm.name == "cam_rpy_deg":
                 r = [math.radians(float(v)) for v in prm.value]
                 self.r_ee_cam = rpy_to_matrix(r[0], r[1], r[2])
@@ -247,6 +312,9 @@ class FaceTrackController(Node):
         self.enabled = bool(req.data)
         self.v_cmd[:] = 0.0
         self.w_cmd[:] = 0.0
+        self._est = None
+        self._stall_hist.clear()
+        self._stall_until = 0.0
         now = self.get_clock().now().nanoseconds * 1e-9
         if self.enabled:
             self.hold_until = 0.0
@@ -257,6 +325,71 @@ class FaceTrackController(Node):
         resp.success = True
         self.get_logger().warn(resp.message)
         return resp
+
+    def _on_reload_jacobian(self, _req: Trigger.Request,
+                            resp: Trigger.Response) -> Trigger.Response:
+        self.jac = self._load_jacobian(self.jac_file)
+        if self.jac is not None and self.z_ref_auto and self.jac_z0 is not None:
+            self.z_ref = self.jac_z0     # 固定距离默认跟随新标定距离
+        resp.success = self.jac is not None
+        resp.message = ("已加载雅可比标定" if self.jac is not None
+                        else f"未找到/不可用：{os.path.expanduser(self.jac_file)}")
+        return resp
+
+    def _use_jacobian(self) -> bool:
+        return self.jac is not None and self.mapping in ("auto", "jacobian")
+
+    def _load_jacobian(self, path: str):
+        """读实测雅可比（归一化图像误差 / 基座米）。缺失或退化时返回 None。"""
+        fp = os.path.expanduser(path)
+        try:
+            with open(fp, encoding="utf-8") as f:
+                d = yaml.safe_load(f)
+            J = np.array(d["jacobian"], dtype=float)
+            if J.shape != (2, 2):
+                raise ValueError(f"shape={J.shape}")
+            det = float(np.linalg.det(J))
+            if abs(det) < 1e-9:
+                raise ValueError(f"退化 det={det:.3g}")
+            d_mm = d.get("distance_mm")
+            self.jac_z0 = float(d_mm) / 1000.0 if d_mm else None
+            # v2 标定：J 与 X 轴都在标定帧下解释，运行时按 R_now·R_calᵀ 旋转。
+            # 这样 L1 转动后"后退"方向会跟着末端转，而不是永远沿基座 X。
+            self.r_cal = None
+            self.depth_dir = 1.0
+            if str(d.get("frame", "base")) == "cal":
+                m = d.get("r_base_ee")
+                if m is not None and len(m) == 9:
+                    self.r_cal = np.array(m, dtype=float).reshape(3, 3)
+                dd = float(d.get("depth_dir", 1))
+                self.depth_dir = 1.0 if dd >= 0 else -1.0
+            # 角雅可比（转动跟踪）：d(u,v)/d(θ_y,θ_z)，单位 1/rad
+            self.jac_a = None
+            ja = d.get("angular_jacobian")
+            if ja is not None:
+                A = np.array(ja, dtype=float)
+                if A.shape == (2, 2) and abs(float(np.linalg.det(A))) > 1e-3:
+                    self.jac_a = A
+        except FileNotFoundError:
+            self.get_logger().info(f"无雅可比标定（{fp}）→ 走解析外参映射")
+            return None
+        except Exception as e:      # noqa: BLE001
+            self.jac_z0 = None
+            self.get_logger().warn(f"雅可比不可用（{e}）→ 走解析外参映射")
+            return None
+        self.get_logger().warn(
+            "使用实测雅可比 [du/dY du/dZ; dv/dY dv/dZ] = "
+            f"[{J[0, 0]:+.1f} {J[0, 1]:+.1f}; {J[1, 0]:+.1f} {J[1, 1]:+.1f}] /m，"
+            f"det={det:+.1f}，标定距离 Z0="
+            f"{(f'{self.jac_z0 * 1000:.0f} mm' if self.jac_z0 else '未知（不做 Z 缩放）')}，"
+            f"深度轴 {'标定帧 X（depth_dir=%+.0f）' % self.depth_dir if self.r_cal is not None else '未标定'}，"
+            f"来源 {fp}")
+        if self.jac_a is not None:
+            self.get_logger().warn(
+                "角雅可比 d(u,v)/d(pitch,yaw) = "
+                f"[{self.jac_a[0, 0]:+.2f} {self.jac_a[0, 1]:+.2f}; "
+                f"{self.jac_a[1, 0]:+.2f} {self.jac_a[1, 1]:+.2f}] /rad")
+        return J
 
     # -------------------------------------------------------------- 主控制环
     def _gate_reason(self, now: float) -> str:
@@ -299,11 +432,22 @@ class FaceTrackController(Node):
                 self._last_reason = reason
             self.v_cmd[:] = 0.0
             self.w_cmd[:] = 0.0
+            self._est = None          # 停发 → servo 会重锚，目标估计作废
+            self._stall_hist.clear()
             self._publish(self.v_cmd, self.w_cmd, now)
             return
         if self._last_reason:
             self.get_logger().info(f"恢复跟踪（原 hold：{self._last_reason}）")
             self._last_reason = ""
+
+        # 追不动保护：停发期间 servo 已重锚，这里从实测重新起算
+        if now < self._stall_until:
+            self.v_cmd[:] = 0.0
+            self.w_cmd[:] = 0.0
+            self._publish(self.v_cmd, self.w_cmd, now)
+            return
+        if self._est is None and self.ee_pos is not None:
+            self._est = self.ee_pos.copy()
 
         t = self.target
         if not self._hist:
@@ -320,6 +464,8 @@ class FaceTrackController(Node):
         if spread > self.agree_tol:
             self.v_cmd[:] = 0.0
             self.w_cmd[:] = 0.0
+            self._est = None
+            self._stall_hist.clear()
             self._publish(self.v_cmd, self.w_cmd, now)
             self.get_logger().warn(
                 f"目标不一致（最近 {len(last)} 帧离散 {spread:.3f} > {self.agree_tol}）→ 停发",
@@ -333,19 +479,93 @@ class FaceTrackController(Node):
         self._in_dead = e_xy < thr and depth_ok
         in_dead = self._in_dead
 
-        v_cam = np.zeros(3) if in_dead else np.array([
-            self.kp * x_mm / 1000.0,
-            self.kp * y_mm / 1000.0,
-            (self.kz * dz_mm / 1000.0) if self.enable_depth else 0.0,
-        ])
-        w_cam = np.zeros(3)
-        if self.enable_angular and not in_dead:
-            w_cam = np.array([-self.ka * ey, self.ka * ex, 0.0])
+        if in_dead:
+            v_des = np.zeros(3)
+            w_des = np.zeros(3)
+            self._stall_hist.clear()
 
-        # 相机系 → base 系（45° 外参在这里，眼在手上）
-        r_base_cam = self.r_base_ee @ self.r_ee_cam
-        v_des = r_base_cam @ v_cam
-        w_des = r_base_cam @ w_cam
+        # 追不动保护：窗口内 |e| 没下降，且一直在使劲 → 目标大概已顶到够不到的地方。
+        # 停发 stall_hold（> servo twist_timeout）让它重锚实测，避免满速硬顶 + IK 抖动。
+        else:
+            self._stall_hist.append((now, float(np.hypot(ex, ey))))
+            while self._stall_hist and now - self._stall_hist[0][0] > self.stall_window:
+                self._stall_hist.popleft()
+            v_now = float(np.linalg.norm(self.v_cmd))
+            if len(self._stall_hist) >= 5:
+                t0, e0 = self._stall_hist[0]
+                span = now - t0
+                prog = e0 - self._stall_hist[-1][1]
+                if (span >= 0.9 * self.stall_window
+                        and prog < self.stall_progress
+                        and v_now > self.stall_v_frac * self.v_max):
+                    self._stall_until = now + self.stall_hold
+                    self._stall_hist.clear()
+                    self.v_cmd[:] = 0.0
+                    self.w_cmd[:] = 0.0
+                    self._est = None
+                    self.get_logger().warn(
+                        f"追不动：{span:.1f}s 内 |e| 仅降 {prog:+.3f}（|v|={v_now:.3f} m/s）"
+                        f" → 停发 {self.stall_hold:.1f}s 重锚")
+                    self._publish(np.zeros(3), np.zeros(3), now)
+                    return
+
+        if in_dead:
+            pass
+        elif self._use_jacobian():
+            # 实测雅可比映射：v = -kp · J⁻¹ · e（J: 归一化图像/米）
+            try:
+                v_lat = -self.kp * np.linalg.solve(self.jac, np.array([ex, ey]))
+            except np.linalg.LinAlgError:
+                v_lat = np.zeros(2)
+            # 转动跟踪时以"转"为主：平移只做残差补偿，避免双环叠加过冲
+            if self.enable_angular:
+                v_lat *= self.lin_frac
+            # 雅可比正比于 1/Z：人脸走近/走远时按 Z/Z0 缩放，避免"近了过冲、远了迟钝"。
+            # Z 只用比值 → 深度单位未标定也不影响（比例误差抵消）。
+            if self.jac_z0 is not None and z_mm > 50.0:
+                zr = float(np.clip((z_mm / 1000.0) / self.jac_z0, 0.5, 2.5))
+                v_lat *= zr
+            # 角速度（标定帧）：绕 Y = pitch，绕 Z = yaw。
+            # 有实测角雅可比时用它解耦；否则用"画面右→绕 Z 反向"的解析近似。
+            if self.enable_angular:
+                if self.jac_a is not None:
+                    try:
+                        wyz = -self.ka * np.linalg.solve(self.jac_a, np.array([ex, ey]))
+                    except np.linalg.LinAlgError:
+                        wyz = np.zeros(2)
+                    w_cal = np.array([0.0, wyz[0], wyz[1]])
+                else:
+                    w_cal = np.array([0.0, -self.ka * ey, -self.ka * ex])
+            else:
+                w_cal = np.zeros(3)
+            if self.r_cal is not None:
+                # v2：J 的 Y/Z 与 depth 的 X 都定义在**标定帧**，再按当前末端姿态转到 base。
+                # 好处：L1 转了 90° 后"后退/左右"会跟着末端一起转，不会打到错误轴上。
+                v_cal = np.array([0.0, v_lat[0], v_lat[1]])
+                if self.enable_depth:
+                    e_d = self.z_ref - z_mm / 1000.0      # >0 = 太近，需要后退
+                    if abs(e_d) > self.dz_dead / 1000.0:
+                        v_cal[0] = float(np.clip(self.kz * e_d * self.depth_dir,
+                                                 -self.v_max, self.v_max))
+                v_des = self.r_base_ee @ (self.r_cal.T @ v_cal)
+                w_des = self.r_base_ee @ (self.r_cal.T @ w_cal)
+            else:
+                # 旧格式（frame=base）：X 固定不动，角速度按 base 解释
+                v_des = np.array([0.0, v_lat[0], v_lat[1]])
+                w_des = w_cal
+        else:
+            v_cam = np.array([
+                self.kp * x_mm / 1000.0,
+                self.kp * y_mm / 1000.0,
+                (self.kz * dz_mm / 1000.0) if self.enable_depth else 0.0,
+            ])
+            w_cam = np.zeros(3)
+            if self.enable_angular:
+                w_cam = np.array([-self.ka * ey, self.ka * ex, 0.0])
+            # 相机系 → base 系（眼在手上；角度来自 cam_rpy_deg 解析外参）
+            r_base_cam = self.r_base_ee @ self.r_ee_cam
+            v_des = r_base_cam @ v_cam
+            w_des = r_base_cam @ w_cam
 
         # 重新捕获后增益从 0 线性升到 1（track_age 在丢脸后归零）：
         # 人脸从画面边上重新出现时不会立刻按满速冲过去，消除"进出画面晃动"
@@ -355,31 +575,45 @@ class FaceTrackController(Node):
 
         # 工作空间虚拟墙：贴边时不再朝外推（否则目标被夹在边界面而实测跟不上，
         # 目标越积越远 → IK 大量失败、手臂乱扭）。也顺带避免"往上够不到还硬顶"。
+        # 判据用「估计的伺服目标」而非实测位姿：目标跑飞时实测往往还停在原地。
+        wall_ref = self._est if self._est is not None else self.ee_pos
         clamped = []
-        if self.ee_pos is not None:
+        if wall_ref is not None:
             for i in range(3):
-                if v_des[i] > 0.0 and self.ee_pos[i] >= self.ws_max[i] - self.ws_margin:
+                if v_des[i] > 0.0 and wall_ref[i] >= self.ws_max[i] - self.ws_margin:
                     v_des[i] = 0.0
                     clamped.append("xyz"[i] + "+")
-                elif v_des[i] < 0.0 and self.ee_pos[i] <= self.ws_min[i] + self.ws_margin:
+                elif v_des[i] < 0.0 and wall_ref[i] <= self.ws_min[i] + self.ws_margin:
                     v_des[i] = 0.0
                     clamped.append("xyz"[i] + "-")
         if clamped:
             self.get_logger().warn(
-                f"工作空间挡板：{'/'.join(clamped)} 方向已置零（EE={np.round(self.ee_pos, 3)}）",
+                f"工作空间挡板：{'/'.join(clamped)} 方向已置零（目标≈{np.round(wall_ref, 3)}）",
                 throttle_duration_sec=2.0)
 
         n = float(np.linalg.norm(v_des))
         if n > self.v_max:
             v_des *= self.v_max / n
-        # 逐拍斜坡（只对线速度；角速度默认关闭）
+        # 逐拍斜坡（线速度）
         dv = v_des - self.v_cmd
         max_dv = self.ramp * self.dt
         if np.linalg.norm(dv) > max_dv:
             dv *= max_dv / float(np.linalg.norm(dv))
             v_des = self.v_cmd + dv
+        # 角速度限幅 + 斜坡（转动跟踪）
+        nw = float(np.linalg.norm(w_des))
+        if nw > self.w_max:
+            w_des *= self.w_max / nw
+        dw = w_des - self.w_cmd
+        max_dw = self.w_ramp * self.dt
+        if np.linalg.norm(dw) > max_dw:
+            dw *= max_dw / float(np.linalg.norm(dw))
+            w_des = self.w_cmd + dw
         self.v_cmd = v_des
         self.w_cmd = w_des
+        # 累计「伺服目标」估计（只有真的在发非零速度时才推进）
+        if self._est is not None:
+            self._est = self._est + self.v_cmd * self.dt
 
         self._publish(self.v_cmd, self.w_cmd, now)
 

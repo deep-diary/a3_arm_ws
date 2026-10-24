@@ -492,6 +492,10 @@ def _build(cfg, include_gripper):
             {"twist_max_accel": 1.0},
             {"twist_max_ang_accel": 3.0},
             {"twist_lpf_tau": 0.06},
+            # 目标工作空间夹紧：z 下限必须高于"够不到基座"的高度。默认 0.02 会让
+            # 人脸跟踪把目标一路顶到基座附近 → IK 大量失败、CLIK 抖动（2026-10-24 真机复现）
+            {"workspace_min": [-0.55, -0.45, 0.15]},
+            {"workspace_max": [0.45, 0.45, 0.70]},
         ],
     )
 

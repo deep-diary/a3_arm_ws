@@ -123,26 +123,42 @@ flowchart LR
 | `/a3/face_target` | `a3_msgs/FaceTarget` | 发布 | 检测结果（约 18 Hz），RELIABLE depth 10 |
 | `/a3/face_track/debug_image` | `sensor_msgs/Image` | 发布 | 标注图（`debug_image:=true` 时） |
 | `/a3/face_track/enable` | `std_srvs/SetBool` | 服务 | 使能跟踪（默认 **false**，必须显式打开） |
+| `/a3/face_track/reload_jacobian` | `std_srvs/Trigger` | 服务 | 重读 `~/.a3/camera/face_jacobian.yaml`（标定后热加载） |
 | `/servo_node/delta_twist_cmds` | `geometry_msgs/TwistStamped` | 发布 | 50 Hz，`frame_id=base_link` |
 
 ### 4.3 控制律
 
 记：`k=(fx,fy,cx,cy)` 内参（无内参时用 `hfov` 估算），`(u,v)` 滤波后人脸中心，`z` 深度，
-`z_ref` 期望距离。
+`z_ref` 期望距离。**横向（左右/上下）+ 前后（固定距离）都跟踪。**
+
+两种映射，`mapping` 选择（`auto` = 有标定文件用雅可比，否则解析外参）：
 
 ```
-[X, Y, Z] = [(u-cx)·z/fx, (v-cy)·z/fy, z]              # 相机系，mm
-e_xy      = max(|u-cx|/W, |v-cy|/H)                    # 归一化像素误差
+# A. 实测雅可比 + 标定帧（v2，推荐，见 §6.3）
+v_lat  = -kp · J⁻¹ · [e_u, e_v] · clip(Z/Z0, 0.5, 2.5)   # J: 标定帧 Y/Z 两列
+v_cal  = [ depth_dir · kz · (z_ref - Z),  v_lat_Y,  v_lat_Z ]
+v_base = R_base_ee(now) · R_calᵀ · v_cal                 # 随末端姿态旋转
+
+# B. 解析外参（未标定时的 fallback）
+[X, Y, Z] = [(u-cx)·z/fx, (v-cy)·z/fy, z]               # 相机系，mm
+e_xy      = max(|u-cx|/W, |v-cy|/H)                     # 归一化像素误差
 v_cam     = [ kp·X/1000, kp·Y/1000, kz·(Z-z_ref)/1000 ] # m/s，死区内置 0
 R_base_cam= R_base_ee(/a3/ee_pose) · R_ee_cam(45° 外参)
-v_base    = R_base_cam · v_cam                          # 发布为 TwistStamped
-|v| ≤ v_max(0.05 m/s)，逐拍斜坡 ≤ 0.5 m/s²
+v_base    = R_base_cam · v_cam
 ```
 
-- **45° 倾斜只出现在 `R_ee_cam` 一个参数里**，标定一次，换检测后端不用改。
-- 默认**只平移不对转**（`enable_angular=false`）：平移同样能让光轴对准人脸，且不引入腕部奇异；
-  需要更快覆盖时再打开角速度项。
-- 死区：`e_xy < deadband`（默认 2.5% 画幅）且 `|dz| < 20 mm` → 输出 0（防抖，避免"围着目标抖"）。
+共同约束：`|v| ≤ v_max`，逐拍斜坡 ≤ 0.5 m/s²。
+
+**为什么用标定帧（v2）**：J 是在某个末端姿态下标定的。相机固定在末端上，L1 转动后
+"画面右/后退"的方向会跟着转；若仍按基座 Y/Z 解释，就会把左右指令打到前后轴上，
+表现为"跟不动/乱晃"。`R_cal` 在标定时记录，运行时用 `R_now · R_calᵀ` 旋转，
+所以任意姿态下都成立。`depth_dir` 由标定时沿基座 +X 的深度探针实测（+1 = +X 远离）。
+
+- 死区：`e_xy < deadband`（默认 6% 画幅，出死区 8% 滞环）且 `|dz| < 40 mm` → 输出 0
+  （防抖，避免"围着目标抖"）。深度死区大于横向：`z` 的噪声/多径更明显。
+- 增益（2026-10-24 真机定档）：`kp=0.4`、`kz=0.6`、`v_max=0.02 m/s`。此前 `0.9/0.05`
+  + 小死区时两个环会同时饱和成 bang-bang，在目标附近来回摆（末端 z 摆 ±3.5 cm、误差摆 ±0.27）；
+  降增益并加大死区后静止误差 std ≤ 0.001、末端 std 0.004 m。
 
 ### 4.4 安全门控（全部满足才发非零 twist）
 
@@ -157,6 +173,50 @@ v_base    = R_base_cam · v_cam                          # 发布为 TwistStampe
 
 任一条件失效 → 立即发 0 并进入 hold；恢复需重新满足条件（不自动重新使能）。
 Control 侧还有失能服务、Ctrl-C 归零；`a3_servo_target` 自身还有 0.3 s twist 超时与工作空间夹紧。
+
+### 4.5 防「目标跑飞」（2026-10-24 真机事故后加）
+
+现象：平板放到画面下沿（`center_norm y=0.71`），机械臂大幅抖动、疑似"暴动"，伺服日志：
+
+```
+err=736.0mm  z=0.0200  ik_fail=16446/44570  ik_jump_rej=2581  moving=1  |v|=0.200
+```
+
+根因链：图像误差大 → 控制器持续 −Z → `a3_servo_target` 的积分目标被夹到 z=0.02 m（基座附近，
+当前 x 下够不到）→ 37% 周期 IK 失败、CLIK 在解之间跳 → 抖动。原先的虚拟墙只看 `ee_pose`（实测），
+目标跑飞时实测还停在原地，所以从未触发。
+
+三道护栏（本需求实现）：
+
+| 护栏 | 参数 | 行为 |
+|---|---|---|
+| 目标估计 + 虚拟墙 | `workspace_min`/`max`、`workspace_margin_m` | 控制器自己累计"伺服目标"（实测 + ∫v），墙作用在目标上 |
+| 追不动保护 | `stall_window_s=1.5`、`stall_min_progress=0.05`、`stall_v_frac=0.5`、`stall_hold_s=0.6` | 窗口内 \|e\| 不降且输出饱和 → 停发 0.6 s（> servo twist_timeout 0.3 s）强制重锚实测 |
+| servo 侧目标夹紧 | `a3_bringup.launch.py` → `workspace_min=[-0.55,-0.45,0.15]` | 目标永远不会低于 z=0.15 m |
+
+使用约束：平板尽量保持在画面中心 ±20%，不要放到画面下沿 20% 以外（那是俯仰工作区的边缘）。
+
+### 4.6 转动跟踪（绕 base 跟人走，2026-10-24 追加）
+
+默认 `enable_angular=false`（只平移，不引入腕部奇异）。纯平移只能覆盖 ±20–30°：
+人脸绕 base 转 θ 时需要横向位移 `R·sinθ`（0.8 m 处 30° 就要 0.4 m），超出工作空间必丢目标。
+要跟一圈必须转动末端：
+
+```
+w_cal  = [0, -ka·e_v, -ka·e_u]         # 标定帧：绕 Y=pitch，绕 Z=yaw
+w_base = R_base_ee(now) · R_calᵀ · w_cal
+```
+
+- 符号推导（小孔成像）：`du/dt ≈ -ω_y`、`dv/dt ≈ +ω_x`；换算到标定帧后即上式。
+  实测若发散，把 `ka` 取负即可。
+- 限幅 `w_max=0.6 rad/s`、斜坡 `w_ramp=2 rad/s²`；开转动时平移增益乘 `lin_frac=0.5`
+  （转为主、平移补残差），避免双环叠加过冲。
+- 转动覆盖范围受腕部限位（L4/L5/L6）与奇异限制，实际可用角度需真机验证。
+
+**几何约束（必须知道）**：相机光轴与第六轴 z 轴差约 45°（支架）。所以"第六轴 z 轴垂直人脸"
+与"人脸在画面中心"不能同时成立。本需求的跟踪目标是**光轴对准人脸**；若要让工具 z 轴对准，
+必须把相机支架改成与杆轴平行，或额外输出 45° 补偿姿态。
+
 
 ## 5. 滤波取舍（用户提问：位置平均 vs 卡尔曼）
 
@@ -181,23 +241,61 @@ env -u PYTHONPATH ~/.a3/venv/face_track/bin/python scripts/face_landmark_overlay
 ```
 `~/.a3/camera/face_calib.yaml` 覆盖包内默认值（`<pkg>/config/face_track.yaml`）。
 
-### 6.2 45° 外参（FK 反推 + 真机确认）
+### 6.2 解析外参（fallback，FK 反推 + 真机确认）
 
-`cam_rpy_deg: [45, 0, 0]`（绕 `end_effector` 的 **x** 轴 +45°，光轴相对杆轴下偏 45°）。
+`cam_rpy_deg: [135, 0, 0]` —— 2026-10-23 由 FK + 真机方向观测反推（旧值 `[135,-52.9,0]` 会让画面歪约 43°、竖向推错）：
 
-推导（2026-10-23，Pinocchio FK，6J `el_a3.urdf`，`end_effector` 的 z 轴指向法兰、**杆轴为 -z**）：
+| 画面方向 | 对应基座轴 |
+|---|---|
+| 画面右 | **+Y** |
+| 画面上 | **+Z** |
+| 光轴/前后 | **−X**（home 位形；v2 起用于固定距离跟踪，方向由 `depth_dir` 实测） |
 
-| 姿态 | 杆轴(-z) 仰角 | 候选外参下的光轴仰角 |
-|---|---|---|
-| 旧 home（L4=0） | 水平 0° | `Rx(+45)` → **−45°**（与"原 home 俯视 45°"实测一致）；`Rx(-45)` → +45°；`Ry(±45)` → 0° |
-| 新 home（L4=−1.0279） | 上仰 59° | `Rx(+45)` → +14° |
+home 的 `L4=0` 时相机到底座连杆约 45° 下偏（用户实测支架约 60°，按 45° 近似即可），
+相机正对桌面 → 适合用桌上平板里的脸做标定。该值只在未标定雅可比（`mapping=extrinsic`
+或标定文件缺失）时生效；方向反了就把第一个数取反。
 
-只有 `Rx(+45)` 能同时满足两处观测，故默认 `[45,0,0]`（早期误写成绕 y 轴，已改）。
-`Rx(+45)` 下相机 x 轴 = EE x 轴，所以**左右映射与 45° 无关**；改变的是"横向运动耦合到哪个竖直方向"。
+### 6.3 图像雅可比自标定（方法 A，推荐）
 
-验证方法：`v_max` 先 0.02、`enable_depth:=false`（平面模式），使能后看 debug 图里人脸中心
-是否朝画面中心收敛；若发散，把 `cam_rpy_deg` 的第一个数取反（`[-45,0,0]`）。
-`cam_rpy_deg` 与 `v_max` 都支持运行时 `ros2 param set`，不必重启。
+不依赖相机安装角/外参：在标定姿态下实测「基座 Y / Z 各走 30 mm → 画面中心移动多少」得到 2×2 雅可比，
+再沿 +X 走一次量深度变化方向。安装角、偏置、尺度、左右/上下耦合全部被 J 吸收。
+**任意装配方式都可，换支架只需重标一次。**
+
+```bash
+# 前置：arm_status=READY、跟踪未使能、脸/平板居中且 20 s 内不动
+python3 scripts/a3_test/f183_calib_jacobian.py              # 约 18 s，探针 20 mm
+python3 scripts/a3_test/f183_calib_jacobian.py --probe 0.03 # 条件数偏大时加大探针重标
+# 输出 ~/.a3/camera/face_jacobian.yaml：
+#   frame: cal, jacobian(2×2), r_base_ee(9), distance_mm(Z0), depth_dir(±1)
+ros2 service call /a3/face_track/reload_jacobian std_srvs/srv/Trigger   # 热加载
+```
+
+脚本会打印 det / cond：`|det| < 1e-3` 判退化（两轴对画面影响几乎平行），`cond > 25` 建议加大探针。
+
+**实测记录（2026-10-24，真机 6J，home 位形，Pad 脸，`--probe 0.03`）：**
+
+```
+J = [-4.4 -0.4; -0.9 +3.4] /m    det = -15.4    cond = 1.3    Z0 = 883 mm
+```
+
+- `du/dY < 0`：基座 +Y → 画面左移（即人脸在画面右侧时往 +Y 追，与真机直觉一致）。
+- `dv/dZ > 0`：基座 +Z → 画面下移（人脸偏上时往 +Z 抬）。
+- 串扰小、`cond≈1.3`，说明 Y/Z 两个方向几乎正交，可直接用 `J⁻¹` 解耦。
+- Z0=883 mm 偏远（人站得比较靠后）；若日常跟踪距离在 0.6 m 左右，靠近后 `Z/Z0` 会自动缩小增益，
+  也可在 0.6 m 处重标一次让基线更贴近常用工况。
+
+### 6.4 前后（固定距离）跟踪与 X 轴
+
+**已实现（v2）**：按 `z_ref` 保持距离——脸太近就沿光轴反方向后退，太远就靠近。
+`z_ref_m <= 0` 时沿用标定距离 `Z0`（默认行为）。
+
+- 方向不是写死的基座 ±X，而是**标定帧 X 轴**，运行时按 `R_now · R_calᵀ` 旋转：
+  home 位姿下沿 X，L1 转 90° 后自动变成沿 ±Y。
+- `depth_dir` 由标定实测（+1 = 沿 +X 走时人脸变远），避免猜符号。
+- 前馈量 `v_x = depth_dir · kz · (z_ref − Z)`，死区 `dz_deadband_mm`（默认 20 mm），限速同 `v_max`。
+- 距离变化对横向增益的影响仍由 `J ∝ 1/Z` 的 `Z/Z0` 缩放补偿；两者独立。
+- 精度取决于单目深度标定（§6.1，个体脸型差异 ±10%），作为外环足够；不追求 mm 级。
+
 
 ## 7. 实现清单
 
@@ -209,6 +307,7 @@ env -u PYTHONPATH ~/.a3/venv/face_track/bin/python scripts/face_landmark_overlay
 | `scripts/setup_face_track_env.sh` | 建 `~/.a3/venv/face_track`、装 mediapipe、下模型到 `~/.a3/models/` |
 | `scripts/a3_stack.sh` | `--face-track`：起栈后顺带拉起跟踪；`stop/restart` 先停它再停栈；`status` 单列一节；孤儿清理名单已含三个进程特征 |
 | `scripts/face_landmark_overlay.py` | 离线视频验证/标定工具（已完成） |
+| `scripts/a3_test/f183_calib_jacobian.py` | 图像雅可比自标定（Y/Z 探针 → `~/.a3/camera/face_jacobian.yaml`，含 `distance_mm`） |
 | `docs/shared/TOPIC_CONTRACT.md` | 登记 `/a3/face_target`、`/a3/face_track/*` |
 
 ## 8. 验收标准
@@ -221,6 +320,8 @@ env -u PYTHONPATH ~/.a3/venv/face_track/bin/python scripts/face_landmark_overlay
 | 4 | 深度标定 | 20 cm 与 50 cm 两点读数误差 < 15% | 尺量 + 读数 |
 | 5 | 转角 | 正脸 yaw 偏差 < ±8°；极端转头符号正确 | 视频抽查 |
 | 6 | 闭环居中 | 人慢速左右移动（≤0.2 m/s），稳态图像误差 < 5% 画幅 | debug 图 + 记录 |
+| 6b | 雅可比标定 | `f183_calib_jacobian.py` 成功写文件，`det≠0`、`cond<25`；`reload_jacobian` 日志显示 `Z0` | 标定输出 |
+| 6c | 距离适应 | 在同一姿态下前/后移动 0.5→0.8 m，靠近不过冲、远离不迟钝（Z/Z0 缩放生效） | 实测 |
 | 7 | 失能/丢脸 | 丢脸 0.3 s 内 twist 归零；失能后不再发非零 twist | 录 twist 话题 |
 | 8 | 不干扰他模式 | 未使能时 `a3_servo_target` 收不到本控制器任何非零 twist | 同上 |
 

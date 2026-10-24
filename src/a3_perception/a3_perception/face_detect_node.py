@@ -173,6 +173,8 @@ class FaceDetectNode(Node):
         self._track_start_t: float | None = None
         self._n_out = 0
         self._t_rate = time.monotonic()
+        self._dbg_fps = 0.0          # 标注图帧率（EMA）
+        self._dbg_t = 0.0
 
         self.create_subscription(Image, self.image_topic, self._on_image, sensor_qos)
 
@@ -362,6 +364,26 @@ class FaceDetectNode(Node):
     def _publish_debug(self, frame: np.ndarray, landmarks, msg: FaceTarget) -> None:
         img = frame.copy()
         h, w = img.shape[:2]
+        CYAN = (255, 255, 0)     # BGR：青
+        GREEN = (0, 255, 0)      # BGR：绿（帧率专用）
+        DARK = (0, 0, 0)
+
+        def text(t: str, org, scale: float = 0.55, color=CYAN, thick: int = 1) -> None:
+            cv2.putText(img, t, org, cv2.FONT_HERSHEY_SIMPLEX, scale, DARK, thick + 2, cv2.LINE_AA)
+            cv2.putText(img, t, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA)
+
+        # 帧率（EMA），右上角单独显示
+        now_d = time.monotonic()
+        if self._dbg_t > 0.0:
+            dt = now_d - self._dbg_t
+            if dt > 1e-6:
+                inst = 1.0 / dt
+                self._dbg_fps = inst if self._dbg_fps <= 0.0 else 0.9 * self._dbg_fps + 0.1 * inst
+        self._dbg_t = now_d
+        fps_txt = f"FPS {self._dbg_fps:4.1f}"
+        (tw, _), _ = cv2.getTextSize(fps_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+        text(fps_txt, (w - tw - 10, 24), color=GREEN)
+
         if landmarks is not None:
             for pt in landmarks:
                 cv2.circle(img, (int(pt.x * w), int(pt.y * h)), 1, (0, 200, 0), -1)
@@ -371,21 +393,20 @@ class FaceDetectNode(Node):
             cv2.drawMarker(img, (cu, cvv), (0, 0, 255), cv2.MARKER_CROSS, 16, 2)
             cv2.arrowedLine(img, (cu, cvv), (w // 2, h // 2), (0, 200, 255), 1,
                             cv2.LINE_AA, tipLength=0.06)
+            # 控制目标：u、v → 0（人脸居中），Z → z_ref（固定距离）
+            # 注意 cv2.putText 的 Hershey 字体只有 ASCII，不能写中文
             lines = [
-                f"X {msg.xyz_mm.x:+6.0f}  Y {msg.xyz_mm.y:+6.0f}  Z {msg.xyz_mm.z:6.0f} mm",
-                f"YAW {msg.yaw_deg:+6.1f}  PITCH {msg.pitch_deg:+6.1f}  "
-                f"ROLL {msg.roll_deg:+6.1f} deg",
-                f"err {msg.image_error.x:+.3f} {msg.image_error.y:+.3f}  "
-                f"{'valid' if msg.valid else 'COASTING'}",
+                f"XYZ   X {msg.xyz_mm.x:+5.0f} | Y {msg.xyz_mm.y:+5.0f} | "
+                f"Z {msg.xyz_mm.z:4.0f} mm",
+                f"HEAD  YAW {msg.yaw_deg:+5.1f} | PITCH {msg.pitch_deg:+5.1f} | "
+                f"ROLL {msg.roll_deg:+5.1f} deg",
+                f"ERR   u {msg.image_error.x:+.3f} | v {msg.image_error.y:+.3f}  "
+                f"(0=center){'' if msg.valid else '  COASTING'}",
             ]
             for i, t in enumerate(lines):
-                cv2.putText(img, t, (10, 24 + i * 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                            (0, 0, 0), 3, cv2.LINE_AA)
-                cv2.putText(img, t, (10, 24 + i * 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                            (240, 240, 240), 1, cv2.LINE_AA)
+                text(t, (10, 24 + i * 22))
         else:
-            cv2.putText(img, "NO FACE", (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                        (0, 0, 255), 2, cv2.LINE_AA)
+            text("NO FACE", (10, 24), 0.7, (0, 0, 255), 2)
         out = Image()
         out.header = msg.header
         out.height, out.width = h, w

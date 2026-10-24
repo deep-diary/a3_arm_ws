@@ -33,33 +33,52 @@
     base_frame: base_link
     rate_hz: 50.0
     # 增益：v = kp × 横向偏移[m]，v_z = kz × 深度误差[m]
-    kp_img: 0.9
-    kz: 1.2
-    v_max: 0.05          # F181 已验证的人脸跟踪档位
+    # 2026-10-24 真机实测：0.9 / 0.05 + 小死区会在目标附近来回摆（两环同时饱和成 bang-bang）；
+    # 0.4 / 0.02 稳定但偏慢；0.6 / 0.04 是当前使用的档位（横向稳态误差 std ≈ 0.014）。
+    kp_img: 0.6
+    kz: 0.6
+    v_max: 0.04
     ramp_accel: 0.5      # m/s²
-    deadband: 0.04        # 归一化图像误差死区（4% 半幅 ≈ 13px）
-    deadband_exit: 0.055  # 滞环出死区阈值（防边界反复启停）
+    deadband: 0.06        # 归一化图像误差死区（6% 半幅）
+    deadband_exit: 0.08  # 滞环出死区阈值（防边界反复启停）
     edge_hold: 0.88       # |err| 超过视为不可信（人脸被画面裁切）
     settle_time_s: 0.6    # 重新捕获后增益 0→1 的渐变时长（消除进出画面晃动）
-    dz_deadband_mm: 20.0
-    z_ref_m: 0.45
+    dz_deadband_mm: 40.0  # 深度读数噪声/多径更大，死区给足
+    # 期望距离：0 = 沿用标定时的距离（固定距离跟踪）
+    z_ref_m: 0.0
     z_min_m: 0.15
     z_max_m: 0.90
     # end_effector → camera_optical_frame。
     # FK 反推 + 实测确认（2026-10-23）：画面右 = 基座 +Y、画面上 = +Z、光轴 = -X（前后不跟踪）。
-    # 旧 home(L4=0) 光轴俯 45°、新 home(L4=-0.785) 光轴水平，两者都被该值同时满足。
     # 若换相机支架必须重标；左右反了就把第一个数改成 -45。
     cam_rpy_deg: [135.0, 0.0, 0.0]
+    # 映射方式：auto（有标定文件用雅可比，否则用上面的解析外参）| jacobian | extrinsic。
+    # 雅可比由 scripts/a3_test/f183_calib_jacobian.py 实测生成，与相机安装角无关；
+    # 文件里的 distance_mm 是标定距离 Z0，控制器按 Z/Z0 缩放输出（前后移动不用另标 X 轴）。
+    mapping: auto
+    jacobian_file: ~/.a3/camera/face_jacobian.yaml
     # 采样一致性：取最近 median_n 帧的逐分量中位数（抗单帧跳变）；
     # 最近几帧离散超过 agree_tol（归一化误差）判为"检测不稳"→ 停发，防进出画面抽动。
     median_n: 3
     agree_tol: 0.10
+    # 转动跟踪（绕 base 跟人走）：默认关，确认符号后运行时打开
+    #   ros2 param set /face_track_controller enable_angular true
+    # 打开后以"转"为主，平移按 lin_frac 降权；工具 z 轴与光轴差约 45°，以光轴对准为准
     enable_angular: false
-    ka: 0.8
+    ka: 0.8          # 角速度增益 [1/s]（图像误差 → rad/s）
+    w_max: 0.6       # 角速度上限 [rad/s]
+    w_ramp: 2.0      # 角速度斜坡 [rad/s²]
+    lin_frac: 0.5    # 开转动时的平移增益系数
     target_timeout: 0.5
     ee_timeout: 0.5
     # 工作空间虚拟墙（与 a3_servo_target 默认一致）：贴边时不再朝外推，
-    # 否则目标被夹在边界面、实测跟不上 → 目标越积越远 → IK 大量失败 + 手臂乱扭
-    workspace_min: [-0.60, -0.45, 0.02]
+    # 否则目标被夹在边界面、实测跟不上 → 目标越积越远 → IK 大量失败 + 手臂乱扭。
+    # z 下限 0.15 是踩过的坑：0.02 会让目标一路钻到基座附近（真机 IK 失败 37%、CLIK 抖动）
+    workspace_min: [-0.55, -0.45, 0.15]
     workspace_max: [0.45, 0.45, 0.70]
     workspace_margin_m: 0.03
+    # 追不动保护：窗口内误差没下降且输出接近饱和 → 停发 stall_hold_s 让 servo 重锚
+    stall_window_s: 1.5
+    stall_min_progress: 0.05
+    stall_v_frac: 0.5
+    stall_hold_s: 0.6
