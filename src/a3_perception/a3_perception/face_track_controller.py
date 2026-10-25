@@ -119,6 +119,12 @@ class FaceTrackController(Node):
         self.declare_parameter("mapping", "auto")
         self.declare_parameter("jacobian_file", "~/.a3/camera/face_jacobian.yaml")
         self.declare_parameter("enable_angular", False)
+        # F191 标定（TRACK 模式长按触发）：
+        #   target_err_x/y = 目标中心偏移（归一化图像误差当量，水平/竖向）
+        #   z_ref_m        = 目标距离（前后）；0 = 跟随雅可比标定距离
+        self.declare_parameter("target_err_x", 0.0)
+        self.declare_parameter("target_err_y", 0.0)
+        self.declare_parameter("calibration_file", "~/.a3/camera/face_target.yaml")
         self.declare_parameter("ka", 0.8)            # [1/s] 角速度增益（enable_angular 时）
         self.declare_parameter("w_max", 0.6)         # [rad/s] 角速度上限
         self.declare_parameter("w_ramp", 2.0)        # [rad/s²] 角速度斜坡
@@ -174,6 +180,9 @@ class FaceTrackController(Node):
         self.z_min = float(p("z_min_m").value)
         self.z_max = float(p("z_max_m").value)
         self.enable_angular = bool(p("enable_angular").value)
+        self.target_err = np.array([float(p("target_err_x").value),
+                                    float(p("target_err_y").value)])
+        self.calib_file = str(p("calibration_file").value)
         self.w_max = abs(float(p("w_max").value))
         self.w_ramp = abs(float(p("w_ramp").value))
         self.lin_frac = float(np.clip(float(p("lin_frac").value), 0.0, 1.0))
@@ -252,6 +261,9 @@ class FaceTrackController(Node):
         self.create_service(SetBool, "/a3/face_track/enable", self._on_enable)
         self.create_service(Trigger, "/a3/face_track/reload_jacobian",
                             self._on_reload_jacobian)
+        # F191：标定三件套（TRACK 模式长按）
+        self.create_service(Trigger, "/a3/face_track/status", self._on_track_status)
+        self.create_service(Trigger, "/a3/face_track/set_target", self._on_set_target)
 
         self.enabled = False
         self.target: FaceTarget | None = None
@@ -272,12 +284,113 @@ class FaceTrackController(Node):
         dt = 1.0 / max(1.0, float(p("rate_hz").value))
         self.dt = dt
         self.create_timer(dt, self._tick)
+        self._load_target_calib()
         self.get_logger().info(
             f"face_track 就绪：{p('target_topic').value} → {self.twist_topic}；"
             f"v_max {self.v_max:.3f} m/s，kp {self.kp:.2f}，z_ref {self.z_ref:.2f} m，"
             f"深度轴 {'开' if self.enable_depth else '关（平面跟踪）'}，"
             f"cam_rpy {[round(math.degrees(a), 1) for a in rpy]}°；"
             "当前**未使能**（调 /a3/face_track/enable）")
+
+    # ---------------------------------------------------------- F191 标定
+    def _load_target_calib(self) -> None:
+        """读 ~/.a3/camera/face_target.yaml（目标中心偏移 / 目标距离）。"""
+        fp = os.path.expanduser(self.calib_file)
+        try:
+            with open(fp, encoding="utf-8") as f:
+                d = yaml.safe_load(f) or {}
+        except FileNotFoundError:
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"标定文件不可用（{exc}）: {fp}")
+            return
+        try:
+            self.target_err = np.array([float(d.get("target_err_x", 0.0)),
+                                        float(d.get("target_err_y", 0.0))])
+            zr = float(d.get("z_ref_m", 0.0))
+            if zr > 0.0:
+                self.z_ref = zr
+                self.z_ref_auto = False
+        except (TypeError, ValueError) as exc:
+            self.get_logger().warn(f"标定文件格式错误（{exc}）: {fp}")
+            return
+        self.get_logger().warn(
+            f"已载入目标标定：target=({self.target_err[0]:+.3f}, "
+            f"{self.target_err[1]:+.3f}) z_ref={self.z_ref:.3f} m（{fp}）")
+
+    def _save_target_calib(self) -> str:
+        fp = os.path.expanduser(self.calib_file)
+        tmp = fp + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                yaml.safe_dump({
+                    "target_err_x": float(self.target_err[0]),
+                    "target_err_y": float(self.target_err[1]),
+                    "z_ref_m": float(self.z_ref),
+                }, f, allow_unicode=True, sort_keys=False)
+            os.replace(tmp, fp)
+            return fp
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"写标定文件失败（{exc}）: {fp}")
+            return ""
+
+    def _recent_medians(self):
+        """最近 median_n 帧的 (err_x, err_y, z_mm) 中位数；不足返回 None。"""
+        if not self._hist:
+            return None
+        last = list(self._hist)[-self.median_n:]
+        return (float(np.median([h[0] for h in last])),
+                float(np.median([h[1] for h in last])),
+                float(np.median([h[4] for h in last])))
+
+    def _on_set_target(self, _req: Trigger.Request,
+                       resp: Trigger.Response) -> Trigger.Response:
+        """水平/竖向 + 前后目标标定：把当前画面位置/距离记为新目标。
+
+        TRACK 模式「Circle 长按」触发（人站到你希望被保持的位置）。
+        """
+        med = self._recent_medians()
+        if med is None:
+            resp.success = False
+            resp.message = "无有效目标：先把脸放进画面并等 1 s"
+            return resp
+        ex, ey, z_mm = med
+        self.target_err = np.array([ex, ey])
+        z_ok = z_mm > 50.0
+        if z_ok:
+            self.z_ref = z_mm / 1000.0
+            self.z_ref_auto = False
+        self._reset_err_state()
+        self._stall_hist.clear()
+        self._prog_e_best = None
+        self._est = None
+        path = self._save_target_calib()
+        resp.success = True
+        resp.message = (
+            f"target=({ex:+.3f}, {ey:+.3f})"
+            + (f" z_ref={self.z_ref:.3f} m" if z_ok else " z 无有效深度（未改距离）")
+            + (f" → {path}" if path else "（未持久化）"))
+        self.get_logger().warn(f"目标标定：{resp.message}")
+        self._publish(np.zeros(3), np.zeros(3),
+                      self.get_clock().now().nanoseconds * 1e-9)
+        return resp
+
+    def _on_track_status(self, _req: Trigger.Request,
+                         resp: Trigger.Response) -> Trigger.Response:
+        """查询当前跟踪状态与标定值（TRACK 模式「Square 短按」）。"""
+        med = self._recent_medians()
+        err = f"({med[0]:+.3f},{med[1]:+.3f})" if med else "n/a"
+        z = f"{med[2]:.0f} mm" if med else "n/a"
+        resp.success = True
+        resp.message = (
+            f"enabled={int(self.enabled)} err={err} z={z} "
+            f"z_ref={self.z_ref:.3f} m target=({self.target_err[0]:+.3f},"
+            f"{self.target_err[1]:+.3f}) jac={int(self.jac is not None)} "
+            f"jac_a={int(self.jac_a is not None)} arm={self.arm_state or '?'} "
+            f"mode={self.control_mode or '?'}")
+        self.get_logger().info(f"track status: {resp.message}")
+        return resp
 
     def _on_params(self, params):
         for prm in params:
@@ -372,6 +485,12 @@ class FaceTrackController(Node):
                 self.r_ee_cam = rpy_to_matrix(r[0], r[1], r[2])
                 self.get_logger().warn(
                     f"cam_rpy_deg → {[round(math.degrees(a), 1) for a in r]}°")
+            elif prm.name == "target_err_x":
+                self.target_err[0] = float(prm.value)
+                self.get_logger().warn(f"target_err_x → {self.target_err[0]:+.3f}")
+            elif prm.name == "target_err_y":
+                self.target_err[1] = float(prm.value)
+                self.get_logger().warn(f"target_err_y → {self.target_err[1]:+.3f}")
         return SetParametersResult(successful=True)
 
     # ------------------------------------------------------------------ 回调
@@ -687,6 +806,9 @@ class FaceTrackController(Node):
                 f"目标不一致（最近 {len(last)} 帧离散 {spread:.3f} > {self.agree_tol}）→ 停发",
                 throttle_duration_sec=2.0)
             return
+        # F191：目标中心偏移——把"当前记录的位置"当作 0 误差（水平/竖向标定）
+        ex -= float(self.target_err[0])
+        ey -= float(self.target_err[1])
         e_xy = max(abs(ex), abs(ey))
         dz_mm = z_mm - self.z_ref * 1000.0
         depth_ok = (not self.enable_depth) or abs(dz_mm) < self.dz_dead

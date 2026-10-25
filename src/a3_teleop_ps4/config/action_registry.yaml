@@ -117,6 +117,22 @@ functions:
     kind: discrete
     description: 'F189 TRACK Triangle：跟踪开/关切换'
 
+  face_track_status:
+    kind: discrete
+    description: 'F191 TRACK Square 短按：查询跟踪状态与标定值（enabled/err/z/z_ref/target/jac）'
+
+  face_track_record_target:
+    kind: discrete
+    description: 'F191 TRACK Circle 长按：水平/竖向 + 前后目标标定（当前脸位置与距离记为新目标，写 ~/.a3/camera/face_target.yaml）'
+
+  face_track_calibrate_depth:
+    kind: discrete
+    description: 'F191 TRACK Square 长按：前后（深度）标定（脸放 200 mm，按 z 中位数缩放 depth_units_mm，写 face_calib.yaml）'
+
+  face_track_reload_jacobian:
+    kind: discrete
+    description: 'F191 TRACK Triangle 长按：重载 ~/.a3/camera/face_jacobian.yaml（离线脚本产物）'
+
   vision_toggle_mesh:
     kind: discrete
     description: 'F194 网格点/网格线/人脸框显示开关（画面中心与人脸中心始终保留）'

@@ -22,14 +22,17 @@ import os
 import sys
 import threading
 import time
+from collections import deque
 
 import numpy as np
 import rclpy
+import yaml
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import Header
+from std_srvs.srv import Trigger
 
 try:
     import cv2
@@ -139,6 +142,9 @@ class FaceDetectNode(Node):
         self.declare_parameter("max_rate_hz", 20.0)
         self.declare_parameter("min_confidence", 0.4)
         self.declare_parameter("jump_reject_frac", 0.25)
+        # F191 前后（深度）标定：把脸放在已知距离处按一下，按 z 中位数缩放 depth_units_mm
+        self.declare_parameter("calib_known_distance_mm", 200.0)
+        self.declare_parameter("calib_file", "~/.a3/camera/face_calib.yaml")
 
         p = self.get_parameter
         self.image_topic = p("image_topic").value
@@ -172,6 +178,12 @@ class FaceDetectNode(Node):
         self.pub_ov = self.create_publisher(
             FaceOverlay, str(p("overlay_topic").value), rel_qos)
         self.add_on_set_parameters_callback(self._on_params)
+        # F191：前后（深度）标定——按已知距离缩放 depth_units_mm
+        self._z_hist = deque(maxlen=20)
+        self._calib_dist = float(p("calib_known_distance_mm").value)
+        self._calib_file = str(p("calib_file").value)
+        self.create_service(Trigger, "/a3/face_track/calibrate_depth",
+                            self._on_calibrate_depth)
 
         self._lock = threading.Lock()
         self._frame = None            # (stamp_ns, bgr ndarray)
@@ -334,6 +346,8 @@ class FaceDetectNode(Node):
         zf = self._hold["z"]
         msg.detected = True
         msg.valid = math.isfinite(zf)
+        if msg.valid:
+            self._z_hist.append(float(zf))   # F191 深度标定样本
         msg.confidence = 1.0   # tasks API 不暴露单脸分数，检出即 1.0（仅作占位）
         msg.center_norm.x, msg.center_norm.y = fu / w, fv / h
         msg.xyz_mm.x = (fu - cx) * zf / fx if msg.valid else 0.0
@@ -385,6 +399,64 @@ class FaceDetectNode(Node):
         msg.pitch_deg = self._hold["pitch"]
         msg.roll_deg = self._hold["roll"]
         msg.track_age_s = (time.monotonic() - self._track_start_t) if self._track_start_t else 0.0
+
+    def _on_calibrate_depth(self, _req: Trigger.Request,
+                            resp: Trigger.Response) -> Trigger.Response:
+        """F191 前后（深度）标定：脸放已知距离，按当前 z 中位数缩放 depth_units_mm。
+
+        TRACK 模式「Square 长按」触发。距离基准是参数 calib_known_distance_mm
+        （默认 200 mm）——把人脸/标定板放到该距离再按。
+        """
+        known = self._calib_dist
+        if known <= 0.0:
+            resp.success = False
+            resp.message = "calib_known_distance_mm 必须 > 0"
+            return resp
+        if len(self._z_hist) < 5:
+            resp.success = False
+            resp.message = (f"深度样本不足（{len(self._z_hist)}/5）：把脸放到 "
+                            f"{known:.0f} mm 处并保持约 1 s 再按")
+            return resp
+        z_med = float(np.median(self._z_hist))
+        if not math.isfinite(z_med) or z_med <= 1.0:
+            resp.success = False
+            resp.message = f"深度读数无效（z={z_med:.1f}）"
+            return resp
+        old = self._units
+        self._units *= known / z_med
+        self.units_mm = self._units * self._scale
+        path = self._persist_depth()
+        resp.success = True
+        resp.message = (f"depth_units_mm {old:.2f} → {self._units:.2f}"
+                        f"（z {z_med:.0f} mm @ 已知 {known:.0f} mm）"
+                        + (f" → {path}" if path else "（未持久化）"))
+        self.get_logger().warn(resp.message)
+        self._z_hist.clear()
+        return resp
+
+    def _persist_depth(self) -> str:
+        """把 depth_units_mm/depth_scale 写回 ~/.a3/camera/face_calib.yaml（保留其它键）。"""
+        fp = os.path.expanduser(self._calib_file)
+        try:
+            data = {}
+            try:
+                with open(fp, encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+            except FileNotFoundError:
+                pass
+            block = data.setdefault("/face_detect_node", {})
+            params = block.setdefault("ros__parameters", {})
+            params["depth_units_mm"] = float(self._units)
+            params["depth_scale"] = float(self._scale)
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            tmp = fp + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+            os.replace(tmp, fp)
+            return fp
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"写深度标定失败（{exc}）")
+            return ""
 
     def _publish_overlay(self, header, landmarks, msg: FaceTarget) -> None:
         """F194：把标注要素打包给显示层（不含像素图，~1 KB/帧）。"""

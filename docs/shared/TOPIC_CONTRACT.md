@@ -86,11 +86,14 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/face_overlay` | `a3_msgs/msg/FaceOverlay` | F194 结构化人脸标注：`detected` + 478 点归一化坐标 + 三角剖分连线索引（`uint16[] edges`）+ 人脸轮廓 + 框 + XYZ/RPY/`err_u,err_v`。约 1 KB/帧，由 `face_detect_node` 发布 |
 | `/a3/vision/display` | `sensor_msgs/Image` | **唯一显示出口**：`vision_display_mux` 用原图做底叠加全部标注；未开跟踪时透传原图。RViz Image 面板订阅这一路 |
 | `/a3/vision/mode` | `std_msgs/String` | `face_track` / `off`：`face_track_controller` 1 Hz 重发；显示层据此决定叠加或透传 |
-| `/a3/vision/show_mesh` | `std_msgs/Bool` | 网格点/网格线/人脸框开关（画面中心、人脸中心与连线始终保留）。TRACK 模式 `Options` 长按切换 |
+| `/a3/vision/show_mesh` | `std_msgs/Bool` | 网格点/网格线/人脸框开关（画面中心、人脸中心与连线始终保留）。TRACK 模式 `Circle` 短按切换 |
 | `/a3/teleop/mode` | `std_msgs/String` | F189 HMI 模式：`normal/teach/waypoint/track/piano/demo/dance`，`ps4_mapper` 1 Hz 重发；`ds4_feedback_node` 据此着色 |
 | `/a3/arm/stop` | `std_srvs/Trigger` | F190 通用停止：示教先保存 → 当前位姿一帧刹停（保力矩）→ 退出 SERVO/ZERO_TORQUE → 回 READY；切模式前必调 |
 | `/a3/face_track/enable` | `std_srvs/SetBool` | 人脸跟踪使能（默认关；TRACK 模式进入时自动置 true） |
 | `/a3/face_track/reload_jacobian` | `std_srvs/Trigger` | 重载 `~/.a3/camera/face_jacobian.yaml` |
+| `/a3/face_track/status` | `std_srvs/Trigger` | F191 查询跟踪状态：`enabled/err/z/z_ref/target/jac/jac_a/arm/mode` |
+| `/a3/face_track/set_target` | `std_srvs/Trigger` | F191 目标标定：把当前脸的画面位置（水平/竖向）与距离记为 0 误差点，写 `~/.a3/camera/face_target.yaml` |
+| `/a3/face_track/calibrate_depth` | `std_srvs/Trigger` | F191 深度标定：脸放已知距离（参数 `calib_known_distance_mm`，默认 200 mm），按 z 中位数缩放 `depth_units_mm`，写 `~/.a3/camera/face_calib.yaml` |
 
 **插值语义（执行层）：** 仅 positions → 线性；+velocities → 三次；+accelerations → 五次；effort 始终线性（JTC 对齐）。参数 `trajectory_interpolation_method`（默认 `auto`）。
 

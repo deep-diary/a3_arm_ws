@@ -144,9 +144,18 @@ class ActionExecutor:
         self._save_pose_cli = node.create_client(SaveNamedPose, "/a3/arm/save_named_pose")
         # F189 TRACK 模式：人脸跟踪开关（SetBool）与显示层网格开关（Bool 话题）
         self._face_enable_cli = node.create_client(SetBool, "/a3/face_track/enable")
+        # F191 标定三件套（TRACK 模式长按）
+        self._face_status_cli = node.create_client(Trigger, "/a3/face_track/status")
+        self._face_target_cli = node.create_client(Trigger, "/a3/face_track/set_target")
+        self._face_depth_cli = node.create_client(Trigger, "/a3/face_track/calibrate_depth")
+        self._face_jac_cli = node.create_client(Trigger, "/a3/face_track/reload_jacobian")
         self._mesh_pub = node.create_publisher(Bool, "/a3/vision/show_mesh", 10)
         self._mesh_on = True
         self._face_on = False
+        # F191：跟踪开关的权威状态来自 /a3/vision/mode（进 TRACK 自动 enable 后同步）
+        self._face_enable_pending = False
+        self._face_enable_since = 0.0
+        node.create_subscription(String, "/a3/vision/mode", self._on_vision_mode, 10)
         # F189：模式切换等操作员事件（ds4_feedback_node 消费：灯色/震动）
         self._event_pub = node.create_publisher(String, "/a3/arm/operator_event", 10)
 
@@ -222,6 +231,15 @@ class ActionExecutor:
     def _on_arm_status(self, msg: ArmStatus) -> None:
         self.arm_state = str(msg.state)
 
+    def _on_vision_mode(self, msg: String) -> None:
+        """F189/F191：跟踪开关以 /a3/vision/mode 为准（进 TRACK 自动 enable 后同步）。"""
+        on = str(msg.data) == "face_track"
+        if on != self._face_on:
+            self._n.get_logger().info(f"视觉模式同步 → {'开' if on else '关'}")
+        self._face_on = on
+        if on:
+            self._face_enable_pending = False
+
     def tick_begin(self) -> None:
         self._lin = [0.0, 0.0, 0.0]
         self._ang = [0.0, 0.0, 0.0]
@@ -238,6 +256,7 @@ class ActionExecutor:
         if self._pending_gripper is not None:
             self._gripper_goal(*self._pending_gripper)
         self._advance_pending_teach(now)
+        self._advance_face_enable(now)
         if not self._enable_pending or self._enable_called:
             return
         if self._gate_open and self._power_state == "Running":
@@ -560,28 +579,90 @@ class ActionExecutor:
         """L2：WAYPOINT_TEACH 下服务端自动路由为打点，否则保存当前位姿。"""
         self.save_named_pose()
 
-    def face_track_enable(self) -> bool:
+    def _send_face_enable(self, on: bool) -> bool:
         if not self._face_enable_cli.service_is_ready():
-            self._n.get_logger().error(
-                "face_track/enable 不可用：未起 --face-track？")
             return False
         req = SetBool.Request()
-        req.data = True
+        req.data = bool(on)
         self._face_enable_cli.call_async(req)
-        self._face_on = True
-        self._n.get_logger().warn("人脸跟踪 → 开")
         return True
 
+    def face_track_enable(self) -> bool:
+        """F189 TRACK 进入即打开跟踪（enter hook 自动调用）。
+
+        服务瞬时不可用（控制器刚重启）不会拒绝进入模式：挂起后由 poll() 补发，
+        状态以 `/a3/vision/mode` 回读为准。
+        """
+        if self._send_face_enable(True):
+            self._face_on = True
+            self._face_enable_pending = False
+            self._n.get_logger().warn("人脸跟踪 → 开（进入 TRACK 自动）")
+        else:
+            now = self._n.get_clock().now().nanoseconds * 1e-9
+            self._face_enable_pending = True
+            self._face_enable_since = now
+            self._n.get_logger().warn(
+                "face_track/enable 暂不可用 → 挂起，服务就绪后自动打开")
+        return True
+
+    def _advance_face_enable(self, now: float) -> None:
+        if not self._face_enable_pending or self._face_on:
+            self._face_enable_pending = False
+            return
+        if self._send_face_enable(True):
+            self._face_on = True
+            self._face_enable_pending = False
+            self._n.get_logger().warn("人脸跟踪 → 开（补发）")
+        elif now - self._face_enable_since > 15.0:
+            self._face_enable_pending = False
+            self._n.get_logger().error(
+                "face_track/enable 一直不可用：确认已用 --face-track 启动跟踪节点")
+
     def face_track_disable(self) -> None:
-        if self._face_enable_cli.service_is_ready():
-            req = SetBool.Request()
-            req.data = False
-            self._face_enable_cli.call_async(req)
+        self._face_enable_pending = False
+        if self._send_face_enable(False):
+            self._n.get_logger().warn("人脸跟踪 → 关")
         self._face_on = False
-        self._n.get_logger().warn("人脸跟踪 → 关")
 
     def face_track_toggle(self) -> None:
         self.face_track_disable() if self._face_on else self.face_track_enable()
+
+    def _trigger_logged(self, client, label: str) -> None:
+        """调 Trigger 服务并把 success/message 打到日志（标定结果要看文本）。"""
+        if not client.service_is_ready():
+            self._n.get_logger().error(f"{label} 不可用（未起 --face-track？）")
+            return
+        future = client.call_async(Trigger.Request())
+        if future is None:
+            self._n.get_logger().error(f"{label} 调用失败")
+            return
+
+        def _done(fut):
+            try:
+                resp = fut.result()
+            except Exception as exc:  # noqa: BLE001
+                self._n.get_logger().error(f"{label} 调用异常：{exc}")
+                return
+            ok = bool(getattr(resp, "success", False))
+            msg = getattr(resp, "message", "")
+            log = self._n.get_logger().warn if ok else self._n.get_logger().error
+            log(f"{label}: {msg}")
+
+        future.add_done_callback(_done)
+
+    def face_track_status(self) -> None:
+        self._trigger_logged(self._face_status_cli, "face_track/status")
+
+    def face_track_record_target(self) -> None:
+        """F191 水平/竖向前后目标：把当前脸的位置与距离记为新目标（长按 Circle）。"""
+        self._trigger_logged(self._face_target_cli, "face_track/set_target")
+
+    def face_track_calibrate_depth(self) -> None:
+        """F191 前后（深度）标定：脸放已知距离（默认 200 mm）后长按 Square。"""
+        self._trigger_logged(self._face_depth_cli, "face_track/calibrate_depth")
+
+    def face_track_reload_jacobian(self) -> None:
+        self._trigger_logged(self._face_jac_cli, "face_track/reload_jacobian")
 
     def vision_toggle_mesh(self) -> None:
         """F194：网格点/网格线/人脸框开关（画面中心与人脸中心始终保留）。"""

@@ -16,8 +16,24 @@
 
 - **统一退出**：`Options` 短按 = 结束/退出 → NORMAL（示教类先保存）。
 - **切模式前必须先停运动**：新增编排层 `/a3/arm/stop`，切换流程先停当前轨迹/示教/servo，再执行新旧模式的 enter/exit hook，杜绝串扰。
-- **进入策略分级**：示教/路点只切语义（待命），模式内 `Triangle` 才开录；TRACK 进入即 enable；PIANO 进入即定位。
-- 为支撑新按键，本次同步补 4 项底层能力：编排层停止服务、TRACK 标定补全、口风琴 stream 生成服务、角度巡游节点 + 舞蹈槽位。
+- **进入策略**：示教/路点**进入即准备拖动并开录**（未使能会先上电+使能）；TRACK 进入即 enable；PIANO 进入即定位。
+- 为支撑新按键，原计划补 4 项底层能力：编排层停止服务、TRACK 标定、口风琴 stream 生成服务、角度巡游 + 舞蹈槽位。
+  其中**已实现**：停止服务、TRACK 标定（改为 Trigger）、模式框架；**未重建**：generate_stream、angular_cruise、dance 槽位（见「实现状态」表）。
+
+## 一·A、实现状态（2026-10-25 同步，与代码/文档一致）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 固定层 + 7 模式 + Share 直接点名 + Options 退出 | ✅ 已实现 | `default.yaml` / `mapping.py` / `ps4_mapper.py` / `ds4_feedback_node.py` |
+| `/a3/arm/stop`（切模式先停） | ✅ 已实现 | 示教先保存 → 当前位姿一帧刹停（保力矩）→ 回 READY |
+| TEACH/WAYPOINT 进入即准备拖动 | ✅ 已实现 | 未使能会先上电+使能，READY 后自动开录（不再"只切语义"） |
+| TRACK：进入即自动开跟踪 | ✅ 已实现 | enter hook 自动 enable；服务瞬时不可用挂起补发；`/a3/vision/mode` 回读同步 |
+| TRACK：网格开关 / 三类标定 | ✅ 已实现 | ○短=网格开关；○长=目标标定；□长=深度标定；□短=状态；△长=重载雅可比 |
+| D-pad 跟踪距离/目标中心微调 | ❌ 未实现 | TRACK 的 D-pad 留空（用 ○ 长按一次记录目标代替） |
+| F192 `generate_stream`（口风琴 stream 生成服务） | ❌ 未重建 | PIANO 的 △ 短按直接回放 `stream latest` |
+| F193 角度巡游节点 `/a3/demo/angular_cruise` | ❌ 未重建 | DEMO 提供 home 五向巡游 + 随机巡游 |
+| F193 舞蹈槽位（`playback type=dance` + `/a3/arm/save_slot`） | ❌ 未重建 | DANCE 模式暂为"回放 latest / 路点 PTP" |
+| 显示：统一 `/a3/vision/display` + FaceOverlay（F194） | ✅ 已实现 | 原图 25 Hz 主底 + 最后一层叠加；网格用 mediapipe 全量 2556 条边 |
 
 ## 二、Current State Analysis（本轮新增确认）
 
@@ -87,23 +103,24 @@
 | L2 短按 | 录制中打点；未录制存 `snap_*` |
 | Options 短按 | 若在录制先 `stop_teach`，再回 NORMAL |
 
-### 3.5 TRACK（人脸跟踪 + 标定补全）— 紫呼吸
+### 3.5 TRACK（人脸跟踪 + 标定）— 紫呼吸
 
-进入：`face_track enable(true)`（required，失败回退）；`suppress_common_axes: [left_x, left_y, right_x, right_y]`（禁用摇杆、**保留 R2 夹爪**）
+进入：**自动 `face_track enable(true)`**（无需再按 △；服务瞬时不可用时挂起补发）；
+`suppress_common_axes: [left_x, left_y, right_x, right_y]`（禁用摇杆、**保留 R2 夹爪**）
 
 | 按键 | 动作 |
 |---|---|
-| Triangle 短按 | toggle 跟踪（enable ⇄ disable） |
-| **Circle 短按** | **记录目标**：`/a3/face_track/set_target {record_now: true}`（当前画面中心偏差 + 距离作为新基准） |
-| **Circle 长按 1.5s** | `reload_jacobian`（雅可比热重载） |
-| **Square 短按** | `status` 查询（日志 + 灯带反馈） |
-| **Square 长按 1.5s** | **深度比例标定**：`/a3/face_track/calibrate_depth`（脸放 200 mm 处按一下） |
-| **D-pad ↑ / ↓** | 跟踪距离 `z_ref_m` +0.05 / −0.05 |
-| **D-pad ← / →** | 目标中心 `target_err_x` −0.02 / +0.02 |
+| Triangle 短按 | 跟踪开/关切换（进入时已自动打开） |
+| **Triangle 长按 2.0s** | `reload_jacobian`（雅可比热重载） |
+| **Circle 短按** | **网格点/网格线/人脸框开关**（画面中心、人脸中心、连线始终保留） |
+| **Circle 长按 1.5s** | **目标标定**：`/a3/face_track/set_target`（把当前人脸位置 + 距离记为 0 误差点 → 水平/竖向 + 前后） |
+| **Square 短按** | `status` 查询（日志：enabled/err/z/z_ref/target/jac） |
+| **Square 长按 1.5s** | **前后（深度）标定**：`/a3/face_track/calibrate_depth`（脸放 200 mm 处再按） |
 | L2 短按 | 保存当前点位 |
-| Options 短按 | disable 跟踪 → NORMAL |
+| Options 短按 | 退出模式（自动 disable 跟踪） |
 
-> 标定补全说明（回答"要不要补全"）：现有只有雅可比重载，缺"目标框中心 / 跟踪距离 / 深度比例"三类。本次全部补上，见 4.3。
+> 标定全部走长按（△/○/□ 长按），短按只做开关/查询，避免与显示、退出混淆。
+> D-pad 在 TRACK 下保留为空（原计划的跟踪距离/目标中心微调未实现——改由 Circle 长按一次记录）。
 
 ### 3.6 PIANO（弹琴）— 黄呼吸
 
@@ -182,41 +199,38 @@
    - `_mode_guard_until = now + 0.3`（切换后防抖）
    - 发布 `/a3/teleop/mode`；发 `mode_changed:<target>:<rumble_index>`
 
-### 4.3 TRACK 标定补全
+### 4.3 TRACK 标定（实际实现：全部 `std_srvs/Trigger`，不加新 srv）
 
-#### 4.3.1 新增 `a3_msgs/srv/SetFaceTarget.srv`
+> 原计划用 `SetFaceTarget.srv`，实现时简化为 Trigger（"记录一下"不需要回传结构体），
+> 避免为单点功能新增消息并重编 `a3_msgs`。
 
-```
-bool   record_now      # true=用当前中位帧记录；false=用下面的值精确设置
-float32 target_err_x   # 归一化 [-1,1]，控制器从 image_error 中减去
-float32 target_err_y
-float32 z_ref_m        # <=0 表示跟随标定距离 Z0
-bool   persist         # 写 ~/.a3/camera/face_target.yaml
----
-bool success
-string message
-float32 target_err_x
-float32 target_err_y
-float32 z_ref_m
-```
+#### 4.3.1 `/a3/face_track/set_target`（Trigger，控制器）
 
-控制器改动（`face_track_controller.py`）：
-- 新增参数 `target_err_x=0.0`、`target_err_y=0.0`、`calibration_file=~/.a3/camera/face_target.yaml`
-- `_on_params` **显式加分支**（否则 `ros2 param set` 会"成功但无效"——现有回调恒返回 successful）
-- 控制律里 `ex -= target_err_x; ey -= target_err_y`（在 I/D 整形之前）
-- `record_now` 取 `_hist` 最近 `median_n` 帧的 `image_error` / `xyz_mm.z` 中位数
-- 记录/设置后清 `_i_term/_de_lp/_prog_*`（复用 `_reset_err_state`），并补发 0.2 s 零速
+- 取 `_hist` 最近 `median_n` 帧的 `image_error` / `xyz_mm.z` 中位数
+- `target_err_x/y ← 中位误差`；`z_ref ← z_med`（>50 mm 才改）
+- 控制律里 `ex -= target_err_x; ey -= target_err_y`（死区/追不动判定之前）
+- 清 I/D/追不动状态并补发一帧零速；写 `~/.a3/camera/face_target.yaml`
+- 参数 `target_err_x/y`、`calibration_file` 在 `_on_params` 显式加分支（否则 `ros2 param set` 静默无效）
+- 无有效目标 → `success=false, "无有效目标：先把脸放进画面并等 1 s"`
 
-#### 4.3.2 `/a3/face_track/status`（Trigger）
-响应 `message` 返回：`enabled=%d err=(%.3f,%.3f) z=%.3fm z_ref=%.3f target=(%.3f,%.3f) jac=%d joint_scale=%.2f`
+#### 4.3.2 `/a3/face_track/status`（Trigger，控制器）
 
-#### 4.3.3 `/a3/face_track/calibrate_depth`（Trigger）
-加在 `face_detect_node`（现无服务）；参数 `calib_known_distance_mm=200.0`：
-- 取最近一帧 `xyz_mm.z` 中位数 → `depth_units_mm *= known / z_meas` → 原地生效 + 写 `~/.a3/camera/face_calib.yaml`
-- 前置：`detected && valid`，否则 `success=false`
+`enabled=… err=(…) z=… z_ref=… target=(…) jac=1 jac_a=1 arm=… mode=…`
 
-#### 4.3.4 D-pad 调参
-`actions.py` 新增 `face_target_step(dx, dz)`：读本地缓存的目标值（进入 TRACK 时通过 `status` 拉一次），增量后调 `set_target`。
+#### 4.3.3 `/a3/face_track/calibrate_depth`（Trigger，检测节点）
+
+- 参数 `calib_known_distance_mm=200.0`、`calib_file=~/.a3/camera/face_calib.yaml`
+- 取最近 20 个有效 `z` 中位数 → `depth_units_mm *= known / z_med`
+- 写回 `face_calib.yaml`（保留其它键，launch 会二次加载）
+- 样本 <5 → `success=false` 并提示"把脸放到 200 mm 处并保持约 1 s"
+
+#### 4.3.4 按键与状态同步
+
+- 所有标定走**长按**（○/□/△），短按只做开关/查询
+- 跟踪开关以 `/a3/vision/mode` 回读为准（`ActionExecutor` 订阅它同步 `_face_on`）
+- 进入 TRACK 自动 enable；服务瞬时不可用 → 挂起由 `poll()` 补发（15 s 超时报错），
+  不因一次不可用把模式回滚
+- D-pad 调参（原 4.3.4）**未实现**，TRACK 的 D-pad 留空
 
 ### 4.4 `/a3/arm/generate_stream`（GenerateStream.srv）
 

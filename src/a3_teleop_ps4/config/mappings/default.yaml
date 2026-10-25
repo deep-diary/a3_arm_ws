@@ -135,9 +135,16 @@ modes:
     enter: [{fn: face_track_enable, required: true}]
     exit: [{fn: face_track_disable}]
     buttons:
-      triangle: {fn: face_track_toggle, edge: shortpress, hold_s: 1.5}
-      # F194：Options 长按 = 网格点/网格线/人脸框开关（短按仍是退出模式）
-      options: {fn: vision_toggle_mesh, edge: longpress, hold_s: 1.5}
+      # 短按 = 开关/查询；长按 = 标定（F191），全部长按避免与短按混淆
+      triangle:
+        - {fn: face_track_toggle, edge: shortpress, hold_s: 1.5}
+        - {fn: face_track_reload_jacobian, edge: longpress, hold_s: 2.0}
+      circle:
+        - {fn: vision_toggle_mesh, edge: shortpress, hold_s: 1.5}
+        - {fn: face_track_record_target, edge: longpress, hold_s: 1.5}
+      square:
+        - {fn: face_track_status, edge: shortpress, hold_s: 1.5}
+        - {fn: face_track_calibrate_depth, edge: longpress, hold_s: 1.5}
       l2: {fn: save_named_pose, edge: shortpress, hold_s: 1.5}
 
   piano:
