@@ -11,8 +11,9 @@
 
 生成的段模型与编排层 ``_execute_segment`` 一致：
 ``{target, mode, speed, sleep, via:[{pose, exact}], hold_orientation}``。
-- 每段首末点精确（段末速度 0），中间 via 交给模式自带 blend 切角；
-- 进场/离场的关键悬停点加 ``exact: true``，保证**先垂直抬起再横移**，避免斜着拖键；
+- 每段首末点精确（段末速度 0），3 个键间 via 交给模式自带 blend 切角（默认与源/目标对称）；
+- 进场/离场的关键悬停点加 ``exact: true``：从任意当前位/回 home 时先停稳再垂直插入/拔出；
+- ``target_exact=True`` 可把「目标键正上方」也设为 exact（多一次停车，保守选项）；
 - 结束段可给 ``home_positions``（关节命名点 home），仅关节类模式支持。
 """
 
@@ -27,7 +28,7 @@ import yaml
 PRESS_FLOOR_MM = 6.0
 ALPHA_DEFAULT = 0.5
 BETA_DEFAULT = 1.0
-CLEAR_MIN_MM = 10.0
+CLEAR_MIN_MM = 20.0
 CLEAR_MAX_MM = 60.0
 DWELL_DEFAULT_S = 0.2
 SPEED_DEFAULT = 0.2
@@ -112,6 +113,7 @@ def build_press_stream(
     hold_orientation: bool = True,
     home_positions: Optional[Sequence[float]] = None,
     waypoints_pressed: bool = True,
+    target_exact: bool = False,
 ) -> dict:
     """把「按下点」路点序列编排为一条 stream。
 
@@ -173,9 +175,13 @@ def build_press_stream(
             "orientation": dict(downs[i - 1]["orientation"]),
         }
         vias = [
+            # 源键上方：blend 切角（clear≥20mm，离开键面后才开始横移，不会拖键）
             _via(_hover_pose(downs[i - 1], surfaces[i - 1], c)),
+            # 中垂线弧顶：blend 切角
             _via(apex_pose),
-            _via(_hover_pose(downs[i], surfaces[i], c)),
+            # 目标键上方：默认 blend。clear≥20mm 时圆角切点在键面上方 ~8mm 以上，
+            # 之后才是竖直下压；如需极限保守可开 target_exact（多一次停车）。
+            _via(_hover_pose(downs[i], surfaces[i], c), exact=target_exact),
         ]
         segments.append(_segment(
             {"pose": downs[i]}, mode, speed, sleeps[i], hold_orientation, via=vias))
@@ -220,6 +226,7 @@ def header_lines(
     hold_orientation: bool,
     waypoints_pressed: bool,
     home_note: str,
+    target_exact: bool = False,
 ) -> List[str]:
     bar = "# " + "=" * 74
     return [
@@ -231,11 +238,12 @@ def header_lines(
         f"# 参数：press={press_mm}mm, alpha={alpha}, beta={beta}, "
         f"clear={clear_min_mm}~{clear_max_mm}mm, speed={speed}, "
         f"dwell={dwell_s}s, mode={mode}, hold_orientation={hold_orientation}, "
-        f"waypoints_pressed={waypoints_pressed}",
+        f"waypoints_pressed={waypoints_pressed}, target_exact={target_exact}",
         f"# 收尾：{home_note}",
         "# hold_orientation: true → 各点用自身示教姿态做 6D IK（防横压）；"
         "false → position-only IK。",
-        "# 进场/离场悬停点带 exact: true（精确停 → 垂直插入/拔出）；键间 via 默认 blend 切角。",
+        "# exact 悬停：进场/离场（停稳后垂直插入/拔出）；"
+        "键间 3 个 via（源上方/弧顶/目标上方）默认全部 blend 切角。",
         bar,
     ]
 

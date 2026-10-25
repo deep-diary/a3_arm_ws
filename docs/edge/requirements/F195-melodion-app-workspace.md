@@ -38,19 +38,22 @@ trajectories/melodion/
 ## 按键轨迹编排（`a3_arm_controller/melodion_stream.py`）
 
 路点语义：每个 `waypoint.pose` 是**已按下**的 6D 位姿；`press_mm` 仅用于还原键面高度。
-相邻两键水平距离 `d` 决定抬升量（默认 α=0.5、β=1.0，夹紧 10–60 mm）：
+相邻两键水平距离 `d` 决定抬升量（默认 α=0.5、β=1.0，夹紧 20–60 mm）：
 
 ```
-源/目标正上方 z = 按下点 z + press + clamp(α·d, 10, 60) mm
-中垂线上方   z = 两按下点中点 z + press + clamp(β·d, 10, 60) mm
+源/目标正上方 z = 按下点 z + press + clamp(α·d, 20, 60) mm
+中垂线上方   z = 两按下点中点 z + press + clamp(β·d, 20, 60) mm
 ```
 
-- 每段首末点精确（段末速度 0）；键间 3 个 via 交给 `ptp_blend` 切角；
+- 每段首末点精确（段末速度 0）；键间源点上方/弧顶交给 `ptp_blend` 切角；
+- 目标键正上方默认也参与 blend：`clear≥20mm`、圆角半径 `r ≤ min(20mm, 0.45·最短段)`
+  （相邻键 r≈4mm，远跨键 r≈12mm），圆角切点仍在键面上方 ≥8mm，之后才竖直下压；
+  只有**进场/离场悬停点**用 `exact`（从任意当前位/回 home 时先停稳，避免斜插斜拔）；
 - 进场：当前位 → 第 1 键正上方（`exact: true` 停稳）→ 垂直下压；
 - 离场：末键 → 正上方（`exact: true` 垂直拔起）→ 再抬高 → 命名点 `home`；
 - 每键 `sleep`：路点自带则优先，否则默认 0.2 s（音乐流来自曲谱时值）。
 
-`d` 很小时（相邻键 ~19 mm）抬升 10–20 mm 足够；`d` 很大时 β·d 会到几百 mm，
+`d` 很小时（相邻键 ~19 mm）按 20 mm 下限抬升；`d` 很大时 β·d 会到几百 mm，
 **必须夹紧**，否则越过工作空间。
 
 ## 曲谱 → 乐曲线（`scripts/melodion_score_stream.py`）
@@ -66,7 +69,8 @@ trajectories/melodion/
 - [ ] PIANO 模式 `↓/←/→/↑` 分别完成演奏路点、极限键录制、结束保存、生成 stream；
 - [ ] `trajectories/melodion/waypoints/{press,extremes}.yaml` 与
       `streams/{press,extremes}.yaml` 按预期落盘，互不覆盖；
-- [ ] 生成流每段首末精确、键间 blend；进场/离场在正上方 `exact` 停稳（无斜插/斜拔）；
+- [ ] 生成流每段首末精确、键间 3 个 via blend；进场/离场 `exact` 停稳（无斜插/斜拔）；
+      目标键上方默认 blend 不压键边/邻键（必要时加 `--target-exact`）；
 - [ ] 末段回到 `home`；口风琴未被横拖；
 - [ ] `△/○/□` 分别播放 press/extremes/music，且 `music.yaml` 可由极限键 + 曲谱离线生成；
 - [ ] 真机试跑 4 极限键与一首短曲，无碰撞/超限/明显冲击。

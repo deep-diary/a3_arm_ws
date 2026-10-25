@@ -60,7 +60,7 @@ python3 -m app_melodion.melodion_score2stream --score scale --relative
 
 # F195 口风琴应用：按键路点（按下点）→ stream
 # 读 trajectories/melodion/waypoints/press.yaml（PIANO ↓ 示教；缺失时回落 waypoints/latest.yaml）
-# α/β 距离比例抬升（默认 0.5/1.0，10~60mm 夹紧）+ 进场/离场 exact 垂直悬停 + 末段回 home
+# α/β 距离比例抬升（默认 0.5/1.0，20~60mm 夹紧）+ 进场/离场 exact 垂直悬停 + 末段回 home
 python3 ~/a3_arm_ws/scripts/melodion_pts2stream.py
 # 产物：trajectories/melodion/streams/press.yaml（△ 短按播放）
 # 极限键槽：python3 ~/a3_arm_ws/scripts/melodion_pts2stream.py \

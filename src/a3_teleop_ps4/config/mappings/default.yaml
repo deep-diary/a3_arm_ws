@@ -162,7 +162,7 @@ modes:
         pos: {fn: melodion_record_press}      # ↓ 演奏路点示教
       - axis: dpad_x
         neg: {fn: melodion_record_extremes}   # ← 4 极限键录制
-        pos: {fn: teach_leave}                # → 结束示教并保存当前槽位
+        pos: {fn: melodion_stop_teach}        # → 结束示教并保存当前槽位
     buttons:
       triangle: {fn: playback_stream, kwargs: {name: press}, edge: shortpress, hold_s: 1.5}
       circle: {fn: playback_stream, kwargs: {name: extremes}, edge: shortpress, hold_s: 1.5}

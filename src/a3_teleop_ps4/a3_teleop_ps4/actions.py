@@ -543,14 +543,41 @@ class ActionExecutor:
 
     # --- F195 口风琴 PIANO：路点槽位 + stream 生成 ---
 
+    def _start_melodion_teach(self, slot: str) -> None:
+        """口风琴路点录制：READY 直接开录；未使能则上电+使能，READY 后自动补发。
+
+        与 ``teach_enter`` 一致的非阻塞语义（50 Hz 定时器里由 poll 推进）。
+        """
+        client = (self._melodion_record_press if slot == "press"
+                  else self._melodion_record_extremes)
+        label = f"arm/melodion/record_{slot}"
+        if self.arm_state == "READY":
+            self._call_trigger_report(client, label)
+            return
+        if self.arm_state in ("TEACH", "WAYPOINT_TEACH"):
+            self._n.get_logger().warn(
+                f"已在示教中（{self.arm_state}）：先按 → 结束保存，再切换槽位")
+            return
+        now = self._n.get_clock().now().nanoseconds * 1e-9
+        self._pending_teach = f"melodion_{slot}"
+        self._pending_teach_since = now
+        self.arm_power_enable()
+        self._n.get_logger().warn(
+            f"口风琴 {slot} 录制需要使能（当前 {self.arm_state or '未知'}）→ "
+            "先上电+使能，READY 后自动开录")
+
     def melodion_record_press(self) -> None:
-        """PIANO ↓：演奏路点示教（保存到 melodies/waypoints/press.yaml）。"""
-        self._call_trigger_report(self._melodion_record_press, "arm/melodion/record_press")
+        """PIANO ↓：演奏路点示教（保存到 melodion/waypoints/press.yaml）。"""
+        self._start_melodion_teach("press")
 
     def melodion_record_extremes(self) -> None:
         """PIANO ←：4 极限键录制（保存到 melodion/waypoints/extremes.yaml）。"""
-        self._call_trigger_report(self._melodion_record_extremes,
-                                  "arm/melodion/record_extremes")
+        self._start_melodion_teach("extremes")
+
+    def melodion_stop_teach(self) -> None:
+        """PIANO →：结束当前路点示教并保存到活动槽位（结果打日志）。"""
+        self._pending_teach = None
+        self._call_trigger_report(self._teach_stop, "arm/stop_teach")
 
     def melodion_gen_streams(self) -> None:
         """PIANO ↑：由路点生成 press/extremes 两条按键 stream（不运动）。"""
@@ -597,6 +624,13 @@ class ActionExecutor:
             return
         if self.arm_state == "READY":
             kind, self._pending_teach = self._pending_teach, None
+            if kind.startswith("melodion_"):
+                slot = kind.split("_", 1)[1]
+                client = (self._melodion_record_press if slot == "press"
+                          else self._melodion_record_extremes)
+                self._n.get_logger().info(f"已 READY → 自动开始口风琴 {slot} 路点录制")
+                self._call_trigger_report(client, f"arm/melodion/record_{slot}")
+                return
             self._n.get_logger().info(f"已 READY → 自动开始{'路点' if kind == 'waypoint' else '连续'}示教")
             self.teach_start_waypoint() if kind == "waypoint" else self.teach_start()
             return

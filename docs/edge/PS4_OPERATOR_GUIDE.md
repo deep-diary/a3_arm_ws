@@ -53,14 +53,11 @@
 
 **短按 Triangle（▲），臂运行到 home 工作位（F120；约 2 s）**，过程中灯为 **紫色**，到位后回 **绿色**。
 
-> **长按 Triangle 1.5s**：回放 4 键按压 stream 滚动槽 `latest`（`trajectories/streams/latest.yaml`，
-> `scripts/melodion_pts2stream.py` 产物）——起手先到「第 1 点上方 40mm」悬停，再依次下压
-> white1→white19→black13→black1（各 6mm），末段抬回同一悬停位；键间 3 过点抬升弧
-> （源点正上方 +40mm / 两按压点中垂线上方 +80mm / 目标点正上方 +40mm），模式 `ptp_blend`
-> （过点 blend 切角、不停车），速度 0.2。各段带 `hold_orientation: true` → 用录制点的
-> **示教姿态**做 6D IK（不再"只求末端到位"而横着压键）。
-> 想换规划方式：直接改该文件各段的 `mode:` 存盘即生效（文件头有 F166 九模式速查，无需重建/重启）。
-> （原多模式对比流 `modes_sweep` 改用 service 调。需 READY + gate open。）
+> **长按 Triangle 1.5s（NORMAL 模式）**：回放旧 F176 4 键流
+> `trajectories/streams/latest.yaml`（初版起手 40mm 悬停 + 键间 40/80/40mm，`ptp_blend`）。
+> **F195 起口风琴改用 PIANO 模式**：抬升量按两键距离比例缩放、进场/离场垂直悬停、末段回 home，
+> 详见 §4.4 口风琴（PIANO 模式）。
+> 想换规划方式：直接改目标文件各段的 `mode:` 存盘即生效（文件头有 F166 九模式速查，无需重建/重启）。
 
 > **重要：必须先在 home（或 idle）位再推摇杆。** 机械折叠零位是 IK 奇异点，
 > 直接推摇杆会不动或乱扭。
@@ -131,7 +128,9 @@
 | **□ 短按** | 播放 `streams/music.yaml`（曲谱生成，需先跑 `scripts/melodion_score_stream.py`） |
 
 - 按键轨迹：每个路点是**按下点**；键间抬升量按两键水平距离缩放
-  （源/目标正上方 `press+0.5·d`，中垂线上方 `press+1.0·d`，夹紧 10–60mm）。
+  （源/目标正上方 `press+0.5·d`，中垂线上方 `press+1.0·d`，夹紧 20–60mm）。
+- 目标键正上方默认 **blend 切角**（切点仍在键面上方 ≥8mm，之后竖直下压）；
+  真机若发现压键边/邻键，生成时加 `--target-exact`（停稳后再压）。
 - 进场先到第 1 键正上方并**停稳**再垂直下压；离场先垂直抬起末键，再回 `home`，
   避免斜着进出把口风琴拖走。
 - 每条按键 stream 的每段可带 `sleep`（按住时长）；`music.yaml` 的 sleep 来自曲谱时值。

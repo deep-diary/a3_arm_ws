@@ -193,6 +193,10 @@ functions:
     kind: discrete
     description: 'F195 PIANO ←: 4 极限键路点录制（/a3/arm/melodion/record_extremes，保存 melodion/waypoints/extremes.yaml）'
 
+  melodion_stop_teach:
+    kind: discrete
+    description: 'F195 PIANO →: 结束当前口风琴路点示教并保存到活动槽位（/a3/arm/stop_teach，带结果日志）'
+
   melodion_gen_streams:
     kind: discrete
     description: 'F195 PIANO ↑: 由路点槽位生成 press/extremes 两条按键 stream（/a3/arm/melodion/gen_streams，不运动）'

@@ -68,6 +68,8 @@ def main() -> None:
     ap.add_argument("--min-dwell", type=float, default=0.05,
                     help="最短按住时长 s（音符时值小于此值时补齐）")
     ap.add_argument("--hold-orientation", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--target-exact", action=argparse.BooleanOptionalAction, default=False,
+                    help="仅把「目标键正上方」设为 exact（保守选项）")
     ap.add_argument("--out", default=DEFAULT_OUT)
     args = ap.parse_args()
 
@@ -111,6 +113,7 @@ def main() -> None:
         clear_min_mm=args.clear_min, clear_max_mm=args.clear_max,
         mode=args.mode, hold_orientation=args.hold_orientation,
         home_positions=home_positions, waypoints_pressed=True,
+        target_exact=args.target_exact,
     )
     score_name = os.path.splitext(os.path.basename(score_path))[0]
     doc["name"] = score_name
@@ -121,6 +124,7 @@ def main() -> None:
         speed=args.speed, dwell_s=float(args.min_dwell), mode=args.mode,
         hold_orientation=args.hold_orientation, waypoints_pressed=True,
         home_note=(f"回命名点 '{args.home}'" if home_positions else "停在末键上方"),
+        target_exact=args.target_exact,
     )
     write_stream(args.out, doc, header)
     total = sum(float(wp.get("sleep", 0.0)) for wp in waypoints)

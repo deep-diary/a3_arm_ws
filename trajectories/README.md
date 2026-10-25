@@ -10,4 +10,5 @@
 | `melodion/` | 口风琴应用：`waypoints/` 按键路点、`streams/` 按键流 | PS4 PIANO 示教 + `scripts/melodion_*.py` 生成 |
 
 编排层默认 `trajectories_dir` 指向本目录（解析工作区根 `<ws>/trajectories`），
-解析失败时回退 `~/.a3/trajectories`。`streams/` 搜索顺序：本目录 → `app_melodion/config/streams/` → `~/.a3/trajectories/streams`。
+解析失败时回退 `~/.a3/trajectories`。`streams/` 搜索顺序：`melodion/streams/`（口风琴，命中优先）
+→ 本目录 `streams/` → `app_melodion/config/streams/` → `~/.a3/trajectories/streams`。

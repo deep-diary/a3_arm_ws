@@ -122,7 +122,9 @@ def main() -> None:
     ap.add_argument("--clear-min", type=float, default=CLEAR_MIN_MM, help="抬升下限 mm")
     ap.add_argument("--clear-max", type=float, default=CLEAR_MAX_MM, help="抬升上限 mm")
     ap.add_argument("--exact", action=argparse.BooleanOptionalAction, default=False,
-                    help="键间过点是否 exact（默认 False，blend 切角）")
+                    help="键间 3 个过点是否全部 exact（默认 False，blend 切角）")
+    ap.add_argument("--target-exact", action=argparse.BooleanOptionalAction, default=False,
+                    help="仅把「目标键正上方」设为 exact（保守选项，多一次停车）")
     ap.add_argument("--hold-orientation", action=argparse.BooleanOptionalAction, default=True,
                     help="各点用示教姿态做 6D IK（默认 True）")
     ap.add_argument("--waypoints-pressed", action=argparse.BooleanOptionalAction, default=True,
@@ -168,6 +170,7 @@ def main() -> None:
         hold_orientation=args.hold_orientation,
         home_positions=home_positions,
         waypoints_pressed=args.waypoints_pressed,
+        target_exact=args.target_exact,
     )
     if args.exact:
         for seg in doc["segments"]:
@@ -187,6 +190,7 @@ def main() -> None:
         hold_orientation=args.hold_orientation,
         waypoints_pressed=args.waypoints_pressed,
         home_note=(f"回命名点 '{args.home}'" if home_positions else "停在末键上方"),
+        target_exact=args.target_exact,
     )
     header.append("#")
     header.append("# 轨迹模式（F166 规范名 | 旧别名 | 空间 | 说明）—— 改 mode 存盘即生效：")
