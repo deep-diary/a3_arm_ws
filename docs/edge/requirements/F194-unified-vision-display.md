@@ -15,7 +15,9 @@
                                      ├─→ vision_display_mux ─→ /a3/vision/display (25 Hz)
 /a3/face_overlay (~1 KB/帧)  ────────┘         │
 /a3/vision/mode (跟踪开关) ────────────────────┤
-/a3/vision/show_mesh (网格/框开关) ────────────┘
+/a3/vision/show_mesh (网格/框开关) ────────────┤
+/a3/ee_pose (末端位姿, 10 Hz) ─────────────────┤
+/a3/teleop/mode (操作模式, 1 Hz) ──────────────┘
 ```
 
 - **检测端只做检测**：`face_detect_node` 发 `a3_msgs/FaceOverlay`（478 点归一化坐标 +
@@ -28,21 +30,37 @@
 
 | 元素 | 颜色 | 开关 |
 |---|---|---|
-| 画面中心十字 | 青 | 始终 |
-| 人脸中心十字 | 橙（跟踪中）/ 绿（误差进死区） | 始终 |
-| 中心 ↔ 人脸中心连线 | 白 | 始终 |
-| 网格点 + 网格连线（mediapipe tessellation 全量 2556 条） | 亮绿 / 深绿 | `show_mesh` |
-| 人脸轮廓（mask 边界） | 黄 | `show_mesh` |
-| 人脸框 | 蓝 | `show_mesh` |
-| 文本 XYZ / RPY / BOX+ERR | 随人脸中心状态色 | 检测到人脸时 |
+| 画面中心十字 | 淡青 | 始终 |
+| 人脸中心十字 + 实心点 | 琥珀（跟踪中）/ 绿（误差进死区） | 始终 |
+| 中心 ↔ 人脸中心连线 | 弱白 | 始终 |
+| 网格点 + 网格连线（mediapipe tessellation 全量 2556 条） | 暗亮绿 / 暗绿（压暗当背景） | `show_mesh` |
+| 人脸轮廓（mask 边界） | 暗金 | `show_mesh` |
+| 人脸框 | 灰蓝 | `show_mesh` |
+| 文本块（跟踪 4 行 / 非跟踪 3 行，两列对齐） | 标签灰 / 位置值近白 / 角度值青 / 误差随状态色 | 见下 |
+| 右上角第一行帧率 | 绿 | `draw_fps` |
+| 右上角第二行操作模式（`normal` / `track`…，服务单独开跟踪时补 `+track`） | 跟踪中琥珀、否则近白 | `draw_fps` |
 
-文本格式（`|` 分隔，误差含 x/y 两轴）：
+文本块格式（两列各自把"值"对齐到固定 x；标签与数值**不同色**，扫读更快；
+整块下垫 40% 黑底，亮背景下也清晰）：
 
 ```
-XYZ  x  +12 | y  -30 | z  452 mm
-RPY  yaw  +1.2 | pitch  -3.4 | roll  +0.5 deg
-BOX  204 x 202 px | ERR  x +0.120 | y -0.060
+跟踪中（相机系 mm + deg + 图像误差）    非跟踪（末端 base_link mm + deg）
+x:   -27 mm   roll:    -6.7 deg        x:  -191 mm   roll:   +102.5 deg
+y:   +60 mm   pitch:   -0.1 deg        y:   +22 mm   pitch:    +0.6 deg
+z:   321 mm   yaw:     +3.9 deg        z:  +235 mm   yaw:     +81.8 deg
+ex: -0.146    ey:     +0.431
 ```
+
+> **单位用 mm**：工作空间 <1 m，`0.132` 这种小数在现场不好读；`132 mm` 一眼可对。
+> 不再显示 `EE` / `RPY` 表头与 `BOX … px`（框在画面上已画出，冗余）。
+> 早期人脸跟踪的 `XYZ … | RPY … | BOX …` 单行拼接格式一并废弃。
+
+> **为什么不显示四元数**：单个分量（尤其 `w`）没有独立物理含义，`w=0.54` 现场看不出
+> 姿态；RPY 才能对着 RViz / 示教点位核对。约定 `R = Rz(yaw)·Ry(pitch)·Rx(roll)`，
+> 与 `face_track_controller` 的 `quat_to_matrix` 同源；`roll/pitch/yaw` 与
+> `R_x/R_y/R_z`（绕基座固定轴 X→Y→Z 依次转）数值等价，只是 ROS/tf2 惯例叫 RPY，
+> 便于和 RViz 的 `getRPY` 直接对照。俯仰到 ±90° 附近 RPY 会退化（万向锁），
+> 此时以 RViz 姿态显示为准。
 
 > **网格对称性（2026-10-25 修）**：连线索引必须是 mediapipe 的
 > `FACEMESH_TESSELATION` **全量**（2556 条）。早期为省 CPU 做了
@@ -60,10 +78,14 @@ TRACK 模式下 **Circle 短按** = 网格点/网格线/人脸框开关；
 1. `ros2 topic hz /a3/vision/display` ≈ 相机帧率（640×480@25 → 20+ Hz），
    RViz Image 面板显示 640×480，不再有缩放模糊
 2. 未开跟踪：`/a3/vision/display` 与原图一致（无标注）
-3. 开跟踪：网格连线呈对称人脸网格、轮廓闭合，中心青色十字与人脸中心橙色/绿色
-   十字之间有白线
+3. 开跟踪：网格连线呈对称人脸网格、轮廓闭合，中心淡青十字与人脸中心琥珀/绿色
+   十字之间有弱白连线
 4. TRACK 模式 Options 长按 → 网格点/框消失，中心与人脸中心保留；再长按恢复
 5. `/a3/face_track/debug_image` 默认不再发布（`--face-debug` 可临时打开）
+6. 非跟踪（正常）模式：左上角出现 3 行 `x/y/z (mm) + roll/pitch/yaw (deg)` 文本块
+   （数据来自 `/a3/ee_pose` 10 Hz；无 `EE`/`RPY` 表头、两列数值上下对齐），
+   开跟踪后立即换成 4 行（含 `ex/ey`）人脸块；右上角第二行只显示模式名（无 `mode` 前缀），
+   服务单独开跟踪时带 `+track`
 
 ## 关联文档
 

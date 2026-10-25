@@ -15,7 +15,7 @@
 | `launch/usb_cam.launch.py` | **USB 相机单独入口**（F177）：`usb_camera_node` + 静态 TF + 可选 RViz；**真机栈已内置该节点**，此文件只用于脱离栈单独看相机 |
 | `launch/servo.launch.py`、`launch/motor_maintenance.launch.py` | MoveIt Servo 链路 / 电机维护 |
 | `usb_camera_node.py` | USB(UVC) → `/camera/image_raw`(bgr8) + `/camera/camera_info`，cv2 采集（见下） |
-| `vision_display_mux.py` | **F194 统一视觉显示**：原图 + `a3_msgs/FaceOverlay` → `/a3/vision/display`，在最后一层画网格/轮廓/框/中心/连线/文本与唯一帧率；未开跟踪透传原图 |
+| `vision_display_mux.py` | **F194 统一视觉显示**：原图 + `a3_msgs/FaceOverlay` → `/a3/vision/display`，在最后一层画网格/轮廓/框/中心/连线/文本与唯一帧率；未开跟踪透传原图，并在左上角叠加末端位姿（`/a3/ee_pose` 的 x/y/z + RPY）、右上角第二行显示当前模式（`/a3/teleop/mode`） |
 | `trajectory_bridge.py` | reBot 话题缝合（`/a3/joint_trajectory` → JTC） |
 | `trajectory_spline.py` / `follow_joint_trajectory_action.py` | 轨迹插值/桥接辅助 |
 | `gravity_torque_node.py` / `gravity_scale_calibration.py` | 重力前馈与比例标定（F49/F89） |

@@ -12,22 +12,29 @@
   /camera/image_raw      sensor_msgs/Image   (bgr8, BEST_EFFORT)
   /a3/face_overlay       a3_msgs/FaceOverlay (RELIABLE)
   /a3/vision/show_mesh   std_msgs/Bool       (网格/框开关，中心与中心连线始终保留)
+  /a3/vision/mode        std_msgs/String     (face_track / off → 关时透传原图)
+  /a3/ee_pose            geometry_msgs/PoseStamped (base_link→end_effector，**非跟踪时**左上角文本)
+  /a3/teleop/mode        std_msgs/String     (当前操作模式，右上角第二行)
 输出：
   /a3/vision/display     sensor_msgs/Image   (bgr8, BEST_EFFORT)
 
-颜色约定（BGR）：
-  画面中心十字 = 青；人脸中心 + 坐标文本 = 橙（跟踪中）/ 绿（误差进死区）；
-  两点之间白色细连线，一眼看出「脸偏在哪」。
+颜色约定（BGR，标签/数值分层）：
+  画面中心十字 = 淡青；人脸中心 = 琥珀（跟踪中）/ 绿（误差进死区），中心连线弱白；
+  左上角文本块（两种模式同款）：标签灰、位置/尺寸近白、角度青，块下垫 40% 黑底；
+  跟踪时 4 行 = x/y/z(mm) + roll/pitch/yaw(deg) + ex/ey，非跟踪时 3 行 = x/y/z(m) + RPY；
+  右上角：第一行帧率（绿）、第二行操作模式（跟踪中琥珀）；网格/轮廓/框整体压暗。
 """
 
 from __future__ import annotations
 
 import array
+import math
 import time
 
 import cv2
 import numpy as np
 import rclpy
+from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
@@ -39,15 +46,41 @@ except ImportError:
     print("[x] 找不到 a3_msgs.msg.FaceOverlay：先 colcon build --packages-select a3_msgs")
     raise
 
-CENTER_COLOR = (255, 255, 0)      # 青：画面中心
-LINK_COLOR = (255, 255, 255)      # 白：中心连线
-TRACK_COLOR = (0, 165, 255)       # 橙：跟踪中（未到位）
-LOCK_COLOR = (0, 255, 0)          # 绿：已到位（误差在死区内）
-MESH_COLOR = (0, 150, 0)          # 深绿：网格线
-POINT_COLOR = (0, 220, 0)         # 亮绿：网格点
-OVAL_COLOR = (0, 255, 255)        # 黄：人脸轮廓
-BOX_COLOR = (255, 160, 0)         # 蓝：人脸框
+# ── 配色（BGR）──────────────────────────────────────────────────────────────
+# 组织原则：**标签灰 / 数值亮 / 角度青**，状态只用于"点/数值"本身，几何线压暗——
+# 这样一屏里文字始终最跳眼，网格与轮廓退成背景，不会互相抢。
+LABEL = (184, 178, 170)            # 灰   RGB(170,178,184)：字段名（x: / roll: …）
+VALUE = (246, 242, 238)            # 近白 RGB(238,242,246)：位置/尺寸数值
+ANGLE = (250, 200, 90)             # 青   RGB(90,200,250) ：角度数值
+FPS_COLOR = (150, 225, 110)        # 绿   RGB(110,225,150)：帧率
+MODE_TRACK = (60, 170, 255)        # 琥珀 RGB(255,170,60) ：跟踪中 / 操作模式
+STATE_LOCK = (130, 220, 90)        # 绿   RGB(90,220,130) ：误差进死区（已到位）
+STATE_TRACK = MODE_TRACK           # 琥珀：跟踪中
+STATE_ERR = (80, 80, 255)          # 红   RGB(255,80,80)  ：无人脸
+CENTER_COLOR = (235, 220, 120)     # 淡青 RGB(120,220,235)：画面中心十字
+LINK_COLOR = (205, 200, 195)       # 弱白：中心 ↔ 人脸中心连线
+MESH_COLOR = (80, 110, 60)         # 暗绿：网格线（压暗，退成背景）
+POINT_COLOR = (95, 140, 70)        # 暗亮绿：网格点
+SILHOUETTE_COLOR = (90, 190, 200)  # 暗金：人脸轮廓
+BOX_COLOR = (200, 150, 120)        # 灰蓝：人脸框
 DARK = (0, 0, 0)
+PLATE_ALPHA = 0.45                 # 文本块底衬不透明度
+
+
+def quat_to_rpy(x: float, y: float, z: float, w: float):
+    """四元数 → (roll, pitch, yaw) 弧度，约定 R = Rz·Ry·Rx（与 face_track_controller 一致）。
+
+    只取 RPY 显示：单个四元数分量（尤其 w）没有独立物理含义，人看不出姿态。
+    """
+    n = math.sqrt(x * x + y * y + z * z + w * w)
+    if n < 1e-9:
+        return (0.0, 0.0, 0.0)
+    x, y, z, w = x / n, y / n, z / n, w / n
+    roll = math.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+    sp = max(-1.0, min(1.0, 2.0 * (w * y - z * x)))
+    pitch = math.asin(sp)
+    yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    return (roll, pitch, yaw)
 
 
 class VisionDisplayMux(Node):
@@ -62,6 +95,12 @@ class VisionDisplayMux(Node):
         self.declare_parameter("vision_mode_topic", "/a3/vision/mode")
         # 人脸标注超过此时长没更新 → 视为跟踪已关，透传原图（避免残留旧框）
         self.declare_parameter("overlay_timeout_s", 1.0)
+        # 非跟踪（正常）模式：左上角叠加末端位姿（F175 /a3/ee_pose）
+        self.declare_parameter("ee_pose_topic", "/a3/ee_pose")
+        self.declare_parameter("draw_ee_pose", True)
+        self.declare_parameter("ee_timeout_s", 1.0)
+        # 右下角第二行：当前操作模式（ps4_mapper 1 Hz 重发）
+        self.declare_parameter("teleop_mode_topic", "/a3/teleop/mode")
         self.declare_parameter("qos_depth", 5)
         self.declare_parameter("draw_fps", True)
         self.declare_parameter("show_mesh", True)
@@ -75,6 +114,8 @@ class VisionDisplayMux(Node):
         self._show_mesh = bool(p("show_mesh").value)
         self._settle_u = abs(float(p("settle_err_u").value))
         self._settle_v = abs(float(p("settle_err_v").value))
+        self._draw_ee = bool(p("draw_ee_pose").value)
+        self._ee_timeout = float(p("ee_timeout_s").value)
 
         depth = int(p("qos_depth").value)
         img_qos = QoSProfile(depth=depth, history=HistoryPolicy.KEEP_LAST,
@@ -85,6 +126,10 @@ class VisionDisplayMux(Node):
         self._overlay = None
         self._overlay_t = 0.0
         self._mode = None          # None=未收到模式话题（按标注新鲜度决定）
+        self._ee_xyz = None
+        self._ee_rpy = None
+        self._ee_t = 0.0
+        self._teleop_mode = ""
         self._frames = 0
         self._out_fps = 0.0
         self._t_rate = time.monotonic()
@@ -97,6 +142,10 @@ class VisionDisplayMux(Node):
                                  self._on_show_mesh, rel_qos)
         self.create_subscription(String, str(p("vision_mode_topic").value),
                                  self._on_mode, rel_qos)
+        self.create_subscription(PoseStamped, str(p("ee_pose_topic").value),
+                                 self._on_ee, rel_qos)
+        self.create_subscription(String, str(p("teleop_mode_topic").value),
+                                 self._on_teleop_mode, rel_qos)
         self.get_logger().info(
             f"vision_display_mux 就绪：{p('raw_topic').value} + "
             f"{p('overlay_topic').value} → {p('output_topic').value}")
@@ -115,6 +164,15 @@ class VisionDisplayMux(Node):
             self._mode = msg.data
             self.get_logger().warn(
                 f"视觉模式 → {msg.data}（{'叠加标注' if self._tracking() else '透传原图'}）")
+
+    def _on_ee(self, msg: PoseStamped) -> None:
+        q = msg.pose.orientation
+        self._ee_xyz = (msg.pose.position.x, msg.pose.position.y, msg.pose.position.z)
+        self._ee_rpy = quat_to_rpy(q.x, q.y, q.z, q.w)
+        self._ee_t = time.monotonic()
+
+    def _on_teleop_mode(self, msg: String) -> None:
+        self._teleop_mode = msg.data
 
     def _tracking(self) -> bool:
         """是否处于"跟踪开"状态；模式话题未出现时按标注新鲜度决定。"""
@@ -155,28 +213,32 @@ class VisionDisplayMux(Node):
             color = self._state_color(ov)
             cu = int(round(ov.center_norm.x * w))
             cv = int(round(ov.center_norm.y * h))
-            # 中心 ↔ 人脸中心白色连线：一眼看出偏了多少
+            # 中心 ↔ 人脸中心连线：一眼看出偏了多少
             cv2.line(img, (w // 2, h // 2), (cu, cv), LINK_COLOR, thick, cv2.LINE_AA)
-            # 人脸中心：实心圆 + 十字（实心圆保证在网格上也能看清橙/绿状态）
+            # 人脸中心：实心圆 + 十字（实心圆保证在网格上也能看清状态色）
             r = max(4, int(6 * scale / 0.5))
             cv2.circle(img, (cu, cv), r, color, -1, cv2.LINE_AA)
             cv2.circle(img, (cu, cv), r + 1, DARK, 1, cv2.LINE_AA)
             cv2.drawMarker(img, (cu, cv), color, cv2.MARKER_CROSS,
                            int(24 * scale / 0.5), thick)
-            self._draw_text(img, ov, w, h, scale, color)
+            self._draw_face_block(img, ov, scale, thick, color)
         elif ov is not None:
-            self._put(img, "NO FACE", (int(12 * scale / 0.5), int(30 * scale / 0.5)),
-                      scale, (0, 0, 255), thick)
+            self._draw_no_face(img, scale, thick)
+
+        # 非跟踪（正常）模式：左上角叠加末端位姿——关掉跟踪时最想看的量
+        if (self._draw_ee and not self._tracking() and self._ee_xyz is not None
+                and (time.monotonic() - self._ee_t) <= self._ee_timeout):
+            self._draw_ee_pose(img, scale, thick)
 
         if self._fps_on:
             self._draw_fps(img, w, h, scale, thick)
         return img
 
     def _state_color(self, ov: FaceOverlay):
-        """误差进死区 → 绿（已到位），否则橙（跟踪中）。"""
+        """误差进死区 → 绿（已到位），否则琥珀（跟踪中）。"""
         if abs(ov.err_u) <= self._settle_u and abs(ov.err_v) <= self._settle_v:
-            return LOCK_COLOR
-        return TRACK_COLOR
+            return STATE_LOCK
+        return STATE_TRACK
 
     def _draw_face(self, img: np.ndarray, ov: FaceOverlay, w: int, h: int,
                    scale: float) -> None:
@@ -203,7 +265,7 @@ class VisionDisplayMux(Node):
         if len(ov.silhouette) >= 6:
             sil = (np.asarray(ov.silhouette, dtype=np.float32)
                    .reshape(-1, 2) * np.array([w, h], dtype=np.float32)).astype(np.int32)
-            cv2.polylines(img, [sil.reshape(-1, 1, 2)], True, OVAL_COLOR,
+            cv2.polylines(img, [sil.reshape(-1, 1, 2)], True, SILHOUETTE_COLOR,
                           max(2, int(2 * scale / 0.5)), cv2.LINE_AA)
 
         if self._show_mesh and ov.bbox_w_norm > 0.0 and ov.bbox_h_norm > 0.0:
@@ -214,20 +276,85 @@ class VisionDisplayMux(Node):
             cv2.rectangle(img, (x0, y0), (int(x0 + bw), int(y0 + bh)),
                           BOX_COLOR, max(1, int(round(1 * scale / 0.5))), cv2.LINE_AA)
 
-    def _draw_text(self, img: np.ndarray, ov: FaceOverlay, w: int, h: int,
-                   scale: float, color) -> None:
-        thick = max(1, int(round(scale * 2)))
-        lines = [
-            f"XYZ  x {ov.x_mm:+5.0f} | y {ov.y_mm:+5.0f} | z {ov.z_mm:4.0f} mm",
-            f"RPY  yaw {ov.yaw_deg:+5.1f} | pitch {ov.pitch_deg:+5.1f} | "
-            f"roll {ov.roll_deg:+5.1f} deg",
-            f"BOX  {int(ov.bbox_w_norm * w):3d} x {int(ov.bbox_h_norm * h):3d} px | "
-            f"ERR  x {ov.err_u:+.3f} | y {ov.err_v:+.3f}",
+    # ------------------------------------------------------------------ 文本
+    def _plate(self, img: np.ndarray, x0: int, y0: int, x1: int, y1: int) -> None:
+        """文本底衬：40% 黑，亮背景（白墙/屏幕）下也能读。"""
+        h, w = img.shape[:2]
+        x0, x1 = max(0, min(x0, w - 1)), max(0, min(x1, w))
+        y0, y1 = max(0, min(y0, h - 1)), max(0, min(y1, h))
+        if x1 <= x0 or y1 <= y0:
+            return
+        roi = img[y0:y1, x0:x1]
+        cv2.addWeighted(np.zeros_like(roi), PLATE_ALPHA, roi, 1.0 - PLATE_ALPHA, 0.0, roi)
+
+    def _block(self, img: np.ndarray, rows, scale: float, thick: int) -> None:
+        """左上角两列对齐文本块。
+
+        rows = [(左标签, 左值, 左值色, 右标签|None, 右值, 右值色), …]
+        两列的**值**都对齐到各自固定 x（Hershey 不是等宽字体，靠空格对不齐）；
+        标签统一灰色、数值按语义着色——同一行里"名、值"颜色不同，扫读快。
+        """
+        sf = scale / 0.5
+        u = lambda v: int(round(v * sf))
+        x0, y0, gap, dy = u(10), u(26), u(5), u(20)
+        fnt = cv2.FONT_HERSHEY_SIMPLEX
+
+        def tw(t: str) -> int:
+            return cv2.getTextSize(t, fnt, scale, thick)[0][0]
+
+        lw1 = max(tw(r[0]) for r in rows) + gap
+        vw1 = max(tw(r[1]) for r in rows)
+        col2 = x0 + lw1 + vw1 + u(16)
+        right = [r for r in rows if r[3]]
+        lw2 = max((tw(r[3]) for r in right), default=0) + gap
+        vw2 = max((tw(r[4]) for r in right), default=0)
+
+        x1 = col2 + lw2 + vw2 + gap if right else x0 + lw1 + vw1 + gap
+        self._plate(img, x0 - gap, y0 - u(18), x1, y0 + dy * (len(rows) - 1) + u(8))
+        for i, (l1, v1, c1, l2, v2, c2) in enumerate(rows):
+            yy = y0 + i * dy
+            self._put(img, l1, (x0, yy), scale, LABEL, thick)
+            self._put(img, v1, (x0 + lw1, yy), scale, c1, thick)
+            if l2:
+                self._put(img, l2, (col2, yy), scale, LABEL, thick)
+                self._put(img, v2, (col2 + lw2, yy), scale, c2, thick)
+
+    def _draw_ee_pose(self, img: np.ndarray, scale: float, thick: int) -> None:
+        """非跟踪：末端位置（base_link，**mm**）+ 姿态（RPY，deg），3 行两列。
+
+        单位用 mm：工作空间 <1 m，m 的小数位在现场读起来别扭（0.132 vs 132 mm）。
+        不显示四元数：单个分量（尤其 w）没有独立物理含义；RPY 才是能对着
+        RViz / 示教点位核对的值（约定 R = Rz·Ry·Rx，roll/pitch/yaw 即绕基座
+        X/Y/Z 的三次旋转，与 `tf2::getRPY` 同源）。
+        """
+        x, y, z = self._ee_xyz
+        roll, pitch, yaw = (math.degrees(a) for a in self._ee_rpy)
+        rows = [
+            ("x:", f"{x * 1000.0:+5.0f} mm", VALUE, "roll:", f"{roll:+6.1f} deg", ANGLE),
+            ("y:", f"{y * 1000.0:+5.0f} mm", VALUE, "pitch:", f"{pitch:+6.1f} deg", ANGLE),
+            ("z:", f"{z * 1000.0:+5.0f} mm", VALUE, "yaw:", f"{yaw:+6.1f} deg", ANGLE),
         ]
-        y = int(30 * scale / 0.5)
-        for line in lines:
-            self._put(img, line, (int(12 * scale / 0.5), y), scale, color, thick)
-            y += int(22 * scale / 0.5)
+        self._block(img, rows, scale, thick)
+
+    def _draw_face_block(self, img: np.ndarray, ov: FaceOverlay, scale: float,
+                         thick: int, state_color) -> None:
+        """跟踪中：相机系 XYZ（mm）+ 姿态（deg）+ 图像误差，4 行两列（与 EE 块同款）。"""
+        rows = [
+            ("x:", f"{ov.x_mm:+5.0f} mm", VALUE, "roll:", f"{ov.roll_deg:+6.1f} deg", ANGLE),
+            ("y:", f"{ov.y_mm:+5.0f} mm", VALUE, "pitch:", f"{ov.pitch_deg:+6.1f} deg", ANGLE),
+            ("z:", f"{ov.z_mm:5.0f} mm", VALUE, "yaw:", f"{ov.yaw_deg:+6.1f} deg", ANGLE),
+            ("ex:", f"{ov.err_u:+.3f}", state_color, "ey:", f"{ov.err_v:+.3f}", state_color),
+        ]
+        self._block(img, rows, scale, thick)
+
+    def _draw_no_face(self, img: np.ndarray, scale: float, thick: int) -> None:
+        sf = scale / 0.5
+        x0, y0 = int(round(10 * sf)), int(round(26 * sf))
+        text = "NO FACE"
+        tw = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)[0][0]
+        self._plate(img, x0 - int(round(5 * sf)), y0 - int(round(18 * sf)),
+                    x0 + tw + int(round(5 * sf)), y0 + int(round(8 * sf)))
+        self._put(img, text, (x0, y0), scale, STATE_ERR, thick)
 
     def _put(self, img: np.ndarray, text: str, org, scale: float, color,
              thick: int) -> None:
@@ -238,10 +365,28 @@ class VisionDisplayMux(Node):
 
     def _draw_fps(self, img: np.ndarray, w: int, h: int, scale: float,
                   thick: int) -> None:
-        text = f"{self._out_fps:.1f} fps"
-        (tw, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
-        self._put(img, text, (w - tw - int(12 * scale / 0.5),
-                              int(30 * scale / 0.5)), scale, LOCK_COLOR, thick)
+        """右上角两行右对齐：帧率、当前模式（不带 `mode` 前缀）。
+
+        第二行 = 操作模式（`/a3/teleop/mode`：normal / track / teach…）；
+        人脸跟踪若是**服务单独**开的（操作模式没跟着切），补 `+track`，
+        避免"画面在跟踪、右上角写 normal"的错觉。
+        """
+        mode = self._teleop_mode or (self._mode if self._mode else "-")
+        if self._tracking() and "track" not in mode:
+            mode += " +track"
+        sf = scale / 0.5
+        u = lambda v: int(round(v * sf))
+        fnt = cv2.FONT_HERSHEY_SIMPLEX
+        lines = [(f"{self._out_fps:.1f} fps", FPS_COLOR),
+                 (mode, MODE_TRACK if self._tracking() else VALUE)]
+        x_right, y = w - u(12), u(26)
+        widest = max(cv2.getTextSize(t, fnt, scale, thick)[0][0] for t, _ in lines)
+        self._plate(img, x_right - widest - u(5), y - u(18), w - u(3),
+                    y + u(20) * (len(lines) - 1) + u(8))
+        for text, color in lines:
+            tw = cv2.getTextSize(text, fnt, scale, thick)[0][0]
+            self._put(img, text, (x_right - tw, y), scale, color, thick)
+            y += u(20)
 
     # ------------------------------------------------------------------ 发布
     def _publish(self, img: np.ndarray, header) -> None:
