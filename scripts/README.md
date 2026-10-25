@@ -39,7 +39,7 @@
 | `melodion_impact_eval.py` | 口风琴跨键冲击评估（approach/速度 vs j_rms/a_rms/时长） | `python3 scripts/melodion_impact_eval.py` |
 | `melodion_speed_diag.py` | 口风琴跨键 via 关节空间 nominal 时长扫参（approach/vmax/amax） | `python3 scripts/melodion_speed_diag.py` |
 | `melodion_pts2stream.py` | 口风琴按键路点 → stream（薄 CLI，核心在 `a3_arm_controller/melodion_stream.py`）：路点默认是**按下点**，α/β 距离比例抬升（默认 0.5/1.0，20–60mm 夹紧）、进场/离场 exact 垂直悬停、末段回 `home`；默认读 `trajectories/melodion/waypoints/press.yaml`、写 `trajectories/melodion/streams/press.yaml` | `python3 scripts/melodion_pts2stream.py [--alpha 0.5 --beta 1.0 --clear-max 60] [--no-home]` |
-| `melodion_score_stream.py` | 口风琴乐曲 stream：4 极限键路点反推键盘布局（轴向/跨度/黑键后退）+ 曲谱 → `trajectories/melodion/streams/music.yaml`，与示教流共用同一编排器 | `python3 scripts/melodion_score_stream.py --score qinghuaci` |
+| `melodion_score_stream.py` | 口风琴乐曲 stream：4 极限键路点反推键盘布局 + 曲谱 → `trajectories/melodion/streams/music.yaml`；头部写曲名，换曲自动备份到 `streams/backup/<旧曲名>.yaml`，同曲覆盖 | `python3 scripts/melodion_score_stream.py --score happy_birthday --speed 0.5` |
 | `traj_modes_bench.py` | 多路点轨迹模式基准（离线）：ptp/L1/L2/L3/L1.5 × 速度，命令平滑度 j_rms/a_rms + 时长 + SVG/MD | `python3 scripts/traj_modes_bench.py --config src/a3_arm_controller/config/traj_modes_bench.yaml` |
 | `gen_stream_modes.py` | 路点轨迹 → 多模式 stream 生成器（离线，不触发运动）：读 waypoints/latest.yaml 取前 6 点，生成 **9 模式**(ptp/ptp_blend/lin_exact/lin_blend/jnt_g64_quintic/jnt_g64_trapezoid/jnt_spline_bell/circ/jnt_spline_approx)×N 速度的 stream（段间自动回起点） | `python3 scripts/gen_stream_modes.py [--speeds 0.4 0.8] [--modes ptp circ] [--out <path>]` |
 | `traj_mode_recommend.py` | F165 轨迹模式离线推荐器：给定轨迹算各模式时长/a_rms/j_rms/过冲 + 推荐（最快/最平滑 + 场景提示） | `python3 scripts/traj_mode_recommend.py --poses home_up,home_front,...` |

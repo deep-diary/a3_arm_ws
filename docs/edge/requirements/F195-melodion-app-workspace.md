@@ -64,7 +64,9 @@ trajectories/melodion/
    `x_mm` 缩放）、黑键后退量、白/黑键首末 z 与姿态（slerp）；
 2. 任意键按下位姿 = 白键最左原点 + `u·x_mm·scale` + 黑键 `n·retreat`；
 3. 曲谱音符 → 路点（`sleep = beats × 60/tempo`，休止累加到上一音符）；
-4. 复用同一 `build_press_stream`，输出 schema 与示教生成的按键流一致。
+4. 复用同一 `build_press_stream`，输出 schema 与示教生成的按键流一致；
+5. 输出 `music.yaml` 头部写 `曲名：<title>（<name>）`；换曲时旧文件自动备份到
+   `streams/backup/<旧曲名>.yaml`，同曲重复生成直接覆盖。
 
 ## ptp_blend 稳定性
 

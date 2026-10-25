@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
+import shutil
 import sys
 
 import yaml
@@ -37,6 +39,44 @@ PKG = os.path.join(WS, "src", "app_melodion")
 DEFAULT_EXTREMES = os.path.join(WS, "trajectories", "melodion", "waypoints", "extremes.yaml")
 DEFAULT_OUT = os.path.join(WS, "trajectories", "melodion", "streams", "music.yaml")
 DEFAULT_NAMED_POSES = os.path.join(WS, "src", "a3_description", "config", "named_poses.yaml")
+
+
+def _existing_stream_name(path: str):
+    """读取已有 stream 的曲名：优先 YAML 的 name，其次头部“曲名：标题（name）”。"""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        name = str(data.get("name") or "").strip()
+        if name:
+            return name
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for _ in range(10):
+                line = f.readline()
+                if not line:
+                    break
+                m = re.search(r"曲名：(.+?)（([^）]+)）", line)
+                if m:
+                    return m.group(2).strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _backup_previous_song(out_path: str, new_name: str):
+    """输出路径已有**不同曲名**的 stream 时，备份到同目录 backup/<old>.yaml。"""
+    old = _existing_stream_name(out_path)
+    if not old or old == new_name:
+        return None
+    bdir = os.path.join(os.path.dirname(os.path.abspath(out_path)), "backup")
+    os.makedirs(bdir, exist_ok=True)
+    dst = os.path.join(bdir, f"{old}.yaml")
+    shutil.copy2(out_path, dst)
+    return dst
 
 
 def _home_positions(path: str, name: str):
@@ -116,7 +156,9 @@ def main() -> None:
         target_exact=args.target_exact,
     )
     score_name = os.path.splitext(os.path.basename(score_path))[0]
+    title = str(score.get("title") or score_name).strip()
     doc["name"] = score_name
+    doc["title"] = title
     header = header_lines(
         source=f"曲谱 {os.path.relpath(score_path, WS)} + 极限键 {os.path.relpath(args.extremes, WS)}",
         press_mm=press_mm, alpha=args.alpha, beta=args.beta,
@@ -126,10 +168,15 @@ def main() -> None:
         home_note=(f"回命名点 '{args.home}'" if home_positions else "停在末键上方"),
         target_exact=args.target_exact,
     )
+    header.insert(1, f"# 曲名：{title}（{score_name}）")
+    backup = _backup_previous_song(args.out, score_name)
     write_stream(args.out, doc, header)
+    if backup:
+        print(f"backup previous song -> {backup}")
     total = sum(float(wp.get("sleep", 0.0)) for wp in waypoints)
     print(f"wrote music stream: {args.out} ({len(waypoints)} notes, "
           f"{len(doc['segments'])} segments, 按键总时长≈{total:.1f}s, beat={beat_s:.3f}s)")
+    print(f"曲名：{title}（{score_name}），speed={args.speed}, mode={args.mode}")
 
 
 if __name__ == "__main__":

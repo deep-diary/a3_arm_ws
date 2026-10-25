@@ -1,0 +1,38 @@
+# 《生日歌》最简 4 句版（C 大调，3/4 拍）
+# 时值约定：0.25=十六分 / 0.5=八分 / 0.75=附点八分 / 1=四分 / 2=二分
+# 起拍采用附点八分+十六分（0.75+0.25），用于覆盖 1/4 拍的按键时长。
+# 生成：python3 scripts/melodion_score_stream.py --score happy_birthday
+tempo_bpm: 80
+notes:
+  # Happy birthday to you
+  - { name: "G4", beats: 0.75 }
+  - { name: "G4", beats: 0.25 }
+  - { name: "A4", beats: 1.0 }
+  - { name: "G4", beats: 1.0 }
+  - { name: "C5", beats: 1.0 }
+  - { name: "B4", beats: 2.0 }
+
+  # Happy birthday to you
+  - { name: "G4", beats: 0.75 }
+  - { name: "G4", beats: 0.25 }
+  - { name: "A4", beats: 1.0 }
+  - { name: "G4", beats: 1.0 }
+  - { name: "D5", beats: 1.0 }
+  - { name: "C5", beats: 2.0 }
+
+  # Happy birthday dear ...
+  - { name: "G4", beats: 0.75 }
+  - { name: "G4", beats: 0.25 }
+  - { name: "G5", beats: 1.0 }
+  - { name: "E5", beats: 1.0 }
+  - { name: "C5", beats: 1.0 }
+  - { name: "B4", beats: 1.0 }
+  - { name: "A4", beats: 2.0 }
+
+  # Happy birthday to you
+  - { name: "F5", beats: 0.75 }
+  - { name: "F5", beats: 0.25 }
+  - { name: "E5", beats: 1.0 }
+  - { name: "C5", beats: 1.0 }
+  - { name: "D5", beats: 1.0 }
+  - { name: "C5", beats: 2.0 }

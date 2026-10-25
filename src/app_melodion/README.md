@@ -68,8 +68,9 @@ python3 ~/a3_arm_ws/scripts/melodion_pts2stream.py
 #   --out trajectories/melodion/streams/extremes.yaml
 
 # 极限键坐标 + 曲谱 → 乐曲线（□ 短按播放）
-python3 ~/a3_arm_ws/scripts/melodion_score_stream.py --score qinghuaci
+python3 ~/a3_arm_ws/scripts/melodion_score_stream.py --score happy_birthday --speed 0.5
 # 产物：trajectories/melodion/streams/music.yaml
+# 文件头写「曲名：…」；换曲时旧文件自动备份到 streams/backup/<旧曲名>.yaml，同曲直接覆盖
 
 # 预烘焙缓存（把逐段 via 关节轨迹算好存 <name>.yaml.baked.yaml，playback 直接下发提速）
 python3 ~/a3_arm_ws/scripts/melodion_bake.py --stream scale
