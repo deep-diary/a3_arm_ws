@@ -55,6 +55,8 @@ constexpr double kDefaultKdVelocityRef = 1.0;
 constexpr double kDefaultKdSmoothingAlpha = 0.15;
 constexpr double kDefaultFeedbackTimeoutS = 0.2;
 constexpr double kDefaultStartupKd = 4.0;
+// F186：反馈恢复后 kp 从 0 斜坡回额定的时长（把"被重力带走过一段"变成平滑拉回）
+constexpr double kDefaultFreezeRecoverRampS = 0.4;
 constexpr int kDefaultSoftStartCycles = 10;
 constexpr double kDefaultTempWarnC = 90.0;
 constexpr double kDefaultTempProtectC = 95.0;
@@ -256,6 +258,10 @@ public:
     soft_start_cycles_ =
       ParseInt(GetParam(hp, "soft_start_cycles", ""), kDefaultSoftStartCycles);
     soft_start_cycles_ = std::clamp(soft_start_cycles_, 0, 200);
+    // F186：反馈恢复后 kp 斜坡时长（0 = 关闭斜坡）
+    freeze_recover_ramp_s_ = ParseDouble(
+      GetParam(hp, "freeze_recover_ramp_s", ""), kDefaultFreezeRecoverRampS);
+    freeze_recover_ramp_s_ = std::clamp(freeze_recover_ramp_s_, 0.0, 3.0);
     temp_warn_c_ = ParseDouble(GetParam(hp, "temp_warn_c", ""), kDefaultTempWarnC);
     temp_warn_c_ = std::clamp(temp_warn_c_, 40.0, 150.0);
     temp_protect_c_ =
@@ -976,39 +982,60 @@ public:
   }
 
   hardware_interface::return_type write(
-    const rclcpp::Time &, const rclcpp::Duration &) override
+    const rclcpp::Time &, const rclcpp::Duration & period) override
   {
     if (!active_.load()) {
       return hardware_interface::return_type::OK;
     }
 
     if (fb_stale_.load()) {
-      // F81: discard controller commands and hold the last known pose so a
-      // blind joint cannot keep advancing; other joints freeze with it.
-      std::vector<double> motor_positions(joints_.size());
-      {
-        std::lock_guard<std::mutex> lock(fb_mutex_);
+      // F81/F186：反馈 stale 时**冻结保持**，不做软下垂。
+      // 旧实现：全局 kp_/kd_ + 零前馈 + 实测位姿 → 重力下稳态下垂 τ_g/kp（数度），
+      // 通讯恢复后再按控制器旧目标拉回 → 用户实测的「阻尼下垂 + 瞬间弹回」冲击。
+      // 新实现：① 故障边沿锁存控制器的命令位姿/力矩，之后一直按它下发；
+      //        ② 帧构建走正常路径 → 每关节 kp/kd + 重力前馈与平时一致，不会下垂；
+      //        ③ 命令位姿全程不变 → 恢复瞬间没有位置跳变。
+      if (!hold_active_) {
+        hold_pos_.resize(joints_.size());
+        hold_eff_.resize(joints_.size());
         for (size_t i = 0; i < joints_.size(); ++i) {
-          motor_positions[i] =
-            joints_[i].direction * joints_[i].hw_pos + joints_[i].position_offset;
+          hold_pos_[i] = joints_[i].cmd_pos;
+          hold_eff_[i] = joints_[i].cmd_eff;
         }
+        hold_active_ = true;
+        RCLCPP_ERROR(
+          rclcpp::get_logger(kLoggerName),
+          "反馈 stale → 冻结保持（锁存故障前命令，kp/kd + 重力前馈照常，不做软下垂）");
       }
       for (size_t i = 0; i < joints_.size(); ++i) {
-        const auto & j = joints_[i];
-        const auto frame = ProtocolCodec::BuildMitControlFrame(
-          bus_, j.motor_id, motor_positions[i], 0.0, kp_, kd_, 0.0,
-          j.torque_max, j.speed_max);
-        std::string error;
-        if (!transport_.Send(frame, &error)) {
-          RCLCPP_WARN_THROTTLE(
-            rclcpp::get_logger(kLoggerName), clock_, 1000, "%s", error.c_str());
+        joints_[i].cmd_pos = hold_pos_[i];
+        joints_[i].cmd_vel = 0.0;
+        joints_[i].cmd_acc = 0.0;
+        if (joints_[i].effort_mode) {
+          joints_[i].cmd_eff = hold_eff_[i];
         }
       }
       RCLCPP_INFO_THROTTLE(
         rclcpp::get_logger(kLoggerName), clock_, 1000,
         "protective freeze-hold active: feedback stale on >=1 motor");
-      return hardware_interface::return_type::OK;
+    } else if (hold_active_) {
+      // 恢复边沿：kp 从 0 斜坡回额定。若期间确实被重力带走过一段（总线整段断），
+      // 也是"平滑拉回"而不是瞬间冲击。
+      hold_active_ = false;
+      const double period_s = std::max(1e-4, period.seconds());
+      recover_ramp_cycles_ = std::max(
+        1, static_cast<int>(std::lround(freeze_recover_ramp_s_ / period_s)));
+      recover_ramp_left_ = recover_ramp_cycles_;
+      RCLCPP_WARN(
+        rclcpp::get_logger(kLoggerName),
+        "反馈恢复 → kp 在 %.2f s（%d 拍）内从 0 斜坡回额定，避免回弹冲击",
+        freeze_recover_ramp_s_, recover_ramp_cycles_);
     }
+    if (recover_ramp_left_ > 0) {
+      --recover_ramp_left_;
+    }
+    const double kp_scale = (recover_ramp_left_ > 0 && recover_ramp_cycles_ > 0)
+      ? 1.0 - static_cast<double>(recover_ramp_left_) / recover_ramp_cycles_ : 1.0;
 
     if (soft_start_remaining_ > 0) {
       // F83: pure-damping take-up at the measured pose — no position spring —
@@ -1178,7 +1205,7 @@ public:
         const double v_ff = full_ff_active ? (j.direction * j.cmd_vel) : 0.0;
         frame = ProtocolCodec::BuildMitControlFrame(
           bus_, j.motor_id, j.direction * j.cmd_pos + j.position_offset,
-          v_ff, j.kp, j.kd, t_ff, j.torque_encode_max, j.speed_max);
+          v_ff, j.kp * kp_scale, j.kd, t_ff, j.torque_encode_max, j.speed_max);
       }
       std::string error;
       if (!transport_.Send(frame, &error)) {
@@ -1705,6 +1732,16 @@ private:
   int soft_start_cycles_{kDefaultSoftStartCycles};
   int soft_start_remaining_{0};
   std::atomic_bool fb_stale_{false};
+
+  // F186：freeze-hold = 冻结保持（锁存故障前命令，kp/kd+重力前馈照常）。
+  // hold_active_ 为 true 期间 write() 用锁存的命令位姿，不跟随实测（否则会下垂）。
+  bool hold_active_{false};
+  std::vector<double> hold_pos_;
+  std::vector<double> hold_eff_;
+  // 恢复后 kp 斜坡（从 0 回到额定），把"被重力带走过一段"的情况变成平滑拉回。
+  double freeze_recover_ramp_s_{kDefaultFreezeRecoverRampS};
+  int recover_ramp_cycles_{1};
+  int recover_ramp_left_{0};
 
   // F108 position-mode gravity feedforward state.
   double gravity_ff_ratio_{1.0};

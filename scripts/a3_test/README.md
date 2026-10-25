@@ -42,6 +42,28 @@ python3 scripts/a3_test/f181_servo_track.py random --continuous --vmax 0.05 --du
 输出命令速度 CV、0.3–3Hz 纹波、跟随误差、回 home、停稳漂移与命令流速率，
 结果落 `~/.a3/servo_track/<时间戳>/<mode>.json`。
 
+F184/F185 角度（绕末端点）验收与巡航 demo（真机，**不经 `a3_test.sh`**）：
+```bash
+# 逐项验收：三轴正负各 0.1 rad + 随机 60s/60°（判方向/幅值/回位）
+python3 scripts/a3_test/f183_servo_rotation_check.py
+# 连续巡航 demo：每轴 0→+A→−B→0 不停顿，速度可调，末端点全程不动
+python3 scripts/a3_test/f185_angular_cruise_demo.py --analyze        # 只仿真扫最大摆幅，不动臂
+python3 scripts/a3_test/f185_angular_cruise_demo.py --speed 30 --auto-enable
+```
+`--auto-enable` 代替手柄做「门禁 start → `/a3/arm/enable` → goto home」；
+摆幅上限由 `--analyze`（URDF + 关节限位的运动学扫描）给出，home 基准下 X ±90°、Y +28/−53°、Z ±55°，
+默认取 ±80 / +25−45 / ±45；`--amp x=85/85` 可覆盖。速度上限（真机实测）X ≤60、Y ≤40、Z ≤35°/s，
+三轴连跑建议 ≤35（30 与 35 已验 PASS，末端漂移 1–3.9 mm）。人脸跟踪必须先关（同一 twist 话题）。
+
+F186 反馈 stale「冻结保持」验收（vcan，**不需要真机**）：
+```bash
+sudo ip link add dev vcan9 type vcan && sudo ip link set up vcan9   # 仅首次
+python3 scripts/a3_test/f186_freeze_hold_acceptance.py vcan9
+```
+用 `vcan_motor_sim.py --silence-file` 让单电机停发反馈来复现掉线，直接解码插件发到 CAN 上的
+控制帧，比对 stale 前后的 `kp/kd/位置/力矩位`：要求保持期刚度与前馈与健康期**完全一致**、
+位置字段冻结、恢复后 kp 由斜坡回到额定（避免"软下垂 → 瞬间弹回"）。
+
 LL-039 事故回归（F51，`incident`）：
 - 八a **执行层**：Python mock 电机（对接 `/can_tx_frames` ↔ `/can_rx_frames`，**不走 SocketCAN**，无需 root）
   对接真 `motor_protocol_node`；脚本按事故时间线注入：使能 → 零力矩 → 拖到 1.98 rad → 退出零力矩（执行层 F38 重锚）

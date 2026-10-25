@@ -121,7 +121,7 @@ flowchart LR
 |---|---|---|---|
 | `/camera/image_raw` | `sensor_msgs/Image` | 订阅 | F177，bgr8 640×480@25，BEST_EFFORT |
 | `/a3/face_target` | `a3_msgs/FaceTarget` | 发布 | 检测结果（约 18 Hz），RELIABLE depth 10 |
-| `/a3/face_track/debug_image` | `sensor_msgs/Image` | 发布 | 标注图（`debug_image:=true` 时） |
+| `/a3/face_track/debug_image` | `sensor_msgs/Image` | 发布 | 标注图（`debug_image:=true`；`a3_stack.sh --face-track` 默认开，`--no-face-debug` 可关） |
 | `/a3/face_track/enable` | `std_srvs/SetBool` | 服务 | 使能跟踪（默认 **false**，必须显式打开） |
 | `/a3/face_track/reload_jacobian` | `std_srvs/Trigger` | 服务 | 重读 `~/.a3/camera/face_jacobian.yaml`（标定后热加载） |
 | `/servo_node/delta_twist_cmds` | `geometry_msgs/TwistStamped` | 发布 | 50 Hz，`frame_id=base_link` |
@@ -209,9 +209,13 @@ w_base = R_base_ee(now) · R_calᵀ · w_cal
 
 - 符号推导（小孔成像）：`du/dt ≈ -ω_y`、`dv/dt ≈ +ω_x`；换算到标定帧后即上式。
   实测若发散，把 `ka` 取负即可。
-- 限幅 `w_max=0.6 rad/s`、斜坡 `w_ramp=2 rad/s²`；开转动时平移增益乘 `lin_frac=0.5`
-  （转为主、平移补残差），避免双环叠加过冲。
+- 限幅 `w_max=0.15 rad/s`、斜坡 `w_ramp=0.4 rad/s²`（2026-10-24 由 0.6/2.0 收紧，见 F187）；
+  开转动时平移增益乘 `lin_frac=0.5`（转为主、平移补残差），避免双环叠加过冲。
 - 转动覆盖范围受腕部限位（L4/L5/L6）与奇异限制，实际可用角度需真机验证。
+- **安全门（F187）**：转动/平移闭环在"某关节已顶到限位"时会继续积分 → IK 换支 → 拖过限位堵转。
+  现由 [F187](F187-servo-joint-limit-guard.md) 的关节限位软门兜底（`joint_guard` / `joint_margin_deg`）；
+  默认参数已收紧为 `ka=0.3 / w_max=0.15 / w_ramp=0.4`。**2026-10-24 两次堵转事故**
+  见 [LL-185](../../lessons_learned/LL-185-servo-joint-limit-stall-two-incidents.md)。
 
 **几何约束（必须知道）**：相机光轴与第六轴 z 轴差约 45°（支架）。所以"第六轴 z 轴垂直人脸"
 与"人脸在画面中心"不能同时成立。本需求的跟踪目标是**光轴对准人脸**；若要让工具 z 轴对准，
@@ -245,8 +249,8 @@ w_base = R_base_ee(now) · R_calᵀ · w_cal
   （三轴正负定向 6 次 + 随机 60 s；判定位置漂移 < 5 mm、角度误差 < 25%、回位 < 5 mm）。
   **真机 home 位形结果（2026-10-24）**：定向 6/6 通过（实测 0.099–0.110 rad / 指令 0.100，
   轴向 dot 1.00，位置漂移 0.3–3.7 mm）；随机相位逐段 13.0–13.2°/12.9°，累计约 26–31° 后
-  **L4 触机械限位（−1.05 rad）** 提前结束——home 是全伸位形，绕末端点做纯姿态旋转需整臂重构
-  保持末端不动，L4 ±60° 会先到限位，属机构限制（大幅旋转验收请从半折位形起）。
+  **L4 触运动学限位（下界 −1.0472 rad = −60°）** 提前结束——home 是全伸位形，绕末端点做纯姿态旋转需整臂重构
+  保持末端不动，L4 会先到限位（该关节限位不对称：−60°…+90°），属机构限制（大幅旋转验收请从半折位形起）。
 
 
 ## 5. 滤波取舍（用户提问：位置平均 vs 卡尔曼）

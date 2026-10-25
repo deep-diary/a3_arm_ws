@@ -104,6 +104,15 @@ class FaceTrackController(Node):
         # 且最近若干帧的离散度超过 agree_tol（归一化误差）时判为"不稳定"→ 停发
         self.declare_parameter("median_n", 3)
         self.declare_parameter("agree_tol", 0.10)
+        # F188 误差整形：I 消稳态误差（否则"下沉→撞死区出口→抬一下"会形成极限环），
+        # D 提供相位超前（响应更快/更稳，但会放大检测噪声，先给 0，试调 0.03~0.10）。
+        self.declare_parameter("ki_img", 0.3)     # [1/s] 积分增益（作用在归一化误差上）
+        self.declare_parameter("i_max", 0.05)     # 积分项限幅（归一化误差当量）
+        self.declare_parameter("i_leak", 1.0)     # [1/s] 死区内泄漏，防长期偏置
+        self.declare_parameter("kd_img", 0.0)     # [s] 微分增益
+        self.declare_parameter("d_tau", 0.15)     # [s] 微分低通
+        # D 项限幅（归一化误差当量）：微分对检测跳变极敏感，夹住它就不会因单帧抖动打尖峰
+        self.declare_parameter("d_max", 0.03)
         # 视觉伺服映射：auto（有标定用雅可比，否则解析外参）| jacobian | extrinsic
         # jacobian 由 scripts/a3_test/f183_calib_jacobian.py 实测生成（与安装角无关）
         self.declare_parameter("mapping", "auto")
@@ -114,6 +123,12 @@ class FaceTrackController(Node):
         self.declare_parameter("w_ramp", 2.0)        # [rad/s²] 角速度斜坡
         # 开转动时把平移增益按此比例降低，避免"平移 + 转动"双重增益造成过冲
         self.declare_parameter("lin_frac", 0.5)
+        # F187 关节限位软门：两次真机事故（L5 +1.74、L4 −1.115 堵转 FAULT_STALL）都是
+        # "某个关节顶到机械限位后，控制器还在要求它继续走"。用 URDF 限位 + 当前关节角 +
+        # J⁻¹[v;w] 判断"这一拍会让哪个关节朝限位走"，只在该方向上按余量线性收缩；
+        # 朝外的运动不受限（能自己退回来）；已越限则整拍停。
+        self.declare_parameter("joint_guard", True)
+        self.declare_parameter("joint_margin_deg", 15.0)   # 余量小于此值开始收，半程归零
 
         self.declare_parameter("target_timeout", 0.5)
         self.declare_parameter("ee_timeout", 0.5)
@@ -127,7 +142,11 @@ class FaceTrackController(Node):
         # 停发一段（> servo twist_timeout 0.3s，强制其重锚实测）后重试，避免持续满速硬顶。
         self.declare_parameter("stall_window_s", 1.5)
         self.declare_parameter("stall_min_progress", 0.05)   # 窗口内 |e| 至少应下降这么多
-        self.declare_parameter("stall_v_frac", 0.5)          # 输出 > frac*v_max 才算"在使劲"
+        # 无进展判据改成"位移 + 转角"而不是"速度"：
+        # 2026-10-25 实测：目标静止时平移环以 3 mm/s 慢速空转（执行结果主要是手腕滚转，
+        # 图像中心几乎不动），速度远低于 0.5*v_max 所以旧判据从不触发，30 s 爬了 18°。
+        self.declare_parameter("stall_travel_m", 0.04)       # 无进展时累计位移上限 [m]
+        self.declare_parameter("stall_rot_rad", 0.05)        # 无进展时累计转角上限 [rad]
         self.declare_parameter("stall_hold_s", 0.6)          # 停发时长
 
         # 俯仰辅助（F183 Step C）：竖向平移被虚拟墙挡死 / 追不动时，改由绕标定帧 Y 的俯仰
@@ -159,6 +178,15 @@ class FaceTrackController(Node):
         self.lin_frac = float(np.clip(float(p("lin_frac").value), 0.0, 1.0))
         self.median_n = max(1, int(p("median_n").value))
         self.agree_tol = abs(float(p("agree_tol").value))
+        self.ki = float(p("ki_img").value)
+        self.i_max = abs(float(p("i_max").value))
+        self.i_leak = abs(float(p("i_leak").value))
+        self.kd = float(p("kd_img").value)
+        self.d_tau = max(1e-3, float(p("d_tau").value))
+        self.d_max = abs(float(p("d_max").value))
+        self._i_term = np.zeros(2)   # 积分项（归一化误差当量）
+        self._de_lp = np.zeros(2)    # 微分（低通后）
+        self._e_prev = None
         self.mapping = str(p("mapping").value)
         self.jac_file = str(p("jacobian_file").value)
         self.jac_z0 = None
@@ -171,7 +199,7 @@ class FaceTrackController(Node):
             self.z_ref = self.jac_z0
         if self.z_ref <= 0.0:
             self.z_ref = 0.45
-        self._hist = deque(maxlen=9)
+        self._hist = deque(maxlen=max(15, self.median_n))   # 窗口留够，median_n 可调
         self._hist_t = 0.0
         self.enable_depth = bool(p("enable_depth").value)
         self.ka = float(p("ka").value)
@@ -182,12 +210,18 @@ class FaceTrackController(Node):
         self.ws_margin = abs(float(p("workspace_margin_m").value))
         self.stall_window = max(0.3, float(p("stall_window_s").value))
         self.stall_progress = abs(float(p("stall_min_progress").value))
-        self.stall_v_frac = abs(float(p("stall_v_frac").value))
+        self.stall_travel = abs(float(p("stall_travel_m").value))
+        self.stall_rot = abs(float(p("stall_rot_rad").value))
         self.stall_hold = max(0.35, float(p("stall_hold_s").value))
         self.pitch_assist = bool(p("pitch_assist").value)
         self.pitch_gain = float(p("pitch_gain").value)
         self.pitch_max = abs(float(p("pitch_max").value))
         self.pitch_stall_win = max(0.0, float(p("pitch_stall_window_s").value))
+        # F187 关节限位软门
+        self.joint_guard = bool(p("joint_guard").value)
+        self.joint_margin = math.radians(abs(float(p("joint_margin_deg").value)))
+        self.q6 = None            # /a3/arm_status 的 6 关节角（L1..L6 顺序）
+        self._init_joint_limits()
         self._stall_last = 0.0
         self.ee_pos = None
         # 估计的「伺服内部积分目标」：EE 实测 + 累计发出的位移。
@@ -195,6 +229,10 @@ class FaceTrackController(Node):
         self._est = None
         self._stall_hist = deque(maxlen=128)
         self._stall_until = 0.0
+        self._prog_e_best = None   # 无进展守卫：最近一次改善时的 |e|
+        self._prog_travel = 0.0    # 自那次改善以来累计发出的位移 [m]
+        self._prog_rot = 0.0       # 自那次改善以来累计转角 [rad]
+        self._prog_t0 = 0.0
         rpy = [math.radians(float(v)) for v in p("cam_rpy_deg").value]
         self.r_ee_cam = rpy_to_matrix(rpy[0], rpy[1], rpy[2])
 
@@ -291,9 +329,39 @@ class FaceTrackController(Node):
             elif prm.name == "w_max":
                 self.w_max = abs(float(prm.value))
                 self.get_logger().warn(f"w_max → {self.w_max:.2f} rad/s")
+            elif prm.name == "ki_img":
+                self.ki = float(prm.value)
+                self.get_logger().warn(f"ki_img → {self.ki:.3f}")
+            elif prm.name == "i_max":
+                self.i_max = abs(float(prm.value))
+                self.get_logger().warn(f"i_max → {self.i_max:.3f}")
+            elif prm.name == "i_leak":
+                self.i_leak = abs(float(prm.value))
+                self.get_logger().warn(f"i_leak → {self.i_leak:.2f}")
+            elif prm.name == "kd_img":
+                self.kd = float(prm.value)
+                self.get_logger().warn(f"kd_img → {self.kd:.3f}")
+            elif prm.name == "d_max":
+                self.d_max = abs(float(prm.value))
+                self.get_logger().warn(f"d_max → {self.d_max:.3f}")
+            elif prm.name == "d_tau":
+                self.d_tau = max(1e-3, float(prm.value))
+                self.get_logger().warn(f"d_tau → {self.d_tau:.3f}")
+            elif prm.name == "median_n":
+                self.median_n = max(1, int(prm.value))
+                self.get_logger().warn(f"median_n → {self.median_n}")
             elif prm.name == "lin_frac":
                 self.lin_frac = float(np.clip(float(prm.value), 0.0, 1.0))
                 self.get_logger().warn(f"lin_frac → {self.lin_frac:.2f}")
+            elif prm.name == "joint_guard":
+                self.joint_guard = bool(prm.value)
+                if self.joint_guard and not self._pin_ok:
+                    self._init_joint_limits()
+                self.get_logger().warn(f"关节限位软门 → {'开' if self.joint_guard else '关'}")
+            elif prm.name == "joint_margin_deg":
+                self.joint_margin = math.radians(abs(float(prm.value)))
+                self.get_logger().warn(
+                    f"关节限位余量 → {math.degrees(self.joint_margin):.0f}°")
             elif prm.name == "cam_rpy_deg":
                 r = [math.radians(float(v)) for v in prm.value]
                 self.r_ee_cam = rpy_to_matrix(r[0], r[1], r[2])
@@ -320,8 +388,118 @@ class FaceTrackController(Node):
                                 msg.pose.position.z])
         self.ee_t = self.get_clock().now().nanoseconds * 1e-9
 
+    def _reset_err_state(self) -> None:
+        """停发/重新捕获时清积分与微分状态（避免旧偏置带进新目标）。"""
+        self._i_term[:] = 0.0
+        self._de_lp[:] = 0.0
+        self._e_prev = None
+
     def _on_status(self, msg: ArmStatus) -> None:
         self.arm_state = msg.state
+        if msg.joint_names and len(msg.positions) == len(msg.joint_names):
+            q = dict(zip(msg.joint_names, msg.positions))
+            if all(n in q for n in self._pnames):
+                self.q6 = np.array([q[n] for n in self._pnames])
+
+    def _init_joint_limits(self) -> None:
+        """读 URDF 限位 + 建 pinocchio 模型；失败就自动关闭软门（不影响其它功能）。"""
+        self._pnames = [f"L{i}_joint" for i in range(1, 7)]
+        self._pin_ok = False
+        if not self.joint_guard:
+            self.get_logger().info("关节限位软门：关闭（joint_guard=false）")
+            return
+        try:
+            import pinocchio as pin
+            from a3_robot_model import robot_model
+
+            m = pin.buildModelFromUrdf(robot_model.urdf_path())
+            self._pin, self._pm, self._pd = pin, m, m.createData()
+            self._pfid = m.getFrameId("end_effector")
+            self._plo = np.array([m.lowerPositionLimit[m.idx_qs[m.getJointId(n)]]
+                                  for n in self._pnames])
+            self._phi = np.array([m.upperPositionLimit[m.idx_qs[m.getJointId(n)]]
+                                  for n in self._pnames])
+            self._pin_ok = True
+            self.get_logger().info(
+                f"关节限位软门：开（余量 {math.degrees(self.joint_margin):.0f}°，半程归零）"
+                "L1..L6 限位 " + ", ".join(
+                    f"[{math.degrees(a):.0f},{math.degrees(b):.0f}]"
+                    for a, b in zip(self._plo, self._phi)))
+        except Exception as exc:  # noqa: BLE001
+            self._pin_ok = False
+            self.get_logger().warn(f"关节限位软门不可用（{exc}）→ 无限位保护")
+
+    def _limit_scale(self, v_base: np.ndarray, w_base: np.ndarray) -> float:
+        """这一拍（平移+转动）会让哪个关节朝限位走 → [0,1] 收缩系数。
+
+        用 J⁻¹[v;w] 推出关节速度方向，只对"朝限位走"的关节按余量线性收缩；
+        朝外的运动给 1.0（能自己退回来）。任一关节已越 URDF 限位 → 直接返回 0
+        （整拍停），避免继续硬顶把别的关节也拖过限位。
+
+        2026-10-24 第二次事故（L4 堵转）：只保护"转动"不够——L4 已顶在下限时，
+        **平移**仍要求 IK 继续重构，3 s 内把 L5/L3 拖过限位、L4 堵转（FAULT_STALL）。
+        所以这里必须用完整 twist，并覆盖全部 6 个关节。
+        """
+        if not self._pin_ok or self.q6 is None:
+            return 1.0
+        tw = np.concatenate([v_base, w_base])
+        if float(np.linalg.norm(tw)) < 1e-6:
+            return 1.0
+        for i in range(6):                       # 已越限 → 整拍停
+            if self.q6[i] < self._plo[i] - 1e-3 or self.q6[i] > self._phi[i] + 1e-3:
+                self.get_logger().error(
+                    f"{self._pnames[i]} 实测 {self.q6[i]:+.3f} 已越 URDF 限位 "
+                    f"[{self._plo[i]:+.3f},{self._phi[i]:+.3f}] → 停发（需人工退出限位）",
+                    throttle_duration_sec=2.0)
+                return 0.0
+        # 贴限位硬门（与方向无关）：任一关节余量 < joint_margin/2 就整拍停。
+        # 为什么需要与方向无关：关节顶在限位上时，笛卡尔目标还会继续积分，
+        # 一旦 IK 换支，瞬时雅可比方向可能"看起来朝外"，但实际会把别的关节一起拖过去
+        # （2026-10-24 第二次事故就是 L4 顶住后把 L5 拖到 +1.66、L3 拖到 +0.03）。
+        room_all = np.minimum(self.q6 - self._plo, self._phi - self.q6)
+        i_min = int(np.argmin(room_all))
+        if room_all[i_min] < 0.5 * self.joint_margin:
+            self.get_logger().error(
+                f"{self._pnames[i_min]} 余量仅 {math.degrees(room_all[i_min]):+.1f}° "
+                f"（< {math.degrees(self.joint_margin) / 2:.1f}°）→ 整拍停，请先退回限位内",
+                throttle_duration_sec=2.0)
+            return 0.0
+        try:
+            self._pin.computeJointJacobians(self._pm, self._pd, self.q6)
+            self._pin.updateFramePlacements(self._pm, self._pd)
+            J = np.array(self._pin.getFrameJacobian(
+                self._pm, self._pd, self._pfid, self._pin.LOCAL_WORLD_ALIGNED))
+            qd = np.linalg.solve(J, tw)
+        except Exception:  # noqa: BLE001  奇异/无解时不干预，交给伺服层
+            return 1.0
+        # 贴限位硬门（方向无关）：任一关节余量 < 半余量（默认 7.5°）就整拍停。
+        # 为什么不能只靠方向判定：关节已经贴住限位时，Cartesian 目标会继续漂出去，
+        # IK 随后"换支"式地大改关节（实测 1 s 内 L4 命令跳 1.08 rad），方向判定抓不住。
+        room_all = np.minimum(self.q6 - self._plo, self._phi - self.q6)
+        if float(np.min(room_all)) < 0.5 * self.joint_margin:
+            i = int(np.argmin(room_all))
+            self.get_logger().error(
+                f"{self._pnames[i]} 余量仅 {math.degrees(room_all[i]):.1f}°（贴限位）→ 停发，"
+                f"请先回 home/人工退出限位", throttle_duration_sec=2.0)
+            return 0.0
+        scale = 1.0
+        half = 0.5 * self.joint_margin
+        qmax = float(np.max(np.abs(qd)))
+        if qmax < 1e-6:
+            return 1.0
+        # 只有"真的在动"的关节才参与判定：qd 里 1e-17 量级的数值噪声会被误判成
+        # "朝限位走" → 把整拍命令归零（离线复现过）。
+        floor = max(1e-3, 0.05 * qmax)
+        for i in range(6):
+            if abs(qd[i]) < floor:
+                continue
+            room = (self._phi[i] - self.q6[i]) if qd[i] > 0 else (self.q6[i] - self._plo[i])
+            if room >= self.joint_margin:
+                continue
+            scale = min(scale, max(0.0, (room - half) / half))
+            if scale <= 0.0:
+                break
+        return scale
 
     def _on_mode(self, msg: String) -> None:
         self.control_mode = msg.data
@@ -486,6 +664,7 @@ class FaceTrackController(Node):
             self.v_cmd[:] = 0.0
             self.w_cmd[:] = 0.0
             self._est = None
+            self._reset_err_state()
             self._stall_hist.clear()
             self._publish(self.v_cmd, self.w_cmd, now)
             self.get_logger().warn(
@@ -500,6 +679,22 @@ class FaceTrackController(Node):
         self._in_dead = e_xy < thr and depth_ok
         in_dead = self._in_dead
 
+        # ---- F188 误差整形（I 消稳态误差 / D 超前）----
+        e_vec = np.array([ex, ey])
+        if self._e_prev is not None and self.dt > 0.0:
+            raw = (e_vec - self._e_prev) / self.dt
+            a_lp = min(1.0, self.dt / self.d_tau)      # 一阶低通，压检测噪声
+            self._de_lp += a_lp * (raw - self._de_lp)
+        self._e_prev = e_vec.copy()
+        if in_dead:
+            # 死区内不再积分，并缓慢泄漏，避免积分长期"顶着"一个偏置
+            self._i_term *= max(0.0, 1.0 - self.i_leak * self.dt)
+        else:
+            self._i_term = np.clip(self._i_term + self.ki * e_vec * self.dt,
+                                   -self.i_max, self.i_max)
+        term_d = np.clip(self.kd * self._de_lp, -self.d_max, self.d_max)
+        e_ctl = e_vec + self._i_term + term_d
+
         if in_dead:
             v_des = np.zeros(3)
             w_des = np.zeros(3)
@@ -508,25 +703,32 @@ class FaceTrackController(Node):
         # 追不动保护：窗口内 |e| 没下降，且一直在使劲 → 目标大概已顶到够不到的地方。
         # 停发 stall_hold（> servo twist_timeout）让它重锚实测，避免满速硬顶 + IK 抖动。
         else:
-            self._stall_hist.append((now, float(np.hypot(ex, ey))))
-            while self._stall_hist and now - self._stall_hist[0][0] > self.stall_window:
-                self._stall_hist.popleft()
-            v_now = float(np.linalg.norm(self.v_cmd))
-            if len(self._stall_hist) >= 5:
-                t0, e0 = self._stall_hist[0]
-                span = now - t0
-                prog = e0 - self._stall_hist[-1][1]
-                if (span >= 0.9 * self.stall_window
-                        and prog < self.stall_progress
-                        and v_now > self.stall_v_frac * self.v_max):
+            en = float(np.hypot(ex, ey))
+            # 无进展守卫（与速度无关）：只要"走了却没让误差变小"，就停发重锚。
+            # 误差改善 → 重新计程；否则累计已发出的位移/转角，超限即判"空转"。
+            if self._prog_e_best is None or en < self._prog_e_best - self.stall_progress:
+                self._prog_e_best = en
+                self._prog_travel = 0.0
+                self._prog_rot = 0.0
+                self._prog_t0 = now
+            else:
+                self._prog_travel += float(np.linalg.norm(self.v_cmd)) * self.dt
+                self._prog_rot += float(np.linalg.norm(self.w_cmd)) * self.dt
+                span = now - self._prog_t0
+                if (span > 0.5 * self.stall_window
+                        and (self._prog_travel > self.stall_travel
+                             or self._prog_rot > self.stall_rot)):
                     self._stall_until = now + self.stall_hold
                     self._stall_last = now
                     self._stall_hist.clear()
+                    self._prog_e_best = None
                     self.v_cmd[:] = 0.0
                     self.w_cmd[:] = 0.0
                     self._est = None
+                    self._reset_err_state()
                     self.get_logger().warn(
-                        f"追不动：{span:.1f}s 内 |e| 仅降 {prog:+.3f}（|v|={v_now:.3f} m/s）"
+                        f"空转（无进展）：{span:.1f}s 内位移 {self._prog_travel*1e3:.0f} mm / "
+                        f"转角 {self._prog_rot:.2f} rad，|e| 未降（{en:.3f}）"
                         f" → 停发 {self.stall_hold:.1f}s 重锚")
                     self._publish(np.zeros(3), np.zeros(3), now)
                     return
@@ -536,7 +738,7 @@ class FaceTrackController(Node):
         elif self._use_jacobian():
             # 实测雅可比映射：v = -kp · J⁻¹ · e（J: 归一化图像/米）
             try:
-                v_lat = -self.kp * np.linalg.solve(self.jac, np.array([ex, ey]))
+                v_lat = -self.kp * np.linalg.solve(self.jac, e_ctl)
             except np.linalg.LinAlgError:
                 v_lat = np.zeros(2)
             # 转动跟踪时以"转"为主：平移只做残差补偿，避免双环叠加过冲
@@ -552,7 +754,7 @@ class FaceTrackController(Node):
             if self.enable_angular:
                 if self.jac_a is not None:
                     try:
-                        wyz = -self.ka * np.linalg.solve(self.jac_a, np.array([ex, ey]))
+                        wyz = -self.ka * np.linalg.solve(self.jac_a, e_ctl)
                     except np.linalg.LinAlgError:
                         wyz = np.zeros(2)
                     w_cal = np.array([0.0, wyz[0], wyz[1]])
@@ -630,6 +832,14 @@ class FaceTrackController(Node):
                 f"俯仰辅助：竖向平移受限（{'wall' if z_blocked else 'stall'}），"
                 f"e_v={ey:+.3f} → w_pitch={wp:+.3f} rad/s",
                 throttle_duration_sec=2.0)
+
+        # F187 关节限位软门：平移和转动都可能把某个关节顶到限位，整拍一起收缩
+        gs = self._limit_scale(v_des, w_des)
+        if gs < 1.0:
+            v_des = v_des * gs
+            w_des = w_des * gs
+            self.get_logger().warn(
+                f"接近关节限位 → 整拍命令 ×{gs:.2f}", throttle_duration_sec=1.0)
 
         n = float(np.linalg.norm(v_des))
         if n > self.v_max:

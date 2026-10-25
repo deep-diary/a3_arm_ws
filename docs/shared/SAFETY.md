@@ -189,10 +189,31 @@ Web 端单电机调试（CAN 扫描 / MIT 直驱 / 保持）的安全边界：
 
 1. **检测**：插件按电机记录 last-rx，`read()` 中年龄 > `feedback_timeout_s`（默认 0.2 s，约 40 帧）即锁存 stale 并节流 ERROR（含 motor_id/关节名/年龄）。
 2. **read() 永远返回 OK**：ros2_control 2.54.0 中 read() 返回 ERROR 会触发 `System::read()→error()`，默认 on_error 把组件强制转 **unconfigured**；`System::write()` 在该态早退、插件安全写不执行，CAN TX 全灭——报错反而杀死了唯一能保位的层（LL-083）。
-3. **整臂 freeze-hold**：stale 后 `write()` 丢弃控制器新指令，全部 7 路按最后已知位置发位置保持帧（kp/kd 维持，对标 ISO 10218 protective stop）。仿真实测 895+ 保持帧窗口零位移。
+3. **整臂 freeze-hold = 冻结保持，不是软下垂（F186，2026-10-24 修）**：stale 后 `write()` 丢弃控制器新指令，
+   故障边沿**锁存控制器的命令位姿/力矩**并一直按它下发；帧构建走正常路径 → **每关节 kp/kd + 重力前馈
+   与平时完全一致**（对标 ISO 10218 protective stop）。仿真实测 895+ 保持帧窗口零位移。
+   - **旧实现的缺陷（真机复现）**：用「全局 kp + 零前馈 + 实测位姿」保持 → 重力下稳态下垂 `τ_g/kp`（数度，
+     整臂发软），通讯恢复后控制器旧目标又把它拉回 → **瞬间弹回原位、冲击很大**。
+   - **恢复**：反馈恢复后 latch 清除，`kp` 在 `freeze_recover_ramp_s`（默认 0.4 s）内从 0 斜坡回额定；
+     真断线（总线整段失效、电机自己走下坡）时表现为**平滑拉回**而不是一步跳回。
+   - 验收：`scripts/a3_test/f186_freeze_hold_acceptance.py`（vcan + `vcan_motor_sim.py --silence-file`
+     让单电机停发反馈，直接解码 CAN 控制帧比对 kp/kd/位置/前馈）。
 4. **标准上报**：`/diagnostics`（`a3_hardware:feedback_watchdog`，每电机年龄 KeyValue）+ 锁存 `/a3/hardware/feedback_stale`（Bool，TRANSIENT_LOCAL）。FSM 据此在 stale 期间拒绝一切新运动（goto/playback/slider jog）；disable 走 stale 快路径——idle 位直接 reset，非 idle 位拒绝（safe-park 在 freeze-hold 下硬件丢轨迹必超时），提示恢复反馈或人工紧急 reset。
 5. **启动门 fail-fast**：`on_activate` 先 reset-all（电机进 coast），500 ms 内验证 7/7 应答才发 enable；任一暗电机 → ERROR 且零 enable 帧。框架对激活失败的处理是 abort controller_manager 进程（整机停机），因此顺序不可颠倒。
 6. **恢复**：反馈恢复后 latch 自动清除、freeze-hold 解除，无须重启即可继续（disable/enable 与运动均已仿真验证）。
+
+## 视觉伺服关节限位软门（F187）
+
+人脸跟踪的闭环在"某个关节已顶到机械限位"时会继续积分目标 → IK 换支 → 把相邻关节一起拖过限位
+→ `FAULT_STALL`（`mask=0x10`）。2026-10-24 一天内两次（L5 +1.74；L4 −1.115，并**拉断 L5 连杆**）。
+
+1. **判据**：每拍 `qd = J⁻¹[v; w]`（`LOCAL_WORLD_ALIGNED`，末端点不动），用**完整 twist**；
+2. **方向感知收缩**：只对"朝限位走"的关节按余量线性收缩（`joint_margin_deg`=15° 开始、7.5° 归零），
+   朝外运动给 1.0，保证能自己退回；
+3. **贴限位硬门**：任一关节余量 < 7.5° 或已越 URDF 限位 → 与方向无关地**整拍归零**并报 ERROR
+   （此时笛卡尔目标已不可达，任何继续都可能换支拖拽）；
+4. 覆盖 **L1–L6 且平移+转动同时生效**——只保护腕部/转动会漏掉"平移把 IK 逼到换支"这条路径；
+5. 现场指纹：关节顶住后 **err 持续增长**（而非不降）+ `ik_fail` 骤增 + `越 URDF 限位` 告警。
 
 ## JTC 跟踪容差（F97 配置 / F112 放宽 / F117 临时定型）
 

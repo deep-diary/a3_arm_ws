@@ -486,9 +486,11 @@ def _build(cfg, include_gripper):
             {"max_step_trans": 0.004},
             {"twist_timeout": 0.30},
             {"max_ik_jump": 0.05},
-            # CLIK 每拍只做 1~2 次迭代（局部增量 IK）：目标已经按 twist 逐拍小步推进，
-            # 迭代多了会在腕部"伸直"位形收敛到另一支（实测 0.1 rad 指令走出 0.88 rad）
-            {"clik_iters": 2},
+            # CLIK 每拍迭代次数（局部增量 IK）：目标已按 twist 逐拍小步推进，迭代越深跟随越紧、
+            # 相位滞后越小，但会把检测噪声更彻底地"执行"到关节上（命令逐拍差分变大），
+            # 且腕部伸直位形下越容易收敛到另一支（曾被 12 次迭代放大成 0.1 rad→0.88 rad）。
+            # 2026-10-24 由 2 提到 3（配合 goal_filter_tau 0.06→0.03），抖动/换支需实测复核。
+            {"clik_iters": 3},
             # IK 解与种子差 > max_ik_jump 时限步跟进（而不是整帧丢弃，后者会死锁）；
             # 超过 max_ik_jump_hard 判为真换支，仍丢弃并回退目标
             {"ik_jump_clip": True},
@@ -502,7 +504,15 @@ def _build(cfg, include_gripper):
             {"twist_max_angular": 1.2},
             {"twist_max_accel": 1.0},
             {"twist_max_ang_accel": 3.0},
-            {"twist_lpf_tau": 0.06},
+            # F181 twist 低通时间常数：0.06→0.02（2026-10-24）减小纵向/横向跟随滞后；
+            # 代价是 twist 层的高频更少被削掉，命令更"噪"（配合 clik_iters=3 一并观察抖动）
+            {"twist_lpf_tau": 0.02},
+            # 关节级输出限额（比节点默认 1.5 / 5.0 放开）：提高跟踪带宽，代价是更快的关节
+            # 加减速 → 力矩尖峰与发热上升，需盯 FAULT / COOLING 与温升
+            {"max_joint_velocity": 2.5},
+            {"max_joint_acceleration": 8.0},
+            # q_goal 一阶低通：0.06→0.03，减小 IK 解进命令的滞后
+            {"goal_filter_tau": 0.03},
             # 目标工作空间夹紧：z 下限必须高于"够不到基座"的高度。默认 0.02 会让
             # 人脸跟踪把目标一路顶到基座附近 → IK 大量失败、CLIK 抖动（2026-10-24 真机复现）
             {"workspace_min": [-0.55, -0.45, 0.15]},

@@ -146,7 +146,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/hardware/torque_components` | `a3_msgs/msg/TorqueComponents` | F160 力矩分量分解源（重力/科氏+离心/惯量 AFF/总前馈/PD 反馈/总指令/实测），由 `a3_hardware_interface` 插件发布，`a3_arm_controller` 订阅后镜像进 `/a3/arm_status` |
 | `/a3/arm/operator_event` | `std_msgs/String` | F131 操作事件通知：`waypoint_captured`（路点打点成功）等；ds4_feedback_node 消费（白闪 0.4s + 弱震 0.12s） |
 | `/a3/face_target` | `a3_msgs/msg/FaceTarget` | F183 人脸检测结果（`a3_perception/face_detect_node`），见上表“人脸跟踪目标” |
-| `/a3/face_track/debug_image` | `sensor_msgs/Image` | F183 标注图（关键点 + 包围盒 + 6 参数面板），仅 `debug_image:=true` 时发布，BEST_EFFORT |
+| `/a3/face_track/debug_image` | `sensor_msgs/Image` | F183 标注图（关键点 + 包围盒 + 6 参数面板）。`ros2 launch ... debug_image:=true` 时发布；`a3_stack.sh --face-track` **默认开**（RViz 的 Image 面板订阅此路），要省 CPU 用 `--no-face-debug`。BEST_EFFORT |
 | `/a3/face_track/enable` | `std_srvs/SetBool` | F183 跟踪使能（**默认关闭**）；未使能时控制器不向 `/servo_node/delta_twist_cmds` 发任何消息，避免与 PS4 遥操作抢同一话题 |
 | `/a3/face_track/reload_jacobian` | `std_srvs/Trigger` | F183 重读图像雅可比标定（`~/.a3/camera/face_jacobian.yaml`，含标定距离 `distance_mm`，用于 Z/Z0 缩放） |
 | `/servo_node/delta_twist_cmds` | `geometry_msgs/TwistStamped` | F181/F183：`a3_servo_target` 的输入，**按 base 系解释**：`linear` 平移；`angular` **绕末端点旋转**（姿态变、末端位置不变，`rotation_about_tip:=false` 可回退旧语义“绕基座原点画弧”）。PS4 mapper 50 Hz，人脸跟踪控制器 50 Hz（限速 0.05 m/s、加速度斜坡 0.5 m/s²）。IK 连续失败时目标回退到最近成功位姿（不再继续积分） |

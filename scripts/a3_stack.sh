@@ -47,8 +47,10 @@ CHECK_PATTERN='ros2 launch a3_bringup|ros2_control_node|a3_arm_controller|power_
 # start --face-track 起栈后拉起、stop/restart 先停它再停栈。
 FACE_LOG_FILE="/tmp/a3_face_track.log"
 FACE_PATTERN='a3_perception face_track.launch|a3_perception.face_detect_node|lib/a3_perception/face_track_controller'
-# --face-debug：同时发 /a3/face_track/debug_image（首次调方向/看关键点用，多耗一点 CPU）
-FACE_DEBUG=0
+# 标注图 /a3/face_track/debug_image：**默认开**（RViz 的 Image 面板订阅的就是这一路，
+# 否则 --face-track 起来也看不到画面）。要看原图把面板 Topic 改成 /camera/image_raw。
+# 跑 servo 验收/巡航等对控制环敏感的场景，用 --no-face-debug 关掉省 CPU（LL-180）。
+FACE_DEBUG=1
 
 # ── 仿真模式（--sim）──────────────────────────────────────────────
 # 全仿真栈 edge_teleop_full_sim：sim_motor_node 软实时执行层（无 ros2_control_node/
@@ -592,7 +594,11 @@ start_face_track() {
   fi
   info "当前**未使能**（默认安全）。确认相机朝向/外参符号无误后再开："
   info "  ros2 service call /a3/face_track/enable std_srvs/srv/SetBool \"{data: true}\""
-  info "标注图：/a3/face_track/debug_image（launch 加 debug_image:=true）"
+  if [ "$FACE_DEBUG" = 1 ]; then
+    info "标注图：/a3/face_track/debug_image（默认发；RViz Image 面板看的这一路）"
+  else
+    info "标注图已关（--no-face-debug）：RViz 里看不到画面"
+  fi
   return 0
 }
 
@@ -968,9 +974,10 @@ usage() {
   --no-mqtt      显式关 MQTT（默认已是关，保留兼容）
   --face-track   起栈后顺带拉起人脸跟踪（F183，独立 launch + mediapipe venv）；
                  默认**不使能**，需再调 /a3/face_track/enable；与 --no-camera 冲突。
-                 stop/restart 会先停它（它往 /servo_node/delta_twist_cmds 发 twist）
-  --face-debug   仅配合 --face-track：同时发 /a3/face_track/debug_image 标注图
-                 （首次核对相机方向/关键点用，多耗一点 CPU）
+                 stop/restart 会先停它（它往 /servo_node/delta_twist_cmds 发 twist）。
+                 **同时默认发布标注图** /a3/face_track/debug_image（RViz 的 Image 面板
+                 订阅的就是这一路），所以 `restart --face-track --rviz` 直接就能看画面
+  --no-face-debug 关掉标注图发布（省 CPU；跑 servo 验收/巡航等对控制环敏感时用，LL-180）
   --sim          走全仿真栈 edge_teleop_full_sim（domain $SIM_DOMAIN 隔离真机；可放任意位置）
   --no-joy       仅 --sim：不起 joy_node（/joy 由脚本注入，如 ps4_sim_test.py 合成测试）
 
@@ -1031,7 +1038,9 @@ main() {
       --no-mqtt) do_mqtt=0 ;;
       --mqtt) do_mqtt=1 ;;
       --face-track) do_face_track=1 ;;
-      --face-debug) FACE_DEBUG=1 ;;
+      # 标注图默认已开；--face-debug / --debug_image 保留为显式写法（兼容旧命令/笔误）
+      --face-debug|--debug_image|--debug-image) FACE_DEBUG=1 ;;
+      --no-face-debug|--no-debug_image|--no-debug-image) FACE_DEBUG=0 ;;
       on|start) turn_off=0 ;;
       off|stop) turn_off=1 ;;
       -h|--help) usage; exit 0 ;;

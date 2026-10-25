@@ -39,8 +39,10 @@
     kz: 0.6
     v_max: 0.04
     ramp_accel: 0.5      # m/s²
-    deadband: 0.06        # 归一化图像误差死区（6% 半幅）
-    deadband_exit: 0.08  # 滞环出死区阈值（防边界反复启停）
+    # 2026-10-25：0.06/0.08 → 0.03/0.045。原来死区偏大，静态目标下形成
+    # "下沉→撞死区出口(0.08)→抬一下→回死区→再下沉"的极限环（实测 ey 在 -0.03~-0.09
+    # 以约 3 s 周期摆动，vz 每周期打一次 +6 mm/s 短脉冲）。
+
     edge_hold: 0.88       # |err| 超过视为不可信（人脸被画面裁切）
     settle_time_s: 0.6    # 重新捕获后增益 0→1 的渐变时长（消除进出画面晃动）
     dz_deadband_mm: 40.0  # 深度读数噪声/多径更大，死区给足
@@ -59,16 +61,28 @@
     jacobian_file: ~/.a3/camera/face_jacobian.yaml
     # 采样一致性：取最近 median_n 帧的逐分量中位数（抗单帧跳变）；
     # 最近几帧离散超过 agree_tol（归一化误差）判为"检测不稳"→ 停发，防进出画面抽动。
-    median_n: 3
+    # 3 → 5：真人脸有表情/微动 + 检测误差，3 帧中位数偏"跳"；5 帧 ≈ 0.4~0.5 s，
+    # 引入约 0.2 s 群延迟（再大就跟不上人了，20 帧 @10 Hz = 2 s 延迟，不可取）。
+    median_n: 5
     agree_tol: 0.10
-    # 转动跟踪（绕 base 跟人走）：默认关，确认符号后运行时打开
-    #   ros2 param set /face_track_controller enable_angular true
-    # 打开后以"转"为主，平移按 lin_frac 降权；工具 z 轴与光轴差约 45°，以光轴对准为准
-    enable_angular: false
-    ka: 0.8          # 角速度增益 [1/s]（图像误差 → rad/s）
-    w_max: 0.6       # 角速度上限 [rad/s]
-    w_ramp: 2.0      # 角速度斜坡 [rad/s²]
+    # F188 误差整形（见 face_track_controller 注释）
+
+    # 转动跟踪（绕 base 跟人走）：默认开（角雅可比已标定，见
+    # scripts/a3_test/f183_calib_jacobian.py --ang-probe 0.10）
+    #   打开后以"转"为主，平移按 lin_frac 降权；工具 z 轴与光轴差约 45°，以光轴对准为准
+    enable_angular: true
+    # 2026-10-24 事故后收紧（F187）：原 ka 0.8 / w_max 0.6 让一次"转"在 1 s 内把 L5
+    # 拧到 +1.74 rad（超 +90° 限位 9.6°）→ FAULT_STALL。转动环先跑稳再往上升。
+    ka: 0.3          # 角速度增益 [1/s]（图像误差 → rad/s）
+    w_max: 0.15      # 角速度上限 [rad/s]
+    w_ramp: 0.4      # 角速度斜坡 [rad/s²]（原 2.0 太快）
     lin_frac: 0.5    # 开转动时的平移增益系数
+    # 关节限位软门（F187）：用 URDF 限位 + 当前关节角 + J⁻¹[v;w] 判断"这一拍会让哪个关节
+    # 朝限位走"，只在该方向上按余量线性收缩（余量 15° 开始收、7.5° 归零），朝外运动不受限；
+    # 任一关节已越限 → 整拍停（2026-10-24 两次事故：L5 +1.74 / L4 −1.115 堵转 FAULT_STALL）。
+    # 注意必须覆盖"平移"：L4 顶在下限时，平移仍要求 IK 重构，会把 L5/L3 一起拖过限位。
+    joint_guard: true
+    joint_margin_deg: 15.0
     target_timeout: 0.5
     ee_timeout: 0.5
     # 工作空间虚拟墙（与 a3_servo_target 默认一致）：贴边时不再朝外推，
@@ -77,11 +91,21 @@
     workspace_min: [-0.55, -0.45, 0.15]
     workspace_max: [0.45, 0.45, 0.70]
     workspace_margin_m: 0.03
-    # 追不动保护：窗口内误差没下降且输出接近饱和 → 停发 stall_hold_s 让 servo 重锚
-    stall_window_s: 1.5
-    stall_min_progress: 0.05
-    stall_v_frac: 0.5
-    stall_hold_s: 0.6
+    # 无进展守卫（2026-10-25 改）：不看速度，看"走了多少却没让误差变小"。
+    # 起因：目标静止时平移环以 3 mm/s 慢速空转（执行结果主要是手腕滚转、图像中心不动），
+    # 旧判据要求 |v| > 0.5*v_max 才触发 → 30 s 爬了 18°。
+    stall_window_s: 1.5        # 至少观察这么久才判定
+    stall_min_progress: 0.02   # |e| 至少下降这么多才算"有进展"
+    stall_travel_m: 0.04       # 无进展时累计位移上限（4 cm）
+    stall_rot_rad: 0.05        # 无进展时累计转角上限
+    stall_hold_s: 0.6          # 判定后停发时长（> servo twist_timeout）
+    # 定稿参数（2026-10-25 A/B）：D 有效、I 无效（误差方向本身降不下去，积分只会加速跑飞）
+    ki_img: 0.0
+    kd_img: 0.03
+    d_tau: 0.15
+    d_max: 0.03
+    deadband: 0.05
+    deadband_exit: 0.06
     # 俯仰辅助（F183 Step C）：竖向平移被虚拟墙挡死 / 追不动时，用绕标定帧 Y 的俯仰继续追。
     # 典型场景：人要抬高、末端已顶到高度上限，平移无解但抬腕还能让相机看向人脸。
     pitch_assist: false      # 需先标定角雅可比并确认真机符号后再开

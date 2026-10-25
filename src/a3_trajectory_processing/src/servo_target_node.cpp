@@ -81,6 +81,14 @@ public:
     max_vel_ = declare_parameter<double>("max_joint_velocity", 1.5);      // [rad/s]
     max_acc_ = declare_parameter<double>("max_joint_acceleration", 5.0);  // [rad/s²]
     max_jerk_ = declare_parameter<double>("max_joint_jerk", 50.0);        // [rad/s³]
+    // F187（伺服侧）：命令状态 q_cmd_ 必须同时夹在 URDF 限位内。
+    // 2026-10-24 事故：q_cmd_ 只夹速度不夹位置，vj 前馈把它一路积分到限位外
+    // （黑匣子：L4 命令 −1.48 vs 限位 −1.047、L5 +1.78 vs 1.5708），MIT 位置环按
+    // kp·(cmd−meas) 顶死 → 堵转 0x10 → 拉断 L5 连杆。
+    // 停止下发时的平滑归位：跟踪期间命令一直"领先"实测（正是这份领先在托着臂抗重力），
+    // 关跟踪瞬间把命令撤到实测位姿会让臂"掉一下"。改成按 settle_rate 匀速收到实测位姿再停发。
+    settle_rate_ = declare_parameter<double>("settle_rate", 0.3);            // [rad/s]
+    cmd_limit_margin_ = declare_parameter<double>("cmd_limit_margin", 0.02);  // [rad]
     max_ik_jump_ = declare_parameter<double>("max_ik_jump", 0.05);        // [rad]/周期
     // IK 解与当前种子相差超过 max_ik_jump 时：true=限步逼近（推荐，避免死锁）；false=整帧丢弃（旧行为）
     ik_jump_clip_ = declare_parameter<bool>("ik_jump_clip", true);
@@ -228,13 +236,16 @@ public:
           resp->message = "no joint state yet";
           return;
         }
-        target_ = state_->getGlobalLinkTransform(tip_frame_);
+        std::vector<double> qc;
+        bool out = false;
+        target_ = measuredPose(qc, out);
         z_lock_ = target_.translation().z();
         target_ok_ = target_;
         have_target_ok_ = true;
-        q_goal_ = q_meas_;
+        q_goal_ = qc;
         resp->success = true;
-        resp->message = "reanchored to measured";
+        resp->message = out ? "reanchored to measured (关节越限，已夹紧)"
+                            : "reanchored to measured";
       });
 
     timer_ = create_wall_timer(std::chrono::duration<double>(dt_), [this] { step(); });
@@ -285,6 +296,48 @@ private:
     }
     return ok;
   }
+
+  // ---------------- 锚定辅助：实测关节必须先夹到 URDF 限位 ----------------
+  // 为什么：重锚若直接用"实测 FK"当目标，一旦某个关节越限，clikSolve 里一夹紧就差
+  // 2.6°(0.046 rad) > clik_tol_rot_loose_(0.02)，于是**每拍都 ik_fail**、目标被回退钉死、
+  // 整臂一个关节都不动（实测 ik_fail 17150/20158 = 85%，表现为"卡在极限且不尝试转动"）。
+  bool clampedMeas(std::vector<double>& qc) const
+  {
+    qc = q_meas_;
+    bool out = false;
+    for (size_t i = 0; i < kDof; ++i) {
+      const double v = clampd(qc[i], joint_lo_[i], joint_hi_[i]);
+      // 报告阈值 5 mrad：零点/编码噪声让 L2 在 0.000±0.001 抖是常态，不该每 2s 刷告警；
+      // 但仍照常夹紧（夹紧本身无副作用）。
+      if (std::abs(v - qc[i]) > 5e-3) out = true;
+      qc[i] = v;
+    }
+    return out;
+  }
+
+  Eigen::Isometry3d fkOf(const std::vector<double>& q)
+  {
+    moveit::core::RobotState st = *state_;
+    st.setJointGroupPositions(jmg_, q);
+    st.updateLinkTransforms();
+    return st.getGlobalLinkTransform(tip_frame_);
+  }
+
+  // 返回可作锚点的实测位姿；qc = 要写回 q_goal_ 的关节（夹紧后），out = 是否发生越限。
+  Eigen::Isometry3d measuredPose(std::vector<double>& qc, bool& out)
+  {
+    out = clampedMeas(qc);
+    if (!out) return state_->getGlobalLinkTransform(tip_frame_);
+    for (size_t i = 0; i < kDof; ++i) {
+      if (std::abs(qc[i] - q_meas_[i]) > 5e-3) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                             "%s 实测 %.4f 越 URDF 限位 [%.4f, %.4f] → 锚定用夹紧后的位姿",
+                             joint_names_[i].c_str(), q_meas_[i], joint_lo_[i], joint_hi_[i]);
+      }
+    }
+    return fkOf(qc);
+  }
+
   void onJointState(const sensor_msgs::msg::JointState::SharedPtr msg)
   {
     std::lock_guard<std::mutex> lk(mu_);
@@ -298,18 +351,20 @@ private:
     }
     state_->setJointGroupPositions(jmg_, q);
     state_->setJointGroupVelocities(jmg_, qd);
+    q_meas_ = q;
+    qd_meas_ = qd;
     if (!have_state_) {
-      target_ = state_->getGlobalLinkTransform(tip_frame_);
+      std::vector<double> qc;
+      bool out = false;
+      target_ = measuredPose(qc, out);
       z_lock_ = target_.translation().z();
       target_ok_ = target_;
       have_target_ok_ = true;
-      q_goal_ = q;
-      for (size_t i = 0; i < kDof; ++i) { q_cmd_[i] = q[i]; qd_cmd_[i] = qd[i]; qa_cmd_[i] = 0.0; }
+      q_goal_ = qc;
+      for (size_t i = 0; i < kDof; ++i) { q_cmd_[i] = qc[i]; qd_cmd_[i] = qd[i]; qa_cmd_[i] = 0.0; }
       have_state_ = true;
       RCLCPP_INFO(get_logger(), "首帧状态就绪：绝对目标锚定 z=%.4f", z_lock_);
     }
-    q_meas_ = q;
-    qd_meas_ = qd;
   }
 
   void onTwist(const geometry_msgs::msg::TwistStamped::SharedPtr msg)
@@ -337,19 +392,81 @@ private:
     const bool twist_fresh = have_twist_ && (now() - twist_t_).seconds() < twist_timeout_;
     const bool active = state_ok && !mode_blocked && !feedback_stale_ && twist_fresh;
     if (!active) {
-      last_step_t_ = now();
-      target_ = state_->getGlobalLinkTransform(tip_frame_);
+      const rclcpp::Time t_now = now();
+      double dt_step = dt_;
+      if (last_step_t_.nanoseconds() > 0) {
+        const double d = (t_now - last_step_t_).seconds();
+        if (d > 0.0) dt_step = clampd(d, 0.5 * dt_, 2.0 * dt_);
+      }
+      last_step_t_ = t_now;
+      std::vector<double> qc;
+      bool out = false;
+      target_ = measuredPose(qc, out);
       z_lock_ = target_.translation().z();
       target_ok_ = target_;
       have_target_ok_ = true;
-      q_goal_ = q_meas_;
+      q_goal_ = qc;
+      v_lim_.setZero();  // 平滑器状态清零，避免恢复时带旧速度
+      v_lp_.setZero();
+
+      // 只有"只是 twist 断了"（跟踪被关/超时）这一种情况才平滑归位；
+      // FAULT / ZERO_TORQUE / stale 时一律不发布，交给下层的保持/失能逻辑。
+      const bool can_settle = state_ok && !mode_blocked && !feedback_stale_ && !twist_fresh;
+      if (can_settle) {
+        if (!settle_active_ && !settle_done_) {
+          // 进入时拍快照（夹在软限位内）：之后命令朝快照收敛，臂才不会跟着重力往下走。
+          for (size_t i = 0; i < kDof; ++i) {
+            settle_target_[i] = clampd(qc[i], joint_lo_[i] + cmd_limit_margin_,
+                                       joint_hi_[i] - cmd_limit_margin_);
+          }
+          settle_active_ = true;
+          double gap0 = 0.0;
+          for (size_t i = 0; i < kDof; ++i)
+            gap0 = std::max(gap0, std::abs(settle_target_[i] - q_cmd_[i]));
+          RCLCPP_INFO(get_logger(),
+                      "停止下发 → 平滑归位（%.3f rad @ %.2f rad/s，约 %.2f s）",
+                      gap0, settle_rate_, gap0 / std::max(1e-3, settle_rate_));
+        }
+        if (settle_active_) {
+          double gap = 0.0;
+          for (size_t i = 0; i < kDof; ++i)
+            gap = std::max(gap, std::abs(settle_target_[i] - q_cmd_[i]));
+          if (gap > 1e-3) {
+            const double step = settle_rate_ * dt_step;
+            std::array<double, kDof> q_out{}, qd_zero{};
+            for (size_t i = 0; i < kDof; ++i) {
+              q_cmd_[i] += clampd(settle_target_[i] - q_cmd_[i], -step, step);
+              qd_cmd_[i] = 0.0;
+              qa_cmd_[i] = 0.0;
+              q_out[i] = q_cmd_[i];
+            }
+            trajectory_msgs::msg::JointTrajectory msg;
+            msg.header.stamp = rclcpp::Time(0);
+            msg.header.frame_id = base_frame_;
+            msg.joint_names = joint_names_;
+            trajectory_msgs::msg::JointTrajectoryPoint pt;
+            pt.positions.assign(q_out.begin(), q_out.end());
+            pt.velocities.assign(qd_zero.begin(), qd_zero.end());
+            pt.time_from_start = rclcpp::Duration::from_seconds(dt_step);
+            msg.points.push_back(pt);
+            pub_->publish(msg);
+            was_in_servo_ = false;
+            return;
+          }
+          // 完成标记：否则下面的"重锚实测"会把 q_cmd_ 拉回实测，下一拍 gap 又 >1e-3
+          // → 100 Hz 反复"开始/完成"（仍在发同一位置，但日志刷屏、publish 永不停）。
+          settle_active_ = false;
+          settle_done_ = true;
+          RCLCPP_INFO(get_logger(), "平滑归位完成，停止下发");
+        }
+      }
+      settle_active_ = false;
+      if (!can_settle) settle_done_ = false;   // FAULT/stale/ZERO_TORQUE 后再停发要重新归位
       for (size_t i = 0; i < kDof; ++i) {
-        q_cmd_[i] = q_meas_[i];
+        q_cmd_[i] = qc[i];
         qd_cmd_[i] = qd_meas_[i];
         qa_cmd_[i] = 0.0;
       }
-      v_lim_.setZero();  // 平滑器状态清零，避免恢复时带旧速度
-      v_lp_.setZero();
       if (was_in_servo_) {
         was_in_servo_ = false;
         RCLCPP_INFO(get_logger(), "停止下发（state=%s mode=%s stale=%d twist_fresh=%d）→ 重锚实测",
@@ -359,6 +476,7 @@ private:
     }
     if (!was_in_servo_) {
       was_in_servo_ = true;
+      settle_done_ = false;   // 重新收到 twist：下次再停发要重新归位
       last_step_t_ = now();
       RCLCPP_INFO(get_logger(), "开始下发（state=%s）→ 以当前实测位姿为绝对目标起点",
                   arm_state_.c_str());
@@ -406,18 +524,24 @@ private:
     const Eigen::Matrix<double, 6, 1> v = v_lp_;
     const bool moving = v.head<3>().norm() > 1e-4 || v.tail<3>().norm() > 1e-3;
 
-    // ---- 1b) 已到位且无指令：直接锚住实测，不再解 IK ----
+    // ---- 1b) 已到位且无指令：分支异常时才锚实测，正常保持则不动 ----
     // 腕部接近伸直时 IK 存在姿态等价的两个分支，即使目标静止也会被"限步跟进"一路拖到另一支
-    // （实测停发后工具继续转 10°→29°）。到位后重锚即可彻底消除这种漂移。
-    if (!moving) {
-      const Eigen::Isometry3d cur = state_->getGlobalLinkTransform(tip_frame_);
+    // （实测停发后工具继续转 10°→29°）。所以检测到分支异常后，下一拍把种子/目标换成实测。
+    // **不能无条件换**：无条件把 q_goal_ 换成实测 == "实测在哪就保持在哪"，位置环误差恒 ≈0，
+    // 重力把臂拉低时命令就逐拍跟着下坠（2026-10-25 实测：无人脸 18 s 内 L3 漂 0.09 rad，
+    // 命令−实测恒为 0.000）。
+    if (!moving && ik_branch_suspect_) {
+      std::vector<double> qc;
+      bool out = false;
+      const Eigen::Isometry3d cur = measuredPose(qc, out);
       const double pe = (target_.translation() - cur.translation()).norm();
       const double re = std::abs(Eigen::AngleAxisd(cur.linear().transpose() * target_.linear()).angle());
       if (pe < 3e-3 && re < 1e-2) {
-        q_goal_ = q_meas_;
+        q_goal_ = qc;
         target_ = cur;
         target_ok_ = cur;
         have_target_ok_ = true;
+        ik_branch_suspect_ = false;
       }
     }
 
@@ -492,6 +616,7 @@ private:
         // 解离"实测关节"太远 → 姿态等价的另一分支（腕部伸直位形最典型）。
         // 这种解即便姿态正确，跟过去也会让工具多转几十度，必须拒绝。
         ++ik_far_rej_;
+        ik_branch_suspect_ = true;
         if (have_target_ok_) target_ = target_ok_;
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                              "IK 解远离实测 %.3f rad > %.3f → 判为另一分支，保持当前目标（累计 %d）",
@@ -514,6 +639,7 @@ private:
         for (size_t i = 0; i < kDof; ++i) q_goal_[i] += s * (qsol[i] - q_goal_[i]);
         ik_fail_streak_ = 0;
         ++ik_jump_clip_cnt_;
+        ik_branch_suspect_ = true;
         target_ok_ = target_;
         have_target_ok_ = true;
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
@@ -521,6 +647,7 @@ private:
                              dmax, max_ik_jump_, max_ik_jump_, ik_jump_clip_cnt_);
       } else {
         ++ik_jump_reject_;
+        ik_branch_suspect_ = true;
         if (have_target_ok_) target_ = target_ok_;   // 跳变过大（真换支）：目标回退，别继续积分
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                              "IK 换支被拒：dmax=%.3f rad ≥ %.3f（累计 %d）",
@@ -564,6 +691,27 @@ private:
       qa_cmd_[i] = clampd(a_des, qa_cmd_[i] - a_step, qa_cmd_[i] + a_step);
       qd_cmd_[i] = clampd(qd_cmd_[i] + qa_cmd_[i] * dt_step, -max_vel_, max_vel_);
       q_cmd_[i] += qd_cmd_[i] * dt_step;
+      // F187：命令状态贴限位（不只是 IK 解），否则前馈会把命令推出量程。
+      // 若实测本来就在余量带内（如 idle 的 L2=0.015 而限位 0.000 + 余量 0.020），
+      // 不能把命令顶到余量线上——那等于常驻一个 5 mrad 的位置偏置（≈0.4 Nm 顶着发热），
+      // 改为"最多退到实测处、不许再往限位里走"。
+      const double lo_lim = std::min(joint_lo_[i] + cmd_limit_margin_, q_meas_[i]);
+      const double hi_lim = std::max(joint_hi_[i] - cmd_limit_margin_, q_meas_[i]);
+      if (q_cmd_[i] < lo_lim || q_cmd_[i] > hi_lim) {
+        const bool lo = q_cmd_[i] < lo_lim;
+        q_cmd_[i] = lo ? lo_lim : hi_lim;
+        if (lo ? (qd_cmd_[i] < 0.0) : (qd_cmd_[i] > 0.0)) {
+          qd_cmd_[i] = 0.0;
+          qa_cmd_[i] = 0.0;
+        }
+        ++cmd_limit_clamp_cnt_;
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                             "命令到限位：%s q_cmd=%.3f（限位 %.3f..%.3f，余量 %.3f）"
+                             " 累计 %lu 次；目标已贴限位，继续跟会顶死电机",
+                             joint_names_[i].c_str(), q_cmd_[i],
+                             joint_lo_[i], joint_hi_[i], cmd_limit_margin_,
+                             static_cast<unsigned long>(cmd_limit_clamp_cnt_));
+      }
       q_out[i] = q_cmd_[i];
       qd_out[i] = qd_cmd_[i];
       qa_out[i] = qa_cmd_[i];
@@ -576,16 +724,18 @@ private:
     }
     if (track_err > max_track_err_) {
       ++track_err_resets_;
+      std::vector<double> qc;
+      bool out = false;
+      target_ = measuredPose(qc, out);
       for (size_t i = 0; i < kDof; ++i) {
-        q_cmd_[i] = q_meas_[i];
+        q_cmd_[i] = qc[i];
         qd_cmd_[i] = qd_meas_[i];
         qa_cmd_[i] = 0.0;
       }
-      target_ = state_->getGlobalLinkTransform(tip_frame_);
       z_lock_ = target_.translation().z();
       target_ok_ = target_;
       have_target_ok_ = true;
-      q_goal_ = q_meas_;
+      q_goal_ = qc;
       v_lim_.setZero();
       v_lp_.setZero();
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
@@ -685,6 +835,14 @@ private:
   rclcpp::Time mode_t_{ 0, 0, RCL_ROS_TIME };
   std::vector<double> q_meas_, qd_meas_, q_goal_;
   std::array<double, kDof> q_cmd_{}, qd_cmd_{}, qa_cmd_{};
+  double settle_rate_{ 0.3 };            // [rad/s] 停发前把命令收到实测位姿的速率
+  bool settle_active_{ false };
+  // 归位目标必须是"进入时刻的快照"，不能是实时实测：用实时实测时，臂被重力拉低、
+  // 命令就逐拍跟着往下走，差恒为 0（永不收敛）→ 无人脸时持续缓慢下沉（2026-10-25 实测）。
+  std::array<double, kDof> settle_target_{};
+  bool settle_done_{ false };            // 本次停发已归位完成（避免每拍重锚后再归位刷屏）
+  double cmd_limit_margin_{ 0.02 };      // [rad] 命令与 URDF 限位的最小余量
+  uint64_t cmd_limit_clamp_cnt_{ 0 };
   double max_track_err_{ 3.0 };  // [rad] 命令-实测偏差上限（只在真的被挡/失速时才重锚）
   double vj_filter_tau_{ 0.05 };
   double pos_gain_{ 4.0 };
@@ -704,6 +862,8 @@ private:
   bool rotation_about_tip_{ true };
   double z_lock_{ 0.0 };
   int ik_fail_streak_{ 0 }, ik_fail_total_{ 0 }, ik_jump_reject_{ 0 };
+  // 本拍 IK 出现过"换支/远离实测/限步跟进"→ 下一拍且已到位时用实测重锚一次（见 1b）
+  bool ik_branch_suspect_{ false };
 };
 
 int main(int argc, char** argv)
