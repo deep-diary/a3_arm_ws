@@ -17,7 +17,7 @@
 | Share + ↓ | WAYPOINT | 同上，但开的是路点示教 |
 | Share + ← | TRACK | `/a3/face_track/enable true`（required，失败回退 NORMAL） |
 | Share + → | PIANO | goto `melodion_white1`（optional） |
-| Share + △ | DEMO | goto `ready`（optional） |
+| Share + △ | DEMO | goto `home`（改：先进工作位再演示） |
 | Share + ○ | DANCE | goto `ready`（optional） |
 | Share + □ | NORMAL | — |
 
@@ -33,7 +33,7 @@
 | WAYPOINT | 进入即开路点录制；△=开始/打点；L2=打点 |
 | TRACK | △短=跟踪开/关、△长(2s)=重载雅可比；**○短=网格点/网格线/人脸框开关**、**○长=水平+前后目标标定**；□短=状态查询、**□长=前后（深度）标定**；L2=存点；4 根摇杆轴被屏蔽（R2 夹爪保留） |
 | PIANO | D-pad 四向=口风琴四个定位点；△=回放 stream `latest`；○/□=首/末键；L2=存点 |
-| DEMO | △=home 五向平移巡游；○=停止；□=随机点位巡游；L2=存点 |
+| DEMO | 进入先回 `home`；△=home 五向平移巡游；○=停止；□=随机点位巡游；L2=存点；D-pad 不绑定（角度巡航 F193 未实现） |
 | DANCE | △=回放 latest；□=路点 PTP；○=停止；L2=存点 |
 
 ## 关键修复（2026-10-25）
@@ -46,6 +46,9 @@
    未使能则先 `power start + /a3/arm/enable`，由 50 Hz tick 轮询到 READY 后自动开录。
 3. **Share+方向重复触发**：`share` 按住期间用"level + 单次锁存"触发，而不是 rising 边沿
    （20 Hz joy 下快速按键会漏），提交模式后保留锁存，松手才清。
+4. **切模式瞬间泄漏按键**：提交新模式时仍按住的键/方向键会先锁存，**松开后**才允许
+   在新模式里生效。否则 `Share+△` 进 DEMO 后，△ 一松就又从新模式触发一次动作
+   （实测被误认为"正常模式的 △ 也被执行了"）。
 
 ## 验收标准
 

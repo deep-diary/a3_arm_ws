@@ -23,6 +23,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/RetimeTrajectory.srv"
   "srv/MotorIdCommand.srv"
   "srv/SetPayload.srv"
+  "srv/AngularCruise.srv"
   "msg/ArmStatus.msg"
   "msg/FaceTarget.msg"
   "msg/FaceOverlay.msg"

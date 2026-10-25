@@ -31,7 +31,7 @@
 | TRACK：网格开关 / 三类标定 | ✅ 已实现 | ○短=网格开关；○长=目标标定；□长=深度标定；□短=状态；△长=重载雅可比 |
 | D-pad 跟踪距离/目标中心微调 | ❌ 未实现 | TRACK 的 D-pad 留空（用 ○ 长按一次记录目标代替） |
 | F192 `generate_stream`（口风琴 stream 生成服务） | ❌ 未重建 | PIANO 的 △ 短按直接回放 `stream latest` |
-| F193 角度巡游节点 `/a3/demo/angular_cruise` | ❌ 未重建 | DEMO 提供 home 五向巡游 + 随机巡游 |
+| F193 角度巡游 + 连续随机平移（DEMO △/○ 短长按） | ✅ 已实现 | `a3_bringup/angular_cruise` + `AngularCruise` srv；`xyz/spin/random/translate`；translate 为 OU 连续速度、30 s/越界/姿态 15° 自停 |
 | F193 舞蹈槽位（`playback type=dance` + `/a3/arm/save_slot`） | ❌ 未重建 | DANCE 模式暂为"回放 latest / 路点 PTP" |
 | 显示：统一 `/a3/vision/display` + FaceOverlay（F194） | ✅ 已实现 | 原图 25 Hz 主底 + 最后一层叠加；网格用 mediapipe 全量 2556 条边 |
 
@@ -138,16 +138,21 @@
 
 ### 3.7 DEMO（演示）— 白呼吸
 
-进入：goto `ready`（optional）
+进入：**goto `home`**（先把臂带到工作位，再执行巡游）
 
 | 按键 | 动作 |
 |---|---|
-| **Triangle 短按** | **home 六向平移巡游**：`random_pose_tour {fixed_sequence: [home, home_up, home_down, home_left, home_right, home_front, home_back]}` |
-| **Circle 短按** | **角度巡游启停**：`/a3/demo/angular_cruise {action: toggle, axis: all}` |
+| **Triangle 短按** | **固定三轴角度巡航**：`/a3/demo/angular_cruise {action:start, mode:"xyz"}`（X→Y→Z 各摆一轮，绕末端点、位置不动） |
+| **Triangle 长按 1.5s** | **连续随机平移巡游**：`/a3/demo/angular_cruise {mode:"translate", duration_s:30}`（OU 速度、锁姿态、半径 6 cm；30 s 或越界/姿态 15° 自停） |
+| **Circle 短按** | **旋转巡游**：`{action:toggle, mode:"spin"}`（偏航往复，再按停止） |
+| **Circle 长按 1.5s** | **随机角度巡游**：`{action:toggle, mode:"random"}`（每轮随机轴+随机幅度，再按停止） |
 | Square 短按 | 随机命名点巡游 `random_pose_tour` |
-| **D-pad ↑ / ↓ / ← / →** | 单轴角度巡游 X / Y / Z / 综合（各按一次启动，再按停止） |
 | L2 短按 | 保存当前点位 |
-| Options 短按 | 停止巡游 → NORMAL |
+| Options 短按 | 停止并退出（`demo_angular_stop` + `/a3/arm/stop`） |
+
+> D-pad 不绑定（角度巡航改由上述按键触发）。
+> 角度巡航门禁：臂 READY、`control_mode != ZERO_TORQUE`、人脸跟踪关闭；
+> 幅度/速度沿用 F185 扫描包络（X ±80°、Y +25/−45°、Z ±45°，峰值 30°/s）。
 
 ### 3.8 DANCE（舞蹈，新增）— 品红呼吸
 

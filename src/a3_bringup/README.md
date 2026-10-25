@@ -22,6 +22,7 @@
 | `servo_mode_bridge.py` / `servo_anchor.py` | Servo 模式桥 + 绝对目标锚定（F118） |
 | `move_to_pose_ik_node.py` / `ee_pose_publisher.py` | 笛卡尔 IK / 末端位姿话题（F175） |
 | `sim_*.py`、`can_bus_monitor_node.py`、`topic_rate_monitor_node.py`、`systemd_watchdog_feed_node.py` | 仿真执行层 + 健康/看门狗 |
+| `angular_cruise_node.py` | **F193 DEMO 角度巡航**：`/a3/demo/angular_cruise`（`xyz/spin/random`），绕末端点旋转、正弦包络；门禁 READY/非 ZERO_TORQUE/无人脸跟踪 |
 | `config/usb_cam.rviz` | 相机 RViz 配置（Fixed Frame `map` + Image display） |
 | `config/diagnostics.yaml`、`config/cyclonedds.xml` | 诊断聚合、DDS 配置（经 `CYCLONEDDS_URI` 注入） |
 

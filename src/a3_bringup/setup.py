@@ -43,6 +43,7 @@ setup(
             "servo_anchor = a3_bringup.servo_anchor:main",
             "usb_camera_node = a3_bringup.usb_camera_node:main",
             "vision_display_mux = a3_bringup.vision_display_mux:main",
+            "angular_cruise = a3_bringup.angular_cruise_node:main",
         ],
     },
     tests_require=['ament_lint_auto', 'ament_flake8', 'ament_pep257', 'pytest']

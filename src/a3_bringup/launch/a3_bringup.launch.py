@@ -697,6 +697,15 @@ def _build(cfg, include_gripper):
         output="screen",
     )
 
+    # ---- F193：DEMO 角度巡航（绕末端点旋转；服务 /a3/demo/angular_cruise）----
+    angular_cruise = Node(
+        package="a3_bringup",
+        executable="angular_cruise",
+        name="angular_cruise",
+        output="screen",
+        condition=IfCondition(use_teleop),
+    )
+
     # ---- F82：诊断聚合（/diagnostics → /diagnostics_agg + toplevel state）----
     diagnostics_yaml = os.path.join(bringup_share, "config", "diagnostics.yaml")
     diagnostic_aggregator = Node(
@@ -992,4 +1001,5 @@ def _build(cfg, include_gripper):
         rviz,
         camera,
         vision_display,
+        angular_cruise,
     ]

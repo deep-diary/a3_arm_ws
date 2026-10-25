@@ -173,11 +173,21 @@ modes:
     color: white
     pattern: breathe
     rumble_index: 6
-    enter: [{fn: goto_named_pose, kwargs: {name: ready}, required: false}]
-    exit: [{fn: arm_stop}]
+    # 进入先回 home 工作位，再执行巡游（避免在任意姿态直接大范围运动）
+    enter: [{fn: goto_named_pose, kwargs: {name: home}, required: false}]
+    # 退出：先停角度巡航，再停运动（Options 短按 = 停止并退出）
+    exit: [{fn: demo_angular_stop}, {fn: arm_stop}]
+    # 巡航期间禁止摇杆发 twist（否则两路 twist 抢同一话题），R2 夹爪保留
+    suppress_common_axes: [left_x, left_y, right_x, right_y]
     buttons:
-      triangle: {fn: demo_tour_home, edge: shortpress, hold_s: 1.5}
-      circle: {fn: arm_stop, edge: shortpress, hold_s: 1.5}
+      # 短按 = 角度巡航（固定三轴）；长按 = 平移随机巡游
+      triangle:
+        - {fn: demo_angular_xyz, edge: shortpress, hold_s: 1.5}
+        - {fn: demo_random_translation, edge: longpress, hold_s: 1.5}
+      # 短按 = 旋转巡游（偏航往复）；长按 = 随机角度巡游
+      circle:
+        - {fn: demo_angular_spin, edge: shortpress, hold_s: 1.5}
+        - {fn: demo_angular_random, edge: longpress, hold_s: 1.5}
       square: {fn: random_pose_tour, edge: shortpress, hold_s: 1.5}
       l2: {fn: save_named_pose, edge: shortpress, hold_s: 1.5}
 

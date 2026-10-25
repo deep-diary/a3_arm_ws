@@ -89,6 +89,7 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/vision/show_mesh` | `std_msgs/Bool` | 网格点/网格线/人脸框开关（画面中心、人脸中心与连线始终保留）。TRACK 模式 `Circle` 短按切换 |
 | `/a3/teleop/mode` | `std_msgs/String` | F189 HMI 模式：`normal/teach/waypoint/track/piano/demo/dance`，`ps4_mapper` 1 Hz 重发；`ds4_feedback_node` 据此着色 |
 | `/a3/arm/stop` | `std_srvs/Trigger` | F190 通用停止：示教先保存 → 当前位姿一帧刹停（保力矩）→ 退出 SERVO/ZERO_TORQUE → 回 READY；切模式前必调 |
+| `/a3/demo/angular_cruise` | `a3_msgs/srv/AngularCruise` | F193 DEMO 巡游：`xyz`（固定三轴）/`spin`（偏航往复）/`random`（随机轴+幅度）/`translate`（连续随机平移，OU 速度、30 s 或越界/姿态 15° 自停）；绕末端点旋转、正弦包络；门禁 READY、非 ZERO_TORQUE、无人脸跟踪 |
 | `/a3/face_track/enable` | `std_srvs/SetBool` | 人脸跟踪使能（默认关；TRACK 模式进入时自动置 true） |
 | `/a3/face_track/reload_jacobian` | `std_srvs/Trigger` | 重载 `~/.a3/camera/face_jacobian.yaml` |
 | `/a3/face_track/status` | `std_srvs/Trigger` | F191 查询跟踪状态：`enabled/err/z/z_ref/target/jac/jac_a/arm/mode` |

@@ -8,7 +8,7 @@ from typing import List, Optional
 from builtin_interfaces.msg import Duration
 from control_msgs.action import GripperCommand
 from control_msgs.msg import JointJog
-from geometry_msgs.msg import TwistStamped
+from geometry_msgs.msg import PoseStamped, TwistStamped
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -19,6 +19,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from a3_msgs.msg import ArmStatus
 from a3_msgs.srv import (
+    AngularCruise,
     GotoNamedPose,
     PlaybackTrajectory,
     RandomPoseTour,
@@ -149,6 +150,10 @@ class ActionExecutor:
         self._face_target_cli = node.create_client(Trigger, "/a3/face_track/set_target")
         self._face_depth_cli = node.create_client(Trigger, "/a3/face_track/calibrate_depth")
         self._face_jac_cli = node.create_client(Trigger, "/a3/face_track/reload_jacobian")
+        # F193 DEMO：角度巡航（绕末端点旋转）与末端位姿（随机平移巡游基准）
+        self._angular_cli = node.create_client(AngularCruise, "/a3/demo/angular_cruise")
+        self._ee_pose = None
+        node.create_subscription(PoseStamped, "/a3/ee_pose", self._on_ee_pose, 10)
         self._mesh_pub = node.create_publisher(Bool, "/a3/vision/show_mesh", 10)
         self._mesh_on = True
         self._face_on = False
@@ -677,6 +682,64 @@ class ActionExecutor:
         msg = String()
         msg.data = str(event)
         self._event_pub.publish(msg)
+
+    def _on_ee_pose(self, msg: PoseStamped) -> None:
+        self._ee_pose = msg
+
+    def _angular_request(self, action: int, mode: str, cycles: int = 0,
+                         amp: float = 0.0, duration: float = 0.0,
+                         vmax: float = 0.0, bound: float = 0.0,
+                         rot_deg: float = 0.0) -> None:
+        if not self._angular_cli.service_is_ready():
+            self._n.get_logger().error(
+                "/a3/demo/angular_cruise 不可用（angular_cruise 节点未起？）")
+            return
+        req = AngularCruise.Request()
+        req.action = int(action)
+        req.mode = mode
+        req.cycles = int(cycles)
+        req.amp_deg = float(amp)
+        req.peak_dps = 0.0
+        req.duration_s = float(duration)
+        req.vmax_mps = float(vmax)
+        req.bounds_m = float(bound)
+        req.rot_bound_deg = float(rot_deg)
+        future = self._angular_cli.call_async(req)
+        if future is None:
+            self._n.get_logger().error("angular_cruise 调用失败")
+            return
+
+        def _done(fut):
+            try:
+                resp = fut.result()
+            except Exception as exc:  # noqa: BLE001
+                self._n.get_logger().error(f"angular_cruise 异常：{exc}")
+                return
+            log = (self._n.get_logger().warn if resp.success
+                   else self._n.get_logger().error)
+            log(f"angular_cruise[{mode or resp.mode}]: {resp.message}")
+
+        future.add_done_callback(_done)
+
+    def demo_angular_xyz(self) -> None:
+        """固定三轴各摆一轮（X→Y→Z），绕末端点旋转、末端位置保持。"""
+        self._angular_request(1, "xyz", cycles=1)
+
+    def demo_angular_spin(self) -> None:
+        """旋转巡游：偏航往复连续，按同一键（toggle）停止。"""
+        self._angular_request(2, "spin")
+
+    def demo_angular_random(self) -> None:
+        """随机角度巡游：每轮随机轴 + 随机幅度，循环到再按停止。"""
+        self._angular_request(2, "random")
+
+    def demo_angular_stop(self) -> None:
+        self._angular_request(0, "")
+
+    def demo_random_translation(self) -> None:
+        """平移随机巡游：连续随机速度（默认 30 s / 半径 6 cm / 姿态 ≤15°），
+        到时或越过平移/姿态边界自动停（对齐 f181_servo_track.py 的 --continuous）。"""
+        self._angular_request(1, "translate", duration=30.0)
 
     def demo_tour_home(self) -> None:
         """DEMO：home 五向平移巡游（固定序列，不随机）。"""

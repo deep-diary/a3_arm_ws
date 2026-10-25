@@ -104,6 +104,9 @@ class Ps4Mapper(Node):
         else:
             self._resolved = resolve_mode(mapping, "")
         self._select_latch: Optional[str] = None
+        # F189：切模式时仍按住的键要先松开才生效，避免 Share+△ 的 △ 立刻又触发
+        # 新模式里的 △ 绑定（"进 DEMO 却执行了别的动作"）
+        self._held_latch: set[str] = set()
         self._pending_mode: Optional[str] = None
         self._pending_since = 0.0
         self._pending_run_exit = True
@@ -281,6 +284,19 @@ class Ps4Mapper(Node):
         # 清边沿/摇杆/方向键状态：避免旧模式的按键在切换瞬间重复触发
         self._edges = ButtonEdgeTracker()
         self._dpad_active.clear()
+        # 仍按住的键/方向键先锁存，松开后才允许触发（否则 Share+△ 会在新模式里
+        # 立刻又执行一次 △ 的动作）
+        self._held_latch = set()
+        joy = self._joy
+        if joy is not None:
+            names = set(self._select_map) | set(self._resolved.get("buttons") or {})
+            for name in names:
+                if self._layout.button(joy, name):
+                    self._held_latch.add(name)
+            for dspec in self._resolved.get("dpad") or []:
+                axis = str(dspec.get("axis", ""))
+                raw = self._layout.axis_raw(joy, axis)
+                self._dpad_active[axis] = 1 if raw > 0.5 else (-1 if raw < -0.5 else 0)
         if not from_select:
             self._select_latch = None
         self._exec.tick_begin()
@@ -326,6 +342,10 @@ class Ps4Mapper(Node):
             self._mode_t = now
 
         joy = self._joy
+        # 切模式瞬间仍按住的键：松开之前不参与新模式的绑定
+        if self._held_latch:
+            self._held_latch = {
+                b for b in self._held_latch if self._layout.button(joy, b)}
         self._exec.tick_begin()
         pose_block = self._exec.pose_blocking(now)
 
@@ -368,6 +388,8 @@ class Ps4Mapper(Node):
 
         if not block_inputs:
             for bind_key, btn, spec in iter_button_bindings(resolved):
+                if btn in self._held_latch:
+                    continue
                 held = self._layout.button(joy, btn)
                 edge = str(spec.get("edge", "rising"))
                 fire = False

@@ -1,0 +1,17 @@
+# F193 DEMO 巡游服务：角度巡航（绕末端点旋转）+ 连续随机平移巡游
+uint8 action        # 0=stop 1=start 2=toggle
+# "xyz"=固定三轴各摆一轮；"spin"=偏航(Z)往复连续；
+# "random"=每轮随机挑轴+随机幅度；"translate"=连续随机平移（OU 过程，带边界/时长）
+string mode
+float64 amp_deg     # 0=默认（x 80/80、y 25/45、z 45/45）；random 时作为最大幅度
+float64 peak_dps    # 0=节点默认 30
+uint32 cycles       # 0=循环到 stop（spin/random）；xyz 固定一轮
+# translate 专用（0=用节点默认）
+float64 duration_s     # 默认 30 s，到时自动停
+float64 vmax_mps       # 默认 0.04 m/s
+float64 bounds_m       # 水平半径默认 0.06 m（z 用 0.8×）
+float64 rot_bound_deg  # 姿态漂移上限默认 15°
+---
+bool success
+string message
+string mode         # 实际执行的模式（回读用）
