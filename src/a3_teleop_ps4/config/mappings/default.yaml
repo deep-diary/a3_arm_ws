@@ -153,7 +153,7 @@ modes:
     pattern: breathe
     rumble_index: 5
     suppress_common_axes: [left_x, left_y, right_x, right_y]
-    enter: [{fn: goto_named_pose, kwargs: {name: melodion_white1}, required: false}]
+    enter: []
     exit: []
     # F195 口风琴应用：↓ 演奏路点示教 / ← 4 极限键录制 / → 结束并保存 / ↑ 生成 stream
     dpad:
@@ -164,7 +164,9 @@ modes:
         neg: {fn: melodion_record_extremes}   # ← 4 极限键录制
         pos: {fn: melodion_stop_teach}        # → 结束示教并保存当前槽位
     buttons:
-      triangle: {fn: playback_stream, kwargs: {name: press}, edge: shortpress, hold_s: 1.5}
+      triangle:
+        - {fn: playback_stream, kwargs: {name: press}, edge: shortpress, hold_s: 1.5}
+        - {fn: melodion_home, edge: longpress, hold_s: 1.5}
       circle: {fn: playback_stream, kwargs: {name: extremes}, edge: shortpress, hold_s: 1.5}
       square: {fn: playback_stream, kwargs: {name: music}, edge: shortpress, hold_s: 1.5}
       l2: {fn: save_named_pose, edge: shortpress, hold_s: 1.5}

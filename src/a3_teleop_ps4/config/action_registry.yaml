@@ -193,6 +193,10 @@ functions:
     kind: discrete
     description: 'F195 PIANO ←: 4 极限键路点录制（/a3/arm/melodion/record_extremes，保存 melodion/waypoints/extremes.yaml）'
 
+  melodion_home:
+    kind: discrete
+    description: 'F195 PIANO △ 长按: 先 /a3/arm/stop 停住运动/示教，再 goto_named_pose home（卡在中途时的退出口）'
+
   melodion_stop_teach:
     kind: discrete
     description: 'F195 PIANO →: 结束当前口风琴路点示教并保存到活动槽位（/a3/arm/stop_teach，带结果日志）'

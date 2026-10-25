@@ -3647,8 +3647,11 @@ class ArmController(Node):
             import numpy as np  # type: ignore
             import pinocchio as pin  # type: ignore
 
-            quat = pin.Quaternion(float(ori["x"]), float(ori["y"]),
-                                  float(ori["z"]), float(ori["w"]))
+            # Eigen::Quaternion 的 4 标量构造顺序是 (w, x, y, z)；用 coeffs 数组
+            # [x, y, z, w] 更不容易写错（曾误用 (x,y,z,w) 导致 6D IK 姿态偏 90°）。
+            quat = pin.Quaternion(
+                np.array([float(ori["x"]), float(ori["y"]),
+                          float(ori["z"]), float(ori["w"])], dtype=float))
             return np.array(quat.normalized().matrix(), dtype=float)
         except Exception:  # noqa: BLE001
             return None
@@ -4674,14 +4677,35 @@ class ArmController(Node):
                 if i < len(exact) and bool(exact[i]):
                     radii[i] = 0.0
         radii[-1] = 0.0  # 末项恒精确停
+        # pilz PTP 的 blend 是**笛卡尔过渡窗**（内部按采样位姿求 IK）。小段 + 姿态跳变
+        # （如白键→黑键）时半径过大会报 "Blend radius too large" /
+        # "Unable to find IK solution for sampled Cartesian pose"。这里再收紧到 ≤6mm。
+        radii = [min(float(r), 0.006) for r in radii]
+        radii[-1] = 0.0
 
         v_s = 1.0 if speed is None else float(speed)
         a_global = float(self.get_parameter("moveit_acceleration_scaling").value)
-        items = [
-            self._build_ptp_sequence_item(
-                chain[i + 1][:6], radii[i], v_scale=v_s, a_scale=v_s * a_global)
-            for i in range(len(chain) - 1)]
-        ok, stotal, smsg = self._sequence_move_group(items, f"via ptp {label}")
+
+        def _items(radii_local: List[float]) -> List[MotionSequenceItem]:
+            return [
+                self._build_ptp_sequence_item(
+                    chain[i + 1][:6], radii_local[i], v_scale=v_s, a_scale=v_s * a_global)
+                for i in range(len(chain) - 1)]
+
+        ok, stotal, smsg = self._sequence_move_group(_items(radii), f"via ptp {label}")
+        if not ok and any(r > 0.0 for r in radii):
+            # 兜底：全部精确过点（blend=0）重试一次，避免整条 stream 停在中途
+            self.get_logger().warn(
+                f"{label}: ptp blend failed ({smsg}) → retry with exact vias (blend=0)")
+            radii0 = [0.0] * (len(chain) - 1)
+            ok0, s0, msg0 = self._sequence_move_group(
+                _items(radii0), f"via ptp {label} exact")
+            if ok0:
+                self._schedule_back_to_ready(0.3)
+                return True, (
+                    f"{label}: via ptp {len(chain) - 1} legs, {s0:.1f}s "
+                    "(blend→exact fallback)"), s0
+            smsg = f"{smsg}; exact retry: {msg0}"
         if not ok:
             return False, smsg, 0.0
         self._schedule_back_to_ready(0.3)
@@ -5559,7 +5583,9 @@ class ArmController(Node):
             import numpy as np  # type: ignore
             import pinocchio as pin  # type: ignore
 
-            quat = pin.Quaternion(*[float(v) for v in req.ref_quat])
+            # srv 定义 ref_quat = [x, y, z, w]；Eigen 构造顺序是 (w, x, y, z)
+            qx, qy, qz, qw = (float(v) for v in req.ref_quat)
+            quat = pin.Quaternion(qw, qx, qy, qz)
             ref_R = np.array(quat.normalized().matrix(), dtype=float)
 
         names: List[str] = []
@@ -6198,6 +6224,9 @@ class ArmController(Node):
                 hist = os.path.join(save_dir, f"teach_wp_{ts}.yaml")
                 if self._save_waypoints_to(hist):
                     auto_msgs.append(f"backup teach_wp_{ts}.yaml")
+                if slot:  # 口风琴槽：保存即生成该槽的按键 stream
+                    _ok, gen_msg = self._generate_melodion_stream(slot)
+                    auto_msgs.append(gen_msg)
             else:
                 auto_msgs.append("auto-save FAILED (see log)")
         else:
@@ -6211,71 +6240,92 @@ class ArmController(Node):
         )
         return resp
 
+    def _generate_melodion_stream(self, slot: str) -> Tuple[bool, str]:
+        """由 ``melodion/waypoints/<slot>.yaml`` 生成 ``melodion/streams/<slot>.yaml``。
+
+        与离线脚本共用 ``melodion_stream.build_press_stream``：α/β 抬升、进场/离场
+        exact 悬停、末段回命名点 home。返回 (成功, 说明)。
+        """
+        ms = _melodion_stream
+        wp_path = os.path.join(self._melodion_wp_dir, f"{slot}.yaml")
+        out_path = os.path.join(self._melodion_stream_dir, f"{slot}.yaml")
+        if not os.path.exists(wp_path):
+            return False, f"{slot}: 缺 melodion/waypoints/{slot}.yaml"
+        try:
+            data = ms.load_yaml(wp_path)
+            if str(data.get("kind") or "") != "waypoint":
+                raise ValueError(f"kind={data.get('kind')!r}，需要 waypoint")
+            waypoints = list(data.get("waypoints") or [])
+            home = self._poses.get("home")
+            doc = ms.build_press_stream(
+                waypoints,
+                joint_names=data.get("joint_names") or self._joint_names,
+                press_mm=ms.PRESS_FLOOR_MM,
+                speed=ms.SPEED_DEFAULT,
+                dwell_s=ms.DWELL_DEFAULT_S,
+                alpha=ms.ALPHA_DEFAULT,
+                beta=ms.BETA_DEFAULT,
+                clear_min_mm=ms.CLEAR_MIN_MM,
+                clear_max_mm=ms.CLEAR_MAX_MM,
+                mode=ms.MODE_DEFAULT,
+                hold_orientation=True,
+                home_positions=home,
+                waypoints_pressed=True,
+            )
+            header = ms.header_lines(
+                source=f"melodion/waypoints/{slot}.yaml",
+                press_mm=ms.PRESS_FLOOR_MM,
+                alpha=ms.ALPHA_DEFAULT,
+                beta=ms.BETA_DEFAULT,
+                clear_min_mm=ms.CLEAR_MIN_MM,
+                clear_max_mm=ms.CLEAR_MAX_MM,
+                speed=ms.SPEED_DEFAULT,
+                dwell_s=ms.DWELL_DEFAULT_S,
+                mode=ms.MODE_DEFAULT,
+                hold_orientation=True,
+                waypoints_pressed=True,
+                home_note=("回命名点 'home'" if home else "停在末键上方"),
+            )
+            ms.write_stream(out_path, doc, header)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"{slot}: 生成失败 {exc}"
+        return True, f"{slot}: {len(waypoints)} 键 -> {len(doc['segments'])} 段 -> streams/{slot}.yaml"
+
     def _melodion_gen_streams_cb(
         self, req: Trigger.Request, resp: Trigger.Response
     ) -> Trigger.Response:
-        """F195 口风琴 ↑：由路点槽位生成 press/extremes 两条按键 stream（不运动）。
+        """F195 口风琴 ↑：结束示教（若在示教）并生成**演奏** stream（press）。
 
-        与离线脚本共用 ``melodion_stream.build_press_stream``：α/β 抬升、进场/离场
-        exact 悬停、末段回命名点 home。缺路点/生成失败不影响另一条。
+        extremes 流在 ``→`` 结束极限键示教、保存成功后自动生成；``↑`` 不再连带生成，
+        避免一次操作出两条互不相关的轨迹。
         """
-        ms = _melodion_stream
-        press_mm = ms.PRESS_FLOOR_MM
-        home = self._poses.get("home")
-        jobs = (
-            ("press", os.path.join(self._melodion_wp_dir, "press.yaml"),
-             os.path.join(self._melodion_stream_dir, "press.yaml")),
-            ("extremes", os.path.join(self._melodion_wp_dir, "extremes.yaml"),
-             os.path.join(self._melodion_stream_dir, "extremes.yaml")),
-        )
         msgs: List[str] = []
-        ok_any = False
-        for slot, wp_path, out_path in jobs:
-            if not os.path.exists(wp_path):
-                msgs.append(f"{slot}: 缺 melodion/waypoints/{slot}.yaml")
-                continue
-            try:
-                data = ms.load_yaml(wp_path)
-                if str(data.get("kind") or "") != "waypoint":
-                    raise ValueError(f"kind={data.get('kind')!r}，需要 waypoint")
-                waypoints = list(data.get("waypoints") or [])
-                doc = ms.build_press_stream(
-                    waypoints,
-                    joint_names=data.get("joint_names") or self._joint_names,
-                    press_mm=press_mm,
-                    speed=ms.SPEED_DEFAULT,
-                    dwell_s=ms.DWELL_DEFAULT_S,
-                    alpha=ms.ALPHA_DEFAULT,
-                    beta=ms.BETA_DEFAULT,
-                    clear_min_mm=ms.CLEAR_MIN_MM,
-                    clear_max_mm=ms.CLEAR_MAX_MM,
-                    mode=ms.MODE_DEFAULT,
-                    hold_orientation=True,
-                    home_positions=home,
-                    waypoints_pressed=True,
-                )
-                header = ms.header_lines(
-                    source=f"melodion/waypoints/{slot}.yaml",
-                    press_mm=press_mm,
-                    alpha=ms.ALPHA_DEFAULT,
-                    beta=ms.BETA_DEFAULT,
-                    clear_min_mm=ms.CLEAR_MIN_MM,
-                    clear_max_mm=ms.CLEAR_MAX_MM,
-                    speed=ms.SPEED_DEFAULT,
-                    dwell_s=ms.DWELL_DEFAULT_S,
-                    mode=ms.MODE_DEFAULT,
-                    hold_orientation=True,
-                    waypoints_pressed=True,
-                    home_note=("回命名点 'home'" if home else "停在末键上方"),
-                )
-                ms.write_stream(out_path, doc, header)
-            except Exception as exc:  # noqa: BLE001
-                msgs.append(f"{slot}: 生成失败 {exc}")
-                continue
-            ok_any = True
-            msgs.append(f"{slot}: {len(waypoints)} 键 -> {len(doc['segments'])} 段")
-        resp.success = ok_any
-        resp.message = "；".join(msgs) if msgs else "no waypoints"
+        stopped_slot: Optional[str] = None
+        if self._state == STATE_WAYPOINT_TEACH:
+            stopped_slot = self._waypoint_slot
+            sresp = self._stop_waypoint_teach(Trigger.Response())
+            if not sresp.success:
+                resp.success = False
+                resp.message = f"结束示教失败：{sresp.message}"
+                return resp
+            msgs.append(f"已结束示教并保存（{sresp.message}）")
+        elif self._state == STATE_TEACH:
+            sresp = self._stop_teach_cb(Trigger.Request(), Trigger.Response())
+            if not sresp.success:
+                resp.success = False
+                resp.message = f"结束示教失败：{sresp.message}"
+                return resp
+            msgs.append(f"已结束连续示教（{sresp.message}）")
+
+        # 停止示教时已按槽位自动生成；press 已生成则不重复
+        if stopped_slot == "press":
+            resp.success = True
+            resp.message = "；".join(msgs)
+            return resp
+        ok, msg = self._generate_melodion_stream("press")
+        msgs.append(msg)
+        resp.success = ok
+        resp.message = "；".join(msgs)
         return resp
 
     def _dump_recording(self) -> dict:

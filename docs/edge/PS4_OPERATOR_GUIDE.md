@@ -121,9 +121,10 @@
 |------|------|
 | **D-pad ↓** | 开始**演奏路点示教**（`melodion/waypoints/press.yaml`）；L2 在「已按下」位置打点 |
 | **D-pad ←** | 开始**4 极限键录制**（`melodion/waypoints/extremes.yaml`）；顺序：白键最左(F3) → 白键最右(C6) → 黑键最右(A#5) → 黑键最左(F#3)，每键 L2 打点 |
-| **D-pad →** | **结束示教并保存**到当前槽位（同时写 `teach_wp_*.yaml` 时间戳备份） |
-| **D-pad ↑** | **生成按键 stream**：由两个路点槽生成 `streams/press.yaml` 与 `streams/extremes.yaml`（不运动） |
+| **D-pad →** | **结束示教、保存并生成**：保存到当前槽位后立即生成该槽位 stream（press 槽→`streams/press.yaml`，extremes 槽→`streams/extremes.yaml`） |
+| **D-pad ↑** | **生成演奏流**：若正在示教先保存退出，再生成 `streams/press.yaml`；不连带生成 extremes |
 | **△ 短按** | 播放 `streams/press.yaml`（演奏路点生成的按键轨迹） |
+| **△ 长按 1.5s** | **停止当前运动/示教并回 `home`**（卡在中途或轨迹失败时的退出口） |
 | **○ 短按** | 播放 `streams/extremes.yaml`（4 极限键轨迹） |
 | **□ 短按** | 播放 `streams/music.yaml`（曲谱生成，需先跑 `scripts/melodion_score_stream.py`） |
 

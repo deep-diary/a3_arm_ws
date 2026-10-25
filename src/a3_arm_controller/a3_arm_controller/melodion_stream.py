@@ -164,14 +164,15 @@ def build_press_stream(
     # 键间：源正上方 → 中垂线上方 → 目标正上方 → 目标按压点
     for i in range(1, len(downs)):
         c, apex = pair_clears(i)
-        mid_surface = (surfaces[i - 1] + surfaces[i]) / 2.0
+        # 白→黑时黑键面更高：弧顶以下列两者较高面为基准，避免贴着高的一侧过弧
+        apex_surface = max(surfaces[i - 1], surfaces[i])
         mid_xy = (
             (float(downs[i - 1]["position"]["x"]) + float(downs[i]["position"]["x"])) / 2.0,
             (float(downs[i - 1]["position"]["y"]) + float(downs[i]["position"]["y"])) / 2.0,
         )
         apex_pose = {
             "position": {"x": mid_xy[0], "y": mid_xy[1],
-                         "z": mid_surface + apex / 1000.0},
+                         "z": apex_surface + apex / 1000.0},
             "orientation": dict(downs[i - 1]["orientation"]),
         }
         vias = [

@@ -29,8 +29,8 @@ trajectories/melodion/
 |---|---|---|
 | `↓` | `/a3/arm/melodion/record_press` | 开始演奏路点示教 |
 | `←` | `/a3/arm/melodion/record_extremes` | 开始 4 极限键录制 |
-| `→` | `/a3/arm/stop_teach` | 结束示教并保存到当前槽位（+ 时间戳备份） |
-| `↑` | `/a3/arm/melodion/gen_streams` | 生成 `press.yaml` + `extremes.yaml` 两条 stream |
+| `→` | `/a3/arm/stop_teach` | 结束示教、保存到当前槽位（+ 时间戳备份），**并生成该槽位 stream**（press→`press.yaml` / extremes→`extremes.yaml`） |
+| `↑` | `/a3/arm/melodion/gen_streams` | 结束示教（若有）后生成**演奏** stream（`press.yaml`）；extreme 流由 `→` 自动生成，二者不互相连带 |
 | `△` 短按 | `playback {type: stream, name: press}` | 播放演奏按键流 |
 | `○` 短按 | `playback {type: stream, name: extremes}` | 播放 4 极限键流 |
 | `□` 短按 | `playback {type: stream, name: music}` | 播放曲谱乐曲线 |
@@ -52,6 +52,8 @@ trajectories/melodion/
 - 进场：当前位 → 第 1 键正上方（`exact: true` 停稳）→ 垂直下压；
 - 离场：末键 → 正上方（`exact: true` 垂直拔起）→ 再抬高 → 命名点 `home`；
 - 每键 `sleep`：路点自带则优先，否则默认 0.2 s（音乐流来自曲谱时值）。
+- 白→黑时两个按下点高度不同：目标键上方按**黑键自身**键面抬高；弧顶按两者**较高**键面计算。
+- 按下点为 `positions` 可用时仍走 6D IK（姿态修正见下），保证与示教姿态一致。
 
 `d` 很小时（相邻键 ~19 mm）按 20 mm 下限抬升；`d` 很大时 β·d 会到几百 mm，
 **必须夹紧**，否则越过工作空间。
@@ -63,6 +65,20 @@ trajectories/melodion/
 2. 任意键按下位姿 = 白键最左原点 + `u·x_mm·scale` + 黑键 `n·retreat`；
 3. 曲谱音符 → 路点（`sleep = beats × 60/tempo`，休止累加到上一音符）；
 4. 复用同一 `build_press_stream`，输出 schema 与示教生成的按键流一致。
+
+## ptp_blend 稳定性
+
+pilz PTP 的 blend 是**笛卡尔过渡窗**（内部对采样位姿求 IK）。白→黑这类“水平距离小、姿态跳变大”
+的段，半径过大会报 `Blend radius too large` / `Unable to find IK solution`，整条 stream 会停在
+中途。处理：stream 的 `ptp_blend` 半径额外收紧到 **≤6mm**；若序列仍失败，自动以
+**全部 exact（blend=0）重试一次**，保证一条 stream 能走完（代价是该段多几次停车）。
+
+## 姿态一致性（F176 修复）
+
+`_pose_ref_rotation` 原先用 `pin.Quaternion(x,y,z,w)` 构造，但 Eigen 的四标量构造顺序是
+`(w,x,y,z)`，导致 6D IK 目标姿态整体偏差约 90°，所有点回落 position-only（日志刷
+"6D IK 未收敛"）。改为按 `[x,y,z,w]` coeffs 数组构造后，录制点的 6D IK 残差为 0，
+播放姿态与示教一致。
 
 ## 验收标准
 

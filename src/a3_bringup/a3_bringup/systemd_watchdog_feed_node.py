@@ -63,8 +63,9 @@ class SystemdWatchdogFeedNode(Node):
         self.last_js = time.monotonic()
         if not self.ready_sent:
             self.ready_sent = True
-            self._notify(b"READY=1")
-            self.get_logger().info("sent READY=1 to systemd")
+            if self.sock is not None:
+                self._notify(b"READY=1")
+                self.get_logger().info("sent READY=1 to systemd")
 
     def _feed(self):
         if self.sock is None:
@@ -79,6 +80,8 @@ class SystemdWatchdogFeedNode(Node):
                 throttle_duration_sec=2.0)
 
     def _notify(self, payload):
+        if self.sock is None:  # 非 systemd 启动（无 NOTIFY_SOCKET）：静默跳过
+            return
         try:
             self.sock.sendto(payload, self.addr)
         except OSError as e:

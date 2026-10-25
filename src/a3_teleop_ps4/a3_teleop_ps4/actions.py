@@ -574,6 +574,33 @@ class ActionExecutor:
         """PIANO ←：4 极限键录制（保存到 melodion/waypoints/extremes.yaml）。"""
         self._start_melodion_teach("extremes")
 
+    def melodion_home(self) -> None:
+        """PIANO △ 长按：若在运动/示教先停住，随后回命名点 home。"""
+        self._pending_teach = None
+        if self.arm_state in ("TRAJ", "SERVO", "TEACH", "WAYPOINT_TEACH"):
+            if not self._arm_stop.service_is_ready():
+                self._n.get_logger().warn("arm/stop 不可用 → 直接尝试回 home")
+                self.goto_named_pose("home")
+                return
+            future = self._arm_stop.call_async(Trigger.Request())
+            if future is None:
+                self.goto_named_pose("home")
+                return
+
+            def _after_stop(fut):
+                try:
+                    resp = fut.result()
+                    if not getattr(resp, "success", False):
+                        self._n.get_logger().warn(
+                            f"arm/stop 拒绝：{getattr(resp, 'message', '')}")
+                except Exception as exc:  # noqa: BLE001
+                    self._n.get_logger().error(f"arm/stop 调用异常：{exc}")
+                self.goto_named_pose("home")
+
+            future.add_done_callback(_after_stop)
+            return
+        self.goto_named_pose("home")
+
     def melodion_stop_teach(self) -> None:
         """PIANO →：结束当前路点示教并保存到活动槽位（结果打日志）。"""
         self._pending_teach = None
