@@ -143,11 +143,15 @@ functions:
 
   demo_angular_xyz:
     kind: discrete
-    description: 'F193 DEMO Triangle 短按：固定三轴角度巡航（X→Y→Z 各摆一轮，绕末端点、位置保持）'
+    description: 'F193 DEMO Circle 短按：固定三轴角度巡航（X→Y→Z 各摆一轮，绕末端点、位置保持）'
+
+  demo_translate_xyz:
+    kind: discrete
+    description: 'F193 DEMO Triangle 短按：固定三轴平移巡航（X→Y→Z 各 0→+A→−A→0，末端只平移不旋转）'
 
   demo_angular_spin:
     kind: discrete
-    description: 'F193 DEMO Circle 短按：旋转巡游（偏航往复连续，再按停止）'
+    description: 'F193 备用：旋转巡游（偏航往复连续，再按停止）；当前 DEMO 按键未绑定'
 
   demo_angular_random:
     kind: discrete

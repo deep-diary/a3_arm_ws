@@ -16,16 +16,24 @@
 
 ```
 uint8 action     # 0=stop 1=start 2=toggle
-string mode      # "xyz" | "spin" | "random" | "translate"
+string mode      # "translate_xyz" | "translate" | "xyz" | "random" | "spin"
 float64 amp_deg  # 0=默认；random 时作为幅度上限
 float64 peak_dps # 0=默认 30
 uint32 cycles    # 0=循环到 stop（spin/random）；xyz 固定一轮
-# translate 专用（0=节点默认）
-float64 duration_s     # 默认 30 s
+# translate/translate_xyz 专用（0=节点默认）
+float64 duration_s     # 默认 30 s（仅 translate）
 float64 vmax_mps       # 默认 0.04 m/s
-float64 bounds_m       # 水平半径默认 0.06 m（z 用 0.8×）
+float64 bounds_m       # 水平幅度/半径默认 0.06 m（z 用 0.75×）
 float64 rot_bound_deg  # 姿态漂移上限默认 15°
 ```
+
+| 模式 | 行为 | 几何 |
+|---|---|---|
+| `translate_xyz` | X→Y→Z 依次 `0→+A→−A→0`，只发 linear | 位置 ±6cm（z ±4.5cm），姿态不变 |
+| `translate` | OU 随机速度连续平移，30 s 或越界/姿态漂移自停 | 位置留在 6cm 半径内，姿态不变 |
+| `xyz` | 绕基座 X→Y→Z 各摆一轮，只发 angular | 末端位置保持，姿态 ±80/25-45/45° |
+| `random` | 每轮随机轴 + 随机幅度/速度，只发 angular | 末端位置保持 |
+| `spin`（备用） | 偏航往复连续 | 末端位置保持 |
 
 运动形状沿用 F185：每段 `0→+A→−B→0`，速度正弦包络
 `v(t)=v_peak·sin(πt/T)`，`T=π|Δ|/(2·v_peak)`；绕末端点旋转由
@@ -46,6 +54,15 @@ float64 rot_bound_deg  # 姿态漂移上限默认 15°
 - `/a3/control_mode` 不能是 `ZERO_TORQUE`
 - `/a3/vision/mode` 不能是 `face_track`（否则两路 twist 抢同一话题）
 - 停止时补发 0.3 s 零速，避免下游保持最后一拍
+
+## 固定三轴平移（`translate_xyz`）
+
+末端点依次沿基座 X → Y → Z 做 `0→+A→−A→0`，**只发 linear（angular=0）**，姿态保持：
+
+- 幅度：水平 ±6 cm、z ±4.5 cm（`bounds_m` 可调，z 取 0.75×）
+- 速度：正弦包络，峰值 0.04 m/s；每段 `T=π|Δ|/(2·v_peak)`，一轮约 25 s
+- 守卫：|Δx|/|Δy| > 1.2×amp、|Δz| > 0.95×amp 或姿态漂移 > 15° → 立即停
+- 走完自动停（`_stop("完成")`）
 
 ## 平移随机巡游（`translate`，连续不点停）
 
@@ -68,8 +85,8 @@ float64 rot_bound_deg  # 姿态漂移上限默认 15°
 
 | 键 | 短按 | 长按 1.5 s |
 |---|---|---|
-| △ | `demo_angular_xyz`（固定三轴角度巡航） | `demo_random_translation`（连续随机平移，30 s/越界自停） |
-| ○ | `demo_angular_spin`（旋转巡游，再按停止） | `demo_angular_random`（随机角度巡游，再按停止） |
+| △ | `demo_translate_xyz`（**只平移**：X→Y→Z 各摆一轮） | `demo_random_translation`（**只平移**：连续随机方向，30 s/越界自停） |
+| ○ | `demo_angular_xyz`（**只旋转**：X→Y→Z 各摆一轮） | `demo_angular_random`（**只旋转**：随机轴/幅度，再按停止） |
 | □ | `random_pose_tour`（随机命名点巡游） | — |
 | L2 | 保存当前点位 | — |
 | Options | 停止并退出（`demo_angular_stop` + `/a3/arm/stop`） | — |
@@ -78,15 +95,29 @@ float64 rot_bound_deg  # 姿态漂移上限默认 15°
 
 ## 验收标准
 
-1. READY 下 `ros2 service call /a3/demo/angular_cruise a3_msgs/srv/AngularCruise
-   "{action: 1, mode: 'xyz'}"` → 臂原地做 X/Y/Z 三轴摆动，位置漂移 < 10 mm
-2. 同一调用在 `DISABLED` 下返回 `cannot start: arm_state=DISABLED（需 READY）`，
-   且 `/servo_node/delta_twist_cmds` 无消息
-3. `mode: 'spin'` → 偏航往复；`action: 2` 再调一次 → 停
-4. `mode: 'random'` → 每轮轴/幅度不同，仍在 X/Y/Z 包络内
-5. 人脸跟踪开启时启动 → 被拒绝（"人脸跟踪开着"）
-6. DEMO 里 `△` 长按 → 连续随机平移（不是逐点）：30 s 到点自动停；中途把臂推出 6 cm
-   或姿态漂移 15° 也会立即停，日志给出原因（`触平移边界` / `姿态漂移` / `达到时长`）
+1. `mode:'translate_xyz'`：末端沿 X/Y/Z 依次平移到 ±6cm（z ±4.5cm），**姿态变化 ≈0°**，
+   一轮后自动停
+2. `mode:'translate'`：连续随机平移，位置留在 6cm 半径内，姿态 ≈0°，30 s 或越界自停
+3. `mode:'xyz'`：只旋转（X/Y/Z 各一轮），末端位移 < 10 mm，姿态最大变化 > 40°
+4. `mode:'random'`：只旋转，末端位移 < 10 mm，姿态有变化，再 `action:2`/`0` 停止
+5. `DISABLED` 下启动 → `cannot start: arm_state=DISABLED（需 READY）`，
+   `/servo_node/delta_twist_cmds` 无消息
+6. 人脸跟踪开启时启动 → 被拒绝（"人脸跟踪开着"）
+
+### 已完成的 mock 硬件验收（2026-10-25，domain 77）
+
+环境：`hardware:=mock use_servo_target:=true`（与真机同一条 `a3_servo_target` 链），
+脚本 `scripts/a3_test/f193_demo_tour_accept.py`：
+
+| 模式 | 实测 |
+|---|---|
+| `translate_xyz` | 位置 ext x −60..+61 mm、y −60..+61 mm、z −46..+46 mm；姿态 0.0° → **PASS** |
+| `translate`（12 s） | 位置留在 6 cm 内；姿态 0.0° → **PASS** |
+| `xyz`（30°/s） | 姿态 80.5°；末端漂移 **1.9 mm** → **PASS** |
+| `random`（12 s） | 姿态 76.2°；末端漂移 **0.0 mm** → **PASS** |
+
+> 不能用 `a3_stack.sh start --sim` 的 moveit_servo 验收几何：该链在当前姿态大量报
+> `Could not find IK solution (error -31)`；mock + `a3_servo_target` 才与真机一致。
 
 ## 关联文档
 

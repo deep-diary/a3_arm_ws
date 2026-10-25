@@ -180,13 +180,13 @@ modes:
     # 巡航期间禁止摇杆发 twist（否则两路 twist 抢同一话题），R2 夹爪保留
     suppress_common_axes: [left_x, left_y, right_x, right_y]
     buttons:
-      # 短按 = 角度巡航（固定三轴）；长按 = 平移随机巡游
+      # 短按 = 固定三轴平移（只平移）；长按 = 随机方向平移（只平移）
       triangle:
-        - {fn: demo_angular_xyz, edge: shortpress, hold_s: 1.5}
+        - {fn: demo_translate_xyz, edge: shortpress, hold_s: 1.5}
         - {fn: demo_random_translation, edge: longpress, hold_s: 1.5}
-      # 短按 = 旋转巡游（偏航往复）；长按 = 随机角度巡游
+      # 短按 = 固定三轴旋转（只旋转）；长按 = 随机轴旋转（只旋转）
       circle:
-        - {fn: demo_angular_spin, edge: shortpress, hold_s: 1.5}
+        - {fn: demo_angular_xyz, edge: shortpress, hold_s: 1.5}
         - {fn: demo_angular_random, edge: longpress, hold_s: 1.5}
       square: {fn: random_pose_tour, edge: shortpress, hold_s: 1.5}
       l2: {fn: save_named_pose, edge: shortpress, hold_s: 1.5}

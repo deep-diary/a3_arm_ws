@@ -92,6 +92,7 @@ class AngularCruiseNode(Node):
         self._leg_t0 = 0.0
         self._leg_T = 0.0
         self._leg_sgn = 1.0
+        self._leg_speed = 0.0
         self._cycles_left: Optional[int] = None   # None=无限
         self._repeat = ""
         self._zero_until = 0.0
@@ -156,9 +157,9 @@ class AngularCruiseNode(Node):
             return resp
 
         mode = (req.mode or "xyz").strip().lower()
-        if mode not in ("xyz", "spin", "random", "translate"):
+        if mode not in ("xyz", "spin", "random", "translate", "translate_xyz"):
             resp.success = False
-            resp.message = f"unknown mode '{mode}' (xyz/spin/random/translate)"
+            resp.message = f"unknown mode '{mode}' (xyz/spin/random/translate/translate_xyz)"
             resp.mode = self._mode
             return resp
         why = self._gate_reason()
@@ -168,21 +169,27 @@ class AngularCruiseNode(Node):
             resp.mode = self._mode
             return resp
 
-        if mode == "translate":
+        if mode in ("translate", "translate_xyz"):
             if self.ee_p is None or (time.monotonic() - self.ee_t) > 0.5:
                 resp.success = False
                 resp.message = "收不到 /a3/ee_pose（a3_ee_pose 在跑吗？）"
                 resp.mode = self._mode
                 return resp
-            dur = float(req.duration_s) if req.duration_s > 0.0 else self.tr_dur
             vmax = float(req.vmax_mps) if req.vmax_mps > 0.0 else self.tr_vmax
             bound = float(req.bounds_m) if req.bounds_m > 0.0 else self.tr_bound
             rotb = (float(req.rot_bound_deg) if req.rot_bound_deg > 0.0
                     else math.degrees(self.tr_rot))
-            self._start_translate(dur, vmax, bound, rotb)
+            if mode == "translate_xyz":
+                self._start_translate_xyz(bound, vmax, rotb)
+                resp.message = (f"translate sweep start: ±{bound * 100:.0f}cm "
+                                f"(z ±{bound * 75:.0f}cm), {vmax:.3f} m/s, "
+                                f"姿态 ≤{rotb:.0f}°")
+            else:
+                dur = float(req.duration_s) if req.duration_s > 0.0 else self.tr_dur
+                self._start_translate(dur, vmax, bound, rotb)
+                resp.message = (f"translate tour start: {dur:.0f}s, vmax={vmax:.3f} m/s, "
+                                f"bound=±{bound * 100:.0f}cm, rot≤{rotb:.0f}°")
             resp.success = True
-            resp.message = (f"translate tour start: {dur:.0f}s, vmax={vmax:.3f} m/s, "
-                            f"bound=±{bound * 100:.0f}cm, rot≤{rotb:.0f}°")
             resp.mode = self._mode
             self.get_logger().warn(resp.message)
             return resp
@@ -261,6 +268,38 @@ class AngularCruiseNode(Node):
             f"{dur:.1f}s / vmax {vmax:.3f} m/s / 半径 {bound * 100:.0f}cm / "
             f"姿态上限 {rot_deg:.0f}°")
 
+    def _start_translate_xyz(self, amp: float, vmax: float, rot_deg: float) -> None:
+        """固定三轴平移巡航：末端点只平移不旋转（X→Y→Z，各 0→+A→−A→0）。"""
+        self._mode = "translate_xyz"
+        self._running = True
+        self._zero_until = 0.0
+        self._cycles_left = 1
+        self._repeat = ""
+        self._leg_speed = abs(vmax)
+        self._legs = self._legs_translate(abs(amp))
+        self._leg_i = 0
+        self._tr = {
+            "p0": self.ee_p,
+            "q0": self.ee_q,
+            "rot": math.radians(abs(rot_deg)),
+            "hard": abs(amp),
+        }
+        self._begin_leg()
+        if self._servo_start_cli.service_is_ready():
+            self._servo_start_cli.call_async(Trigger.Request())
+        self.get_logger().warn(
+            f"translate sweep 开始：起点 {tuple(round(v, 3) for v in self.ee_p)}，"
+            f"水平 ±{amp * 100:.0f}cm / z ±{amp * 75:.0f}cm，"
+            f"{vmax:.3f} m/s，姿态上限 {rot_deg:.0f}°")
+
+    def _legs_translate(self, amp: float) -> List[Leg]:
+        horiz = abs(amp) if amp > 0.0 else self.tr_bound
+        vert = horiz * 0.75
+        legs: List[Leg] = []
+        for axis, a in (("x", horiz), ("y", horiz), ("z", vert)):
+            legs += [(axis, 0.0, a), (axis, a, -a), (axis, -a, 0.0)]
+        return legs
+
     def _legs_xyz(self, amp_override: float) -> List[Leg]:
         legs: List[Leg] = []
         for axis in ("x", "y", "z"):
@@ -298,7 +337,13 @@ class AngularCruiseNode(Node):
         axis, a0, a1 = self._legs[self._leg_i]
         d = a1 - a0
         self._leg_sgn = 1.0 if d >= 0.0 else -1.0
-        self._leg_T = math.pi * abs(math.radians(d)) / (2.0 * max(1e-3, self.peak))
+        if self._mode == "translate_xyz":
+            delta = abs(d)                       # 米
+            speed = self._leg_speed
+        else:
+            delta = abs(math.radians(d))         # 度 → 弧度
+            speed = self.peak
+        self._leg_T = math.pi * delta / (2.0 * max(1e-3, speed))
         self._leg_t0 = time.monotonic()
 
     def _stop(self, reason: str) -> None:
@@ -322,6 +367,9 @@ class AngularCruiseNode(Node):
         if self._mode == "translate":
             self._tick_translate(now)
             return
+        if self._mode == "translate_xyz":
+            self._tick_translate_xyz(now)
+            return
         axis, a0, a1 = self._legs[self._leg_i]
         el = now - self._leg_t0
         if el >= self._leg_T:
@@ -342,6 +390,41 @@ class AngularCruiseNode(Node):
         w = self.peak * math.sin(math.pi * el / self._leg_T) * self._leg_sgn
         ax = AXES[axis]
         self._publish((w * ax[0], w * ax[1], w * ax[2]))
+
+    def _tick_translate_xyz(self, now: float) -> None:
+        """固定三轴平移：只用 linear，姿态保持不变（漂移超限即停）。"""
+        tr = self._tr
+        if self.ee_p is None or (now - self.ee_t) > 0.5:
+            self._stop("ee_pose 超时")
+            return
+        p0, p = tr["p0"], self.ee_p
+        dev = [p[i] - p0[i] for i in range(3)]
+        hard = tr["hard"]
+        if (abs(dev[0]) > hard * 1.2 or abs(dev[1]) > hard * 1.2
+                or abs(dev[2]) > hard * 0.95):
+            self._stop(f"触平移边界 {tuple(round(v * 1000) for v in dev)}mm")
+            return
+        q0, q = tr["q0"], self.ee_q
+        if q0 is not None and q is not None:
+            dot = abs(sum(a * b for a, b in zip(q0, q)))
+            ang = 2.0 * math.acos(min(1.0, dot))
+            if ang > tr["rot"]:
+                self._stop(
+                    f"姿态漂移 {math.degrees(ang):.1f}° > {math.degrees(tr['rot']):.0f}°")
+                return
+        axis, a0, a1 = self._legs[self._leg_i]
+        el = now - self._leg_t0
+        if el >= self._leg_T:
+            self._leg_i += 1
+            if self._leg_i >= len(self._legs):
+                self._stop("完成")
+                return
+            self._begin_leg()
+            return
+        s = self._leg_speed * math.sin(math.pi * el / self._leg_T) * self._leg_sgn
+        v = [0.0, 0.0, 0.0]
+        v["xyz".index(axis)] = s
+        self._publish((0.0, 0.0, 0.0), v)
 
     def _tick_translate(self, now: float) -> None:
         tr = self._tr

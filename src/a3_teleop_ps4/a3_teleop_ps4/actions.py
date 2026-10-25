@@ -721,6 +721,10 @@ class ActionExecutor:
 
         future.add_done_callback(_done)
 
+    def demo_translate_xyz(self) -> None:
+        """固定三轴平移巡航：X→Y→Z 各 0→+A→−A→0，末端点只平移不旋转。"""
+        self._angular_request(1, "translate_xyz")
+
     def demo_angular_xyz(self) -> None:
         """固定三轴各摆一轮（X→Y→Z），绕末端点旋转、末端位置保持。"""
         self._angular_request(1, "xyz", cycles=1)
