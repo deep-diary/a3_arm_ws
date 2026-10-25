@@ -76,6 +76,11 @@ from a3_msgs.srv import (
     SetPayload,
 )
 
+try:  # 口风琴按键 stream 编排（纯 Python，供示教槽位/PS4 生成复用）
+    from a3_arm_controller import melodion_stream as _melodion_stream
+except ImportError:  # pragma: no cover - 脚本以 sys.path 直连包目录时
+    import melodion_stream as _melodion_stream
+
 JOINTS = [
     "L1_joint",
     "L2_joint",
@@ -1451,6 +1456,14 @@ class ArmController(Node):
         # F131: 路点任务子目录
         self._wp_dir = os.path.join(self._traj_dir, "waypoints")
         os.makedirs(self._wp_dir, exist_ok=True)
+        # 口风琴独立应用目录（与通用轨迹分开）：trajectories/melodion/{waypoints,streams}
+        self._melodion_dir = os.path.join(self._traj_dir, "melodion")
+        self._melodion_wp_dir = os.path.join(self._melodion_dir, "waypoints")
+        self._melodion_stream_dir = os.path.join(self._melodion_dir, "streams")
+        for _d in (self._melodion_wp_dir, self._melodion_stream_dir):
+            os.makedirs(_d, exist_ok=True)
+        # 路点录制槽位：None=通用 waypoints/latest.yaml；"press"/"extremes"=口风琴槽
+        self._waypoint_slot: Optional[str] = None
 
         # 命名预设点
         self._poses = self._load_poses()
@@ -1561,6 +1574,16 @@ class ArmController(Node):
             callback_group=self._cb_group)
         self.create_service(
             Trigger, "/a3/arm/start_waypoint_teach", self._start_waypoint_teach_cb,
+            callback_group=self._cb_group)
+        # F195: 口风琴 PIANO 模式——路点录制槽位 + 离线生成按键 stream
+        self.create_service(
+            Trigger, "/a3/arm/melodion/record_press", self._melodion_record_press_cb,
+            callback_group=self._cb_group)
+        self.create_service(
+            Trigger, "/a3/arm/melodion/record_extremes", self._melodion_record_extremes_cb,
+            callback_group=self._cb_group)
+        self.create_service(
+            Trigger, "/a3/arm/melodion/gen_streams", self._melodion_gen_streams_cb,
             callback_group=self._cb_group)
         self.create_service(
             SaveTrajectory, "/a3/arm/save_trajectory", self._save_cb,
@@ -5108,12 +5131,14 @@ class ArmController(Node):
 
     def _stream_path(self, name: str) -> str:
         """轨迹流配置文件路径（Q4 搜索顺序）：
+        0) trajectories/melodion/streams/（口风琴应用槽，F195——命中优先）
         1) 仓库 trajectories/streams/（运行时/实验槽，untracked）
         2) app_melodion/config/streams/（版本控制，脚本生成源）
         3) ~/.a3/trajectories/streams（旧槽）
         返回首个存在的；都不存在则返回首个候选（便于报错定位）。"""
         fname = _sanitize_name(name) + ".yaml"
-        candidates = [os.path.join(self._traj_dir, "streams", fname)]
+        candidates = [os.path.join(self._melodion_stream_dir, fname),
+                      os.path.join(self._traj_dir, "streams", fname)]
         try:
             candidates.append(os.path.join(
                 get_package_share_directory("app_melodion"), "config", "streams", fname))
@@ -6024,6 +6049,24 @@ class ArmController(Node):
         self, req: Trigger.Request, resp: Trigger.Response
     ) -> Trigger.Response:
         """F131（Share 长按 1.5s）：路点示教——L2 打点，Options 结束保存."""
+        return self._begin_waypoint_teach(None, resp)
+
+    def _melodion_record_press_cb(
+        self, req: Trigger.Request, resp: Trigger.Response
+    ) -> Trigger.Response:
+        """F195 口风琴 ↓：演奏路点录制（保存到 melodion/waypoints/press.yaml）。"""
+        return self._begin_waypoint_teach("press", resp)
+
+    def _melodion_record_extremes_cb(
+        self, req: Trigger.Request, resp: Trigger.Response
+    ) -> Trigger.Response:
+        """F195 口风琴 ←：4 极限键录制（保存到 melodion/waypoints/extremes.yaml）。"""
+        return self._begin_waypoint_teach("extremes", resp)
+
+    def _begin_waypoint_teach(
+        self, slot: Optional[str], resp: Trigger.Response
+    ) -> Trigger.Response:
+        """路点示教统一入口；slot 决定停止时写入哪个槽位（None=通用 latest）。"""
         why = self._teach_guard()
         if why is not None:
             resp.success = False
@@ -6037,11 +6080,14 @@ class ArmController(Node):
             return resp
 
         self._waypoints = []
+        self._waypoint_slot = slot
         if self._using_controller_switch():
             self._publish_mode("ZERO_TORQUE")
         self._set_state(STATE_WAYPOINT_TEACH, "waypoint teaching (L2=mark)")
+        where = f"melodion/{slot}.yaml" if slot else "waypoints/latest.yaml"
         resp.success = True
-        resp.message = "waypoint teach started; L2 to capture, Options to finish"
+        resp.message = (
+            f"waypoint teach started -> {where}; L2 to capture, stop_teach/→ to finish")
         return resp
 
     def _stop_teach_cb(
@@ -6135,13 +6181,21 @@ class ArmController(Node):
             ok, msg = self._exit_freedrive()
         n = len(self._waypoints)
         min_count = int(self.get_parameter("waypoint_min_count").value)
+        slot, self._waypoint_slot = self._waypoint_slot, None
         auto_msgs: List[str] = []
         if n >= min_count:
-            latest = os.path.join(self._wp_dir, "latest.yaml")
-            if self._save_waypoints_to(latest):
-                auto_msgs.append("auto-saved waypoints/latest.yaml")
+            if slot:
+                save_dir = self._melodion_wp_dir
+                main = os.path.join(save_dir, f"{slot}.yaml")
+                main_label = f"melodion/waypoints/{slot}.yaml"
+            else:
+                save_dir = self._wp_dir
+                main = os.path.join(save_dir, "latest.yaml")
+                main_label = "waypoints/latest.yaml"
+            if self._save_waypoints_to(main):
+                auto_msgs.append(f"auto-saved {main_label}")
                 ts = time.strftime("%Y%m%d_%H%M%S")
-                hist = os.path.join(self._wp_dir, f"teach_wp_{ts}.yaml")
+                hist = os.path.join(save_dir, f"teach_wp_{ts}.yaml")
                 if self._save_waypoints_to(hist):
                     auto_msgs.append(f"backup teach_wp_{ts}.yaml")
             else:
@@ -6155,6 +6209,73 @@ class ArmController(Node):
         resp.message = f"recorded {n} waypoints; " + ", ".join(auto_msgs) + (
             f" (zero_torque/stop: {msg})" if not ok else ""
         )
+        return resp
+
+    def _melodion_gen_streams_cb(
+        self, req: Trigger.Request, resp: Trigger.Response
+    ) -> Trigger.Response:
+        """F195 口风琴 ↑：由路点槽位生成 press/extremes 两条按键 stream（不运动）。
+
+        与离线脚本共用 ``melodion_stream.build_press_stream``：α/β 抬升、进场/离场
+        exact 悬停、末段回命名点 home。缺路点/生成失败不影响另一条。
+        """
+        ms = _melodion_stream
+        press_mm = ms.PRESS_FLOOR_MM
+        home = self._poses.get("home")
+        jobs = (
+            ("press", os.path.join(self._melodion_wp_dir, "press.yaml"),
+             os.path.join(self._melodion_stream_dir, "press.yaml")),
+            ("extremes", os.path.join(self._melodion_wp_dir, "extremes.yaml"),
+             os.path.join(self._melodion_stream_dir, "extremes.yaml")),
+        )
+        msgs: List[str] = []
+        ok_any = False
+        for slot, wp_path, out_path in jobs:
+            if not os.path.exists(wp_path):
+                msgs.append(f"{slot}: 缺 melodion/waypoints/{slot}.yaml")
+                continue
+            try:
+                data = ms.load_yaml(wp_path)
+                if str(data.get("kind") or "") != "waypoint":
+                    raise ValueError(f"kind={data.get('kind')!r}，需要 waypoint")
+                waypoints = list(data.get("waypoints") or [])
+                doc = ms.build_press_stream(
+                    waypoints,
+                    joint_names=data.get("joint_names") or self._joint_names,
+                    press_mm=press_mm,
+                    speed=ms.SPEED_DEFAULT,
+                    dwell_s=ms.DWELL_DEFAULT_S,
+                    alpha=ms.ALPHA_DEFAULT,
+                    beta=ms.BETA_DEFAULT,
+                    clear_min_mm=ms.CLEAR_MIN_MM,
+                    clear_max_mm=ms.CLEAR_MAX_MM,
+                    mode=ms.MODE_DEFAULT,
+                    hold_orientation=True,
+                    home_positions=home,
+                    waypoints_pressed=True,
+                )
+                header = ms.header_lines(
+                    source=f"melodion/waypoints/{slot}.yaml",
+                    press_mm=press_mm,
+                    alpha=ms.ALPHA_DEFAULT,
+                    beta=ms.BETA_DEFAULT,
+                    clear_min_mm=ms.CLEAR_MIN_MM,
+                    clear_max_mm=ms.CLEAR_MAX_MM,
+                    speed=ms.SPEED_DEFAULT,
+                    dwell_s=ms.DWELL_DEFAULT_S,
+                    mode=ms.MODE_DEFAULT,
+                    hold_orientation=True,
+                    waypoints_pressed=True,
+                    home_note=("回命名点 'home'" if home else "停在末键上方"),
+                )
+                ms.write_stream(out_path, doc, header)
+            except Exception as exc:  # noqa: BLE001
+                msgs.append(f"{slot}: 生成失败 {exc}")
+                continue
+            ok_any = True
+            msgs.append(f"{slot}: {len(waypoints)} 键 -> {len(doc['segments'])} 段")
+        resp.success = ok_any
+        resp.message = "；".join(msgs) if msgs else "no waypoints"
         return resp
 
     def _dump_recording(self) -> dict:

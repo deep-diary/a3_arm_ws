@@ -183,7 +183,19 @@ functions:
 
   playback_stream:
     kind: discrete
-    description: 'F176 Triangle 长按 1.5s: 回放 4 键按压 stream {type:"stream", name:"latest"}（trajectories/streams/latest.yaml，melodion_pts2stream.py 产物）'
+    description: 'F176/F195: 回放口风琴 stream {type:"stream", name:"<slot>"}（trajectories/melodion/streams/ 优先）'
+
+  melodion_record_press:
+    kind: discrete
+    description: 'F195 PIANO ↓: 演奏路点示教（/a3/arm/melodion/record_press，保存 melodion/waypoints/press.yaml）'
+
+  melodion_record_extremes:
+    kind: discrete
+    description: 'F195 PIANO ←: 4 极限键路点录制（/a3/arm/melodion/record_extremes，保存 melodion/waypoints/extremes.yaml）'
+
+  melodion_gen_streams:
+    kind: discrete
+    description: 'F195 PIANO ↑: 由路点槽位生成 press/extremes 两条按键 stream（/a3/arm/melodion/gen_streams，不运动）'
 
   random_pose_tour:
     kind: discrete

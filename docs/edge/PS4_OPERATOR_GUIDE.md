@@ -115,6 +115,27 @@
    仅 READY 态生效；示教中/运动中长按会被安全拒绝（示教时请用短按结束）。
    中途随时可 **R3** 软失能或 **✕** 硬急停中断。
 
+#### 4.4 口风琴（PIANO 模式，F195）
+
+选模式：**按住 Share + →** 进入 PIANO（黄呼吸）。轨迹全部落在
+`trajectories/melodion/{waypoints,streams}/`，与通用示教/巡游分开。
+
+| 操作 | 动作 |
+|------|------|
+| **D-pad ↓** | 开始**演奏路点示教**（`melodion/waypoints/press.yaml`）；L2 在「已按下」位置打点 |
+| **D-pad ←** | 开始**4 极限键录制**（`melodion/waypoints/extremes.yaml`）；顺序：白键最左(F3) → 白键最右(C6) → 黑键最右(A#5) → 黑键最左(F#3)，每键 L2 打点 |
+| **D-pad →** | **结束示教并保存**到当前槽位（同时写 `teach_wp_*.yaml` 时间戳备份） |
+| **D-pad ↑** | **生成按键 stream**：由两个路点槽生成 `streams/press.yaml` 与 `streams/extremes.yaml`（不运动） |
+| **△ 短按** | 播放 `streams/press.yaml`（演奏路点生成的按键轨迹） |
+| **○ 短按** | 播放 `streams/extremes.yaml`（4 极限键轨迹） |
+| **□ 短按** | 播放 `streams/music.yaml`（曲谱生成，需先跑 `scripts/melodion_score_stream.py`） |
+
+- 按键轨迹：每个路点是**按下点**；键间抬升量按两键水平距离缩放
+  （源/目标正上方 `press+0.5·d`，中垂线上方 `press+1.0·d`，夹紧 10–60mm）。
+- 进场先到第 1 键正上方并**停稳**再垂直下压；离场先垂直抬起末键，再回 `home`，
+  避免斜着进出把口风琴拖走。
+- 每条按键 stream 的每段可带 `sleep`（按住时长）；`music.yaml` 的 sleep 来自曲谱时值。
+
 ### 5. 收工（R3）
 
 **短按右摇杆键（R3）**：臂先自动收回到 idle 折叠位（safe-park，紫色），再失能，

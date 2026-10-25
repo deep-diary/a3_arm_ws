@@ -1,0 +1,30 @@
+# 口风琴应用轨迹目录
+
+口风琴（melodion）是独立应用，轨迹与通用示教/巡游分开存放。
+
+| 子目录 | 内容 | 来源 |
+|---|---|---|
+| `waypoints/` | 按键路点（`kind: waypoint`） | PS4 PIANO 模式 D-pad 示教 |
+| `streams/` | 口风琴轨迹流（`kind: stream`） | `scripts/melodion_pts2stream.py` / `scripts/melodion_score_stream.py` 生成 |
+
+## 路点槽位（PIANO 模式）
+
+| 文件 | 含义 | 录制方式 |
+|---|---|---|
+| `waypoints/press.yaml` | 演奏路点：按演奏顺序示教的**按下**点位 | `↓` 开始，`→` 结束保存 |
+| `waypoints/extremes.yaml` | 4 个极限键：白键最左 → 白键最右 → 黑键最右 → 黑键最左 | `←` 开始，`→` 结束保存 |
+
+按键路点默认视为「已按下」的点位；生成轨迹时用 `press_depth_mm` 还原键面高度并叠加抬升量。
+
+## Stream 槽位
+
+| 文件 | 含义 | 播放 |
+|---|---|---|
+| `streams/press.yaml` | 由 `waypoints/press.yaml` 生成的按键流 | `△` 短按 |
+| `streams/extremes.yaml` | 由 `waypoints/extremes.yaml` 生成的 4 极限键流 | `○` 短按 |
+| `streams/music.yaml` | 极限键坐标 + 曲谱生成的乐曲流 | `□` 短按 |
+
+`↑` 一次性重新生成 `press.yaml` 与 `extremes.yaml`；`music.yaml` 由
+`scripts/melodion_score_stream.py` 离线生成（选曲谱）。
+
+> 本目录内容为运行时产物，不纳入 git（`README.md` 除外）。

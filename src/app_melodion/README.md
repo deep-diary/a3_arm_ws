@@ -39,6 +39,7 @@
 | `config/streams/*.yaml` | 生成的轨迹流配置（软件编排产物，版本控制） |
 | `app_melodion/key_config.py` | 键位 + 几何 → 每键 up/down 笛卡尔位姿 + `transition_via_pose` 键间过点（dict，无 ROS） |
 | `app_melodion/score.py` | 曲谱解析 |
+| `app_melodion/key_layout.py` | 4 极限键路点 → 键盘布局（轴向/跨度/黑键后退）→ 任意键按下位姿 + 曲谱→路点 |
 | `app_melodion/melodion_score2stream.py` | 离线脚本：曲谱 → stream 配置 |
 
 ## 用法
@@ -57,16 +58,18 @@ python3 -m app_melodion.melodion_score2stream --sweep
 # 相对位置模式（frame=relative + anchor，换口风琴位置只改 anchor）
 python3 -m app_melodion.melodion_score2stream --score scale --relative
 
-# 实测定位点 → 4 键按压 stream（F176）：读路点录制滚动槽 trajectories/waypoints/latest.yaml
-# （white1/white19/black13/black1，未按压基准点），z 下压 6mm；起手先到「第 1 点上方 40mm」悬停、
-# 收尾抬回同一悬停位；键间 3 过点抬升弧（源点正上方 +40 / 两按压点中垂线上方 +80 / 目标点正上方 +40 mm），
-# mode=ptp_blend（过点 blend 切角）、hold_orientation=true（各点用示教姿态做 6D IK，防横压）、speed 0.2
+# F195 口风琴应用：按键路点（按下点）→ stream
+# 读 trajectories/melodion/waypoints/press.yaml（PIANO ↓ 示教；缺失时回落 waypoints/latest.yaml）
+# α/β 距离比例抬升（默认 0.5/1.0，10~60mm 夹紧）+ 进场/离场 exact 垂直悬停 + 末段回 home
 python3 ~/a3_arm_ws/scripts/melodion_pts2stream.py
-# 产物：trajectories/streams/latest.yaml（长按 Triangle 回放槽；文件头附 F166 九模式速查，
-# 直接改各段 mode: 存盘即生效，无需重建/重启栈）；stdout 另打印
-# melodion_white1/white19/black13/black1 命名点关节值（粘贴到 named_poses.yaml，D-pad 对位用）
-# 换规划方式：python3 ~/a3_arm_ws/scripts/melodion_pts2stream.py --mode jnt_g64_quintic [--exact]
-# 要回旧的 position-only IK（不保姿态）：加 --no-hold-orientation
+# 产物：trajectories/melodion/streams/press.yaml（△ 短按播放）
+# 极限键槽：python3 ~/a3_arm_ws/scripts/melodion_pts2stream.py \
+#   --pts trajectories/melodion/waypoints/extremes.yaml \
+#   --out trajectories/melodion/streams/extremes.yaml
+
+# 极限键坐标 + 曲谱 → 乐曲线（□ 短按播放）
+python3 ~/a3_arm_ws/scripts/melodion_score_stream.py --score qinghuaci
+# 产物：trajectories/melodion/streams/music.yaml
 
 # 预烘焙缓存（把逐段 via 关节轨迹算好存 <name>.yaml.baked.yaml，playback 直接下发提速）
 python3 ~/a3_arm_ws/scripts/melodion_bake.py --stream scale

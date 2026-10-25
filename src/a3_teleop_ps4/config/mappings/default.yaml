@@ -155,17 +155,18 @@ modes:
     suppress_common_axes: [left_x, left_y, right_x, right_y]
     enter: [{fn: goto_named_pose, kwargs: {name: melodion_white1}, required: false}]
     exit: []
+    # F195 口风琴应用：↓ 演奏路点示教 / ← 4 极限键录制 / → 结束并保存 / ↑ 生成 stream
     dpad:
       - axis: dpad_y
-        neg: {fn: goto_named_pose, kwargs: {name: melodion_black13}}
-        pos: {fn: goto_named_pose, kwargs: {name: melodion_black1}}
+        neg: {fn: melodion_gen_streams}       # ↑ 生成 press + extremes stream
+        pos: {fn: melodion_record_press}      # ↓ 演奏路点示教
       - axis: dpad_x
-        neg: {fn: goto_named_pose, kwargs: {name: melodion_white1}}
-        pos: {fn: goto_named_pose, kwargs: {name: melodion_white19}}
+        neg: {fn: melodion_record_extremes}   # ← 4 极限键录制
+        pos: {fn: teach_leave}                # → 结束示教并保存当前槽位
     buttons:
-      triangle: {fn: playback_stream, kwargs: {name: latest}, edge: shortpress, hold_s: 1.5}
-      circle: {fn: goto_named_pose, kwargs: {name: melodion_white1}, edge: shortpress, hold_s: 1.5}
-      square: {fn: goto_named_pose, kwargs: {name: melodion_white19}, edge: shortpress, hold_s: 1.5}
+      triangle: {fn: playback_stream, kwargs: {name: press}, edge: shortpress, hold_s: 1.5}
+      circle: {fn: playback_stream, kwargs: {name: extremes}, edge: shortpress, hold_s: 1.5}
+      square: {fn: playback_stream, kwargs: {name: music}, edge: shortpress, hold_s: 1.5}
       l2: {fn: save_named_pose, edge: shortpress, hold_s: 1.5}
 
   demo:

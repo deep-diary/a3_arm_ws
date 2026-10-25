@@ -6,15 +6,19 @@
 `T = π|Δ|/(2·v_peak)`。幅度默认取 F185 的 URDF 限位扫描结果（X ±80°、
 Y +25/−45°、Z ±45°），不贴限位。
 
-三种模式：
+模式：
   xyz    —— 固定三轴各摆一轮：X → Y → Z（演示姿态三自由度）
   spin   —— 偏航(Z) 往复连续（"旋转巡游"），按同一键或 stop 结束
-  random —— 每轮随机挑一根基座轴 + 随机幅度（0.5~1.0×安全幅度），循环到 stop
+  random —— 随机角度游走：OU 角速度（方向连续随机，避免停走抖动被 servo 判
+            IK 另一分支），姿态相对起点的旋转向量按轴限制在实测包络的 80%
+            （X ±64°、Y +20/−36°、Z ±36°），越过 70% 自动朝回中方向推；
+            默认 30 s 自停（`duration_s=0` 用参数 `random_duration_s`，0=不限时）
 
 安全门禁（任一不满足 → 拒绝启动 / 立即停发零速）：
   - `/a3/arm_status` 必须是 READY / SERVO
   - `/a3/control_mode` 不能是 ZERO_TORQUE
   - `/a3/vision/mode` 不能是 face_track（避免两路 twist 抢同一话题）
+  - 关节限位余量：任一关节距 URDF 限位 < `joint_margin_deg`（默认 8°）即停
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ from std_srvs.srv import Trigger
 
 from a3_msgs.msg import ArmStatus
 from a3_msgs.srv import AngularCruise
+from sensor_msgs.msg import JointState
 
 AXES = {
     "x": (1.0, 0.0, 0.0),
@@ -45,7 +50,42 @@ DEFAULT_AMP = {
     "y": (25.0, 45.0),
     "z": (45.0, 45.0),
 }
+# URDF 关节限位（rad）；L7 夹爪不参与旋转巡游守卫
+JOINT_LIMITS = {
+    "L1_joint": (-2.79253, 2.79253),
+    "L2_joint": (0.0, 3.66519),
+    "L3_joint": (-4.01426, 0.0),
+    "L4_joint": (-1.0472, 1.5708),
+    "L5_joint": (-1.5708, 1.5708),
+    "L6_joint": (-1.5708, 1.5708),
+}
 Leg = Tuple[str, float, float]
+
+
+def _q_mul(a, b):
+    """四元数乘法 (x,y,z,w)。"""
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz)
+
+
+def _q_conj(q):
+    return (-q[0], -q[1], -q[2], q[3])
+
+
+def _rot_vec(q):
+    """四元数 → 旋转向量（轴×弧角），用于按轴给姿态包络设限。"""
+    if q[3] < 0.0:
+        q = (-q[0], -q[1], -q[2], -q[3])
+    v = math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2])
+    if v < 1e-9:
+        return (0.0, 0.0, 0.0)
+    ang = 2.0 * math.atan2(v, max(-1.0, min(1.0, q[3])))
+    k = ang / v
+    return (q[0] * k, q[1] * k, q[2] * k)
 
 
 class AngularCruiseNode(Node):
@@ -57,11 +97,17 @@ class AngularCruiseNode(Node):
         self.declare_parameter("control_mode_topic", "/a3/control_mode")
         self.declare_parameter("vision_mode_topic", "/a3/vision/mode")
         self.declare_parameter("ee_pose_topic", "/a3/ee_pose")
+        self.declare_parameter("joint_states_topic", "/joint_states")
         self.declare_parameter("rate_hz", 50.0)
         self.declare_parameter("peak_dps", 30.0)          # 峰值角速度
         self.declare_parameter("spin_amp_deg", 45.0)      # spin 模式偏航幅度
-        self.declare_parameter("random_min_frac", 0.5)    # random 最小幅度比例
-        self.declare_parameter("random_peak_min_frac", 0.7)
+        # random：随机角度游走（OU 角速度）
+        self.declare_parameter("random_duration_s", 30.0)   # 0=不限时
+        self.declare_parameter("random_bound_frac", 0.8)    # 姿态包络 = 实测幅度 × 该比例
+        self.declare_parameter("random_soft_frac", 0.7)     # 软边界（自动回中）
+        self.declare_parameter("random_tau_s", 0.5)         # 方向随机化时间常数
+        self.declare_parameter("random_accel", 1.0)         # 角加速度限幅 rad/s²
+        self.declare_parameter("joint_margin_deg", 8.0)     # 关节限位余量守卫
         # translate：连续随机平移（OU 过程，参考 scripts/a3_test/f181_servo_track.py）
         self.declare_parameter("translate_duration_s", 30.0)
         self.declare_parameter("translate_vmax_mps", 0.04)
@@ -73,8 +119,12 @@ class AngularCruiseNode(Node):
         p = self.get_parameter
         self.peak = abs(math.radians(float(p("peak_dps").value)))
         self.spin_amp = abs(float(p("spin_amp_deg").value))
-        self.rand_min = min(1.0, max(0.1, float(p("random_min_frac").value)))
-        self.rand_peak_min = min(1.0, max(0.1, float(p("random_peak_min_frac").value)))
+        self.rw_dur = max(0.0, float(p("random_duration_s").value))
+        self.rw_bound_frac = min(1.0, max(0.3, float(p("random_bound_frac").value)))
+        self.rw_soft_frac = min(0.95, max(0.3, float(p("random_soft_frac").value)))
+        self.rw_tau = max(0.05, float(p("random_tau_s").value))
+        self.rw_accel = max(0.05, float(p("random_accel").value))
+        self.joint_margin = abs(math.radians(float(p("joint_margin_deg").value)))
         self.tr_dur = max(1.0, float(p("translate_duration_s").value))
         self.tr_vmax = abs(float(p("translate_vmax_mps").value))
         self.tr_bound = abs(float(p("translate_bound_m").value))
@@ -104,6 +154,11 @@ class AngularCruiseNode(Node):
         self._v = [0.0, 0.0, 0.0]
         self._last_v = [0.0, 0.0, 0.0]
         self._tr = {}
+        # random 单向随机游走状态
+        self._rw = {}
+        # 关节守卫
+        self.joint_pos = {}
+        self.joint_t = 0.0
 
         rel = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self.pub = self.create_publisher(
@@ -116,6 +171,8 @@ class AngularCruiseNode(Node):
                                  self._on_vision_mode, rel)
         self.create_subscription(PoseStamped, str(p("ee_pose_topic").value),
                                  self._on_ee, rel)
+        self.create_subscription(JointState, str(p("joint_states_topic").value),
+                                 self._on_joints, rel)
         # 尽力启动 servo（a3_servo_target 链路下该服务可能不存在，忽略即可）
         self._servo_start_cli = self.create_client(Trigger, "/servo_node/start_servo")
 
@@ -142,6 +199,26 @@ class AngularCruiseNode(Node):
         self.ee_p = (float(p.x), float(p.y), float(p.z))
         self.ee_q = (float(q.x), float(q.y), float(q.z), float(q.w))
         self.ee_t = time.monotonic()
+
+    def _on_joints(self, msg: JointState) -> None:
+        for name, pos in zip(msg.name, msg.position):
+            self.joint_pos[name] = float(pos)
+        self.joint_t = time.monotonic()
+
+    def _joint_guard(self) -> str:
+        """关节限位余量守卫：任一关节贴限位即返回原因（无 joint_states 时不拦）。"""
+        if not self.joint_pos or (time.monotonic() - self.joint_t) > 1.0:
+            return ""
+        m = self.joint_margin
+        for name, (lo, hi) in JOINT_LIMITS.items():
+            q = self.joint_pos.get(name)
+            if q is None:
+                continue
+            if q < lo + m or q > hi - m:
+                return (f"{name}={math.degrees(q):+.1f}° 距限位 "
+                        f"[{math.degrees(lo):+.0f},{math.degrees(hi):+.0f}]° "
+                        f"< {math.degrees(m):.0f}°")
+        return ""
 
     # ------------------------------------------------------------------ 服务
     def _on_cruise(self, req: AngularCruise.Request,
@@ -197,6 +274,26 @@ class AngularCruiseNode(Node):
         peak = abs(math.radians(float(req.peak_dps))) if req.peak_dps > 0.0 else self.peak
         amp = abs(float(req.amp_deg)) if req.amp_deg > 0.0 else 0.0
         cycles = int(req.cycles)
+
+        if mode == "random":
+            # 单向随机游走需要起始姿态做包络基准
+            if self.ee_q is None or (time.monotonic() - self.ee_t) > 0.5:
+                resp.success = False
+                resp.message = "收不到 /a3/ee_pose（a3_ee_pose 在跑吗？）"
+                resp.mode = self._mode
+                return resp
+            dur = float(req.duration_s) if req.duration_s > 0.0 else self.rw_dur
+            bound = amp if amp > 0.0 else 0.0      # amp_deg：可选，统一收紧姿态包络
+            self._start_random(dur, peak, math.radians(bound))
+            resp.success = True
+            resp.message = (
+                f"random walk start: 峰值 {math.degrees(peak):.0f}°/s，"
+                f"{'不限时' if dur <= 0.0 else f'{dur:.0f}s 自停'}"
+                + (f"，包络 ±{bound:.0f}°" if bound > 0.0 else ""))
+            resp.mode = self._mode
+            self.get_logger().warn(resp.message)
+            return resp
+
         self._start(mode, amp, peak, cycles)
         resp.success = True
         resp.message = (
@@ -224,14 +321,10 @@ class AngularCruiseNode(Node):
             self._cycles_left = 1
             self._repeat = ""
             self._legs = self._legs_xyz(amp_override)
-        elif mode == "spin":
+        else:  # spin
             self._cycles_left = None if cycles == 0 else cycles
             self._repeat = "spin"
             self._legs = self._legs_spin(amp_override)
-        else:
-            self._cycles_left = None if cycles == 0 else cycles
-            self._repeat = "random"
-            self._legs = self._legs_random(amp_override)
         self._leg_i = 0
         self._begin_leg()
         self._running = True
@@ -239,6 +332,44 @@ class AngularCruiseNode(Node):
         self._last_reason = ""
         if self._servo_start_cli.service_is_ready():
             self._servo_start_cli.call_async(Trigger.Request())
+
+    def _start_random(self, dur: float, peak: float, bound_override: float) -> None:
+        """随机角度游走：OU 角速度过程（方向连续随机游走），姿态按轴设包络。
+
+        不用"一步一停"的离散小步：在 home 这类腕部接近奇异的位姿下，频繁的速度
+        过零会让 a3_servo_target 反复判 IK 另一分支（`IK 解远离实测`），末端漂移
+        可达数厘米；连续角速度则能稳定跟踪（与 translate 的 OU 同一套思路）。
+        """
+        self._mode = "random"
+        self.peak = peak
+        self._running = True
+        self._zero_until = 0.0
+        self._cycles_left = None
+        self._repeat = ""
+        self._legs = []
+        frac = self.rw_bound_frac
+        bounds = []
+        for axis in ("x", "y", "z"):
+            ap, an = DEFAULT_AMP[axis]
+            if bound_override > 0.0:
+                ap = an = min(bound_override, max(ap, an))
+            bounds.append((-math.radians(an * frac), math.radians(ap * frac)))
+        self._rw = {
+            "t0": time.monotonic(),
+            "dur": dur,
+            "q0": self.ee_q,
+            "bounds": bounds,
+            "w": [0.0, 0.0, 0.0],
+            "last_w": [0.0, 0.0, 0.0],
+        }
+        if self._servo_start_cli.service_is_ready():
+            self._servo_start_cli.call_async(Trigger.Request())
+        self.get_logger().warn(
+            "random walk 开始：峰值 %.0f°/s，%s，包络 X ±%.0f°/Y +%.0f/-%.0f°/Z ±%.0f°"
+            % (math.degrees(peak),
+               "不限时" if dur <= 0.0 else f"{dur:.0f}s 自停",
+               math.degrees(bounds[0][1]), math.degrees(bounds[1][1]),
+               math.degrees(-bounds[1][0]), math.degrees(bounds[2][1])))
 
     def _start_translate(self, dur: float, vmax: float, bound: float,
                          rot_deg: float) -> None:
@@ -312,25 +443,10 @@ class AngularCruiseNode(Node):
         a = min(a, DEFAULT_AMP["z"][0], DEFAULT_AMP["z"][1])
         return [("z", 0.0, a), ("z", a, -a), ("z", -a, 0.0)]
 
-    def _legs_random(self, amp_override: float) -> List[Leg]:
-        axis = random.choice(("x", "y", "z"))
-        cap = abs(amp_override) if amp_override > 0.0 else 0.0
-        ap, an = self._axis_amp(axis, cap, randomize=True)
-        old = self.peak
-        self.peak = old * random.uniform(self.rand_peak_min, 1.0)
-        self.get_logger().info(
-            f"random 轮次：axis={axis} +{ap:.0f}°/-{an:.0f}°，"
-            f"峰值 {math.degrees(self.peak):.0f}°/s")
-        return [(axis, 0.0, ap), (axis, ap, -an), (axis, -an, 0.0)]
-
-    def _axis_amp(self, axis: str, override: float,
-                  randomize: bool = False) -> Tuple[float, float]:
+    def _axis_amp(self, axis: str, override: float) -> Tuple[float, float]:
         dp, dn = DEFAULT_AMP[axis]
         if override > 0.0:
             dp = dn = min(override, max(dp, dn))
-        if randomize:
-            dp *= random.uniform(self.rand_min, 1.0)
-            dn *= random.uniform(self.rand_min, 1.0)
         return dp, dn
 
     def _begin_leg(self) -> None:
@@ -370,6 +486,9 @@ class AngularCruiseNode(Node):
         if self._mode == "translate_xyz":
             self._tick_translate_xyz(now)
             return
+        if self._mode == "random":
+            self._tick_random(now)
+            return
         axis, a0, a1 = self._legs[self._leg_i]
         el = now - self._leg_t0
         if el >= self._leg_T:
@@ -381,9 +500,7 @@ class AngularCruiseNode(Node):
                     if self._cycles_left <= 0:
                         self._stop("完成")
                         return
-                if self._repeat == "random":
-                    self._legs = self._legs_random(0.0)
-                elif self._repeat == "spin":
+                if self._repeat == "spin":
                     self._legs = self._legs_spin(0.0)
             self._begin_leg()
             return
@@ -477,6 +594,57 @@ class AngularCruiseNode(Node):
         self._v = v
         self._last_v = list(v)
         self._publish((0.0, 0.0, 0.0), v)
+
+    def _tick_random(self, now: float) -> None:
+        """随机角度游走主循环：OU 角速度，只发 angular（末端位置保持）。"""
+        rw = self._rw
+        dur = rw.get("dur", 0.0)
+        if dur > 0.0 and (now - rw["t0"]) >= dur:
+            self._stop(f"达到时长 {dur:.0f}s")
+            return
+        if self.ee_q is None or (now - self.ee_t) > 0.5:
+            self._stop("ee_pose 超时")
+            return
+        why = self._joint_guard()      # 只在无界游走时启用（xyz/spin 幅度已实测）
+        if why:
+            self._stop(f"关节守卫：{why}")
+            return
+        r = _rot_vec(_q_mul(self.ee_q, _q_conj(rw["q0"])))
+        bounds = rw["bounds"]
+        for i, (lo, hi) in enumerate(bounds):
+            if r[i] > hi or r[i] < lo:
+                self._stop(
+                    f"姿态越界 {'xyz'[i]}={math.degrees(r[i]):+.0f}° "
+                    f"(允许 {math.degrees(lo):+.0f}..{math.degrees(hi):+.0f}°)")
+                return
+
+        dt = self.dt
+        wmax = self.peak
+        w = rw["w"]
+        sigma = 0.8 * wmax
+        for i in range(3):
+            w[i] += (-(w[i] / self.rw_tau) * dt
+                     + sigma * math.sqrt(dt) * random.gauss(0.0, 1.0))
+        # 软边界回中（按轴：越过 70% 包络就往回推）
+        soft = self.rw_soft_frac
+        for i, (lo, hi) in enumerate(bounds):
+            lo_s, hi_s = lo * soft, hi * soft
+            if r[i] > hi_s:
+                w[i] -= (r[i] - hi_s) / max(1e-3, hi - hi_s) * 2.0 * wmax
+            elif r[i] < lo_s:
+                w[i] += (lo_s - r[i]) / max(1e-3, lo_s - lo) * 2.0 * wmax
+        # 加速度限幅 + 模长限幅
+        prev = rw["last_w"]
+        lim = self.rw_accel * dt
+        for i in range(3):
+            dv = w[i] - prev[i]
+            w[i] = prev[i] + max(-lim, min(lim, dv))
+        n = math.sqrt(sum(c * c for c in w))
+        if n > wmax and n > 1e-9:
+            w = [c * wmax / n for c in w]
+        rw["w"] = w
+        rw["last_w"] = list(w)
+        self._publish((w[0], w[1], w[2]))
 
     def _publish(self, w, v=(0.0, 0.0, 0.0)) -> None:
         msg = TwistStamped()

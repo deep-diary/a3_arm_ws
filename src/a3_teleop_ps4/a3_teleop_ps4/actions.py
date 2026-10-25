@@ -134,6 +134,13 @@ class ActionExecutor:
         self._teach_start_waypoint = node.create_client(
             Trigger, "/a3/arm/start_waypoint_teach")
         self._teach_stop = node.create_client(Trigger, "/a3/arm/stop_teach")
+        # F195 口风琴 PIANO：路点槽位录制（press/extremes）+ 按键 stream 生成
+        self._melodion_record_press = node.create_client(
+            Trigger, "/a3/arm/melodion/record_press")
+        self._melodion_record_extremes = node.create_client(
+            Trigger, "/a3/arm/melodion/record_extremes")
+        self._melodion_gen_streams = node.create_client(
+            Trigger, "/a3/arm/melodion/gen_streams")
         self._playback = node.create_client(PlaybackTrajectory, "/a3/arm/playback")
         # F116: Options 长按 3s 触发随机命名点巡游（服务端仅 READY 态放行）
         self._random_tour = node.create_client(
@@ -382,6 +389,28 @@ class ActionExecutor:
             return
         client.call_async(Trigger.Request())
 
+    def _call_trigger_report(self, client, label: str) -> None:
+        """调用 Trigger 并把 success/message 打到日志（口风琴录制/生成要看结果）。"""
+        if not client.service_is_ready():
+            self._n.get_logger().warn(f"{label} not available")
+            return
+        future = client.call_async(Trigger.Request())
+        if future is None:
+            self._n.get_logger().error(f"{label} 调用失败")
+            return
+
+        def _done(fut):
+            try:
+                resp = fut.result()
+            except Exception as exc:  # noqa: BLE001
+                self._n.get_logger().error(f"{label} 调用异常：{exc}")
+                return
+            ok = bool(getattr(resp, "success", False))
+            log = self._n.get_logger().info if ok else self._n.get_logger().error
+            log(f"{label}: {getattr(resp, 'message', '')}")
+
+        future.add_done_callback(_done)
+
     def _servo_pause(self) -> None:
         if self._servo_paused:
             return
@@ -511,6 +540,21 @@ class ActionExecutor:
 
     def teach_stop(self) -> None:
         self._call_trigger(self._teach_stop, "arm/stop_teach")
+
+    # --- F195 口风琴 PIANO：路点槽位 + stream 生成 ---
+
+    def melodion_record_press(self) -> None:
+        """PIANO ↓：演奏路点示教（保存到 melodies/waypoints/press.yaml）。"""
+        self._call_trigger_report(self._melodion_record_press, "arm/melodion/record_press")
+
+    def melodion_record_extremes(self) -> None:
+        """PIANO ←：4 极限键录制（保存到 melodion/waypoints/extremes.yaml）。"""
+        self._call_trigger_report(self._melodion_record_extremes,
+                                  "arm/melodion/record_extremes")
+
+    def melodion_gen_streams(self) -> None:
+        """PIANO ↑：由路点生成 press/extremes 两条按键 stream（不运动）。"""
+        self._call_trigger_report(self._melodion_gen_streams, "arm/melodion/gen_streams")
 
     # --- F189/F190: 模式化按键语义 ---
 

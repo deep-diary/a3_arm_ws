@@ -31,7 +31,7 @@
 | TRACK：网格开关 / 三类标定 | ✅ 已实现 | ○短=网格开关；○长=目标标定；□长=深度标定；□短=状态；△长=重载雅可比 |
 | D-pad 跟踪距离/目标中心微调 | ❌ 未实现 | TRACK 的 D-pad 留空（用 ○ 长按一次记录目标代替） |
 | F192 `generate_stream`（口风琴 stream 生成服务） | ❌ 未重建 | PIANO 的 △ 短按直接回放 `stream latest` |
-| F193 巡游（DEMO △/○ 短长按，平移与旋转严格分离） | ✅ 已实现 | `a3_bringup/angular_cruise` + `AngularCruise` srv；△短=`translate_xyz`、△长=`translate`（OU 连续，30 s/越界/姿态 15° 自停）、○短=`xyz`、○长=`random`，`spin` 备用；mock 硬件已验收 PASS |
+| F193 巡游（DEMO △/○ 短长按，平移与旋转严格分离） | ✅ 已实现 | `a3_bringup/angular_cruise` + `AngularCruise` srv；△短=`translate_xyz`、△长=`translate`（OU 连续，30 s/越界/姿态 15° 自停）、○短=`xyz`、○长=`random`（OU 角度游走，30 s 自停 + 姿态包络 + 关节限位守卫），`spin` 备用；mock 硬件四项全部 PASS |
 | F193 舞蹈槽位（`playback type=dance` + `/a3/arm/save_slot`） | ❌ 未重建 | DANCE 模式暂为"回放 latest / 路点 PTP" |
 | 显示：统一 `/a3/vision/display` + FaceOverlay（F194） | ✅ 已实现 | 原图 25 Hz 主底 + 最后一层叠加；网格用 mediapipe 全量 2556 条边 |
 
@@ -147,7 +147,7 @@
 | **Triangle 短按 1.5s** | **固定三轴平移**：`{action:start, mode:"translate_xyz"}`（X→Y→Z 依次 `0→+A→−A→0`，只发 linear；水平 ±6 cm、z ±4.5 cm，一轮后自停） |
 | **Triangle 长按 1.5s** | **连续随机平移**：`{mode:"translate", duration_s:30}`（OU 速度、锁姿态、半径 6 cm；30 s 或越界/姿态漂移 15° 自停） |
 | **Circle 短按 1.5s** | **固定三轴旋转**：`{action:start, mode:"xyz"}`（X→Y→Z 各摆一轮，只发 angular，绕末端点、位置不动） |
-| **Circle 长按 1.5s** | **随机轴旋转**：`{action:toggle, mode:"random"}`（每轮随机轴+随机幅度，只发 angular，再按停止） |
+| **Circle 长按 1.5s** | **随机方向旋转**：`{action:toggle, mode:"random"}`（OU 角速度随机游走，只发 angular；姿态包络 X ±64°、Y +20/−36°、Z ±36°，越过 70% 回中；**默认 30 s 自停**，也可再按 ○ 停） |
 | Square 短按 | 随机命名点巡游 `random_pose_tour` |
 | L2 短按 | 保存当前点位 |
 | Options 短按 | 停止并退出（`demo_angular_stop` + `/a3/arm/stop`） |

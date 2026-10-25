@@ -18,7 +18,8 @@
     translate_xyz : X→Y→Z 依次平移（各轴 ±6cm / z ±4.5cm），姿态变化 < 3°
     translate     : 连续随机平移，留在半径内，姿态 < 16°
     xyz           : 只旋转，末端位移 < 10 mm，姿态最大变化 > 40°
-    random        : 只旋转，末端位移 < 10 mm，姿态有变化
+    random        : 只旋转（单向随机游走），末端位移 < 10 mm，姿态有变化，
+                    且到 duration 后自行停住（末 2 s 姿态基本不变）
 """
 
 import math
@@ -26,7 +27,7 @@ import os
 import sys
 import time
 
-os.environ.setdefault("ROS_DOMAIN_ID", "99")
+os.environ.setdefault("ROS_DOMAIN_ID", "77")
 
 import rclpy  # noqa: E402
 from geometry_msgs.msg import PoseStamped  # noqa: E402
@@ -84,7 +85,7 @@ class Probe(Node):
 
     def call(self, action: int, mode: str = "", duration: float = 0.0,
              vmax: float = 0.0, bound: float = 0.0, rot: float = 0.0,
-             peak: float = 0.0):
+             peak: float = 0.0, amp: float = 0.0):
         if not self.cli.wait_for_service(timeout_sec=3.0):
             raise RuntimeError("angular_cruise 服务不可用")
         req = AngularCruise.Request()
@@ -95,6 +96,7 @@ class Probe(Node):
         req.bounds_m = float(bound)
         req.rot_bound_deg = float(rot)
         req.peak_dps = float(peak)
+        req.amp_deg = float(amp)
         fut = self.cli.call_async(req)
         t0 = time.monotonic()
         while not fut.done() and time.monotonic() - t0 < 5.0:
@@ -117,8 +119,18 @@ class Probe(Node):
                 ext[i][1] = max(ext[i][1], dp[i])
             dot = abs(sum(a * b for a, b in zip(q0, q)))
             max_ang = max(max_ang, 2.0 * math.acos(min(1.0, dot)))
-        return dict(n=len(self.samples), max_dp=max_dp,
-                    ext=ext, max_ang=math.degrees(max_ang))
+        # 末 2 s 的姿态变化（判断是否已自停）
+        t_end = self.samples[-1][0]
+        tail = [q for t, _, q in self.samples if t >= t_end - 2.0]
+        tail_ang = 0.0
+        if len(tail) > 1:
+            qt = tail[0]
+            for q in tail[1:]:
+                dot = abs(sum(a * b for a, b in zip(qt, q)))
+                tail_ang = max(tail_ang, 2.0 * math.acos(min(1.0, dot)))
+        return dict(n=len(self.samples), max_dp=max_dp, ext=ext,
+                    max_ang=math.degrees(max_ang),
+                    tail_ang=math.degrees(tail_ang))
 
 
 def fmt(s) -> str:
@@ -159,17 +171,18 @@ def main() -> int:
     n.spin_for(14.0)
     results["translate"] = n.stats()
 
+    n.goto_home()
     r = n.call(1, "xyz", peak=30.0)
     print("start xyz:", r.success, r.message)
     n.samples.clear()
     n.spin_for(40.0)
     results["xyz"] = n.stats()
 
-    r = n.call(1, "random", peak=45.0)
+    n.goto_home()             # DEMO 每次进入都先回 home；验收同样逐项复位
+    r = n.call(1, "random", duration=12.0, peak=30.0)
     print("start random:", r.success, r.message)
     n.samples.clear()
-    n.spin_for(12.0)
-    n.call(0)
+    n.spin_for(16.0)          # 12 s 到点自停，多留 4 s 观察末段是否静止
     results["random"] = n.stats()
 
     print("\n=== 结果 ===")
@@ -184,7 +197,8 @@ def main() -> int:
     s = results["xyz"]
     c3 = bool(s) and s["max_dp"] < 0.010 and s["max_ang"] > 40.0
     s = results["random"]
-    c4 = bool(s) and s["max_dp"] < 0.010 and s["max_ang"] > 5.0
+    c4 = (bool(s) and s["max_dp"] < 0.010 and s["max_ang"] > 10.0
+          and s["tail_ang"] < 0.5)
 
     ok = True
     for name, cond in (("translate_xyz", c1), ("translate", c2),

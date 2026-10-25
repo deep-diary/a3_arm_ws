@@ -32,7 +32,7 @@ float64 rot_bound_deg  # 姿态漂移上限默认 15°
 | `translate_xyz` | X→Y→Z 依次 `0→+A→−A→0`，只发 linear | 位置 ±6cm（z ±4.5cm），姿态不变 |
 | `translate` | OU 随机速度连续平移，30 s 或越界/姿态漂移自停 | 位置留在 6cm 半径内，姿态不变 |
 | `xyz` | 绕基座 X→Y→Z 各摆一轮，只发 angular | 末端位置保持，姿态 ±80/25-45/45° |
-| `random` | 每轮随机轴 + 随机幅度/速度，只发 angular | 末端位置保持 |
+| `random` | OU 角速度随机方向游走，只发 angular；默认 30 s 自停 | 姿态相对起点按轴限幅（X ±64°、Y +20/−36°、Z ±36°），70% 软边界回中 |
 | `spin`（备用） | 偏航往复连续 | 末端位置保持 |
 
 运动形状沿用 F185：每段 `0→+A→−B→0`，速度正弦包络
@@ -43,7 +43,7 @@ float64 rot_bound_deg  # 姿态漂移上限默认 15°
 |---|---|---|
 | `xyz` | X→Y→Z 依次各摆一轮，自动结束（约 34 s） | X ±80°、Y +25/−45°、Z ±45°，峰值 30°/s |
 | `spin` | 偏航(Z) 往复连续，再按一次停止 | ±45°，峰值 30°/s |
-| `random` | 每轮随机挑一根基座轴 + 随机幅度（0.5~1.0×安全幅度）、随机峰值（0.7~1.0×30°/s），循环到停止 | 上限同上 |
+| `random` | 见下节：OU 角速度随机方向游走，默认 30 s 自停（`duration_s=0` 用参数 `random_duration_s`，0=不限时） | 峰值 30°/s，包络 = 上表 × 0.8 |
 
 幅度取 F185 `--analyze` 的 URDF 限位扫描结果（留 3–10° 余量），**不生成任意斜轴**，
 避免超出已验证包络。
@@ -53,7 +53,28 @@ float64 rot_bound_deg  # 姿态漂移上限默认 15°
 - `/a3/arm_status` 必须是 `READY` / `SERVO`
 - `/a3/control_mode` 不能是 `ZERO_TORQUE`
 - `/a3/vision/mode` 不能是 `face_track`（否则两路 twist 抢同一话题）
+- `random` 额外两道守卫：姿态包络（相对起点旋转向量按轴，硬边界越界即停）
+  + 关节限位余量（`/joint_states` 任一关节距 URDF 限位 < 8° 即停）
 - 停止时补发 0.3 s 零速，避免下游保持最后一拍
+
+## 随机角度游走（`random`）
+
+OU 角速度过程（与 `translate` 的 OU 同一套，只是换成姿态空间）：
+
+- `w += −(w/τ)·dt + σ·√dt·N(0,1)`，`τ=0.5 s`、`σ=0.8×峰值(30°/s)`，
+  角加速度限幅 `1.0 rad/s²`，模长限幅 `峰值`
+- 姿态包络：相对起始 `q0` 的旋转向量按轴限制在 F185 实测值的 80%
+  （X ±64°、Y +20/−36°、Z ±36°）；越过 70% 后叠加反向角速度回中
+- 停止条件：达到时长（默认 30 s）/ 姿态越界 / 关节贴限位 / `ee_pose` 超时 / 门禁失效
+- 只发 angular（linear=0），末端位置由 `a3_servo_target` 的 `rotation_about_tip` 保持
+
+> 为什么不用"每小步换轴"的离散小步：home 工作位腕部接近奇异，每个小段两端速度归零会
+> 让 `a3_servo_target` 反复判 IK 另一分支（`IK 解远离实测 0.200 rad`），实测末端漂移
+> 6°/15°/25° 步长分别 46/24/17 mm；连续角速度则是 1~2 mm。
+
+> **自碰撞检测仍未接入**：`a3_servo_target` 只做 IK 单步限幅 + 关节命令钳位
+> （`cmd_limit_margin=0.02 rad`），没有碰撞检测；MoveIt `/check_state_validity` 在这套栈
+> 不回包，pinocchio 4.0 的碰撞 API 还需适配。当前用"姿态包络 + 关节限位余量"等效兜底。
 
 ## 固定三轴平移（`translate_xyz`）
 
@@ -99,7 +120,8 @@ float64 rot_bound_deg  # 姿态漂移上限默认 15°
    一轮后自动停
 2. `mode:'translate'`：连续随机平移，位置留在 6cm 半径内，姿态 ≈0°，30 s 或越界自停
 3. `mode:'xyz'`：只旋转（X/Y/Z 各一轮），末端位移 < 10 mm，姿态最大变化 > 40°
-4. `mode:'random'`：只旋转，末端位移 < 10 mm，姿态有变化，再 `action:2`/`0` 停止
+4. `mode:'random'`：只旋转（OU 随机方向游走，默认 30 s 自停），末端位移 < 10 mm，
+   姿态有变化；到时长后自行停住
 5. `DISABLED` 下启动 → `cannot start: arm_state=DISABLED（需 READY）`，
    `/servo_node/delta_twist_cmds` 无消息
 6. 人脸跟踪开启时启动 → 被拒绝（"人脸跟踪开着"）
@@ -107,14 +129,20 @@ float64 rot_bound_deg  # 姿态漂移上限默认 15°
 ### 已完成的 mock 硬件验收（2026-10-25，domain 77）
 
 环境：`hardware:=mock use_servo_target:=true`（与真机同一条 `a3_servo_target` 链），
-脚本 `scripts/a3_test/f193_demo_tour_accept.py`：
+脚本 `scripts/a3_test/f193_demo_tour_accept.py`（每项前先 `goto home`）：
 
 | 模式 | 实测 |
 |---|---|
-| `translate_xyz` | 位置 ext x −60..+61 mm、y −60..+61 mm、z −46..+46 mm；姿态 0.0° → **PASS** |
+| `translate_xyz` | 位置 ext x −60..+61 mm、y −60..+61 mm、z −45..+46 mm；姿态 0.0° → **PASS** |
 | `translate`（12 s） | 位置留在 6 cm 内；姿态 0.0° → **PASS** |
-| `xyz`（30°/s） | 姿态 80.5°；末端漂移 **1.9 mm** → **PASS** |
-| `random`（12 s） | 姿态 76.2°；末端漂移 **0.0 mm** → **PASS** |
+| `xyz`（30°/s） | 姿态 80.3°；末端漂移 **1.8 mm** → **PASS** |
+| `random`（12 s） | 姿态 33.9°；末端漂移 **1.3 mm** → **PASS** |
+| `random`（默认 30 s） | 姿态 47.9°；末端漂移 **1.8 mm**，到 30 s 自动停 |
+
+> **离散小步为什么被放弃**：先试过"每小步 6~25° 换轴 + 正弦包络（两端速度归零）"，
+> `a3_servo_target` 在 home（腕部接近奇异）反复报
+> `IK 解远离实测 0.200 rad → 判为另一分支，保持当前目标`，末端漂移 6°/15°/25° 步长
+> 分别 46/24/17 mm。改成连续 OU 角速度（与 `translate` 同款）后漂移降到 1~2 mm。
 
 > 不能用 `a3_stack.sh start --sim` 的 moveit_servo 验收几何：该链在当前姿态大量报
 > `Could not find IK solution (error -31)`；mock + `a3_servo_target` 才与真机一致。
