@@ -50,10 +50,13 @@ except ImportError:  # 未编译 a3_msgs 时给出明确提示
     raise
 
 
-# F194：网格三角剖分连线（每 4 条取 1 条，约 500 条，显示层画线不至于压满 CPU）
+# F194：网格三角剖分连线（mediapipe 官方 FACEMESH_TESSELATION 全量 2556 条）。
+# 注意不能做 `sorted(...)[::N]` 这类抽样：按字典序抽会把左右对称的边抽得不一致，
+# 显示出来的网格就会"一侧密一侧疏"（用户 2026-10-25 反馈）。显示层用 LINE_8
+# 画全量只需 ~7 ms/帧，没必要为省 CPU 破坏对称性。
 try:
     import mediapipe as _mp
-    MESH_EDGES = [int(v) for pair in sorted(_mp.solutions.face_mesh.FACEMESH_TESSELATION)[::4]
+    MESH_EDGES = [int(v) for pair in _mp.solutions.face_mesh.FACEMESH_TESSELATION
                   for v in pair]
 except Exception:  # noqa: BLE001
     MESH_EDGES = []

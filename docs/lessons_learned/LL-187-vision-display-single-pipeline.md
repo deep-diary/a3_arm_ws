@@ -25,6 +25,10 @@ RK3588 上互相抢带宽/CPU；且检测只有 10–15 Hz，标注图天然比�
 3. 判断"画面卡"先看 `ros2 topic hz /camera/image_raw`（用 `camera_info` 这种小消息或
    发布端日志，不要用 Python 订阅大图判帧率，LL-168）。
 4. 图像类 QoS 用 BEST_EFFORT，但深度别压到 1（12 Hz 级别的标注会因严格丢帧而抖）。
+5. **网格连线不要做按索引抽样**：`sorted(FACEMESH_TESSELATION)[::4]` 按字典序每 4 条取 1，
+   不具镜像对称性 → 显示出来"一侧密一侧疏"（用户 2026-10-25 反馈）。用全量 2556 条 +
+   `cv2.LINE_8`（~7 ms/帧；`LINE_AA` 要 ~29 ms），既对称又不吃 CPU。网格点用
+   numpy 直接写像素（`img[yi, xi] = color`），比逐点 `cv2.circle` 快一个数量级。
 
 ## 相关路径
 

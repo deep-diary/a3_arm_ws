@@ -186,16 +186,19 @@ class VisionDisplayMux(Node):
         px = pts.reshape(-1, 2) * np.array([w, h], dtype=np.float32)
 
         if self._show_mesh and len(ov.edges) >= 2:
-            # mediapipe 三角剖分连线（一次性 polylines，比逐条 line 快得多）
-            edges = np.asarray(ov.edges, dtype=np.int32).reshape(-1, 2)
-            idx = edges[edges < len(px)]
-            if idx.size >= 2:
-                segs = px[idx].astype(np.int32)
-                cv2.polylines(img, list(segs.reshape(-1, 2, 2)),
-                              False, MESH_COLOR, 1, cv2.LINE_AA)
-            # 网格点
-            for x, y in px.astype(np.int32):
-                cv2.circle(img, (int(x), int(y)), 1, POINT_COLOR, -1)
+            # mediapipe 官方三角剖分（2556 条，左右对称）。一次性 polylines 画完；
+            # 用 LINE_8 而不是 LINE_AA：全量边的 AA 版本实测 ~29 ms/帧，非 AA 只要 ~7 ms。
+            e = np.asarray(ov.edges, dtype=np.int32).reshape(-1, 2)
+            ok = (e >= 0).all(axis=1) & (e < len(px)).all(axis=1)
+            e = e[ok]
+            if e.size:
+                segs = px[e].astype(np.int32)          # (N, 2, 2)
+                cv2.polylines(img, list(segs), False, MESH_COLOR, 1, cv2.LINE_8)
+            # 网格点：直接写像素（比逐点 cv2.circle 快一个数量级）
+            xi = np.rint(px[:, 0]).astype(np.int32)
+            yi = np.rint(px[:, 1]).astype(np.int32)
+            vis = (xi >= 0) & (xi < w) & (yi >= 0) & (yi < h)
+            img[yi[vis], xi[vis]] = POINT_COLOR
 
         if len(ov.silhouette) >= 6:
             sil = (np.asarray(ov.silhouette, dtype=np.float32)
