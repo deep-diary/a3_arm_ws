@@ -25,7 +25,7 @@
     # goto 规划时间调慢：velocity+acc 0.30→0.15 使轨迹时长约翻倍（2026-09 真机
     # "goto 挺快"，减速亦减小 JTC 跟踪误差余量）
     moveit_velocity_scaling: 0.15
-    moveit_acceleration_scaling: 0.15
+    moveit_acceleration_scaling: 0.25
     # F163: 轨迹段 via 过点（gotoby 原语）——当前位→中间过点→目标 一条 C2 平滑轨迹。
     # 峰值速度/加速度上限与过点样条稠密重采样点数；段级 speed(0~1) 线性缩放 v/a。
     # F16x: via 点姿态保持（_solve_ik_position ref_orientation）消除腕部绕路后，

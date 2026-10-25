@@ -2,7 +2,8 @@
 # 时值约定：0.25=十六分 / 0.5=八分 / 0.75=附点八分 / 1=四分 / 2=二分
 # 起拍采用附点八分+十六分（0.75+0.25），用于覆盖 1/4 拍的按键时长。
 # 生成：python3 scripts/melodion_score_stream.py --score happy_birthday
-tempo_bpm: 80
+title: "生日歌"
+tempo_bpm: 100
 notes:
   # Happy birthday to you
   - { name: "G4", beats: 0.75 }
