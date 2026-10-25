@@ -5,38 +5,46 @@
 > 需求与验收：[docs/edge/REQUIREMENTS.md](../../docs/edge/REQUIREMENTS.md) F60–F64、F119/F120/F135；
 > 安全合同：[docs/shared/SAFETY.md](../../docs/shared/SAFETY.md)。
 
-## 完整映射表（`mapping:=default`，F60 + F64）
+## 固定层（所有模式生效）
 
 | 键 | 边沿 | 动作 | 底层调用 |
 |----|------|------|----------|
-| **L3** | 短按 | 一键开门禁 + 使能 | `power start` → `/a3/arm/enable`（幂等） |
-| **R3** | 短按 | 任意模式软失能 | `/a3/arm/disable`（F119：先从 SERVO/示教/重力补偿退出当前模式 → F40 safe-park 回 idle → 保电失能） |
+| **L3** | 按下 | 一键开门禁 + 使能 | `power start` → `/a3/arm/enable`（幂等） |
+| **R3** | 按下 | 任意模式软失能 | `/a3/arm/disable`（F119：先退出 SERVO/示教/重力补偿 → F40 safe-park 回 idle → 保电失能） |
 | **Cross（✕）** | 长按 1 s | **硬急停**（断电、关闸；恢复需 L3） | `/power_sequence/command shutdown` |
-| **Triangle（▲）** | 按下即触发 | goto home | `/a3/arm/goto_named_pose {name: home}` |
-| **Share** | 短按 | 开始**连续**示教（蓝呼吸） | `/a3/arm/start_teach`（零力矩拖动 + 记录） |
-| **Share** | 长按 1.5 s | 开始**路点**示教（青呼吸，F131） | `/a3/arm/start_waypoint_teach`（零力矩拖动 + L2 打点） |
-| **Options** | 短按 | 结束示教（按当前类型自动保存 latest） | `/a3/arm/stop_teach` |
-| **Options** | 长按 3 s | F116 随机点位巡游（仅 READY 态，TEACH/WAYPOINT_TEACH/TRAJ 被安全拒绝） | `/a3/arm/random_pose_tour {count: 0, seed: 0}` |
-| **Square（■）** | 短按 | 回放最新**连续**轨迹 | `/a3/arm/playback {name: "", type: ""}` ≡ latest continuous |
-| **Square（■）** | 长按 1.5 s | 回放最新**路点** PTP（关节空间 MoveJ，F131） | `/a3/arm/playback {name: "", type: "waypoint", strategy: "ptp"}` |
-| **Circle（●）** | 短按 | goto idle | `/a3/arm/goto_named_pose {name: idle}` |
-| **Circle（●）** | 长按 1.5 s | 回放最新**路点** LIN（笛卡尔直线，F131；跨奇异拒绝不回落 PTP） | `/a3/arm/playback {name: "", type: "waypoint", strategy: "lin"}` |
-| **L1+R1 同按** | 长按 2 s | init（设零：写当前位姿为零点，**不带使能**；F135 起 PS 键解绑——PS 是开机键易误触） | `/a3/arm/init` |
-| **L1** | 按住 | **平移死人开关**：仅放行平移轴（F64 gates） | 松开约 0.5 s servo 超时停 |
-| **R1** | 按住 | **旋转死人开关**：放行偏航/俯仰/滚转三轴（F183） | 同上 |
-| **R2** | 模拟 | 夹爪力控（**不需要 L1/R1**），松开全开 | gripper_force |
-| 左摇杆 X / Y | 模拟（L1） | 平移 Y（左右）/ Z（上下） | servo_lin_y / servo_lin_z |
-| 左摇杆 X | 模拟（R1） | 滚转（绕 X，F183） | servo_ang_x |
-| 右摇杆 Y / X | 模拟 | 平移 X（前后，gate l1）/ 偏航（gate r1） | servo_lin_x / servo_ang_z |
-| 右摇杆 Y | 模拟（R1） | 俯仰（绕 Y，抬腕/低头，F183） | servo_ang_y |
-| **D-pad 上 / 下** | 点按 | goto 口风琴黑键 A#5 / F#3 未按压基准点（melodion_black13/black1），F176 | `goto_named_pose {name: melodion_black13/melodion_black1}` |
-| **D-pad 左 / 右** | 点按 | goto 口风琴白键 F3 / C6 未按压基准点（melodion_white1/white19），F176 | `goto_named_pose {name: melodion_white1/melodion_white19}` |
-| **L2** | 短按 | 保存当前位姿为 snap_YYYYMMDD_HHMMSS（F114，写包内 named_poses.yaml） | `/a3/arm/save_named_pose {name: ""}` |
-| touchpad | 单击（tap） | **预留不绑**（蓝牙无键事件 LL-052；hidraw 触摸偏移缺陷 LL-143，F132 修复后在 `default.yaml` 取消注释即绑 LIN 回放） | — |
+| **L1+R1 同按** | 长按 2 s | init（设零；**不带使能**） | `/a3/arm/init` |
+| **L1** | 按住 | **平移死人开关**：仅放行平移轴 | servo_lin_x/y/z（gates l1） |
+| **R1** | 按住 | **旋转死人开关**：偏航/俯仰/滚转 | servo_ang_x/y/z（gates r1） |
+| **R2** | 模拟 | 夹爪力控（不需要 L1/R1），松开全开 | gripper_force |
+| **Share 按住** | 修饰 | 进入"选模式"窗口，屏蔽摇杆/其它键 | — |
+| **Options** | 短按 | 退出当前模式 → NORMAL（示教类先保存） | `/a3/arm/stop` |
 
-> F115 起 D-pad 不再调速，平移/旋转恒用 `speed_normal`（默认 0.35）；`step_linear_scale/step_angular_scale` 动作函数保留，自定义映射可自行绑定。
+## 选模式（按住 Share + 方向/面键，直接点名不循环）
 
-口诀：**L3 开工、R3 收工、✕ 长按急停；▲ home、● idle（F120）；Share-Options-■ = 连续示教-保存-回放；Share 长按+L2 打点 = 路点示教（F131），■ 长按 PTP、● 长按 LIN；L1+R1 同按 2 s 设零（F135，PS 已解绑）；L1 平移、R1 旋转、十字键直达口风琴四点（F176）。**
+| 组合 | 模式 | 说明 |
+|---|---|---|
+| Share + ↑ | TEACH | 进模式即准备拖动（未使能会自动上电+使能，READY 后自动开录） |
+| Share + ↓ | WAYPOINT | 路点示教（L2/△ 打点） |
+| Share + ← | TRACK | 人脸跟踪（自动 enable；4 根摇杆轴被屏蔽，R2 保留） |
+| Share + → | PIANO | 口风琴定位点 |
+| Share + △ | DEMO | home 五向巡游 / 随机巡游 |
+| Share + ○ | DANCE | 回放最新动作 |
+| Share + □ | NORMAL | 手动/通用回放 |
+
+## 各模式按键
+
+| 模式 | 按键 → 动作 |
+|---|---|
+| **NORMAL** | ↑=home、↓=idle、←=前（normal_slot_left）、→=后（normal_slot_right）；△短=ready、△长=回放 latest；□短=存点、□长=路点 PTP；○短=停止、○长=路点 LIN；L2=存点 |
+| **TEACH** | 进入即开录；△=开/停录制（停即保存）；L2=存点 |
+| **WAYPOINT** | 进入即开路点录制；△=开始/打点；L2=打点 |
+| **TRACK** | △=跟踪开/关；**Options 长按 1.5 s=网格点/网格线/人脸框开关**；L2=存点 |
+| **PIANO** | D-pad 四向=口风琴四点；△=回放 stream `latest`；○/□=首/末键；L2=存点 |
+| **DEMO** | △=home 五向巡游；○=停止；□=随机点位巡游；L2=存点 |
+| **DANCE** | △=回放 latest；□=路点 PTP；○=停止；L2=存点 |
+
+> 方向键方向已按物理方向修正（`ds4_linux.yaml` 对 `dpad_x`/`dpad_y` 取反，F189）。
+> 口诀：**Share+方向选模式，Options 退出；L3 开工、R3 收工、✕ 长按急停；L1 平移、R1 旋转、R2 夹爪。**
 
 ## DS4 灯带 / 震动（F61，`ds4_feedback_node`）
 

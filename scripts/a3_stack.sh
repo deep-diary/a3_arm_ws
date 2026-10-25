@@ -38,19 +38,19 @@ WS_DIR="$(dirname "$SCRIPT_DIR")"
 LOG_FILE="/tmp/a3_real_stack.log"
 
 # 栈节点命令行特征（孤儿兜底名单，与 QUICKSTART 一键关停一致）
-NODE_PATTERN='ros2 launch a3_bringup|ros2_control_node|install/a3_arm_controller/lib/a3_arm_controller/arm_controller|power_sequence_node|ps4_mapper|ds4_feedback_node|ros2mqtt_bridge|move_group|retime_trajectory_node|a3_self_test|/joy/joy_node|can_bus_monitor|topic_rate_monitor|aggregator_node|diagnostic_common_diagnostics|ros2 bag record|robot_state_publisher|a3_sim_executor|gravity_torque_node|a3_bringup/servo_mode_bridge|moveit_servo/servo_node_main|servo_target_node|servo_anchor|a3_bringup/ee_pose_publisher|a3_perception face_track.launch|a3_perception.face_detect_node|lib/a3_perception/face_track_controller'
+NODE_PATTERN='ros2 launch a3_bringup|ros2_control_node|install/a3_arm_controller/lib/a3_arm_controller/arm_controller|power_sequence_node|ps4_mapper|ds4_feedback_node|ros2mqtt_bridge|move_group|retime_trajectory_node|a3_self_test|/joy/joy_node|can_bus_monitor|topic_rate_monitor|aggregator_node|diagnostic_common_diagnostics|ros2 bag record|robot_state_publisher|a3_sim_executor|gravity_torque_node|a3_bringup/servo_mode_bridge|moveit_servo/servo_node_main|servo_target_node|servo_anchor|a3_bringup/ee_pose_publisher|a3_bringup/usb_camera_node|a3_bringup/vision_display_mux|a3_perception face_track.launch|a3_perception.face_detect_node|lib/a3_perception/face_track_controller'
 # 复核名单（精简）
-CHECK_PATTERN='ros2 launch a3_bringup|ros2_control_node|a3_arm_controller|power_sequence_node|ps4_mapper|ds4_feedback_node|ros2mqtt_bridge|move_group|joy_node|ros2 bag|robot_state_publisher|servo_node_main|servo_target_node'
+CHECK_PATTERN='ros2 launch a3_bringup|ros2_control_node|a3_arm_controller|power_sequence_node|ps4_mapper|ds4_feedback_node|ros2mqtt_bridge|move_group|joy_node|ros2 bag|robot_state_publisher|servo_node_main|servo_target_node|usb_camera_node|vision_display_mux'
 
 # ── 人脸跟踪（F183，--face-track）────────────────────────────────
 # 独立 launch（检测节点跑 mediapipe venv + 控制器跑系统 python），与主栈同生命周期：
 # start --face-track 起栈后拉起、stop/restart 先停它再停栈。
 FACE_LOG_FILE="/tmp/a3_face_track.log"
 FACE_PATTERN='a3_perception face_track.launch|a3_perception.face_detect_node|lib/a3_perception/face_track_controller'
-# 标注图 /a3/face_track/debug_image：**默认开**（RViz 的 Image 面板订阅的就是这一路，
-# 否则 --face-track 起来也看不到画面）。要看原图把面板 Topic 改成 /camera/image_raw。
-# 跑 servo 验收/巡航等对控制环敏感的场景，用 --no-face-debug 关掉省 CPU（LL-180）。
-FACE_DEBUG=1
+# 标注图 /a3/face_track/debug_image：**默认关**（F194 起 RViz 的 Image 面板看的是
+# /a3/vision/display —— 原图 25Hz 主底 + 叠加人脸标注，分辨率不降、帧率不降）。
+# 只有排查检测节点自身渲染时才开：--face-debug。
+FACE_DEBUG=0
 
 # ── 仿真模式（--sim）──────────────────────────────────────────────
 # 全仿真栈 edge_teleop_full_sim：sim_motor_node 软实时执行层（无 ros2_control_node/
@@ -595,10 +595,9 @@ start_face_track() {
   info "当前**未使能**（默认安全）。确认相机朝向/外参符号无误后再开："
   info "  ros2 service call /a3/face_track/enable std_srvs/srv/SetBool \"{data: true}\""
   if [ "$FACE_DEBUG" = 1 ]; then
-    info "标注图：/a3/face_track/debug_image（默认发；RViz Image 面板看的这一路）"
-  else
-    info "标注图已关（--no-face-debug）：RViz 里看不到画面"
+    info "调试标注图：/a3/face_track/debug_image（仅排查检测节点时用）"
   fi
+  info "画面统一看 /a3/vision/display（原图 + 人脸标注，rviz Image 面板已订阅）"
   return 0
 }
 
@@ -674,11 +673,9 @@ do_start() {
   local cam_arg="use_camera:=true" mqtt_arg="use_mqtt:=false"
   [ "$do_camera" = 0 ] && cam_arg="use_camera:=false"
   [ "$do_mqtt" = 1 ] && mqtt_arg="use_mqtt:=true"
-  # F183：带人脸跟踪时关掉画面上烧的接收帧率文字，否则会压进检测输入与标注图
-  local cam_overlay_arg="camera_overlay_fps:=true"
-  if [ "$face_track" = 1 ] && [ "$do_camera" = 1 ]; then
-    cam_overlay_arg="camera_overlay_fps:=false"
-  fi
+  # F194：帧率统一由 vision_display_mux 在 /a3/vision/display 右上角显示，
+  # 相机不再往原始像素上烧字（会压低检测输入质量）。
+  local cam_overlay_arg="camera_overlay_fps:=false"
   info "附加节点：camera=$([ "$do_camera" = 1 ] && echo on || echo off)，mqtt=$([ "$do_mqtt" = 1 ] && echo on || echo off)"
   info "setsid 启动真机栈，日志：$LOG_FILE"
   setsid bash -c "source '$SCRIPT_DIR/a3_shell_env.sh' && export PYTHONNOUSERSITE=1 && cd '$WS_DIR' && ros2 launch a3_bringup a3_bringup.launch.py hardware:=can can_interface:=can1 use_rviz:=$rviz_arg include_gripper:=$grip_arg $servo_arg $cam_arg $mqtt_arg $cam_overlay_arg" \
@@ -975,9 +972,9 @@ usage() {
   --face-track   起栈后顺带拉起人脸跟踪（F183，独立 launch + mediapipe venv）；
                  默认**不使能**，需再调 /a3/face_track/enable；与 --no-camera 冲突。
                  stop/restart 会先停它（它往 /servo_node/delta_twist_cmds 发 twist）。
-                 **同时默认发布标注图** /a3/face_track/debug_image（RViz 的 Image 面板
-                 订阅的就是这一路），所以 `restart --face-track --rviz` 直接就能看画面
-  --no-face-debug 关掉标注图发布（省 CPU；跑 servo 验收/巡航等对控制环敏感时用，LL-180）
+                 画面统一看 /a3/vision/display（F194：原图 + 人脸标注，rviz 已订阅）
+  --face-debug   额外发布检测节点自带标注图 /a3/face_track/debug_image（仅排查用）
+  --no-face-debug 关掉该调试图（默认即关）
   --sim          走全仿真栈 edge_teleop_full_sim（domain $SIM_DOMAIN 隔离真机；可放任意位置）
   --no-joy       仅 --sim：不起 joy_node（/joy 由脚本注入，如 ps4_sim_test.py 合成测试）
 

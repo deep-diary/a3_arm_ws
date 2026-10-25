@@ -12,9 +12,13 @@ trigger_rest: 1.0
 trigger_pressed: -1.0
 
 # Invert after reading raw axis (Linux left/right Y: -1 is typically up).
+# F189 实测（2026-10-25）：蓝牙 hid-sony 的 D-pad hat 轴向相反——按物理"上/左"
+# 读到的是 +1，导致"上→idle、下→home、左→后退"。两个 hat 轴都取反后，
+# dpad_up/left 虚拟键才与物理方向一致（虚拟键按取反后的值判 lt/gt）。
 invert_axes:
   left_y: true
-  dpad_y: false
+  dpad_x: true
+  dpad_y: true
 
 buttons:
   cross: 0

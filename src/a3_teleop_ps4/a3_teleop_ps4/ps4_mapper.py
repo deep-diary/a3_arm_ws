@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""YAML-driven PS4 mapper: axes → analog_01/n11 functions, buttons → discrete."""
+"""YAML-driven PS4 mapper: axes → analog_01/n11 functions, buttons → discrete.
+
+F189 起支持"固定层 + 模式层"：`common` 里的绑定在所有模式生效，`modes.<name>`
+可覆盖同名轴/键或屏蔽公共轴；**按住 Share + 方向/面键**直接点名模式，
+Options 短按退出回 NORMAL。切模式前先调 `/a3/arm/stop` 停掉当前运动，
+避免模式之间串扰（F190）。
+"""
 
 from __future__ import annotations
 
@@ -8,7 +14,10 @@ from typing import Dict, Optional
 import rclpy
 from geometry_msgs.msg import Vector3
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu, Joy
+from std_msgs.msg import String
+from std_srvs.srv import Trigger
 
 from a3_teleop_ps4.actions import ActionExecutor
 from a3_teleop_ps4.mapping import (
@@ -20,7 +29,10 @@ from a3_teleop_ps4.mapping import (
     iter_button_bindings,
     iter_touch_bindings,
     load_yaml,
+    mode_specs,
     package_config_path,
+    resolve_mode,
+    select_bindings,
     validate_mapping,
 )
 
@@ -37,6 +49,8 @@ class Ps4Mapper(Node):
         self.declare_parameter("rate_hz", 50.0)
         self.declare_parameter("auto_start_servo", True)
         self.declare_parameter("gyro_scale", 1.5)
+        # F189：切模式时等 /a3/arm/stop 的最长时间（超时也继续切换，只 WARN）
+        self.declare_parameter("mode_stop_timeout_s", 1.0)
 
         layout_cfg = load_yaml(str(self.get_parameter("layout_file").value))
         registry = load_yaml(str(self.get_parameter("registry_file").value))
@@ -75,18 +89,48 @@ class Ps4Mapper(Node):
         self._gyro_scale = float(self.get_parameter("gyro_scale").value)
         self._servo_started = False
 
+        # ---- F189 模式状态 ----
+        self._mode_names = mode_specs(mapping)
+        self._select_map = select_bindings(mapping)
+        select_spec = ((mapping.get("modes") or {}).get("select") or {})
+        self._select_modifier = str(select_spec.get("modifier", "share"))
+        self._exit_spec = dict((mapping.get("modes") or {}).get("exit") or {})
+        self._mode: Optional[str] = None
+        self._resolved: Dict[str, object] = {}
+        if self._mode_names:
+            self._mode = "normal" if "normal" in self._mode_names else \
+                next(iter(self._mode_names))
+            self._resolved = resolve_mode(mapping, self._mode)
+        else:
+            self._resolved = resolve_mode(mapping, "")
+        self._select_latch: Optional[str] = None
+        self._pending_mode: Optional[str] = None
+        self._pending_since = 0.0
+        self._pending_run_exit = True
+        self._pending_from_select = False
+        self._pending_stop_future = None
+        self._mode_guard_until = 0.0
+        self._mode_t = 0.0            # 1 Hz 重发模式话题（晚启动的订阅者也能拿到）
+        self._mode_pub = self.create_publisher(String, "/a3/teleop/mode", 10)
+        self._stop_cli = self.create_client(Trigger, "/a3/arm/stop")
+
         self.create_subscription(
             Joy, str(self.get_parameter("joy_topic").value), self._on_joy, 10
         )
         self.create_subscription(Imu, "/a3/ds4/imu", self._on_imu, 10)
         self.create_subscription(Vector3, "/a3/ds4/touch", self._on_touch, 10)
+        self.create_subscription(
+            String, "/a3/teleop/mode", self._on_mode_echo,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE))
 
         rate = float(self.get_parameter("rate_hz").value)
         self._dt = 1.0 / max(rate, 1.0)
         self.create_timer(self._dt, self._on_timer)
+        if self._mode:
+            self._publish_mode_state(self._mode)
         self.get_logger().info(
             f"ps4_mapper ready mapping={self.get_parameter('mapping_file').value} "
-            f"twist_frame={twist_frame}"
+            f"twist_frame={twist_frame} mode={self._mode or 'legacy'}"
         )
 
     def _on_joy(self, msg: Joy) -> None:
@@ -112,6 +156,14 @@ class Ps4Mapper(Node):
                 self.get_logger().info(f"touch {gesture} detected -> {spec.get('fn')}")
                 self._exec.apply_discrete(str(spec.get("fn")), kwargs)
 
+    def _on_mode_echo(self, msg: String) -> None:
+        """外部（launch/脚本）也可指定模式；与当前不同则走同一切换流程。"""
+        target = str(msg.data).strip()
+        if not target or target == self._mode or target not in self._mode_names:
+            return
+        now = self.get_clock().now().nanoseconds * 1e-9
+        self._switch_mode(target, now, run_exit=True, from_select=False)
+
     def _joy_ready(self) -> bool:
         return self._joy is not None and self._joy_alive_ticks >= self._joy_alive_threshold
 
@@ -122,6 +174,139 @@ class Ps4Mapper(Node):
             self._servo_started = True
             self.get_logger().info("servo started after joy became ready")
 
+    # ------------------------------------------------------------ F189 模式
+    def _handle_mode_select(self, joy: Joy, now: float) -> bool:
+        """Share 按住期间：方向/面键直接点名模式。返回 True = 处于选模式窗口。"""
+        if not self._select_map:
+            return False
+        if not self._layout.button(joy, self._select_modifier):
+            self._select_latch = None
+            return False
+        for btn, target in self._select_map.items():
+            if not self._layout.button(joy, btn) or self._select_latch == target:
+                continue
+            self._select_latch = target
+            self.get_logger().info(f"选模式：{self._select_modifier}+{btn} → {target}")
+            self._switch_mode(target, now, run_exit=True, from_select=True)
+        return True
+
+    def _handle_mode_exit(self, joy: Joy, now: float) -> None:
+        spec = self._exit_spec
+        if not spec or self._mode in (None, "normal"):
+            return
+        btn = str(spec.get("button", "options"))
+        held = self._layout.button(joy, btn)
+        hold_s = float(spec.get("hold_s", 1.5))
+        if str(spec.get("edge", "shortpress")) == "shortpress":
+            fire = self._edges.shortpress("mode_exit", held, now, hold_s)
+        else:
+            fire = self._edges.rising("mode_exit", held)
+        if fire:
+            self.get_logger().info(f"退出模式 {self._mode} → normal")
+            self._switch_mode("normal", now, run_exit=True, from_select=False)
+
+    def _switch_mode(self, target: str, now: float, run_exit: bool,
+                     from_select: bool) -> None:
+        if target not in self._mode_names or target == self._mode:
+            return
+        if self._pending_mode is not None:
+            return
+        self._pending_mode = target
+        self._pending_since = now
+        self._pending_run_exit = run_exit
+        self._pending_from_select = from_select
+        # 先停当前运动（编排层 stop → 回 READY），完成或超时后再提交模式
+        self._pending_stop_future = None
+        if self._stop_cli.service_is_ready():
+            self._pending_stop_future = self._stop_cli.call_async(Trigger.Request())
+        self._exec.stop_motion()
+
+    def _check_pending_mode(self, now: float) -> None:
+        if self._pending_mode is None:
+            return
+        fut = self._pending_stop_future
+        if fut is not None:
+            if not fut.done():
+                if now - self._pending_since < float(
+                        self.get_parameter("mode_stop_timeout_s").value):
+                    return
+                self.get_logger().warn("arm/stop 超时 → 仍切换模式")
+            else:
+                try:
+                    resp = fut.result()
+                    if not getattr(resp, "success", True):
+                        self.get_logger().warn(
+                            f"arm/stop 拒绝：{getattr(resp, 'message', '')}")
+                except Exception as exc:  # noqa: BLE001
+                    self.get_logger().warn(f"arm/stop 调用失败：{exc}")
+        target = self._pending_mode
+        run_exit = self._pending_run_exit
+        from_select = self._pending_from_select
+        self._pending_mode = None
+        self._pending_stop_future = None
+        self._commit_mode(target, now, run_exit, from_select)
+
+    def _run_hooks(self, mode: str, which: str) -> bool:
+        spec = self._mode_names.get(mode) or {}
+        for hook in spec.get(which) or []:
+            fn = str(hook.get("fn"))
+            kwargs = dict(hook.get("kwargs") or {})
+            required = bool(hook.get("required", False))
+            method = getattr(self._exec, fn, None)
+            if method is None:
+                self.get_logger().error(f"模式 {mode} 的 {which} 钩子未知：{fn}")
+                if required:
+                    return False
+                continue
+            try:
+                result = method(**kwargs) if kwargs else method()
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().error(f"{mode}.{which}.{fn} 失败：{exc}")
+                if required:
+                    return False
+                continue
+            if required and result is False:
+                self.get_logger().error(f"{mode}.{which}.{fn} 返回失败 → 拒绝进入")
+                return False
+        return True
+
+    def _commit_mode(self, target: str, now: float, run_exit: bool,
+                     from_select: bool) -> None:
+        prev = self._mode
+        if run_exit and prev:
+            self._run_hooks(prev, "exit")
+        self._mode = target
+        self._resolved = resolve_mode(self._mapping, target)
+        self._mode_guard_until = now + 0.3
+        # 清边沿/摇杆/方向键状态：避免旧模式的按键在切换瞬间重复触发
+        self._edges = ButtonEdgeTracker()
+        self._dpad_active.clear()
+        if not from_select:
+            self._select_latch = None
+        self._exec.tick_begin()
+        if not self._run_hooks(target, "enter"):
+            self.get_logger().error(f"进入 {target} 失败 → 回退")
+            self._run_hooks(target, "exit")
+            fallback = "normal" if "normal" in self._mode_names else (prev or target)
+            self._mode = fallback
+            self._resolved = resolve_mode(self._mapping, fallback)
+            self._publish_mode_state(fallback, rejected=target)
+            return
+        self._publish_mode_state(target)
+
+    def _publish_mode_state(self, mode: str, rejected: Optional[str] = None) -> None:
+        spec = self._mode_names.get(mode) or {}
+        label = str(spec.get("label", mode.upper()))
+        rumble = int(spec.get("rumble_index", 0))
+        msg = String()
+        msg.data = mode
+        self._mode_pub.publish(msg)
+        event = f"mode_rejected:{rejected}" if rejected else \
+            f"mode_changed:{label}:{rumble}"
+        self._exec.notify_operator_event(event)
+        self.get_logger().warn(f"模式 → {label}{('（进入失败：' + rejected + '）') if rejected else ''}")
+
+    # ---------------------------------------------------------------- 主循环
     def _on_timer(self) -> None:
         now = self.get_clock().now().nanoseconds * 1e-9
         if self._joy is None or (now - self._joy_received_at) > 1.0:
@@ -129,18 +314,36 @@ class Ps4Mapper(Node):
             return
 
         self._joy_alive_ticks += 1
-        if not self._joy_ready():
+        if self._joy_ready():
+            self._maybe_start_servo()
+            self._exec.poll(now)
+        else:
             return
+        if self._mode and now - self._mode_t > 1.0:
+            msg = String()
+            msg.data = self._mode
+            self._mode_pub.publish(msg)
+            self._mode_t = now
 
-        self._maybe_start_servo()
-        self._exec.poll(now)
         joy = self._joy
         self._exec.tick_begin()
         pose_block = self._exec.pose_blocking(now)
 
+        # 模式选择/退出（先处理，选模式窗口内屏蔽其它输入）
+        select_window = False
+        if self._mode_names:
+            self._handle_mode_exit(joy, now)
+            select_window = self._handle_mode_select(joy, now)
+        if self._pending_mode is not None:
+            self._check_pending_mode(now)
+            select_window = True
+
+        block_inputs = pose_block or select_window or now < self._mode_guard_until
+        resolved = self._resolved
+
         # F64：逐轴 gates——轴任一 gate 按住才取样；未列 gates 的轴不门控（R2 夹爪）
-        if not pose_block:
-            for axis_name, spec in iter_axis_bindings(self._mapping):
+        if not block_inputs:
+            for axis_name, spec in iter_axis_bindings(resolved):
                 gates = spec.get("gates") or []
                 if gates and not any(self._layout.button(joy, g) for g in gates):
                     continue
@@ -163,35 +366,36 @@ class Ps4Mapper(Node):
                         v = -v
                     self._exec.apply_analog(fn, v)
 
-        for bind_key, btn, spec in iter_button_bindings(self._mapping):
-            held = self._layout.button(joy, btn)
-            edge = str(spec.get("edge", "rising"))
-            fire = False
-            if edge == "longpress":
-                fire = self._edges.longpress(
-                    bind_key, held, now, float(spec.get("hold_s", 1.0))
-                )
-            elif edge == "shortpress":
-                fire = self._edges.shortpress(
-                    bind_key, held, now, float(spec.get("hold_s", 3.0))
-                )
-            else:
-                fire = self._edges.rising(bind_key, held)
-            if fire:
-                kwargs = dict(spec.get("kwargs") or {})
-                self._exec.apply_discrete(str(spec.get("fn")), kwargs)
+        if not block_inputs:
+            for bind_key, btn, spec in iter_button_bindings(resolved):
+                held = self._layout.button(joy, btn)
+                edge = str(spec.get("edge", "rising"))
+                fire = False
+                if edge == "longpress":
+                    fire = self._edges.longpress(
+                        bind_key, held, now, float(spec.get("hold_s", 1.0))
+                    )
+                elif edge == "shortpress":
+                    fire = self._edges.shortpress(
+                        bind_key, held, now, float(spec.get("hold_s", 3.0))
+                    )
+                else:
+                    fire = self._edges.rising(bind_key, held)
+                if fire:
+                    kwargs = dict(spec.get("kwargs") or {})
+                    self._exec.apply_discrete(str(spec.get("fn")), kwargs)
 
-        for dspec in self._mapping.get("dpad") or []:
-            axis_name = str(dspec.get("axis", ""))
-            raw = self._layout.axis_raw(joy, axis_name)
-            sign = 1 if raw > 0.5 else (-1 if raw < -0.5 else 0)
-            if sign != 0 and self._dpad_active.get(axis_name, 0) == 0:
-                entry = dspec.get("pos" if sign > 0 else "neg") or {}
-                kwargs = dict(entry.get("kwargs") or {})
-                self._exec.apply_discrete(str(entry.get("fn")), kwargs)
-            self._dpad_active[axis_name] = sign
+            for dspec in resolved.get("dpad") or []:
+                axis_name = str(dspec.get("axis", ""))
+                raw = self._layout.axis_raw(joy, axis_name)
+                sign = 1 if raw > 0.5 else (-1 if raw < -0.5 else 0)
+                if sign != 0 and self._dpad_active.get(axis_name, 0) == 0:
+                    entry = dspec.get("pos" if sign > 0 else "neg") or {}
+                    kwargs = dict(entry.get("kwargs") or {})
+                    self._exec.apply_discrete(str(entry.get("fn")), kwargs)
+                self._dpad_active[axis_name] = sign
 
-        self._exec.tick_end(now, not pose_block, self._dt)
+        self._exec.tick_end(now, not block_inputs, self._dt)
 
 
 def _clamp(v: float) -> float:

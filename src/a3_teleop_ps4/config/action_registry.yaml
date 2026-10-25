@@ -81,6 +81,50 @@ functions:
     kind: discrete
     description: Call /a3/arm/stop_teach (停止记录 + F54 自动保存)
 
+  arm_stop:
+    kind: discrete
+    description: 'F190: Call /a3/arm/stop（切模式前先停运动；TEACH 先保存再回 READY）'
+
+  teach_enter:
+    kind: discrete
+    description: 'F189 进入示教：READY 直接开录；未使能先上电+使能，READY 后自动开录（kwargs kind=teach|waypoint）'
+
+  teach_leave:
+    kind: discrete
+    description: F189 退出示教：丢弃挂起请求，录制中则 stop_teach（自动保存）
+
+  teach_toggle:
+    kind: discrete
+    description: 'F189 TEACH 模式 Triangle：未录制→开始；录制中→stop_teach'
+
+  waypoint_toggle:
+    kind: discrete
+    description: 'F189 WAYPOINT 模式 Triangle：未录制→开始路点示教；录制中→打点'
+
+  save_pose_or_capture:
+    kind: discrete
+    description: 'F189 L2：WAYPOINT_TEACH 下服务端路由为打点，否则保存当前位姿'
+
+  face_track_enable:
+    kind: discrete
+    description: 'F189 TRACK 进入：/a3/face_track/enable true（服务不可用返回 false）'
+
+  face_track_disable:
+    kind: discrete
+    description: 'F189 TRACK 退出：/a3/face_track/enable false'
+
+  face_track_toggle:
+    kind: discrete
+    description: 'F189 TRACK Triangle：跟踪开/关切换'
+
+  vision_toggle_mesh:
+    kind: discrete
+    description: 'F194 网格点/网格线/人脸框显示开关（画面中心与人脸中心始终保留）'
+
+  demo_tour_home:
+    kind: discrete
+    description: 'F189 DEMO：home 五向平移巡游（random_pose_tour 固定序列）'
+
   playback_latest:
     kind: discrete
     description: 'Call /a3/arm/playback {name:""} (空名 ≡ 回放 latest)'

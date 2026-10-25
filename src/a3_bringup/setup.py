@@ -42,6 +42,7 @@ setup(
             "topic_rate_monitor = a3_bringup.topic_rate_monitor_node:main",
             "servo_anchor = a3_bringup.servo_anchor:main",
             "usb_camera_node = a3_bringup.usb_camera_node:main",
+            "vision_display_mux = a3_bringup.vision_display_mux:main",
         ],
     },
     tests_require=['ament_lint_auto', 'ament_flake8', 'ament_pep257', 'pytest']

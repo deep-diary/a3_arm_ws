@@ -14,9 +14,10 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float32, String
-from std_srvs.srv import Trigger
+from std_srvs.srv import SetBool, Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
+from a3_msgs.msg import ArmStatus
 from a3_msgs.srv import (
     GotoNamedPose,
     PlaybackTrajectory,
@@ -126,6 +127,8 @@ class ActionExecutor:
         self._arm_init = node.create_client(Trigger, "/a3/arm/init")
         self._arm_enable = node.create_client(Trigger, "/a3/arm/enable")
         self._arm_disable = node.create_client(Trigger, "/a3/arm/disable")
+        # F190：切模式前先停运动（编排层回收 TRAJ/TEACH/SERVO）
+        self._arm_stop = node.create_client(Trigger, "/a3/arm/stop")
         self._teach_start = node.create_client(Trigger, "/a3/arm/start_teach")
         self._teach_start_waypoint = node.create_client(
             Trigger, "/a3/arm/start_waypoint_teach")
@@ -139,6 +142,13 @@ class ActionExecutor:
         self._goto_pose_cli = node.create_client(GotoNamedPose, "/a3/arm/goto_named_pose")
         # F114：L2 短按保存当前位姿（空名 → 服务端时间戳名 snap_*）
         self._save_pose_cli = node.create_client(SaveNamedPose, "/a3/arm/save_named_pose")
+        # F189 TRACK 模式：人脸跟踪开关（SetBool）与显示层网格开关（Bool 话题）
+        self._face_enable_cli = node.create_client(SetBool, "/a3/face_track/enable")
+        self._mesh_pub = node.create_publisher(Bool, "/a3/vision/show_mesh", 10)
+        self._mesh_on = True
+        self._face_on = False
+        # F189：模式切换等操作员事件（ds4_feedback_node 消费：灯色/震动）
+        self._event_pub = node.create_publisher(String, "/a3/arm/operator_event", 10)
 
         # F64：平移/旋转速度档相互独立（D-pad 上下/左右分别步进）
         self.linear_scale = 0.35
@@ -169,6 +179,11 @@ class ActionExecutor:
         self._power_enable_timeout = float(
             node.declare_parameter("power_enable_timeout_s", 5.0).value
         )
+        # F189 示教挂起：进入示教模式时若臂未使能，先上电+使能，READY 后自动开录
+        self._pending_teach: Optional[str] = None   # "teach" | "waypoint"
+        self._pending_teach_since = 0.0
+        self._teach_wait_s = float(node.declare_parameter("teach_wait_s", 10.0).value)
+        self.arm_state = ""
 
         # F36/F87：R2 扳机力控状态机（GripperCommand action；server 暂不可用时
         # 由 _pending_gripper 在 poll() 重试，无需自研重试表）
@@ -187,6 +202,9 @@ class ActionExecutor:
         )
         node.create_subscription(Bool, "/power_sequence/gate_open", self._on_gate, latch_qos)
         node.create_subscription(String, "/power_sequence/state", self._on_power_state, latch_qos)
+        # F189：编排层状态（决定示教是否需要先上电/使能）
+        node.create_subscription(ArmStatus, "/a3/arm_status", self._on_arm_status,
+                                 QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE))
 
     def _on_js(self, msg: JointState) -> None:
         name_to_pos = {n: p for n, p in zip(msg.name, msg.position)}
@@ -200,6 +218,9 @@ class ActionExecutor:
 
     def _on_power_state(self, msg: String) -> None:
         self._power_state = str(msg.data)
+
+    def _on_arm_status(self, msg: ArmStatus) -> None:
+        self.arm_state = str(msg.state)
 
     def tick_begin(self) -> None:
         self._lin = [0.0, 0.0, 0.0]
@@ -216,6 +237,7 @@ class ActionExecutor:
         """每 tick 调用一次：重试挂起的夹爪目标、推进 L3 上电+使能挂起态."""
         if self._pending_gripper is not None:
             self._gripper_goal(*self._pending_gripper)
+        self._advance_pending_teach(now)
         if not self._enable_pending or self._enable_called:
             return
         if self._gate_open and self._power_state == "Running":
@@ -465,6 +487,127 @@ class ActionExecutor:
 
     def teach_stop(self) -> None:
         self._call_trigger(self._teach_stop, "arm/stop_teach")
+
+    # --- F189/F190: 模式化按键语义 ---
+
+    def arm_stop(self) -> None:
+        """F190 切模式/停止：编排层回收 TEACH/TRAJ/SERVO 并回 READY。"""
+        if self._arm_stop.service_is_ready():
+            self._call_trigger(self._arm_stop, "arm/stop")
+            return
+        self.stop_motion()
+        self._n.get_logger().warn("/a3/arm/stop 不可用 → 本地零速兜底")
+
+    def teach_enter(self, kind: str = "teach") -> bool:
+        """进入示教（F189）。
+
+        之前的坑：进"示教模式"只切了按键语义，臂仍是位置闭环 → 拖不动。
+        这里在进入模式时就把臂准备好：已 READY 直接开录；未使能则先上电+使能，
+        READY 后由 poll() 自动开录（不阻塞 50 Hz 定时器）。
+        """
+        self._pending_teach = None
+        if self.arm_state in ("TEACH", "WAYPOINT_TEACH"):
+            return True
+        target = "waypoint" if kind == "waypoint" else "teach"
+        if self.arm_state == "READY":
+            self.teach_start_waypoint() if target == "waypoint" else self.teach_start()
+            return True
+        now = self._n.get_clock().now().nanoseconds * 1e-9
+        self._n.get_logger().warn(
+            f"示教需要使能（当前 {self.arm_state or '未知'}）→ 先上电+使能，"
+            f"READY 后自动开始{'路点' if target == 'waypoint' else '连续'}示教")
+        self.arm_power_enable()
+        self._pending_teach = target
+        self._pending_teach_since = now
+        return True
+
+    def _advance_pending_teach(self, now: float) -> None:
+        if self._pending_teach is None:
+            return
+        if self.arm_state in ("TEACH", "WAYPOINT_TEACH"):
+            self._pending_teach = None
+            return
+        if self.arm_state == "READY":
+            kind, self._pending_teach = self._pending_teach, None
+            self._n.get_logger().info(f"已 READY → 自动开始{'路点' if kind == 'waypoint' else '连续'}示教")
+            self.teach_start_waypoint() if kind == "waypoint" else self.teach_start()
+            return
+        if now - self._pending_teach_since > self._teach_wait_s:
+            self._pending_teach = None
+            self._n.get_logger().error(
+                f"示教等待超时（arm_state={self.arm_state or '?'}）：请先按 L3 上电使能")
+
+    def teach_leave(self) -> None:
+        """退出示教模式：丢弃挂起请求；正在录制则 stop_teach（自动保存）。"""
+        self._pending_teach = None
+        if self.arm_state in ("TEACH", "WAYPOINT_TEACH"):
+            self.teach_stop()
+
+    def teach_toggle(self) -> None:
+        if self.arm_state == "TEACH":
+            self.teach_stop()
+        else:
+            self.teach_enter("teach")
+
+    def waypoint_toggle(self) -> None:
+        """路点模式：未录制 → 开始；录制中 → 打点（服务端按状态路由）。"""
+        if self.arm_state == "WAYPOINT_TEACH":
+            self.save_named_pose()
+        else:
+            self.teach_enter("waypoint")
+
+    def save_pose_or_capture(self) -> None:
+        """L2：WAYPOINT_TEACH 下服务端自动路由为打点，否则保存当前位姿。"""
+        self.save_named_pose()
+
+    def face_track_enable(self) -> bool:
+        if not self._face_enable_cli.service_is_ready():
+            self._n.get_logger().error(
+                "face_track/enable 不可用：未起 --face-track？")
+            return False
+        req = SetBool.Request()
+        req.data = True
+        self._face_enable_cli.call_async(req)
+        self._face_on = True
+        self._n.get_logger().warn("人脸跟踪 → 开")
+        return True
+
+    def face_track_disable(self) -> None:
+        if self._face_enable_cli.service_is_ready():
+            req = SetBool.Request()
+            req.data = False
+            self._face_enable_cli.call_async(req)
+        self._face_on = False
+        self._n.get_logger().warn("人脸跟踪 → 关")
+
+    def face_track_toggle(self) -> None:
+        self.face_track_disable() if self._face_on else self.face_track_enable()
+
+    def vision_toggle_mesh(self) -> None:
+        """F194：网格点/网格线/人脸框开关（画面中心与人脸中心始终保留）。"""
+        self._mesh_on = not self._mesh_on
+        msg = Bool()
+        msg.data = self._mesh_on
+        self._mesh_pub.publish(msg)
+        self._n.get_logger().info(f"网格/人脸框 → {'开' if self._mesh_on else '关'}")
+
+    def notify_operator_event(self, event: str) -> None:
+        """F189：操作员事件（ds4_feedback_node 消费：模式灯色/震动/白闪）。"""
+        msg = String()
+        msg.data = str(event)
+        self._event_pub.publish(msg)
+
+    def demo_tour_home(self) -> None:
+        """DEMO：home 五向平移巡游（固定序列，不随机）。"""
+        if not self._random_tour.service_is_ready():
+            self._n.get_logger().warn("arm/random_pose_tour not available")
+            return
+        req = RandomPoseTour.Request()
+        req.count = 0
+        req.seed = 0
+        req.fixed_sequence = ["home", "home_up", "home_down", "home_front", "home_back"]
+        self._random_tour.call_async(req)
+        self._n.get_logger().info("demo_tour_home -> 5 点固定序列")
 
     def playback_latest(self) -> None:
         if not self._playback.service_is_ready():

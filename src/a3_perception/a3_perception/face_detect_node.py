@@ -43,11 +43,25 @@ except ImportError as exc:  # noqa: BLE001
     raise
 
 try:
-    from a3_msgs.msg import FaceTarget
+    from a3_msgs.msg import FaceOverlay, FaceTarget
 except ImportError:  # 未编译 a3_msgs 时给出明确提示
-    print("[x] 找不到 a3_msgs.msg.FaceTarget：先 colcon build --packages-select a3_msgs",
-          file=sys.stderr)
+    print("[x] 找不到 a3_msgs.msg.FaceTarget/FaceOverlay："
+          "先 colcon build --packages-select a3_msgs", file=sys.stderr)
     raise
+
+
+# F194：网格三角剖分连线（每 4 条取 1 条，约 500 条，显示层画线不至于压满 CPU）
+try:
+    import mediapipe as _mp
+    MESH_EDGES = [int(v) for pair in sorted(_mp.solutions.face_mesh.FACEMESH_TESSELATION)[::4]
+                  for v in pair]
+except Exception:  # noqa: BLE001
+    MESH_EDGES = []
+
+# 人脸椭圆轮廓（按顺序闭合）：显示层画 mask 边界
+FACE_OVAL_IDX = (10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
+                 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
+                 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109)
 
 
 # ------------------------------------------------------------------ 一阶/One-Euro
@@ -106,6 +120,9 @@ class FaceDetectNode(Node):
 
         self.declare_parameter("image_topic", "/camera/image_raw")
         self.declare_parameter("output_topic", "/a3/face_target")
+        # F194：结构化标注（关键点/连线/轮廓/框/文本），由显示层叠加到原始画面上
+        self.declare_parameter("overlay_topic", "/a3/face_overlay")
+        self.declare_parameter("publish_overlay", True)
         self.declare_parameter("debug_image", False)
         self.declare_parameter("debug_topic", "/a3/face_track/debug_image")
         self.declare_parameter("model_path", "~/.a3/models/face_landmarker.task")
@@ -123,6 +140,7 @@ class FaceDetectNode(Node):
         p = self.get_parameter
         self.image_topic = p("image_topic").value
         self.debug_image = bool(p("debug_image").value)
+        self.publish_overlay = bool(p("publish_overlay").value)
         self.hfov = float(p("hfov_deg").value)
         self._units = float(p("depth_units_mm").value)
         self._scale = float(p("depth_scale").value)
@@ -148,6 +166,8 @@ class FaceDetectNode(Node):
         self.pub = self.create_publisher(FaceTarget, str(p("output_topic").value), rel_qos)
         # 标注图：发布器常建、按 debug_image 开关决定是否发布 → 可运行时 ros2 param set 打开
         self.pub_dbg = self.create_publisher(Image, str(p("debug_topic").value), sensor_qos)
+        self.pub_ov = self.create_publisher(
+            FaceOverlay, str(p("overlay_topic").value), rel_qos)
         self.add_on_set_parameters_callback(self._on_params)
 
         self._lock = threading.Lock()
@@ -269,6 +289,7 @@ class FaceDetectNode(Node):
             msg.valid = bool(coasting)      # coasting 期内沿用旧值，但标记未验证
             self._fill_held(msg, w, h, coasting)
             self.pub.publish(msg)
+            self._publish_overlay(msg.header, None, msg)
             if self.debug_image:
                 self._publish_debug(frame, None, msg)
             return
@@ -324,6 +345,7 @@ class FaceDetectNode(Node):
         msg.bbox_h_norm = (by1 - by0) / h
         msg.track_age_s = now - self._track_start_t
         self.pub.publish(msg)
+        self._publish_overlay(msg.header, landmarks, msg)
 
         if self.debug_image:
             self._publish_debug(frame, landmarks, msg)
@@ -361,28 +383,47 @@ class FaceDetectNode(Node):
         msg.roll_deg = self._hold["roll"]
         msg.track_age_s = (time.monotonic() - self._track_start_t) if self._track_start_t else 0.0
 
+    def _publish_overlay(self, header, landmarks, msg: FaceTarget) -> None:
+        """F194：把标注要素打包给显示层（不含像素图，~1 KB/帧）。"""
+        if not self.publish_overlay:
+            return
+        ov = FaceOverlay()
+        ov.header = header
+        if landmarks is None:
+            ov.detected = False
+            self.pub_ov.publish(ov)
+            return
+        ov.detected = True
+        flat = []
+        for pt in landmarks:
+            flat.append(float(pt.x))
+            flat.append(float(pt.y))
+        ov.landmarks = flat
+        ov.edges = MESH_EDGES
+        sil = []
+        for i in FACE_OVAL_IDX:
+            sil.append(float(landmarks[i].x))
+            sil.append(float(landmarks[i].y))
+        ov.silhouette = sil
+        ov.center_norm.x = msg.center_norm.x
+        ov.center_norm.y = msg.center_norm.y
+        ov.bbox_w_norm = msg.bbox_w_norm
+        ov.bbox_h_norm = msg.bbox_h_norm
+        ov.x_mm, ov.y_mm, ov.z_mm = msg.xyz_mm.x, msg.xyz_mm.y, msg.xyz_mm.z
+        ov.yaw_deg, ov.pitch_deg, ov.roll_deg = (
+            msg.yaw_deg, msg.pitch_deg, msg.roll_deg)
+        ov.err_u, ov.err_v = msg.image_error.x, msg.image_error.y
+        self.pub_ov.publish(ov)
+
     def _publish_debug(self, frame: np.ndarray, landmarks, msg: FaceTarget) -> None:
         img = frame.copy()
         h, w = img.shape[:2]
         CYAN = (255, 255, 0)     # BGR：青
-        GREEN = (0, 255, 0)      # BGR：绿（帧率专用）
         DARK = (0, 0, 0)
 
         def text(t: str, org, scale: float = 0.55, color=CYAN, thick: int = 1) -> None:
             cv2.putText(img, t, org, cv2.FONT_HERSHEY_SIMPLEX, scale, DARK, thick + 2, cv2.LINE_AA)
             cv2.putText(img, t, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA)
-
-        # 帧率（EMA），右上角单独显示
-        now_d = time.monotonic()
-        if self._dbg_t > 0.0:
-            dt = now_d - self._dbg_t
-            if dt > 1e-6:
-                inst = 1.0 / dt
-                self._dbg_fps = inst if self._dbg_fps <= 0.0 else 0.9 * self._dbg_fps + 0.1 * inst
-        self._dbg_t = now_d
-        fps_txt = f"FPS {self._dbg_fps:4.1f}"
-        (tw, _), _ = cv2.getTextSize(fps_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
-        text(fps_txt, (w - tw - 10, 24), color=GREEN)
 
         if landmarks is not None:
             for pt in landmarks:

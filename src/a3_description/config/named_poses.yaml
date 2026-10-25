@@ -46,6 +46,13 @@ poses:
   home_down:
     positions: [0.0, 0.7154, -0.2479, -0.4675, 0.0, 0.0, 0.0]
 
+  # F189: NORMAL 模式 D-pad 左右 = 前/后两个"预留位"（默认沿用 home_front/home_back，
+  # 想换点位直接改这两项即可，按键映射不用动）。
+  normal_slot_left:      # D-pad ← ：前
+    positions: [0.0, 0.1266, -0.8918, 0.7653, 0.0, 0.0, 0.0]
+  normal_slot_right:     # D-pad → ：后
+    positions: [0.0, 1.8674, -1.6192, -0.2482, 0.0, 0.0, 0.0]
+
   # F114: saved via /a3/arm/save_named_pose at 2026-09-27 11:45:43
   snap_20260927_114543:
     positions: [-0.0040, 0.1287, -0.8879, 0.7659, 0.0021, 0.0017, -0.0006]

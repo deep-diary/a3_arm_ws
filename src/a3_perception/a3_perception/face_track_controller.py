@@ -77,6 +77,7 @@ class FaceTrackController(Node):
         self.declare_parameter("ee_pose_topic", "/a3/ee_pose")
         self.declare_parameter("arm_status_topic", "/a3/arm_status")
         self.declare_parameter("control_mode_topic", "/a3/control_mode")
+        self.declare_parameter("vision_mode_topic", "/a3/vision/mode")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("rate_hz", 50.0)
 
@@ -245,6 +246,9 @@ class FaceTrackController(Node):
         self.create_subscription(String, str(p("control_mode_topic").value),
                                  self._on_mode, rel)
         self.pub = self.create_publisher(TwistStamped, self.twist_topic, rel)
+        # F194：跟踪开关（显示层据此决定"叠加标注"还是"透传原图"）
+        self._vision_mode_pub = self.create_publisher(
+            String, str(p("vision_mode_topic").value), rel)
         self.create_service(SetBool, "/a3/face_track/enable", self._on_enable)
         self.create_service(Trigger, "/a3/face_track/reload_jacobian",
                             self._on_reload_jacobian)
@@ -260,6 +264,7 @@ class FaceTrackController(Node):
         self.w_cmd = np.zeros(3)
         self.hold_until = 0.0        # 失能后仍发 0 的截止时间
         self._last_reason = ""
+        self._vm_t = 0.0             # 视觉模式话题上次发布时刻
 
         # 联调期允许运行时改增益/限速/深度轴（不用重启节点）
         self.add_on_set_parameters_callback(self._on_params)
@@ -523,7 +528,14 @@ class FaceTrackController(Node):
             resp.message = "face tracking DISABLED"
         resp.success = True
         self.get_logger().warn(resp.message)
+        self._publish_vision_mode()
         return resp
+
+    def _publish_vision_mode(self) -> None:
+        m = String()
+        m.data = "face_track" if self.enabled else "off"
+        self._vision_mode_pub.publish(m)
+        self._vm_t = self.get_clock().now().nanoseconds * 1e-9
 
     def _on_reload_jacobian(self, _req: Trigger.Request,
                             resp: Trigger.Response) -> Trigger.Response:
@@ -618,6 +630,10 @@ class FaceTrackController(Node):
 
     def _tick(self) -> None:
         now = self.get_clock().now().nanoseconds * 1e-9
+
+        # 1 Hz 重发视觉模式：显示层可能晚于本节点启动，错过一次性消息
+        if now - self._vm_t > 1.0:
+            self._publish_vision_mode()
 
         if not self.enabled:
             if now < self.hold_until:

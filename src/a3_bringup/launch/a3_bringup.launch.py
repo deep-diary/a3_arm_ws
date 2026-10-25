@@ -673,6 +673,26 @@ def _build(cfg, include_gripper):
                 "overlay_fps": LaunchConfiguration("camera_overlay_fps"),
             }
         ],
+        prefix="taskset -c 0-3",
+        condition=IfCondition(use_camera),
+        output="screen",
+    )
+
+    # ---- F194：统一视觉显示（原图 + 人脸标注 → /a3/vision/display）----
+    # 所有标注都在这一层画：原始像素做底，标注走 ~1KB 的 /a3/face_overlay，
+    # 未开跟踪时直接透传原图；显示帧率（右上角）也只有这一处。
+    vision_display = Node(
+        package="a3_bringup",
+        executable="vision_display_mux",
+        name="vision_display_mux",
+        parameters=[
+            {
+                "raw_topic": "/camera/image_raw",
+                "overlay_topic": "/a3/face_overlay",
+                "output_topic": "/a3/vision/display",
+            }
+        ],
+        prefix="taskset -c 0-3",
         condition=IfCondition(use_camera),
         output="screen",
     )
@@ -879,9 +899,9 @@ def _build(cfg, include_gripper):
         ),
         DeclareLaunchArgument(
             "camera_overlay_fps",
-            default_value="true",
-            description="F177 在画面左上角烧接收帧率（调试用）；F183 视觉处理时置 false，"
-                        "否则文字会压进 /camera/image_raw 与标注图",
+            default_value="false",
+            description="F177 在画面左上角烧接收帧率（调试用）；F194 起帧率统一由 "
+                        "vision_display_mux 在 /a3/vision/display 右上角显示，默认关",
         ),
         DeclareLaunchArgument(
             "use_mqtt",
@@ -971,4 +991,5 @@ def _build(cfg, include_gripper):
         stage_jsb,
         rviz,
         camera,
+        vision_display,
     ]

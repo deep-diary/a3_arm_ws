@@ -1577,6 +1577,10 @@ class ArmController(Node):
         self.create_service(
             Trigger, "/a3/arm/exit_ai", self._exit_ai_cb,
             callback_group=self._cb_group)
+        # F190：通用"停止运动"——切模式前先停，避免模式之间串扰
+        self.create_service(
+            Trigger, "/a3/arm/stop", self._stop_cb,
+            callback_group=self._cb_group)
 
         # 底层服务客户端
         self._motor_cli = self.create_client(
@@ -5937,6 +5941,57 @@ class ArmController(Node):
         resp.message = f"waypoint {idx} captured" + (
             "" if pose else " (FK unavailable; LIN disabled for this task)")
         self.get_logger().info(f"waypoint {idx} captured: {q}")
+        return resp
+
+    def _publish_hold_trajectory(self) -> bool:
+        """F190：用"当前位姿 + 0.3s"的一帧轨迹把正在跑的运动刹停（电机保持力矩）。
+
+        轨迹是 topic 下发、没有 cancel 接口，唯一可靠的"停"就是立刻给它一个新的
+        终点=当前位置。相比 /a3/motor/stop（卸力）安全：不会掉臂。
+        """
+        if not self._have_js:
+            return False
+        traj = JointTrajectory()
+        traj.joint_names = list(self._joint_names)
+        pt = JointTrajectoryPoint()
+        pt.positions = list(self._positions)
+        pt.velocities = [0.0] * self._n_joints
+        pt.time_from_start = Duration(sec=0, nanosec=300_000_000)
+        traj.points = [pt]
+        self._traj_pub.publish(traj)
+        return True
+
+    def _stop_cb(self, req: Trigger.Request, resp: Trigger.Response) -> Trigger.Response:
+        """F190：停止当前运动并回 READY（切模式/一键停止共用）。
+
+        顺序：示教先保存 → 刹停轨迹 → 退出 SERVO/ZERO_TORQUE → 清 FSM。
+        任何状态都放行（安全路径）；DISABLED/FAULT 只做幂等返回。
+        """
+        old = self._state
+        extra = ""
+        if self._state in (STATE_TEACH, STATE_WAYPOINT_TEACH):
+            tr = self._stop_teach_cb(Trigger.Request(), Trigger.Response())
+            if not tr.success:
+                resp.success = False
+                resp.message = f"cannot stop {old}: {tr.message}"
+                return resp
+            extra = " (teach saved)"
+        self._publish_hold_trajectory()
+        self._stop_l7_sequence()
+        if self._mode == "SERVO" and self._servo_stop_cli.service_is_ready():
+            self._servo_stop_cli.call_async(Trigger.Request())
+        elif self._mode == "ZERO_TORQUE" and self._zt_stop_cli.service_is_ready():
+            self._zt_stop_cli.call_async(Trigger.Request())
+        self._traj_done_at = 0.0
+        self._jogging = False
+        self._publish_mode("IDLE")
+        if self._state not in (STATE_READY, STATE_TRAJ, STATE_SERVO, STATE_AI):
+            resp.success = True
+            resp.message = f"stopped from {old}{extra}"
+            return resp
+        self._set_state(STATE_READY, f"stop from {old}")
+        resp.success = True
+        resp.message = f"stopped from {old}{extra}"
         return resp
 
     def _start_teach_cb(

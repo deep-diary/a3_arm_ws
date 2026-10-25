@@ -65,6 +65,19 @@ COLORS = {
     "cyan": (0, 255, 255),
     "purple": (170, 0, 255),
     "white": (255, 255, 255),
+    "yellow": (255, 200, 0),
+    "magenta": (255, 0, 160),
+}
+
+# F189：HMI 模式 → 灯带颜色/样式（仅在臂处于可动状态时生效；故障/失能仍走安全色）
+MODE_STYLE = {
+    "normal": ("green", "solid"),
+    "teach": ("blue", "breathe"),
+    "waypoint": ("cyan", "breathe"),
+    "track": ("purple", "breathe"),
+    "piano": ("yellow", "breathe"),
+    "demo": ("white", "breathe"),
+    "dance": ("magenta", "breathe"),
 }
 
 # 派生态类别（边沿震动/闪白据此判定）
@@ -216,6 +229,11 @@ class Ds4FeedbackNode(Node):
         self.create_subscription(
             String, "/a3/arm/operator_event", self._on_operator_event, 10,
         )
+        # F189：HMI 模式（normal/teach/waypoint/track/piano/demo/dance）→ 灯色
+        self.create_subscription(
+            String, "/a3/teleop/mode", self._on_teleop_mode,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE),
+        )
         self._fb_pub = self.create_publisher(
             String, str(self.get_parameter("feedback_topic").value), 10
         )
@@ -227,6 +245,7 @@ class Ds4FeedbackNode(Node):
         self._monitor_action = ""
         self._power_state = ""
         self._gate_open = False
+        self._mode = ""
 
         self._prev_cls = ""
         self._prev_arm_state = ""
@@ -278,6 +297,21 @@ class Ds4FeedbackNode(Node):
             self._white_until = time.monotonic() + 0.4
             self._rumble_phases = [_RumblePhase(0.0, 0.12, 0.6, 0.0)]
             self._rumble_started_at = time.monotonic()
+        elif msg.data.startswith("mode_changed:"):
+            # F189：切模式震 rumble_index 次（每次 0.1s，间隔 0.12s）
+            parts = msg.data.split(":")
+            try:
+                n = max(1, int(parts[2])) if len(parts) > 2 else 1
+            except ValueError:
+                n = 1
+            n = min(n, 4)
+            self._rumble_phases = [
+                _RumblePhase(i * 0.12, 0.1, 0.5, 0.0) for i in range(n)
+            ]
+            self._rumble_started_at = time.monotonic()
+
+    def _on_teleop_mode(self, msg: String) -> None:
+        self._mode = str(msg.data).strip().lower()
 
     # ---- effect derivation ----
     def _derive(self, now: float) -> _Effect:
@@ -319,6 +353,10 @@ class Ds4FeedbackNode(Node):
         if self._arm_state == "TRAJ" and self._arm_msg.strip() != "jog":
             return _Effect(CLS_TRAJ, "purple", "solid", self._arm_msg or "trajectory")
         if self._arm_state in ("READY", "SERVO"):
+            # F189：可动状态下用 HMI 模式灯色（不新增 class，避免切换时多震一次）
+            style = MODE_STYLE.get(self._mode)
+            if style and self._mode != "normal":
+                return _Effect(CLS_READY, style[0], style[1], f"mode {self._mode}")
             return _Effect(CLS_READY, "green", "solid", self._arm_state.lower())
         if self._arm_state == "DISABLED":
             return _Effect(

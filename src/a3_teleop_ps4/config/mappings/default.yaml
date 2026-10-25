@@ -1,147 +1,188 @@
-# Default PS4 → A3 mapping (F60/F64；F115 修订 2026-09-26 D-pad 改绑 home 偏移点位；F120 Triangle 改绑 home). Change this file to rebind; no code change needed.
-# Source names: buttons/axes keys from ds4_linux.yaml, plus virtual_buttons.
+# PS4 模式化按键映射（F189）。改绑定只改本文件，不用改代码。
 #
-# == 全功能速查（完整操作手册见 docs/edge/PS4_OPERATOR_GUIDE.md，参考表见本包 README.md）==
-#   电源:      L3 短按=一键上电开门禁+使能 / R3 短按=任意模式软失能(F119:先退出当前模式→F40 safe-park→失能) / Cross 长按 1s=硬急停(断电关闸)
-#   位姿:      Triangle 短按=home（F120）/ Circle 短按=idle（自然趴着位，非机械零位；zero 不绑定手柄）
-#              D-pad=口风琴实测定位点（F176，按键盘空间）：左=white1(F3) / 右=white19(C6) / 上=black13(A#5) / 下=black1(F#3)
-#   示教:      Share 短按=连续录制 / Share 长按 1.5s=路点录制（L2 打点，Options 结束保存）
-#              Options 短按=结束并自动保存（按当前录制类型分派）
-#              Square 短按=连续回放 / Square 长按 1.5s=路点 PTP 回放
-#              Circle 短按=idle / Circle 长按 1.5s=路点 LIN 直线回放
-#              Options 长按 3s=F116 随机点位巡游（READY 态才执行；TEACH/WAYPOINT_TEACH 等态被服务端拒绝）
-#   点位:      L2 短按=保存当前位姿为 snap_YYYYMMDD_HHMMSS（F114，写包内 named_poses.yaml）
-#   功能:      L1+R1 同按长按 2s=init(设零，不带使能)（F135：PS 为开机键易误触，已解绑）
-#   运动:      L1 按住+摇杆=末端平移死人开关 / R1 按住+摇杆=末端旋转死人开关
-#              左摇杆=平移 Y(左右)/Z(上下)；右摇杆上下=平移 X(前后)，右摇杆左右=偏航
-#              （F115 起 D-pad 调速退役，平移/旋转恒用 speed_normal 默认档）
-#              F183 R1 三轴旋转：右摇杆左右=偏航(Z) / 右摇杆上下=俯仰(Y) / 左摇杆左右=滚转(X)
-#              旋转语义=绕末端点转（姿态变、末端位置不变），由 a3_servo_target 保证
-#   夹爪:      R2=直接力控（不需要 L1/R1），按得越深抓得越紧，松开即全开
-#   触摸:      触摸板单击 tap=路点 LIN 回放（F132，与 Circle 长按等效；需 hid 节点）
-#              物理触摸板"点击键"蓝牙仍不可用（LL-052），手势走 HID 数据链另测
+# 结构：common（固定层，所有模式生效）+ modes（每个模式可覆盖同名轴/键、可屏蔽公共轴）。
+# 选模式：**按住 Share + 方向/面键**直接点名（不循环）：
+#   Share+↑ TEACH / Share+↓ WAYPOINT / Share+← TRACK / Share+→ PIANO
+#   Share+△ DEMO / Share+○ DANCE / Share+□ NORMAL
+# 统一退出：Options 短按 → 回 NORMAL（示教类先保存）。
+#
+# 固定层（所有模式）：
+#   Cross 长按 1s=硬急停(断电) / L3=上电+使能 / R3=软失能(safe-park) / L1+R1 长按 2s=init
+#   L1+摇杆=末端平移 / R1+摇杆=末端旋转 / R2=夹爪力控
+#
+# 详细操作手册：docs/edge/PS4_OPERATOR_GUIDE.md
 
-# 初始速度档（平移/旋转共用；F115 起 D-pad 不再调速，step_*_scale 函数保留供自定义映射）
 speed_normal: 0.35
+joy_alive_ticks: 25
 
-axes:
-  r2:
-    fn: gripper_force
-    kind: analog_01
-    source: trigger
-  # F183：同一根摇杆在 L1 / R1 下做不同事 → 一个轴可以有多条绑定，按各自 gates 独立判定
-  left_x:
-    - fn: servo_lin_y        # L1：平移 Y（左右）
+common:
+  axes:
+    r2:
+      fn: gripper_force
+      kind: analog_01
+      source: trigger
+    left_x:
+      - fn: servo_lin_y        # L1：平移 Y（左右）
+        kind: analog_n11
+        gates: [l1]
+      - fn: servo_ang_x        # R1：绕基座 X 滚转
+        kind: analog_n11
+        gates: [r1]
+    left_y:
+      fn: servo_lin_z
       kind: analog_n11
       gates: [l1]
-    - fn: servo_ang_x        # R1：绕基座 X 滚转
+    right_y:
+      - fn: servo_lin_x        # L1：平移 X（前后）
+        kind: analog_n11
+        gates: [l1]
+      - fn: servo_ang_y        # R1：绕基座 Y 俯仰
+        kind: analog_n11
+        gates: [r1]
+    right_x:
+      fn: servo_ang_z          # R1：绕基座 Z 偏航
       kind: analog_n11
       gates: [r1]
-  left_y:
-    fn: servo_lin_z
-    kind: analog_n11
-    gates: [l1]
-  right_y:
-    - fn: servo_lin_x        # L1：平移 X（前后）
-      kind: analog_n11
-      gates: [l1]
-    - fn: servo_ang_y        # R1：绕基座 Y 俯仰（抬腕/低头）
-      kind: analog_n11
-      gates: [r1]
-  right_x:
-    fn: servo_ang_z          # R1：绕基座 Z 偏航
-    kind: analog_n11
-    gates: [r1]
+  buttons:
+    cross:
+      fn: power_shutdown
+      edge: longpress
+      hold_s: 1.0
+    l1_r1:
+      fn: arm_init
+      edge: longpress
+      hold_s: 2.0
+    l3:
+      fn: arm_power_enable
+      edge: rising
+    r3:
+      fn: arm_disable
+      edge: rising
+  dpad: []
 
-# F115/F176：D-pad hat 轴（-1/0/+1）0→±1 边沿各触发一次；持续按住不连发，回中后才能再按。
-# 上/下/左/右 = 口风琴实测定位点（走 goto_named_pose → F67 MoveIt，均为「未按压」基准点）：
-# 按键盘空间 左=white1(F3) / 右=white19(C6) / 上=black13(A#5) / 下=black1(F#3)。
-dpad:
-  - axis: dpad_y
-    neg: {fn: goto_named_pose, kwargs: {name: melodion_black13}}   # 上：第 13 黑键 A#5 未按下
-    pos: {fn: goto_named_pose, kwargs: {name: melodion_black1}}    # 下：第 1 黑键 F#3 未按下
-  - axis: dpad_x
-    neg: {fn: goto_named_pose, kwargs: {name: melodion_white1}}    # 左：第 1 白键 F3 未按下
-    pos: {fn: goto_named_pose, kwargs: {name: melodion_white19}}   # 右：第 19 白键 C6 未按下
+modes:
+  select:
+    modifier: share
+    bindings:
+      dpad_up: teach
+      dpad_down: waypoint
+      dpad_left: track
+      dpad_right: piano
+      triangle: demo
+      circle: dance
+      square: normal
+  exit:
+    button: options
+    edge: shortpress
+    hold_s: 1.5
 
-buttons:
-  cross:
-    fn: power_shutdown
-    edge: longpress
-    hold_s: 1.0
-  triangle:
-    # F176: 短按=home（F120 保留）；长按 1.5s=回放 4 键按压 stream 滚动槽 latest
-    # （trajectories/streams/latest.yaml，scripts/melodion_pts2stream.py 产物；原多模式
-    # modes_sweep 改用 service 调）。
-    - fn: goto_named_pose
-      kwargs: {name: home}
-      edge: shortpress
-      hold_s: 1.5
-    - fn: playback_stream
-      kwargs: {name: latest}
-      edge: longpress
-      hold_s: 1.5
-  circle:
-    # F131: 短按=idle 位姿；长按 1.5s=路点 LIN 直线回放（触摸板单击手势实测可靠后将并存）
-    - fn: goto_named_pose
-      kwargs: {name: idle}
-      edge: shortpress
-      hold_s: 1.5
-    - fn: playback_waypoints_lin
-      edge: longpress
-      hold_s: 1.5
-  share:
-    # F131: 短按=连续录制；长按 1.5s=路点录制（L2 打点，Options 保存）
-    - fn: teach_start
-      edge: shortpress
-      hold_s: 1.5
-    - fn: teach_start_waypoint
-      edge: longpress
-      hold_s: 1.5
-  options:
-    # F91: 长按调零已退役（产品栈无消费者；零点维护走 motor_maintenance 独立节点）
-    - fn: teach_stop
-      edge: shortpress
-      hold_s: 3.0
-    # F116: 长按 3s 随机命名点巡游；同键短按语义不变（ButtonEdgeTracker 双键义）
-    - fn: random_pose_tour
-      edge: longpress
-      hold_s: 3.0
-  square:
-    # F131: 短按=连续轨迹回放；长按 1.5s=路点 PTP 回放（kind 门禁，防连续轨迹被逐段规划）
-    - fn: playback_latest
-      edge: shortpress
-      hold_s: 1.5
-    - fn: playback_waypoints_ptp
-      edge: longpress
-      hold_s: 1.5
-  # F135: init 从 PS 键迁到 L1+R1 组合键长按（PS 是手柄开机/唤醒键，开机过程易误触）。
-  # 用 longpress 而非 shortpress：必须双键持续同按 2s，避免 jog 时 L1/R1 短暂交叠误触发；
-  # 即使误触发，SERVO/TRAJ/TEACH 等 busy 态下 init 会被编排层状态机拒绝（双保险）。
-  l1_r1:
-    fn: arm_init
-    edge: longpress
-    hold_s: 2.0
-  l3:
-    fn: arm_power_enable
-    edge: shortpress
-    hold_s: 3.0
-  r3:
-    fn: arm_disable
-    edge: shortpress
-    hold_s: 3.0
-  l2:
-    # F114: 示教/任意时刻一键保存当前位姿（空名 → 服务端自动命名 snap_*）
-    # F131: WAYPOINT_TEACH 态 L2 路由为打点（不写 named_poses.yaml）
-    fn: save_named_pose
-    edge: shortpress
-    hold_s: 3.0
+  normal:
+    label: NORMAL
+    color: green
+    pattern: solid
+    rumble_index: 1
+    enter: []
+    exit: []
+    dpad:
+      - axis: dpad_y
+        neg: {fn: goto_named_pose, kwargs: {name: home}}      # ↑ = home
+        pos: {fn: goto_named_pose, kwargs: {name: idle}}      # ↓ = idle
+      - axis: dpad_x
+        neg: {fn: goto_named_pose, kwargs: {name: normal_slot_left}}   # ← = 前
+        pos: {fn: goto_named_pose, kwargs: {name: normal_slot_right}}  # → = 后
+    buttons:
+      triangle:
+        - {fn: goto_named_pose, kwargs: {name: ready}, edge: shortpress, hold_s: 1.5}
+        - {fn: playback_latest, edge: longpress, hold_s: 1.5}
+      square:
+        - {fn: save_named_pose, edge: shortpress, hold_s: 1.5}
+        - {fn: playback_waypoints_ptp, edge: longpress, hold_s: 1.5}
+      circle:
+        - {fn: arm_stop, edge: shortpress, hold_s: 1.5}
+        - {fn: playback_waypoints_lin, edge: longpress, hold_s: 1.5}
+      l2: {fn: save_named_pose, edge: shortpress, hold_s: 1.5}
 
-# F132: 触摸板手势（数据源 ds4_hid_node 的 /a3/ds4/touch；需 enable_hid:=true）。
-# 暂缓启用：ds4_hid_node 蓝牙模式触摸偏移存在固件兼容问题（实测部分区域接触被误判为未接触），
-# 待专门修复后再启用；当前用 Circle 长按 1.5s 作为路点 LIN 回放入口。
-# touch:
-#   tap:
-#     fn: playback_waypoints_lin
-#     max_dur_s: 0.4
-#     max_move: 0.08
+  teach:
+    label: TEACH
+    color: blue
+    pattern: breathe
+    rumble_index: 2
+    # 进模式即准备拖动（未使能会自动上电+使能，READY 后自动开录）——F189 修复
+    enter: [{fn: teach_enter}]
+    exit: [{fn: teach_leave}]
+    buttons:
+      triangle: {fn: teach_toggle, edge: shortpress, hold_s: 1.5}
+      l2: {fn: save_pose_or_capture, edge: shortpress, hold_s: 1.5}
+
+  waypoint:
+    label: WAYPOINT
+    color: cyan
+    pattern: breathe
+    rumble_index: 3
+    enter: [{fn: teach_enter, kwargs: {kind: waypoint}}]
+    exit: [{fn: teach_leave}]
+    buttons:
+      triangle: {fn: waypoint_toggle, edge: shortpress, hold_s: 1.5}
+      l2: {fn: save_pose_or_capture, edge: shortpress, hold_s: 1.5}
+
+  track:
+    label: TRACK
+    color: purple
+    pattern: breathe
+    rumble_index: 4
+    # 跟踪要独占 twist：屏蔽 4 根摇杆轴，保留 R2 夹爪
+    suppress_common_axes: [left_x, left_y, right_x, right_y]
+    enter: [{fn: face_track_enable, required: true}]
+    exit: [{fn: face_track_disable}]
+    buttons:
+      triangle: {fn: face_track_toggle, edge: shortpress, hold_s: 1.5}
+      # F194：Options 长按 = 网格点/网格线/人脸框开关（短按仍是退出模式）
+      options: {fn: vision_toggle_mesh, edge: longpress, hold_s: 1.5}
+      l2: {fn: save_named_pose, edge: shortpress, hold_s: 1.5}
+
+  piano:
+    label: PIANO
+    color: yellow
+    pattern: breathe
+    rumble_index: 5
+    suppress_common_axes: [left_x, left_y, right_x, right_y]
+    enter: [{fn: goto_named_pose, kwargs: {name: melodion_white1}, required: false}]
+    exit: []
+    dpad:
+      - axis: dpad_y
+        neg: {fn: goto_named_pose, kwargs: {name: melodion_black13}}
+        pos: {fn: goto_named_pose, kwargs: {name: melodion_black1}}
+      - axis: dpad_x
+        neg: {fn: goto_named_pose, kwargs: {name: melodion_white1}}
+        pos: {fn: goto_named_pose, kwargs: {name: melodion_white19}}
+    buttons:
+      triangle: {fn: playback_stream, kwargs: {name: latest}, edge: shortpress, hold_s: 1.5}
+      circle: {fn: goto_named_pose, kwargs: {name: melodion_white1}, edge: shortpress, hold_s: 1.5}
+      square: {fn: goto_named_pose, kwargs: {name: melodion_white19}, edge: shortpress, hold_s: 1.5}
+      l2: {fn: save_named_pose, edge: shortpress, hold_s: 1.5}
+
+  demo:
+    label: DEMO
+    color: white
+    pattern: breathe
+    rumble_index: 6
+    enter: [{fn: goto_named_pose, kwargs: {name: ready}, required: false}]
+    exit: [{fn: arm_stop}]
+    buttons:
+      triangle: {fn: demo_tour_home, edge: shortpress, hold_s: 1.5}
+      circle: {fn: arm_stop, edge: shortpress, hold_s: 1.5}
+      square: {fn: random_pose_tour, edge: shortpress, hold_s: 1.5}
+      l2: {fn: save_named_pose, edge: shortpress, hold_s: 1.5}
+
+  dance:
+    label: DANCE
+    color: magenta
+    pattern: breathe
+    rumble_index: 7
+    enter: [{fn: goto_named_pose, kwargs: {name: ready}, required: false}]
+    exit: [{fn: arm_stop}]
+    buttons:
+      triangle: {fn: playback_latest, edge: shortpress, hold_s: 1.5}
+      square: {fn: playback_waypoints_ptp, edge: shortpress, hold_s: 1.5}
+      circle: {fn: arm_stop, edge: shortpress, hold_s: 1.5}
+      l2: {fn: save_named_pose, edge: shortpress, hold_s: 1.5}

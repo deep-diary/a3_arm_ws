@@ -41,8 +41,9 @@ class UsbCameraNode(Node):
         self.declare_parameter("framerate", 25.0)
         self.declare_parameter("pixel_format", "mjpg")
         # 在画面左上角烧"接收帧率"（本机订阅端实测的 DDS 投递速率）。
-        # 做视觉处理时置 false，避免文字污染图像。
-        self.declare_parameter("overlay_fps", True)
+        # F194 起帧率统一由 vision_display_mux 在 /a3/vision/display 右上角显示，
+        # 这里默认关，避免文字压进 /camera/image_raw 再被人脸标注叠一层。
+        self.declare_parameter("overlay_fps", False)
 
         device = self.get_parameter("video_device").value
         self.frame_id = self.get_parameter("frame_id").value

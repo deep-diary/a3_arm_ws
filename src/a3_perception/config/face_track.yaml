@@ -5,6 +5,9 @@
   ros__parameters:
     image_topic: /camera/image_raw
     output_topic: /a3/face_target
+    # F194：结构化标注给显示层（原图上叠加，不再由检测节点出低分辨率标注图）
+    overlay_topic: /a3/face_overlay
+    publish_overlay: true
     model_path: ~/.a3/models/face_landmarker.task
     debug_image: false
     debug_topic: /a3/face_track/debug_image

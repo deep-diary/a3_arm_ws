@@ -78,6 +78,20 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 | `/a3/ds4/battery` | `std_msgs/Float32` | 可选电量 0–1 |
 | `/a3/ds4/feedback` | `std_msgs/String` | DS4 灯/震反馈诊断（F61）：JSON `{state, gate, fault, color, rumble, reason}`，volatile depth 10，10–20 Hz。无手柄设备时节点仍持续发布（仿真/CI 据此断言灯效） |
 
+### 视觉与 HMI 模式（F183/F189/F194）
+
+| 接口 | 类型 | 说明 |
+|------|------|------|
+| `/camera/image_raw` | `sensor_msgs/Image` | USB 相机原图（bgr8，640×480@25，BEST_EFFORT depth 5） |
+| `/a3/face_overlay` | `a3_msgs/msg/FaceOverlay` | F194 结构化人脸标注：`detected` + 478 点归一化坐标 + 三角剖分连线索引（`uint16[] edges`）+ 人脸轮廓 + 框 + XYZ/RPY/`err_u,err_v`。约 1 KB/帧，由 `face_detect_node` 发布 |
+| `/a3/vision/display` | `sensor_msgs/Image` | **唯一显示出口**：`vision_display_mux` 用原图做底叠加全部标注；未开跟踪时透传原图。RViz Image 面板订阅这一路 |
+| `/a3/vision/mode` | `std_msgs/String` | `face_track` / `off`：`face_track_controller` 1 Hz 重发；显示层据此决定叠加或透传 |
+| `/a3/vision/show_mesh` | `std_msgs/Bool` | 网格点/网格线/人脸框开关（画面中心、人脸中心与连线始终保留）。TRACK 模式 `Options` 长按切换 |
+| `/a3/teleop/mode` | `std_msgs/String` | F189 HMI 模式：`normal/teach/waypoint/track/piano/demo/dance`，`ps4_mapper` 1 Hz 重发；`ds4_feedback_node` 据此着色 |
+| `/a3/arm/stop` | `std_srvs/Trigger` | F190 通用停止：示教先保存 → 当前位姿一帧刹停（保力矩）→ 退出 SERVO/ZERO_TORQUE → 回 READY；切模式前必调 |
+| `/a3/face_track/enable` | `std_srvs/SetBool` | 人脸跟踪使能（默认关；TRACK 模式进入时自动置 true） |
+| `/a3/face_track/reload_jacobian` | `std_srvs/Trigger` | 重载 `~/.a3/camera/face_jacobian.yaml` |
+
 **插值语义（执行层）：** 仅 positions → 线性；+velocities → 三次；+accelerations → 五次；effort 始终线性（JTC 对齐）。参数 `trajectory_interpolation_method`（默认 `auto`）。
 
 ### 关节状态（发布侧）

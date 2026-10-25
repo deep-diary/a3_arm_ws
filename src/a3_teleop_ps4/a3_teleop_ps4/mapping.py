@@ -247,24 +247,92 @@ def validate_mapping(
         if want and want != kind:
             errors.append(f"{where}: {fn} is {want}, binding says {kind}")
 
-    for axis, spec in (mapping.get("axes") or {}).items():
-        # F183：同一根摇杆在 L1/R1 下做不同事 → list 多条绑定
-        specs = spec if isinstance(spec, list) else [spec]
-        for i, s in enumerate(specs):
-            where = f"axes.{axis}" if not isinstance(spec, list) else f"axes.{axis}[{i}]"
-            check(str(s.get("fn")), str(s.get("kind", "")), where)
-    for btn, spec in (mapping.get("buttons") or {}).items():
-        specs = spec if isinstance(spec, list) else [spec]
-        for i, s in enumerate(specs):
-            check(str(s.get("fn")), "discrete", f"buttons.{btn}[{i}]")
-    for i, spec in enumerate(mapping.get("dpad") or []):
-        for side in ("neg", "pos"):
-            entry = spec.get(side) or {}
-            if entry:
-                check(str(entry.get("fn")), "discrete", f"dpad[{i}].{side}")
-    for gesture, spec in (mapping.get("touch") or {}).items():
-        check(str(spec.get("fn")), "discrete", f"touch.{gesture}")
+    def check_block(block: Dict[str, Any], where: str) -> None:
+        for axis, spec in (block.get("axes") or {}).items():
+            # F183：同一根摇杆在 L1/R1 下做不同事 → list 多条绑定
+            specs = spec if isinstance(spec, list) else [spec]
+            for i, s in enumerate(specs):
+                loc = f"{where}axes.{axis}" if not isinstance(spec, list) else \
+                    f"{where}axes.{axis}[{i}]"
+                check(str(s.get("fn")), str(s.get("kind", "")), loc)
+        for btn, spec in (block.get("buttons") or {}).items():
+            specs = spec if isinstance(spec, list) else [spec]
+            for i, s in enumerate(specs):
+                check(str(s.get("fn")), "discrete", f"{where}buttons.{btn}[{i}]")
+        for i, spec in enumerate(block.get("dpad") or []):
+            for side in ("neg", "pos"):
+                entry = spec.get(side) or {}
+                if entry:
+                    check(str(entry.get("fn")), "discrete", f"{where}dpad[{i}].{side}")
+        for gesture, spec in (block.get("touch") or {}).items():
+            check(str(spec.get("fn")), "discrete", f"{where}touch.{gesture}")
+
+    modes = mapping.get("modes") or {}
+    if modes:
+        common = mapping.get("common") or {}
+        check_block(common, "common.")
+        for name, spec in modes.items():
+            if name in ("select", "exit"):
+                continue
+            check_block(spec, f"modes.{name}.")
+            for hook in ("enter", "exit"):
+                for i, h in enumerate(spec.get(hook) or []):
+                    check(str(h.get("fn")), "discrete", f"modes.{name}.{hook}[{i}]")
+        select = modes.get("select") or {}
+        targets = select.get("bindings") or {}
+        for btn, target in targets.items():
+            if target not in modes:
+                errors.append(f"select.bindings.{btn}: unknown mode {target}")
+        for btn, target in targets.items():
+            if not btn:
+                errors.append("select.bindings: empty button name")
+        return errors
+
+    check_block(mapping, "")
     return errors
+
+
+def has_modes(mapping: Dict[str, Any]) -> bool:
+    return isinstance(mapping.get("modes"), dict) and bool(mapping.get("modes"))
+
+
+def select_bindings(mapping: Dict[str, Any]) -> Dict[str, str]:
+    """F189: Share + 方向/面键 → 目标模式名。"""
+    modes = mapping.get("modes") or {}
+    select = modes.get("select") or {}
+    return {str(k): str(v) for k, v in (select.get("bindings") or {}).items()}
+
+
+def mode_specs(mapping: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    modes = mapping.get("modes") or {}
+    return {k: v for k, v in modes.items() if k not in ("select", "exit")}
+
+
+def resolve_mode(mapping: Dict[str, Any], mode: str) -> Dict[str, Any]:
+    """F189: 固定层 common + 当前模式覆盖 → 一份可直接展开的映射块。
+
+    - axes/buttons：模式同名键覆盖 common；
+    - suppress_common_axes：进模式后禁用这些公共轴（r2 夹爪始终保留）；
+    - dpad：模式给就用模式的，否则沿用 common。
+    无 `modes` 段时退回旧单层映射（向后兼容）。
+    """
+    if not has_modes(mapping):
+        return {k: mapping.get(k) for k in ("axes", "buttons", "dpad", "touch")}
+    common = dict(mapping.get("common") or {})
+    spec = dict(mode_specs(mapping).get(mode) or {})
+    axes = dict(common.get("axes") or {})
+    axes.update(spec.get("axes") or {})
+    for name in spec.get("suppress_common_axes") or []:
+        if str(name) != "r2":
+            axes.pop(str(name), None)
+    buttons = dict(common.get("buttons") or {})
+    buttons.update(spec.get("buttons") or {})
+    return {
+        "axes": axes,
+        "buttons": buttons,
+        "dpad": spec.get("dpad", common.get("dpad") or []),
+        "touch": spec.get("touch", common.get("touch") or {}),
+    }
 
 
 def iter_touch_bindings(
