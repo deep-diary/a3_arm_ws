@@ -89,7 +89,7 @@ public:
     // 关跟踪瞬间把命令撤到实测位姿会让臂"掉一下"。改成按 settle_rate 匀速收到实测位姿再停发。
     settle_rate_ = declare_parameter<double>("settle_rate", 0.3);            // [rad/s]
     cmd_limit_margin_ = declare_parameter<double>("cmd_limit_margin", 0.02);  // [rad]
-    max_ik_jump_ = declare_parameter<double>("max_ik_jump", 0.05);        // [rad]/周期
+    max_ik_jump_ = declare_parameter<double>("max_ik_jump", 0.01);        // [rad]/周期
     // IK 解与当前种子相差超过 max_ik_jump 时：true=限步逼近（推荐，避免死锁）；false=整帧丢弃（旧行为）
     ik_jump_clip_ = declare_parameter<bool>("ik_jump_clip", true);
     max_ik_jump_hard_ = declare_parameter<double>("max_ik_jump_hard", 0.60);  // 超过则判为真换支
@@ -116,7 +116,26 @@ public:
     goal_filter_tau_ = declare_parameter<double>("goal_filter_tau", 0.06);  // [s]，0=关闭
     // 跟踪误差保护阈值：**必须大于正常工作时的领先量**（L1 约 8.6mm/rad，30mm/s 下实测领先 0.6~1.1rad）。
     // 设成 0.30 会每 ~0.7s 误触发一次"目标重锚"→ 绝对目标被打回实测 → 冲一下/退回/再冲 = "一快一慢"（实测）。
-    max_track_err_ = declare_parameter<double>("max_track_err", 3.0);      // [rad]
+    max_track_err_ = declare_parameter<double>("max_track_err", 3.0);      // [rad] 粗兜底
+    // 顶死（jammed）检测：命令一直比实测超前、而关节几乎不动 → 撞机械限位/被挡住还继续推。
+    // **不能用固定小阈值**：正常快速跟踪时命令本来就会领先 0.6~1.1 rad（见上条注释），
+    // 固定 0.15 会每 0.7 s 误触发。这里加"实测速度≈0 且持续 jam_time"两个条件，
+    // 只在真顶住时才成立（2026-10-26 事故：臂被拉直后 L2/L3 顶住，serve 仍满速推 6 s）。
+    jam_err_ = declare_parameter<double>("jam_err", 0.15);                 // [rad] 领先量
+    jam_vel_ = declare_parameter<double>("jam_vel", 0.05);                 // [rad/s] "几乎不动"
+    jam_time_ = declare_parameter<double>("jam_time", 0.3);                // [s] 持续判定
+    // IK 异常闸：连续失败 / 0.5 s 内换支过密 → 判"目标不可达"，冻结下发并回锚实测。
+    // 事故里 6 s 内出现 255 次"解远离实测"、ik_fail 16/16，位置环仍按限步满速把整臂甩过去。
+    ik_fail_stop_streak_ = static_cast<int>(declare_parameter<int>("ik_fail_stop_streak", 5));
+    ik_branch_stop_cnt_ = static_cast<int>(declare_parameter<int>("ik_branch_stop_cnt", 10));
+    ik_stop_hold_ = declare_parameter<double>("ik_stop_hold", 0.5);        // [s]
+    // 连续冻结的指数退避：同一原因反复出现时 0.5→1→2→4 s；`ik_freeze_reset_s` 内没再冻结
+    // 就复位（"成功执行一段即清零"）。为什么伺服侧也要退避：目标持续不可达时，
+    // 固定 0.5 s 会变成"每 1.6 s 试 0.5 s"的循环（2026-10-26 实测连续 8 次），
+    // 臂被一轮轮往坏姿态带，日志也刷。恢复判据必须绑定"连续失败"，不能只靠时间。
+    ik_stop_hold_max_ = declare_parameter<double>("ik_stop_hold_max", 4.0);   // [s]
+    ik_freeze_reset_s_ = declare_parameter<double>("ik_freeze_reset_s", 5.0); // [s]
+    ik_hold_cur_ = ik_stop_hold_;
     // vj 一阶低通：J⁻¹ 对 q_goal 的亚毫弧度抖动敏感，实测 vj 逐帧抖 23%；
     // 不过滤会让速度前馈逐帧跳变。
     vj_filter_tau_ = declare_parameter<double>("vj_filter_tau", 0.05);     // [s]，0=关闭
@@ -128,6 +147,10 @@ public:
     acc_gain_ = declare_parameter<double>("acc_gain", 20.0);              // [1/s]
     ws_min_ = declare_parameter<std::vector<double>>("workspace_min", { -0.60, -0.45, 0.02 });
     ws_max_ = declare_parameter<std::vector<double>>("workspace_max", { 0.45, 0.45, 0.70 });
+    // 半径硬限：|p|（末端到基座）上限。**全伸是"边界奇异"**——L2/L3 的肘上/肘下两支
+    // 在此合并，IK 会给出"位姿对、关节差 0.2~0.4 rad"的另一支解，照走就是整臂翻过去。
+    // 按半径夹紧比 x/y/z 盒子更直接（2026-10-26 事故姿态 |p|=0.555 在盒子里完全合法）。
+    reach_max_ = declare_parameter<double>("reach_max", 0.50);            // [m]
     log_period_ = declare_parameter<double>("log_period", 1.0);
     debug_csv_ = declare_parameter<std::string>("debug_csv", "");  // 非空则 100Hz 落调试 CSV
     if (!debug_csv_.empty()) {
@@ -494,6 +517,77 @@ private:
     }
     last_step_t_ = t_now;
 
+    // ---- 0) IK 异常闸：连续失败 / 换支过密 → 判"目标不可达"，冻结下发并回锚实测 ----
+    // 2026-10-26 事故：人脸跑出可达范围 → 臂被拉直（近奇异）→ IK 在两个等价支之间反复跳
+    // （6 s 内 255 次"解远离实测"、ik_fail 16/16），位置环仍按 ik 限步把整臂甩过去
+    // （实测 JTC 速度差 ±3 rad/s）→ CAN 被压垮。这里一旦判异常就**不回退、直接冻结**：
+    // 把目标/命令全部回锚到实测并保持 ik_stop_hold，等 twist 侧（无进展守卫）收手。
+    if ((t_now - ik_win_t_).seconds() > 0.5) {
+      ik_win_t_ = t_now;
+      ik_branch_hits_ = 0;
+    }
+    if (ik_fail_streak_ >= ik_fail_stop_streak_ || ik_branch_hits_ >= ik_branch_stop_cnt_) {
+      if (freeze_until_.nanoseconds() == 0 || t_now >= freeze_until_) {
+        // 指数退避：距上次冻结超过 ik_freeze_reset_s 视为"这段时间执行是好的"→ 复位到 0.5 s
+        if (last_freeze_t_.nanoseconds() > 0 &&
+            (t_now - last_freeze_t_).seconds() > ik_freeze_reset_s_) {
+          ik_hold_cur_ = ik_stop_hold_;
+        }
+        const double hold = ik_hold_cur_;
+        ik_hold_cur_ = std::min(ik_stop_hold_max_, hold * 2.0);
+        last_freeze_t_ = t_now;
+        std::vector<double> qc;
+        bool out = false;
+        target_ = measuredPose(qc, out);
+        z_lock_ = target_.translation().z();
+        target_ok_ = target_;
+        have_target_ok_ = true;
+        q_goal_ = qc;
+        for (size_t i = 0; i < kDof; ++i) {
+          q_cmd_[i] = qc[i];
+          qd_cmd_[i] = 0.0;
+          qa_cmd_[i] = 0.0;
+          jam_t0_[i] = 0.0;
+        }
+        v_lim_.setZero();
+        v_lp_.setZero();
+        vj_f_.fill(0.0);
+        freeze_until_ = t_now + rclcpp::Duration::from_seconds(hold);
+        frozen_ = true;
+        RCLCPP_WARN(get_logger(),
+                    "IK 异常（连续失败 %d 拍 / 0.5s 内换支 %d 次）→ 目标不可达："
+                    "回锚实测并冻结 %.1fs（下次 %.1fs）",
+                    ik_fail_streak_, ik_branch_hits_, hold,
+                    std::min(ik_stop_hold_max_, hold * 2.0));
+        ik_fail_streak_ = 0;
+        ik_branch_hits_ = 0;
+      }
+    }
+    if (frozen_ && t_now >= freeze_until_) {
+      frozen_ = false;
+      RCLCPP_WARN(get_logger(), "IK 冻结结束 → 恢复跟踪（以当前实测为起点）");
+    }
+    if (freeze_until_.nanoseconds() > 0 && t_now < freeze_until_) {
+      // 冻结期：绝对保持出事时的位置（不追目标、不积分），避免"顶住还继续推"
+      std::array<double, kDof> q_out{}, qd_zero{};
+      for (size_t i = 0; i < kDof; ++i) {
+        q_out[i] = q_cmd_[i];
+        qd_cmd_[i] = 0.0;
+        qa_cmd_[i] = 0.0;
+      }
+      trajectory_msgs::msg::JointTrajectory msg;
+      msg.header.stamp = rclcpp::Time(0);
+      msg.header.frame_id = base_frame_;
+      msg.joint_names = joint_names_;
+      trajectory_msgs::msg::JointTrajectoryPoint pt;
+      pt.positions.assign(q_out.begin(), q_out.end());
+      pt.velocities.assign(qd_zero.begin(), qd_zero.end());
+      pt.time_from_start = rclcpp::Duration::from_seconds(dt_step);
+      msg.points.push_back(pt);
+      pub_->publish(msg);
+      return;
+    }
+
     // ---- 1) 指令有效性 + twist 平滑（F181）----
     // 超时 = 零速（绝对保持）；否则先模长限幅、再逐轴加速度限幅、最后一阶低通。
     Eigen::Matrix<double, 6, 1> v_raw = Eigen::Matrix<double, 6, 1>::Zero();
@@ -585,6 +679,14 @@ private:
       } else {
         z_lock_ = cand.translation().z();
       }
+      // 半径硬限（放在 z 锁之后，z 锁可能把点重新推出界）：全伸附近是边界奇异，
+      // 一旦进去 IK 就会在"肘上/肘下"两支之间换支，整臂翻过去的代价是 0.2~0.4 rad。
+      {
+        const double rr = cand.translation().norm();
+        if (rr > reach_max_ && rr > 1e-6) {
+          cand.translation() *= reach_max_ / rr;
+        }
+      }
       target_ = cand;
     }
 
@@ -616,6 +718,7 @@ private:
         // 解离"实测关节"太远 → 姿态等价的另一分支（腕部伸直位形最典型）。
         // 这种解即便姿态正确，跟过去也会让工具多转几十度，必须拒绝。
         ++ik_far_rej_;
+        ++ik_branch_hits_;   // 换支过密 → IK 异常闸（0.5 s 窗口）
         ik_branch_suspect_ = true;
         if (have_target_ok_) target_ = target_ok_;
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
@@ -647,6 +750,7 @@ private:
                              dmax, max_ik_jump_, max_ik_jump_, ik_jump_clip_cnt_);
       } else {
         ++ik_jump_reject_;
+        ++ik_branch_hits_;   // 换支过密 → IK 异常闸（0.5 s 窗口）
         ik_branch_suspect_ = true;
         if (have_target_ok_) target_ = target_ok_;   // 跳变过大（真换支）：目标回退，别继续积分
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
@@ -717,20 +821,40 @@ private:
       qa_out[i] = qa_cmd_[i];
     }
 
-    // ---- 5b) 安全：命令跑得太前（被挡/跟不上）→ 命令状态回拉到实测并重锚 ----
+    // ---- 5b) 安全：顶死 / 命令跑得太前 → 命令状态回拉到实测并重锚 ----
     double track_err = 0.0;
+    bool jammed = false;
+    const double t_sec = t_now.seconds();
     for (size_t i = 0; i < kDof; ++i) {
       track_err = std::max(track_err, std::abs(q_cmd_[i] - q_meas_[i]));
+      // 顶死判据：命令明显超前 **且** 关节几乎不动（撞机械限位/被挡）。只看领先量不够，
+      // 正常快速跟踪时领先 0.6~1.1 rad 是常态（见 max_track_err 注释）。
+      const bool stuck = std::abs(q_cmd_[i] - q_meas_[i]) > jam_err_
+                         && std::abs(qd_meas_[i]) < jam_vel_;
+      if (!stuck) {
+        jam_t0_[i] = 0.0;
+        continue;
+      }
+      if (jam_t0_[i] <= 0.0) jam_t0_[i] = t_sec;
+      if (t_sec - jam_t0_[i] >= jam_time_) {
+        jammed = true;
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                             "顶死：%s 命令 %.3f / 实测 %.3f（领先 %.3f rad）而实测速度仅 "
+                             "%.3f rad/s 持续 %.1fs → 回锚实测，停止继续推",
+                             joint_names_[i].c_str(), q_cmd_[i], q_meas_[i],
+                             q_cmd_[i] - q_meas_[i], qd_meas_[i], jam_time_);
+      }
     }
-    if (track_err > max_track_err_) {
+    if (jammed || track_err > max_track_err_) {
       ++track_err_resets_;
       std::vector<double> qc;
       bool out = false;
       target_ = measuredPose(qc, out);
       for (size_t i = 0; i < kDof; ++i) {
         q_cmd_[i] = qc[i];
-        qd_cmd_[i] = qd_meas_[i];
+        qd_cmd_[i] = 0.0;
         qa_cmd_[i] = 0.0;
+        jam_t0_[i] = 0.0;
       }
       z_lock_ = target_.translation().z();
       target_ok_ = target_;
@@ -738,9 +862,12 @@ private:
       q_goal_ = qc;
       v_lim_.setZero();
       v_lp_.setZero();
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                           "跟踪误差 %.2f rad 超限 → 命令重锚实测（累计 %d 次）",
-                           track_err, track_err_resets_);
+      vj_f_.fill(0.0);
+      if (!jammed) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                             "跟踪误差 %.2f rad 超限 → 命令重锚实测（累计 %d 次）",
+                             track_err, track_err_resets_);
+      }
     }
 
     // ---- 6) 发布单点帧（time_from_start = dt）----
@@ -843,7 +970,21 @@ private:
   bool settle_done_{ false };            // 本次停发已归位完成（避免每拍重锚后再归位刷屏）
   double cmd_limit_margin_{ 0.02 };      // [rad] 命令与 URDF 限位的最小余量
   uint64_t cmd_limit_clamp_cnt_{ 0 };
-  double max_track_err_{ 3.0 };  // [rad] 命令-实测偏差上限（只在真的被挡/失速时才重锚）
+  double max_track_err_{ 3.0 };  // [rad] 命令-实测偏差粗兜底（正常快速跟踪领先量本来就大）
+  // 顶死检测（命令超前 + 关节不动 + 持续 jam_time）：撞机械限位/被挡时唯一可靠的判据
+  double jam_err_{ 0.15 }, jam_vel_{ 0.05 }, jam_time_{ 0.3 };
+  std::array<double, kDof> jam_t0_{};   // 每关节"顶死"起始时刻（0=未触发）
+  // IK 异常闸：连续失败 / 换支过密 → 冻结下发（事故 2026-10-26：255 次换支 + 3 rad/s 甩动）
+  int ik_fail_stop_streak_{ 5 }, ik_branch_stop_cnt_{ 10 };
+  double ik_stop_hold_{ 0.5 }, ik_stop_hold_max_{ 4.0 };
+  double ik_hold_cur_{ 0.5 };            // 当前退避档（连续冻结时翻倍）
+  double ik_freeze_reset_s_{ 5.0 };      // 超过这么久没冻结 → 退避复位
+  rclcpp::Time last_freeze_t_{ 0, 0, RCL_ROS_TIME };
+  int ik_branch_hits_{ 0 };
+  bool frozen_{ false };                 // 处于 IK 异常冻结期（用于"冻结结束"日志，避免刷屏）
+  rclcpp::Time ik_win_t_{ 0, 0, RCL_ROS_TIME };
+  rclcpp::Time freeze_until_{ 0, 0, RCL_ROS_TIME };
+  double reach_max_{ 0.50 };             // [m] 末端到基座距离上限（避开全伸边界奇异）
   double vj_filter_tau_{ 0.05 };
   double pos_gain_{ 4.0 };
   double acc_gain_{ 20.0 };

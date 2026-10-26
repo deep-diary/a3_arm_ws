@@ -42,6 +42,20 @@
 > 判据：改完配置后，**先看 `install/` 里的那份是不是符号链接**（`ls -l`）。
 > 是链接 → 改源码即生效；是普通文件 → 必须重建。
 
+## 追加：`a3_bringup` 的 launch 也是拷贝安装（2026-10-26）
+
+改 `src/a3_bringup/launch/a3_bringup.launch.py` 里的节点参数（例：把
+`{"max_ik_jump": 0.05}` 收到 `0.01`）后只 `restart`，运行时 `ros2 param get` 仍是 **0.05**：
+
+- `install/a3_bringup/share/a3_bringup/launch/…` 是**普通文件**（`readlink -f` 指回 install 自身），
+  源码改动不会同步；
+- 更隐蔽的是：**launch 里的显式参数会覆盖节点代码里的 `declare_parameter` 默认值**——
+  只改 C++ 默认值同样无效，必须两处一起改（launch + 代码默认值），否则排查时会一直盯着代码。
+
+做法：`colcon build --packages-select a3_bringup --symlink-install`（该包 `--symlink-install` 能过，
+之后 install 侧变符号链接）→ 重启栈 → `ros2 param get <node> <param>` 核对。
+判据同前：先 `readlink -f` 看 install 侧是不是链接，再重新读参数确认落地。
+
 ## 相关路径
 
 - `src/a3_teleop_ps4/config/mappings/default.yaml`、`src/a3_teleop_ps4/config/action_registry.yaml`

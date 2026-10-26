@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import array
 import math
+import os
 import time
 
 import cv2
@@ -99,6 +100,13 @@ class VisionDisplayMux(Node):
         self.declare_parameter("ee_pose_topic", "/a3/ee_pose")
         self.declare_parameter("draw_ee_pose", True)
         self.declare_parameter("ee_timeout_s", 1.0)
+        # 末端工作半径 R=|p| 的告警线（与 servo 的 reach_max 0.50 对齐；接近即变色）
+        self.declare_parameter("reach_warn_m", 0.48)
+        # CPU 负载显示：控制环 200 Hz + SocketCAN 读写线程，CPU 一满就反馈掉帧 / TX 队列满 /
+        # 命令台阶（2026-10-26 实测 load 28、空闲 2.5% 时三种症状同时出现）。
+        self.declare_parameter("show_cpu", True)
+        self.declare_parameter("cpu_warn_pct", 60.0)     # 黄：开始挤压控制环
+        self.declare_parameter("cpu_danger_pct", 80.0)   # 红：已出现掉帧/猛动的量级
         # 右下角第二行：当前操作模式（ps4_mapper 1 Hz 重发）
         self.declare_parameter("teleop_mode_topic", "/a3/teleop/mode")
         self.declare_parameter("qos_depth", 5)
@@ -116,6 +124,14 @@ class VisionDisplayMux(Node):
         self._settle_v = abs(float(p("settle_err_v").value))
         self._draw_ee = bool(p("draw_ee_pose").value)
         self._ee_timeout = float(p("ee_timeout_s").value)
+        self._reach_warn = abs(float(p("reach_warn_m").value))
+        self._show_cpu = bool(p("show_cpu").value)
+        self._cpu_warn = abs(float(p("cpu_warn_pct").value))
+        self._cpu_danger = max(self._cpu_warn, abs(float(p("cpu_danger_pct").value)))
+        self._cpu_pct = 0.0
+        self._load1 = 0.0
+        self._stat_prev = None
+        self._nproc = os.cpu_count() or 1
 
         depth = int(p("qos_depth").value)
         img_qos = QoSProfile(depth=depth, history=HistoryPolicy.KEEP_LAST,
@@ -319,6 +335,18 @@ class VisionDisplayMux(Node):
                 self._put(img, l2, (col2, yy), scale, LABEL, thick)
                 self._put(img, v2, (col2 + lw2, yy), scale, c2, thick)
 
+    def _reach_row(self):
+        """R = |p|（base_link → 末端），两种模式都显示：超过 reach_warn 变琥珀。
+
+        用途：直接对着伺服侧的 `reach_max`（0.50 m 半径硬限）看——跟踪到边界时会停在
+        球面上，R 会贴着告警线不再增长。
+        """
+        if self._ee_xyz is None or (time.monotonic() - self._ee_t) > self._ee_timeout:
+            return None
+        r = math.sqrt(sum(v * v for v in self._ee_xyz))
+        color = MODE_TRACK if r > self._reach_warn else VALUE
+        return ("r:", f"{r * 1000.0:5.0f} mm", color, None, "", VALUE)
+
     def _draw_ee_pose(self, img: np.ndarray, scale: float, thick: int) -> None:
         """非跟踪：末端位置（base_link，**mm**）+ 姿态（RPY，deg），3 行两列。
 
@@ -334,17 +362,23 @@ class VisionDisplayMux(Node):
             ("y:", f"{y * 1000.0:+5.0f} mm", VALUE, "pitch:", f"{pitch:+6.1f} deg", ANGLE),
             ("z:", f"{z * 1000.0:+5.0f} mm", VALUE, "yaw:", f"{yaw:+6.1f} deg", ANGLE),
         ]
+        r_row = self._reach_row()
+        if r_row is not None:
+            rows.append(r_row)
         self._block(img, rows, scale, thick)
 
     def _draw_face_block(self, img: np.ndarray, ov: FaceOverlay, scale: float,
                          thick: int, state_color) -> None:
-        """跟踪中：相机系 XYZ（mm）+ 姿态（deg）+ 图像误差，4 行两列（与 EE 块同款）。"""
+        """跟踪中：相机系 XYZ（mm）+ 姿态（deg）+ 图像误差 + 末端半径 R（与 EE 块同款）。"""
         rows = [
             ("x:", f"{ov.x_mm:+5.0f} mm", VALUE, "roll:", f"{ov.roll_deg:+6.1f} deg", ANGLE),
             ("y:", f"{ov.y_mm:+5.0f} mm", VALUE, "pitch:", f"{ov.pitch_deg:+6.1f} deg", ANGLE),
             ("z:", f"{ov.z_mm:5.0f} mm", VALUE, "yaw:", f"{ov.yaw_deg:+6.1f} deg", ANGLE),
             ("ex:", f"{ov.err_u:+.3f}", state_color, "ey:", f"{ov.err_v:+.3f}", state_color),
         ]
+        r_row = self._reach_row()
+        if r_row is not None:
+            rows.append(r_row)
         self._block(img, rows, scale, thick)
 
     def _draw_no_face(self, img: np.ndarray, scale: float, thick: int) -> None:
@@ -363,6 +397,29 @@ class VisionDisplayMux(Node):
         cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color,
                     thick, cv2.LINE_AA)
 
+    def _update_cpu(self) -> None:
+        """每秒一次：CPU 占用率（/proc/stat 差分）+ 1 分钟 load average。
+
+        为什么要显示：控制环是 200 Hz + SocketCAN 读写线程，CPU 一满就会
+        反馈掉帧（stale）/ TX 队列满（CAN write failed）/ dt 抖动（命令台阶）。
+        2026-10-26 实测 load 28、空闲 2.5% 时三种症状同时出现，帧率也从 24 掉到 10。
+        """
+        try:
+            with open("/proc/stat", "r") as f:
+                vals = [int(x) for x in f.readline().split()[1:]]
+            idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+            total = sum(vals)
+            if self._stat_prev is not None:
+                di = idle - self._stat_prev[0]
+                dtot = total - self._stat_prev[1]
+                if dtot > 0:
+                    self._cpu_pct = max(0.0, min(100.0, 100.0 * (1.0 - di / dtot)))
+            self._stat_prev = (idle, total)
+            with open("/proc/loadavg", "r") as f:
+                self._load1 = float(f.read().split()[0])
+        except Exception:  # noqa: BLE001
+            pass
+
     def _draw_fps(self, img: np.ndarray, w: int, h: int, scale: float,
                   thick: int) -> None:
         """右上角两行右对齐：帧率、当前模式（不带 `mode` 前缀）。
@@ -379,6 +436,12 @@ class VisionDisplayMux(Node):
         fnt = cv2.FONT_HERSHEY_SIMPLEX
         lines = [(f"{self._out_fps:.1f} fps", FPS_COLOR),
                  (mode, MODE_TRACK if self._tracking() else VALUE)]
+        if self._show_cpu:
+            cpu_color = (STATE_ERR if self._cpu_pct >= self._cpu_danger
+                         else MODE_TRACK if self._cpu_pct >= self._cpu_warn
+                         else FPS_COLOR)
+            lines.append((f"cpu {self._cpu_pct:.0f}%  ld {self._load1:.1f}/{self._nproc}",
+                          cpu_color))
         x_right, y = w - u(12), u(26)
         widest = max(cv2.getTextSize(t, fnt, scale, thick)[0][0] for t, _ in lines)
         self._plate(img, x_right - widest - u(5), y - u(18), w - u(3),
@@ -408,6 +471,8 @@ class VisionDisplayMux(Node):
             self._out_fps = self._frames / span
             self._frames = 0
             self._t_rate = now
+            if self._show_cpu:
+                self._update_cpu()
             if self._fps_on:
                 overlay_state = ("overlay" if (self._tracking() and self._overlay is not None
                                                and (now - self._overlay_t) <= self._overlay_timeout)

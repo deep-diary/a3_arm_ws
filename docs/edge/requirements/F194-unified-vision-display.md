@@ -44,12 +44,22 @@
 整块下垫 40% 黑底，亮背景下也清晰）：
 
 ```
-跟踪中（相机系 mm + deg + 图像误差）    非跟踪（末端 base_link mm + deg）
-x:   -27 mm   roll:    -6.7 deg        x:  -191 mm   roll:   +102.5 deg
-y:   +60 mm   pitch:   -0.1 deg        y:   +22 mm   pitch:    +0.6 deg
-z:   321 mm   yaw:     +3.9 deg        z:  +235 mm   yaw:     +81.8 deg
+跟踪中（相机系 mm + deg + 图像误差 + 末端半径）
+x:   -27 mm   roll:    -6.7 deg
+y:   +60 mm   pitch:   -0.1 deg
+z:   321 mm   yaw:     +3.9 deg
 ex: -0.146    ey:     +0.431
+r:   398 mm                     ← 末端到基座 \|p\|，超 reach_warn(0.48) 变琥珀
+
+非跟踪（末端 base_link mm + deg + 半径）
+x:  -191 mm   roll:   +102.5 deg
+y:   +22 mm   pitch:    +0.6 deg
+z:  +235 mm   yaw:     +81.8 deg
+r:   398 mm
 ```
+
+> **R 行（2026-10-26 加）**：两种模式都显示，用于对着伺服侧 `reach_max`（0.50 m 半径硬限）
+> 直接看工作半径——跟踪到边界时臂停在球面上，R 贴着告警线不再增长。
 
 > **单位用 mm**：工作空间 <1 m，`0.132` 这种小数在现场不好读；`132 mm` 一眼可对。
 > 不再显示 `EE` / `RPY` 表头与 `BOX … px`（框在画面上已画出，冗余）。
