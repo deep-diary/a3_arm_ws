@@ -18,5 +18,11 @@
 - **关联：** F93（systemd 产品单元）、F100（RT 调度）、F81（反馈陈旧 read 看门狗）、F86（电机侧 CAN 超时兜底重启窗口）、F90（黑匣子在被杀前留痕）
 - **状态：** `completed`（2026-09-24，仿真验收 8/8：RuntimeWatchdogUSec 实测 11 s；临时 notify 单元 30 s 内 active、NRestarts=0；两点 action SUCCESSFUL；杀 vcan_motor_sim 后 **12.4 s** 内 NRestarts 0→1，= WatchdogSec 10 + RestartSec 2，与理论一致）
 
+> **2026-10-26 更新（F196）：** 没有 `NOTIFY_SOCKET`（手动 setsid 起栈）时不再创建
+> `/joint_states` 订阅——此前空转节点仍要付 200 Hz 执行器开销（实测约 33% 单核）。
+> 订阅话题由 `joint_states_topic` 参数给出，默认在 launch 里接到
+> `/joint_states_lite`（50 Hz）；systemd 路径的判定逻辑（首帧 READY +
+> 新鲜度/`feedback_stale` 门控喂狗）不变。
+
 
 > 返回索引：[REQUIREMENTS.md](../REQUIREMENTS.md)

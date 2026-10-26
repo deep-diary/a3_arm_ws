@@ -42,6 +42,8 @@ class EePosePublisher(Node):
         self._ee_frame = str(self.get_parameter("ee_frame").value)
         self._stale_s = 0.5
         self._q = None
+        self._js_names = None
+        self._js_map = []          # [(msg_index, q_index)]，name 序列不变时复用
         self._last_js_time: float = 0.0
         self._warned_no_js = False
         self._unknown_joints: set = set()
@@ -83,14 +85,23 @@ class EePosePublisher(Node):
     def _on_js(self, msg: JointState) -> None:
         if self._q is None or not msg.name:
             return
-        for name, value in zip(msg.name, msg.position):
-            jid = self._model.getJointId(name)
-            if jid == 0 or self._model.nqs[jid] != 1:
-                if name not in self._unknown_joints:
-                    self._unknown_joints.add(name)
-                    self.get_logger().warn(f"joint '{name}' not in URDF — ignored")
-                continue
-            self._q[self._model.idx_qs[jid]] = float(value)
+        # 200 Hz 回调：关节顺序稳定时只做数组搬运，避免每帧 getJointId 查模型
+        names = tuple(msg.name)
+        if names != self._js_names:
+            self._js_names = names
+            self._js_map = []
+            for i, name in enumerate(msg.name):
+                jid = self._model.getJointId(name)
+                if jid == 0 or self._model.nqs[jid] != 1:
+                    if name not in self._unknown_joints:
+                        self._unknown_joints.add(name)
+                        self.get_logger().warn(f"joint '{name}' not in URDF — ignored")
+                    continue
+                self._js_map.append((i, self._model.idx_qs[jid]))
+        positions = msg.position
+        for i, iq in self._js_map:
+            if i < len(positions):
+                self._q[iq] = float(positions[i])
         self._last_js_time = time.monotonic()
 
     def _tick(self) -> None:

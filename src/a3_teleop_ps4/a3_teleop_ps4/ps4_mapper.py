@@ -103,6 +103,10 @@ class Ps4Mapper(Node):
             self._resolved = resolve_mode(mapping, self._mode)
         else:
             self._resolved = resolve_mode(mapping, "")
+        # 负载优化：绑定表只在切模式时变化，50 Hz tick 不再每帧重建 list/元组/f-string
+        self._axis_bindings = iter_axis_bindings(self._resolved)
+        self._button_bindings = iter_button_bindings(self._resolved)
+        self._servo_retry_at = 0.0
         self._select_latch: Optional[str] = None
         # F189：切模式时仍按住的键要先松开才生效，避免 Share+△ 的 △ 立刻又触发
         # 新模式里的 △ 绑定（"进 DEMO 却执行了别的动作"）
@@ -120,8 +124,10 @@ class Ps4Mapper(Node):
         self.create_subscription(
             Joy, str(self.get_parameter("joy_topic").value), self._on_joy, 10
         )
-        self.create_subscription(Imu, "/a3/ds4/imu", self._on_imu, 10)
-        self.create_subscription(Vector3, "/a3/ds4/touch", self._on_touch, 10)
+        # 50 Hz 传感器流用 BEST_EFFORT：发布端是 RELIABLE，兼容；避免可靠传输积压
+        sensor_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.create_subscription(Imu, "/a3/ds4/imu", self._on_imu, sensor_qos)
+        self.create_subscription(Vector3, "/a3/ds4/touch", self._on_touch, sensor_qos)
         self.create_subscription(
             String, "/a3/teleop/mode", self._on_mode_echo,
             QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE))
@@ -173,6 +179,11 @@ class Ps4Mapper(Node):
     def _maybe_start_servo(self) -> None:
         if not self._auto_servo or self._servo_started or not self._joy_ready():
             return
+        # service_is_ready() 是 graph 查询；servo 未起时不要 50 Hz 空查，退避 1 s
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if now < self._servo_retry_at:
+            return
+        self._servo_retry_at = now + 1.0
         if self._exec.try_start_servo():
             self._servo_started = True
             self.get_logger().info("servo started after joy became ready")
@@ -280,6 +291,8 @@ class Ps4Mapper(Node):
             self._run_hooks(prev, "exit")
         self._mode = target
         self._resolved = resolve_mode(self._mapping, target)
+        self._axis_bindings = iter_axis_bindings(self._resolved)
+        self._button_bindings = iter_button_bindings(self._resolved)
         self._mode_guard_until = now + 0.3
         # 清边沿/摇杆/方向键状态：避免旧模式的按键在切换瞬间重复触发
         self._edges = ButtonEdgeTracker()
@@ -306,6 +319,8 @@ class Ps4Mapper(Node):
             fallback = "normal" if "normal" in self._mode_names else (prev or target)
             self._mode = fallback
             self._resolved = resolve_mode(self._mapping, fallback)
+            self._axis_bindings = iter_axis_bindings(self._resolved)
+            self._button_bindings = iter_button_bindings(self._resolved)
             self._publish_mode_state(fallback, rejected=target)
             return
         self._publish_mode_state(target)
@@ -362,10 +377,20 @@ class Ps4Mapper(Node):
         resolved = self._resolved
 
         # F64：逐轴 gates——轴任一 gate 按住才取样；未列 gates 的轴不门控（R2 夹爪）
+        # gate 键每 tick 只求值一次（同一 gate 被多轴复用时不再重复查表）
+        gate_cache: Dict[str, bool] = {}
+
+        def gate_on(name: str) -> bool:
+            val = gate_cache.get(name)
+            if val is None:
+                val = self._layout.button(joy, name)
+                gate_cache[name] = val
+            return val
+
         if not block_inputs:
-            for axis_name, spec in iter_axis_bindings(resolved):
+            for axis_name, spec in self._axis_bindings:
                 gates = spec.get("gates") or []
-                if gates and not any(self._layout.button(joy, g) for g in gates):
+                if gates and not any(gate_on(g) for g in gates):
                     continue
                 fn = str(spec.get("fn"))
                 kind = str(spec.get("kind", "analog_n11"))
@@ -387,7 +412,7 @@ class Ps4Mapper(Node):
                     self._exec.apply_analog(fn, v)
 
         if not block_inputs:
-            for bind_key, btn, spec in iter_button_bindings(resolved):
+            for bind_key, btn, spec in self._button_bindings:
                 if btn in self._held_latch:
                     continue
                 held = self._layout.button(joy, btn)

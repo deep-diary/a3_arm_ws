@@ -19,6 +19,7 @@ import time
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 
@@ -27,6 +28,7 @@ class SystemdWatchdogFeedNode(Node):
     def __init__(self):
         super().__init__("systemd_watchdog_feed")
 
+        self.declare_parameter("joint_states_topic", "/joint_states")
         self.stale_s = float(os.environ.get("A3_WATCHDOG_STALE_S", "3.0"))
         feed_period = float(os.environ.get("A3_WATCHDOG_FEED_PERIOD_S", "2.0"))
 
@@ -48,10 +50,16 @@ class SystemdWatchdogFeedNode(Node):
         self.last_js = None
         self.fb_stale = False
         self.ready_sent = False
-        self.create_subscription(
-            JointState, "/joint_states", self._on_js, 10)
-        self.create_subscription(
-            Bool, "/a3/hardware/feedback_stale", self._on_stale, 10)
+        # 负载优化：没有 NOTIFY_SOCKET 时本节点只空转，不应为它付 200 Hz
+        # /joint_states 订阅的执行器开销（实测约 33% 单核）。systemd 启动时
+        # 行为完全不变。
+        if self.sock is not None:
+            js_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+            self.create_subscription(
+                JointState, str(self.get_parameter("joint_states_topic").value),
+                self._on_js, js_qos)
+            self.create_subscription(
+                Bool, "/a3/hardware/feedback_stale", self._on_stale, 10)
         self.create_timer(feed_period, self._feed)
 
     def _on_stale(self, msg):

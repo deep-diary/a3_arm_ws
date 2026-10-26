@@ -20,5 +20,13 @@
 - **关联：** F81（反馈 staleness/freeze-hold）、F82（aggregator）、LL-115（任务名前缀取节点名）、LL-116（Python 绑定需手动 tick）、LL-117（aggregator 剥条目名前导斜杠）
 - **状态：** `completed`（2026-09-24，隔离域 104 验收 4/4：50 Hz→诊断+聚合 OK 3.3 s；10 Hz→双 WARN 2.0 s；停发→双 ERROR 6.0 s；恢复 50 Hz→双 OK 5.1 s）
 
+> **2026-10-26 更新（F196）：** `/joint_states` 实际是 **200 Hz**（Humble 的 JSB
+> 不支持 `publish_rate`，见 LL-197），旧门限 [40,60] 会永久报 “Frequency too high”。
+> 现分两路：
+> - 开启 `use_joint_state_lite`（默认）时监测 `/joint_states_lite`（50 Hz，门限 [40,60]）；
+> - 关闭时回退监测原始 `/joint_states`（200 Hz，门限 [180,220]）。
+> 原始 200 Hz 的到达率另由 C++ `joint_state_relay` 发布到 `/diagnostics`
+> （`a3_joint_state_relay: raw /joint_states`，默认带 180–220 Hz）。
+
 
 > 返回索引：[REQUIREMENTS.md](../REQUIREMENTS.md)

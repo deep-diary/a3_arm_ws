@@ -12,7 +12,6 @@ from geometry_msgs.msg import PoseStamped, TwistStamped
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float32, String
 from std_srvs.srv import SetBool, Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -178,7 +177,8 @@ class ActionExecutor:
         self._lin = [0.0, 0.0, 0.0]
         self._ang = [0.0, 0.0, 0.0]
         self._jog = [0.0] * 6
-        self._q = [0.0] * 7
+        # 夹爪实测角由 /a3/arm_status（10 Hz，positions 含 L7）镜像；不再为
+        # 一个关节订阅 200 Hz /joint_states（实测该订阅是本节点最大开销）。
         self._gripper = GRIPPER_CLOSE
         self._last_l6_sent: Optional[float] = None
         self._last_l7_sent: Optional[float] = None
@@ -210,11 +210,11 @@ class ActionExecutor:
         # 由 _pending_gripper 在 poll() 重试，无需自研重试表）
         self._force_engaged = False
         self._force_last_torque: Optional[float] = None
+        # GripperCommand server 不在线时退避重试（server_is_ready 是 graph 查询）
+        self._gripper_retry_at = 0.0
 
-        # LL-059：真机 /joint_states 是 SensorDataQoS/BEST_EFFORT；RELIABLE 订阅静默
-        # 收不到。BEST_EFFORT 订阅同时兼容仿真（RELIABLE 发布）。
-        js_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
-        node.create_subscription(JointState, "/joint_states", self._on_js, js_qos)
+        # 负载优化：不再订阅 200 Hz /joint_states。_gripper 只需要 L7 实测角，
+        # 由 10 Hz 的 /a3/arm_status.positions（按 joint_names 排序）提供。
         # gate/state 真机（C++）与仿真均以 reliable+TRANSIENT_LOCAL depth1 锁存发布
         latch_qos = QoSProfile(
             depth=1,
@@ -227,13 +227,6 @@ class ActionExecutor:
         node.create_subscription(ArmStatus, "/a3/arm_status", self._on_arm_status,
                                  QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE))
 
-    def _on_js(self, msg: JointState) -> None:
-        name_to_pos = {n: p for n, p in zip(msg.name, msg.position)}
-        for i, jn in enumerate(JOINTS):
-            if jn in name_to_pos:
-                self._q[i] = float(name_to_pos[jn])
-        self._gripper = self._q[6]
-
     def _on_gate(self, msg: Bool) -> None:
         self._gate_open = bool(msg.data)
 
@@ -242,6 +235,13 @@ class ActionExecutor:
 
     def _on_arm_status(self, msg: ArmStatus) -> None:
         self.arm_state = str(msg.state)
+        # L7 实测角（ArmStatus.positions 按 joint_names 排序）
+        try:
+            idx = list(msg.joint_names).index("L7_joint")
+        except ValueError:
+            idx = 6
+        if 0 <= idx < len(msg.positions):
+            self._gripper = float(msg.positions[idx])
 
     def _on_vision_mode(self, msg: String) -> None:
         """F189/F191：跟踪开关以 /a3/vision/mode 为准（进 TRACK 自动 enable 后同步）。"""
@@ -253,9 +253,10 @@ class ActionExecutor:
             self._face_enable_pending = False
 
     def tick_begin(self) -> None:
-        self._lin = [0.0, 0.0, 0.0]
-        self._ang = [0.0, 0.0, 0.0]
-        self._jog = [0.0] * 6
+        # 原地清零（避免 50 Hz 每 tick 分配 3 个新 list）
+        self._lin[:] = (0.0, 0.0, 0.0)
+        self._ang[:] = (0.0, 0.0, 0.0)
+        self._jog[:] = [0.0] * 6
         self._stopped = False
 
     def pose_blocking(self, now: float) -> bool:
@@ -265,7 +266,8 @@ class ActionExecutor:
 
     def poll(self, now: float) -> None:
         """每 tick 调用一次：重试挂起的夹爪目标、推进 L3 上电+使能挂起态."""
-        if self._pending_gripper is not None:
+        if self._pending_gripper is not None and now >= self._gripper_retry_at:
+            self._gripper_retry_at = now + 1.0
             self._gripper_goal(*self._pending_gripper)
         self._advance_pending_teach(now)
         self._advance_face_enable(now)

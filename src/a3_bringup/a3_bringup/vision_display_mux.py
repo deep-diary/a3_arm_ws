@@ -112,6 +112,9 @@ class VisionDisplayMux(Node):
         self.declare_parameter("qos_depth", 5)
         self.declare_parameter("draw_fps", True)
         self.declare_parameter("show_mesh", True)
+        # 负载优化：没有订阅者（RViz/Web 都没开）时不解码、不绘制、不发布；
+        # 另外限制显示合成帧率，避免相机帧率直接决定这一层的 CPU。
+        self.declare_parameter("max_fps", 25.0)
         # 与 face_track.yaml 的 deadband（0.05）对齐：误差进死区即"到位"变绿
         self.declare_parameter("settle_err_u", 0.05)
         self.declare_parameter("settle_err_v", 0.05)
@@ -149,9 +152,17 @@ class VisionDisplayMux(Node):
         self._frames = 0
         self._out_fps = 0.0
         self._t_rate = time.monotonic()
+        max_fps = float(p("max_fps").value)
+        self._min_period = (1.0 / max_fps) if max_fps > 0.0 else 0.0
+        self._last_proc = 0.0
 
         self.pub = self.create_publisher(Image, str(p("output_topic").value), img_qos)
-        self.create_subscription(Image, str(p("raw_topic").value), self._on_raw, img_qos)
+        # 负载优化：只在真的有人看 /a3/vision/display（RViz/Web）时才订阅原始画面。
+        # 无观察者时连 25 Hz×921 KB 的反序列化都不做（实测约 15% 单核）。
+        self._raw_topic = str(p("raw_topic").value)
+        self._img_qos = img_qos
+        self._raw_sub = None
+        self.create_timer(1.0, self._manage_raw_sub)
         self.create_subscription(FaceOverlay, str(p("overlay_topic").value),
                                  self._on_overlay, rel_qos)
         self.create_subscription(Bool, str(p("show_mesh_topic").value),
@@ -167,6 +178,18 @@ class VisionDisplayMux(Node):
             f"{p('overlay_topic').value} → {p('output_topic').value}")
 
     # ------------------------------------------------------------------ 订阅
+    def _manage_raw_sub(self) -> None:
+        """按 /a3/vision/display 的订阅者数量懒建/撤原始画面订阅。"""
+        has_viewer = self.pub.get_subscription_count() > 0
+        if has_viewer and self._raw_sub is None:
+            self._raw_sub = self.create_subscription(
+                Image, self._raw_topic, self._on_raw, self._img_qos)
+            self.get_logger().info(f"显示有订阅者 → 开始处理 {self._raw_topic}")
+        elif not has_viewer and self._raw_sub is not None:
+            self.destroy_subscription(self._raw_sub)
+            self._raw_sub = None
+            self.get_logger().info("显示无订阅者 → 暂停画面处理")
+
     def _on_overlay(self, msg: FaceOverlay) -> None:
         self._overlay = msg
         self._overlay_t = time.monotonic()
@@ -195,6 +218,13 @@ class VisionDisplayMux(Node):
         return self._mode is None or self._mode == "face_track"
 
     def _on_raw(self, msg: Image) -> None:
+        # 双重保险：订阅者刚好在 1 s 轮询间隙消失时也直接短路
+        if self.pub.get_subscription_count() == 0:
+            return
+        now = time.monotonic()
+        if self._min_period > 0.0 and (now - self._last_proc) < self._min_period:
+            return
+        self._last_proc = now
         if msg.encoding != "bgr8":
             self.get_logger().warn(
                 f"仅支持 bgr8，收到 {msg.encoding}", throttle_duration_sec=10.0)
@@ -437,10 +467,16 @@ class VisionDisplayMux(Node):
         lines = [(f"{self._out_fps:.1f} fps", FPS_COLOR),
                  (mode, MODE_TRACK if self._tracking() else VALUE)]
         if self._show_cpu:
-            cpu_color = (STATE_ERR if self._cpu_pct >= self._cpu_danger
-                         else MODE_TRACK if self._cpu_pct >= self._cpu_warn
+            # 颜色取两者较差者：CPU 占用率高 **或** load 超过核数（排队）都算危险。
+            # 8 核经验线：load <4 舒适、4–8 偏紧、>8 说明可运行线程已超过核数。
+            busy = max(self._cpu_pct / max(1.0, self._cpu_danger),
+                       self._load1 / max(1.0, float(self._nproc)))
+            warn = max(self._cpu_pct / max(1.0, self._cpu_warn),
+                       self._load1 / max(1.0, 0.7 * float(self._nproc)))
+            cpu_color = (STATE_ERR if busy >= 1.0
+                         else MODE_TRACK if warn >= 1.0
                          else FPS_COLOR)
-            lines.append((f"cpu {self._cpu_pct:.0f}%  ld {self._load1:.1f}/{self._nproc}",
+            lines.append((f"load {self._load1:.1f}/{self._nproc}  cpu {self._cpu_pct:.0f}%",
                           cpu_color))
         x_right, y = w - u(12), u(26)
         widest = max(cv2.getTextSize(t, fnt, scale, thick)[0][0] for t, _ in lines)

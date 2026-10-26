@@ -149,6 +149,7 @@ def _build(cfg, include_gripper):
     use_camera = LaunchConfiguration("use_camera")
     use_mqtt = LaunchConfiguration("use_mqtt")
     use_teleop = LaunchConfiguration("use_teleop")
+    use_demo_nodes = LaunchConfiguration("use_demo_nodes")
     use_self_test = LaunchConfiguration("use_self_test")
     use_host_diagnostics = LaunchConfiguration("use_host_diagnostics")
     teleop_mapping = LaunchConfiguration("teleop_mapping")
@@ -159,6 +160,15 @@ def _build(cfg, include_gripper):
     bag_dir_cfg = LaunchConfiguration("bag_dir")
     use_servo_anchor = LaunchConfiguration("use_servo_anchor")
     use_servo_target = LaunchConfiguration("use_servo_target")
+    use_joint_state_lite = LaunchConfiguration("use_joint_state_lite")
+    # 低频消费者统一走 lite 话题（50 Hz）；关闭 relay 时回退原始 200 Hz
+    joint_states_low = ParameterValue(
+        PythonExpression([
+            "'/joint_states_lite' if '", use_joint_state_lite, "' == 'true' "
+            "else '/joint_states'",
+        ]),
+        value_type=str,
+    )
 
     bringup_share = get_package_share_directory("a3_bringup")
     desc_share = robot_model.description_share(cfg)
@@ -544,7 +554,26 @@ def _build(cfg, include_gripper):
             "apply_calibrated_inertia": True,
             "joint_direction": [1.0] * n_joints,
             "tau_scale": gravity_tau_scale,
+            "joint_states_topic": joint_states_low,
         }],
+    )
+
+    # ---- 负载优化：/joint_states 200 Hz → /joint_states_lite 50 Hz ----
+    # 控制链（JTC/servo）仍用原始 200 Hz；诊断/FK/重力/看门狗等低频消费者改走
+    # lite，避免每个 Python 订阅者都为 200 Hz 付执行器唤醒开销。
+    joint_state_relay = Node(
+        package="a3_trajectory_processing",
+        executable="joint_state_relay",
+        name="joint_state_relay",
+        output="screen",
+        parameters=[{
+            "input_topic": "/joint_states",
+            "output_topic": "/joint_states_lite",
+            "rate_hz": 50.0,
+            "min_rate_hz": 180.0,
+            "max_rate_hz": 220.0,
+        }],
+        condition=IfCondition(use_joint_state_lite),
     )
 
     # ---- F175：末端位姿话题（base_link → end_effector 的 FK，联调/测量用）----
@@ -553,7 +582,11 @@ def _build(cfg, include_gripper):
         executable="ee_pose_publisher",
         name="a3_ee_pose",
         output="screen",
-        parameters=[{"ee_frame": "end_effector", "rate_hz": 20.0}],
+        parameters=[{
+            "ee_frame": "end_effector",
+            "rate_hz": 20.0,
+            "joint_states_topic": joint_states_low,
+        }],
     )
 
     # F118：薄桥接累积器（绝对目标）。downstream 在 JTC 原生话题前，非 arm 关节透传。
@@ -615,6 +648,7 @@ def _build(cfg, include_gripper):
         executable="a3_self_test",
         name="a3_self_test",
         output="screen",
+        parameters=[{"joint_states_topic": joint_states_low}],
         condition=IfCondition(use_self_test),
     )
 
@@ -624,6 +658,7 @@ def _build(cfg, include_gripper):
         executable="systemd_watchdog_feed",
         name="systemd_watchdog_feed",
         output="screen",
+        parameters=[{"joint_states_topic": joint_states_low}],
     )
 
     mqtt_bridge = IncludeLaunchDescription(
@@ -701,12 +736,14 @@ def _build(cfg, include_gripper):
     )
 
     # ---- F193：DEMO 角度巡航（绕末端点旋转；服务 /a3/demo/angular_cruise）----
+    # 负载优化：demo 节点不再随 use_teleop 常开（实测空转约 40% 单核）。
+    # 需要演示时显式 use_demo_nodes:=true（a3_stack.sh --demo）。
     angular_cruise = Node(
         package="a3_bringup",
         executable="angular_cruise",
         name="angular_cruise",
         output="screen",
-        condition=IfCondition(use_teleop),
+        condition=IfCondition(use_demo_nodes),
     )
 
     # ---- F82：诊断聚合（/diagnostics → /diagnostics_agg + toplevel state）----
@@ -763,12 +800,37 @@ def _build(cfg, include_gripper):
     )
 
     # ---- F104：关键话题频率健康（退化 WARN / 停发 ERROR）----
+    # lite relay 开启时监测 50 Hz 的 /joint_states_lite；关闭 relay 时回退原始
+    # 200 Hz。两侧门限不同，故用两个互斥节点（同名，只实例化一个）。
     topic_rate_monitor = Node(
         package="a3_bringup",
         executable="topic_rate_monitor",
         name="a3_topic_rate",
         output="screen",
-        condition=IfCondition(use_diagnostics),
+        parameters=[{
+            "topics": ["/joint_states_lite"],
+            "min_freq": [40.0],
+            "max_freq": [60.0],
+        }],
+        condition=IfCondition(PythonExpression([
+            "'", use_diagnostics, "' == 'true' and '",
+            use_joint_state_lite, "' == 'true'",
+        ])),
+    )
+    topic_rate_monitor_raw = Node(
+        package="a3_bringup",
+        executable="topic_rate_monitor",
+        name="a3_topic_rate",
+        output="screen",
+        parameters=[{
+            "topics": ["/joint_states"],
+            "min_freq": [180.0],
+            "max_freq": [220.0],
+        }],
+        condition=IfCondition(PythonExpression([
+            "'", use_diagnostics, "' == 'true' and '",
+            use_joint_state_lite, "' == 'false'",
+        ])),
     )
 
     # ---- F90：故障黑匣子（rosbag2 snapshot-mode；FAULT 边沿 FSM 触发落盘）----
@@ -786,8 +848,6 @@ def _build(cfg, include_gripper):
             "/a3/arm_status",
             "/a3/control_mode",
             "/diagnostics",
-            "/diagnostics_agg",
-            "/diagnostics_toplevel_state",
             "/arm_controller/joint_trajectory",
         ],
         output="screen",
@@ -842,6 +902,7 @@ def _build(cfg, include_gripper):
             fsm,
             monitor,
             retime_node,
+            joint_state_relay,
             watchdog_feed,
             mqtt_bridge,
             servo_node,
@@ -854,6 +915,7 @@ def _build(cfg, include_gripper):
             teleop,
             can_bus_monitor,
             topic_rate_monitor,
+            topic_rate_monitor_raw,
         ])],
     )
 
@@ -924,6 +986,12 @@ def _build(cfg, include_gripper):
         ),
         DeclareLaunchArgument("use_teleop", default_value="true"),
         DeclareLaunchArgument(
+            "use_demo_nodes",
+            default_value="false",
+            description="F193 DEMO 节点（angular_cruise）。默认关：空转约 40% 单核；"
+                        "需要角度巡航演示时置 true（a3_stack.sh --demo）",
+        ),
+        DeclareLaunchArgument(
             "use_self_test",
             default_value="true",
             description="F95 只读自检服务（diagnostic_msgs/SelfTest；"
@@ -986,6 +1054,13 @@ def _build(cfg, include_gripper):
             default_value="true",
             description="F181: 默认用 a3_trajectory_processing/servo_target_node"
                         "（绝对目标 + CLIK + twist 加速度限幅/低通）；false 回退 moveit_servo",
+        ),
+        DeclareLaunchArgument(
+            "use_joint_state_lite",
+            default_value="true",
+            description="负载优化：起 joint_state_relay 把 /joint_states（200 Hz）"
+                        "降频成 /joint_states_lite（50 Hz）供诊断/FK/重力/看门狗使用；"
+                        "false 时这些节点回退订阅原始 /joint_states",
         ),
         rsp,
         sim_power_sequence,

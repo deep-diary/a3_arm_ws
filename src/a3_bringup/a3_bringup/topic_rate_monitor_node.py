@@ -25,8 +25,12 @@ class TopicRateMonitor(Node):
     def __init__(self):
         super().__init__("a3_topic_rate")
         self.declare_parameter("topics", ["/joint_states"])
-        self.declare_parameter("min_freq", [40.0])
-        self.declare_parameter("max_freq", [60.0])
+        # /joint_states 由控制器 update_rate 决定（Humble 的 JSB 不支持
+        # publish_rate，实测 200 Hz）。旧门限 [40,60] 是 50 Hz 时代的配置，
+        # 会对 200 Hz 永久报 "Frequency too high"，既误报又白烧订阅开销。
+        # 低频消费者改订 /joint_states_lite（50 Hz）时由 launch 覆盖为 [40,60]。
+        self.declare_parameter("min_freq", [180.0])
+        self.declare_parameter("max_freq", [220.0])
         self.declare_parameter("tolerance", 0.1)
         self.declare_parameter("window_size", 5)
 

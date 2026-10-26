@@ -44,6 +44,8 @@ class UsbCameraNode(Node):
         # F194 起帧率统一由 vision_display_mux 在 /a3/vision/display 右上角显示，
         # 这里默认关，避免文字压进 /camera/image_raw 再被人脸标注叠一层。
         self.declare_parameter("overlay_fps", False)
+        # 负载优化：内参是常量，RViz 不需要 25 Hz；1 Hz 足够且省一次序列化/发布
+        self.declare_parameter("camera_info_rate_hz", 1.0)
 
         device = self.get_parameter("video_device").value
         self.frame_id = self.get_parameter("frame_id").value
@@ -52,6 +54,9 @@ class UsbCameraNode(Node):
         framerate = self.get_parameter("framerate").value
         pixel_format = str(self.get_parameter("pixel_format").value).lower()
         self.overlay_fps = bool(self.get_parameter("overlay_fps").value)
+        info_hz = max(0.1, float(self.get_parameter("camera_info_rate_hz").value))
+        self._info_period = 1.0 / info_hz
+        self._last_info_t = 0.0
         self._rx = 0
         self._rx_fps = 0.0
         self._rx_t0 = time.monotonic()
@@ -93,6 +98,11 @@ class UsbCameraNode(Node):
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(width))
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, float(height))
         cap.set(cv2.CAP_PROP_FPS, float(framerate))
+        # 只保留最新帧，避免驱动/OpenCV 内部积压旧帧（部分后端会忽略该属性）
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:  # noqa: BLE001
+            pass
         self.cap = cap
 
         actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -155,6 +165,16 @@ class UsbCameraNode(Node):
             stamp = self.get_clock().now().to_msg()
             height, width = frame.shape[:2]
 
+            # 无图像订阅者（RViz/视觉链都没起）时跳过 921 KB 的封装与 DDS 拷贝；
+            # 仍持续 read() 以保持相机缓冲新鲜，订阅者随时可加入。
+            if self.pub_image.get_subscription_count() == 0:
+                now = time.monotonic()
+                if now - self._last_info_t >= self._info_period:
+                    self._last_info_t = now
+                    self.camera_info.header.stamp = stamp
+                    self.pub_info.publish(self.camera_info)
+                continue
+
             msg = Image()
             msg.header.stamp = stamp
             msg.header.frame_id = self.frame_id
@@ -168,8 +188,11 @@ class UsbCameraNode(Node):
             msg.data = array.array("B", frame.tobytes())
             self.pub_image.publish(msg)
 
-            self.camera_info.header.stamp = stamp
-            self.pub_info.publish(self.camera_info)
+            now = time.monotonic()
+            if now - self._last_info_t >= self._info_period:
+                self._last_info_t = now
+                self.camera_info.header.stamp = stamp
+                self.pub_info.publish(self.camera_info)
 
     def destroy_node(self):
         self._stop.set()

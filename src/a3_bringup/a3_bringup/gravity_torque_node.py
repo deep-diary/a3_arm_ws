@@ -109,6 +109,10 @@ class GravityTorqueNode(Node):
 
         self._enabled = bool(self.get_parameter("enabled").value)
         self._q = np.zeros(n, dtype=np.float64)
+        # 200 Hz 回调的 name→index 映射只在关节顺序变化时重建
+        self._js_names = None
+        self._js_map: List[tuple] = []
+        self._q_model = None
         self._mode = "IDLE"  # IDLE | TRAJ_RUNNING | GRAVITY_COMP
         self._external_mode = "IDLE"
         self._traj_end_time: Optional[rclpy.time.Time] = None
@@ -195,6 +199,7 @@ class GravityTorqueNode(Node):
 
             self._pin_model = model
             self._pin_data = model.createData()
+            self._q_model = pin.neutral(model)
             self._iq_map = []
             for name in self._joint_names:
                 jid = model.getJointId(name)
@@ -304,11 +309,20 @@ class GravityTorqueNode(Node):
         self._set_mode("TRAJ_RUNNING")
 
     def _on_js(self, msg: JointState) -> None:
-        for i, name in enumerate(self._joint_names):
-            if name in msg.name:
-                idx = msg.name.index(name)
-                if idx < len(msg.position):
-                    self._q[i] = float(msg.position[idx])
+        names = tuple(msg.name)
+        if names != self._js_names:
+            self._js_names = names
+            self._js_map = []
+            for i, name in enumerate(msg.name):
+                try:
+                    j = self._joint_names.index(name)
+                except ValueError:
+                    continue
+                self._js_map.append((i, j))
+        positions = msg.position
+        for i, j in self._js_map:
+            if i < len(positions):
+                self._q[j] = float(positions[i])
 
     def _compute_tau(self) -> List[float]:
         # idle 堆叠自稳定位姿：连杆接触已承担重力，前馈会让电机对抗接触纯发热。
@@ -319,7 +333,9 @@ class GravityTorqueNode(Node):
 
         if self._backend == "pinocchio" and self._pin_model is not None:
             pin = self._pin
-            q = pin.neutral(self._pin_model)
+            # 复用缓冲：neutral 对全 revolute 模型即全零，避免每 20 Hz tick 分配
+            q = self._q_model
+            q.fill(0.0)
             # Model space: apply joint_direction like reBot (q_model = q * direction)
             q_model_vals = self._q * self._direction
             for i, iq in enumerate(self._iq_map):

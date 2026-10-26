@@ -38,9 +38,9 @@ WS_DIR="$(dirname "$SCRIPT_DIR")"
 LOG_FILE="/tmp/a3_real_stack.log"
 
 # 栈节点命令行特征（孤儿兜底名单，与 QUICKSTART 一键关停一致）
-NODE_PATTERN='ros2 launch a3_bringup|ros2_control_node|install/a3_arm_controller/lib/a3_arm_controller/arm_controller|power_sequence_node|ps4_mapper|ds4_feedback_node|ros2mqtt_bridge|move_group|retime_trajectory_node|a3_self_test|/joy/joy_node|can_bus_monitor|topic_rate_monitor|aggregator_node|diagnostic_common_diagnostics|ros2 bag record|robot_state_publisher|a3_sim_executor|gravity_torque_node|a3_bringup/servo_mode_bridge|moveit_servo/servo_node_main|servo_target_node|servo_anchor|a3_bringup/ee_pose_publisher|a3_bringup/usb_camera_node|a3_bringup/vision_display_mux|a3_bringup/angular_cruise|a3_bringup/systemd_watchdog_feed|a3_perception face_track.launch|a3_perception.face_detect_node|lib/a3_perception/face_track_controller'
+NODE_PATTERN='ros2 launch a3_bringup|ros2_control_node|install/a3_arm_controller/lib/a3_arm_controller/arm_controller|power_sequence_node|ps4_mapper|ds4_feedback_node|ros2mqtt_bridge|move_group|retime_trajectory_node|a3_self_test|/joy/joy_node|can_bus_monitor|topic_rate_monitor|aggregator_node|diagnostic_common_diagnostics|ros2 bag record|robot_state_publisher|a3_sim_executor|gravity_torque_node|a3_bringup/servo_mode_bridge|moveit_servo/servo_node_main|servo_target_node|servo_anchor|a3_bringup/ee_pose_publisher|a3_bringup/usb_camera_node|a3_bringup/vision_display_mux|a3_bringup/angular_cruise|a3_bringup/systemd_watchdog_feed|joint_state_relay|a3_perception face_track.launch|a3_perception.face_detect_node|lib/a3_perception/face_track_controller'
 # 复核名单（精简）
-CHECK_PATTERN='ros2 launch a3_bringup|ros2_control_node|a3_arm_controller|power_sequence_node|ps4_mapper|ds4_feedback_node|ros2mqtt_bridge|move_group|joy_node|ros2 bag|robot_state_publisher|servo_node_main|servo_target_node|usb_camera_node|vision_display_mux|angular_cruise'
+CHECK_PATTERN='ros2 launch a3_bringup|ros2_control_node|a3_arm_controller|power_sequence_node|ps4_mapper|ds4_feedback_node|ros2mqtt_bridge|move_group|joy_node|ros2 bag|robot_state_publisher|servo_node_main|servo_target_node|joint_state_relay|usb_camera_node|vision_display_mux|angular_cruise'
 
 # ── 人脸跟踪（F183，--face-track）────────────────────────────────
 # 独立 launch（检测节点跑 mediapipe venv + 控制器跑系统 python），与主栈同生命周期：
@@ -619,7 +619,8 @@ stop_face_track() {
 
 do_start() {
   local with_rviz="${1:-0}" do_probe="${2:-1}" do_joy="${3:-1}" servo_target="${4:-1}" \
-        do_camera="${5:-1}" do_mqtt="${6:-1}" face_track="${7:-0}"
+        do_camera="${5:-1}" do_mqtt="${6:-1}" face_track="${7:-0}" \
+        do_diag="${8:-1}" do_self_test="${9:-1}" do_rosbag="${10:-1}" do_demo="${11:-0}"
   if [ "$SIM" = 1 ]; then
     do_start_sim "$with_rviz" "$do_joy"
     return
@@ -676,9 +677,14 @@ do_start() {
   # F194：帧率统一由 vision_display_mux 在 /a3/vision/display 右上角显示，
   # 相机不再往原始像素上烧字（会压低检测输入质量）。
   local cam_overlay_arg="camera_overlay_fps:=false"
-  info "附加节点：camera=$([ "$do_camera" = 1 ] && echo on || echo off)，mqtt=$([ "$do_mqtt" = 1 ] && echo on || echo off)"
+  # 负载档位：诊断/自检/黑匣子/demo 节点按需开（默认全开，与旧行为一致）
+  local diag_arg="use_diagnostics:=$([ "$do_diag" = 1 ] && echo true || echo false)"
+  local self_test_arg="use_self_test:=$([ "$do_self_test" = 1 ] && echo true || echo false)"
+  local rosbag_arg="use_rosbag:=$([ "$do_rosbag" = 1 ] && echo true || echo false)"
+  local demo_arg="use_demo_nodes:=$([ "$do_demo" = 1 ] && echo true || echo false)"
+  info "附加节点：camera=$([ "$do_camera" = 1 ] && echo on || echo off)，mqtt=$([ "$do_mqtt" = 1 ] && echo on || echo off)，diagnostics=$([ "$do_diag" = 1 ] && echo on || echo off)，self_test=$([ "$do_self_test" = 1 ] && echo on || echo off)，rosbag=$([ "$do_rosbag" = 1 ] && echo on || echo off)，demo=$([ "$do_demo" = 1 ] && echo on || echo off)"
   info "setsid 启动真机栈，日志：$LOG_FILE"
-  setsid bash -c "source '$SCRIPT_DIR/a3_shell_env.sh' && export PYTHONNOUSERSITE=1 && cd '$WS_DIR' && ros2 launch a3_bringup a3_bringup.launch.py hardware:=can can_interface:=can1 use_rviz:=$rviz_arg include_gripper:=$grip_arg $servo_arg $cam_arg $mqtt_arg $cam_overlay_arg" \
+  setsid bash -c "source '$SCRIPT_DIR/a3_shell_env.sh' && export PYTHONNOUSERSITE=1 && cd '$WS_DIR' && ros2 launch a3_bringup a3_bringup.launch.py hardware:=can can_interface:=can1 use_rviz:=$rviz_arg include_gripper:=$grip_arg $servo_arg $cam_arg $mqtt_arg $cam_overlay_arg $diag_arg $self_test_arg $rosbag_arg $demo_arg" \
     </dev/null >"$LOG_FILE" 2>&1 &
 
   info "等待 15s 起栈 …"
@@ -944,7 +950,7 @@ do_calibrate() {
 
 usage() {
   cat <<EOF
-用法：$0 {start|stop|restart|status|free|calibrate} [-f|--force] [--rviz] [--no-probe] [--6j|--7j] [--keep-rviz] [--sim] [--no-joy] [--face-track] [--mqtt]
+用法：$0 {start|stop|restart|status|free|calibrate} [-f|--force] [--rviz] [--no-probe] [--6j|--7j] [--keep-rviz] [--sim] [--no-joy] [--face-track] [--mqtt] [--light|--vision|--full|--demo]
   start    启动真机栈（先探测电机：7J 档 7/7、6J 档 1..6 在线，setsid 起栈，日志 $LOG_FILE）
   stop     优雅停栈（臂未失能默认拒绝）
   restart  重启
@@ -975,6 +981,11 @@ usage() {
                  画面统一看 /a3/vision/display（F194：原图 + 人脸标注，rviz 已订阅）
   --face-debug   额外发布检测节点自带标注图 /a3/face_track/debug_image（仅排查用）
   --no-face-debug 关掉该调试图（默认即关）
+  --light        轻载档：无相机/无 RViz/MQTT/诊断/自检/黑匣子/demo（伺服/平滑度验收、待机）
+  --vision       视觉档：相机 + 视觉显示（RViz 单独按需开），无 MQTT/黑匣子
+  --full         全量档：相机 + RViz + 诊断 + 自检 + 黑匣子（联调用，负载最高）
+  --demo         额外启动 F193 demo 节点（angular_cruise，空转约 40% 单核）
+  --no-diagnostics / --no-rosbag / --no-self-test  单独关闭对应附加节点
   --sim          走全仿真栈 edge_teleop_full_sim（domain $SIM_DOMAIN 隔离真机；可放任意位置）
   --no-joy       仅 --sim：不起 joy_node（/joy 由脚本注入，如 ps4_sim_test.py 合成测试）
 
@@ -1019,7 +1030,7 @@ main() {
   fi
 
   local force=0 keep_rviz=0 with_rviz=0 do_probe=1 do_joy=1 turn_off=0 set_zero_id=255 servo_target=1 \
-        do_camera=1 do_mqtt=0 do_face_track=0
+        do_camera=1 do_mqtt=0 do_face_track=0 do_diag=1 do_self_test=1 do_rosbag=1 do_demo=0
   while [ $# -gt 0 ]; do
     case "$1" in
       -f|--force) force=1 ;;
@@ -1034,6 +1045,14 @@ main() {
       --no-camera) do_camera=0 ;;
       --no-mqtt) do_mqtt=0 ;;
       --mqtt) do_mqtt=1 ;;
+      # 负载档位（见 usage）：只影响附加节点，不动控制链与安全门
+      --light) with_rviz=0; do_camera=0; do_mqtt=0; do_diag=0; do_self_test=0; do_rosbag=0; do_demo=0 ;;
+      --vision) with_rviz=0; do_camera=1; do_mqtt=0; do_diag=1; do_self_test=1; do_rosbag=0 ;;
+      --full) with_rviz=1; do_camera=1; do_diag=1; do_self_test=1; do_rosbag=1 ;;
+      --demo) do_demo=1 ;;
+      --no-diagnostics) do_diag=0 ;;
+      --no-rosbag) do_rosbag=0 ;;
+      --no-self-test) do_self_test=0 ;;
       --face-track) do_face_track=1 ;;
       # 标注图默认已开；--face-debug / --debug_image 保留为显式写法（兼容旧命令/笔误）
       --face-debug|--debug_image|--debug-image) FACE_DEBUG=1 ;;
@@ -1058,12 +1077,12 @@ main() {
   fi
 
   case "$action" in
-    start)   do_start "$with_rviz" "$do_probe" "$do_joy" "$servo_target" "$do_camera" "$do_mqtt" "$do_face_track" ;;
+    start)   do_start "$with_rviz" "$do_probe" "$do_joy" "$servo_target" "$do_camera" "$do_mqtt" "$do_face_track" "$do_diag" "$do_self_test" "$do_rosbag" "$do_demo" ;;
     stop)    do_stop "$force" "$keep_rviz" ;;
     free)    do_free "$turn_off" ;;
     set-zero) do_set_zero "$set_zero_id" ;;
     restart) do_stop "$force" "$keep_rviz" || exit 1
-             do_start "$with_rviz" "$do_probe" "$do_joy" "$servo_target" "$do_camera" "$do_mqtt" "$do_face_track" ;;
+             do_start "$with_rviz" "$do_probe" "$do_joy" "$servo_target" "$do_camera" "$do_mqtt" "$do_face_track" "$do_diag" "$do_self_test" "$do_rosbag" "$do_demo" ;;
     status)  do_status ;;
     *) err "未知动作：$action"; usage; exit 1 ;;
   esac

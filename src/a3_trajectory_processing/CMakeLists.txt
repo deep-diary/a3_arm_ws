@@ -16,6 +16,7 @@ find_package(ruckig CONFIG REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
 
 add_executable(retime_trajectory_node src/retime_trajectory_node.cpp)
 ament_target_dependencies(
@@ -47,6 +48,19 @@ ament_target_dependencies(
 )
 
 install(TARGETS retime_trajectory_node otg_demo servo_target_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# 负载优化：/joint_states 200 Hz → /joint_states_lite 50 Hz 中转
+add_executable(joint_state_relay src/joint_state_relay_node.cpp)
+ament_target_dependencies(
+  joint_state_relay
+  rclcpp
+  sensor_msgs
+  diagnostic_msgs
+)
+
+install(TARGETS joint_state_relay
   DESTINATION lib/${PROJECT_NAME}
 )
 

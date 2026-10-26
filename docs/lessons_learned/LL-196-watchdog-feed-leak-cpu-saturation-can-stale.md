@@ -47,6 +47,11 @@ kill -TERM <除当前栈以外的 PID>                            # 保留当前
 - `/arm_controller/joint_trajectory` 有 **2 个发布者**：`a3_servo_target` 与 `ps4_mapper`（`actions.py` 的动作路径）。
   平时 mapper 不发，一旦某个动作触发就是"双源抢同一个 JTC 目标" → 必然顿挫，排查抖动时要查它。
 
+> **2026-10-26 再次复现（F196 新增 `joint_state_relay`）：** 新节点同样漏在 `NODE_PATTERN` 外，
+> 重启后残留两个 relay → `/joint_states_lite` 实测 100 Hz（两路 50 Hz 叠加）、CPU 翻倍。
+> 已把 `joint_state_relay` 加进 `NODE_PATTERN`/`CHECK_PATTERN`。**新增任何 launch 节点都必须
+> 同步加停机名单**，否则重启一次漏一个。
+
 ## 相关路径
 
 - `scripts/a3_stack.sh`（`NODE_PATTERN`）

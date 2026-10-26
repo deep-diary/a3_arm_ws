@@ -31,7 +31,7 @@ from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 from std_srvs.srv import Trigger
 
 try:
@@ -140,6 +140,10 @@ class FaceDetectNode(Node):
         self.declare_parameter("filter_beta", 0.05)
         self.declare_parameter("coast_timeout_s", 0.30)
         self.declare_parameter("max_rate_hz", 20.0)
+        # 负载优化：默认只在跟踪使能（/a3/vision/mode == face_track）时跑 MediaPipe。
+        # 未使能时仍保留节点与最新帧，服务一开即可用，但不付推理成本。
+        self.declare_parameter("vision_mode_topic", "/a3/vision/mode")
+        self.declare_parameter("require_tracking_mode", True)
         self.declare_parameter("min_confidence", 0.4)
         self.declare_parameter("jump_reject_frac", 0.25)
         # F191 前后（深度）标定：把脸放在已知距离处按一下，按 z 中位数缩放 depth_units_mm
@@ -205,6 +209,8 @@ class FaceDetectNode(Node):
         self._hold = dict(u=0.0, v=0.0, z=0.0, yaw=0.0, pitch=0.0, roll=0.0)
         self._have_hold = False
         self._last_detect_t = 0.0
+        self._require_mode = bool(p("require_tracking_mode").value)
+        self._vision_on = not self._require_mode
         self._track_start_t: float | None = None
         self._n_out = 0
         self._t_rate = time.monotonic()
@@ -212,6 +218,8 @@ class FaceDetectNode(Node):
         self._dbg_t = 0.0
 
         self.create_subscription(Image, self.image_topic, self._on_image, sensor_qos)
+        self.create_subscription(
+            String, str(p("vision_mode_topic").value), self._on_vision_mode, rel_qos)
 
         opts = vision.FaceLandmarkerOptions(
             base_options=mp_python.BaseOptions(model_asset_path=model_path),
@@ -248,6 +256,16 @@ class FaceDetectNode(Node):
         return SetParametersResult(successful=True)
 
     # ---------------------------------------------------------------- 订阅回调
+    def _on_vision_mode(self, msg: String) -> None:
+        on = str(msg.data) == "face_track"
+        if on != self._vision_on:
+            self._vision_on = on
+            if on:
+                # 重新使能：清掉上次停用前的 coasting/滤波历史
+                self._last_detect_t = 0.0
+                self._have_hold = False
+            self.get_logger().info(f"人脸检测 → {'开' if on else '空闲'}")
+
     def _on_image(self, msg: Image) -> None:
         if msg.encoding != "bgr8":
             self.get_logger().warn(f"仅支持 bgr8，收到 {msg.encoding}", once=True)
@@ -281,6 +299,8 @@ class FaceDetectNode(Node):
                 self.get_logger().error(f"处理帧失败：{exc}", throttle_duration_sec=2.0)
 
     def _process(self, stamp_ns: int, frame: np.ndarray) -> None:
+        if not self._vision_on:
+            return          # 跟踪未使能：不跑 MediaPipe（省 ~30% 单核）
         now_m = time.monotonic()
         if now_m - self._last_proc_t < self._min_period:
             return          # max_rate_hz 节流（相机 25 Hz，检测上限按参数）

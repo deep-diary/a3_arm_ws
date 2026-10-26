@@ -29,6 +29,8 @@ public:
   : rclcpp::Node("a3_self_test")
   {
     min_js_rate_ = declare_parameter<double>("min_joint_states_rate", 40.0);
+    const auto js_topic = declare_parameter<std::string>(
+      "joint_states_topic", "/joint_states");
     expected_joints_ = declare_parameter<std::vector<std::string>>(
       "expected_joints",
       {"L1_joint", "L2_joint", "L3_joint", "L4_joint", "L5_joint", "L6_joint",
@@ -42,8 +44,10 @@ public:
     gethostname(host_buf, sizeof(host_buf) - 1);
     hostname_ = host_buf[0] != '\0' ? host_buf : "a3-arm";
 
+    // 负载优化：/joint_states_lite 由 C++ relay 以 BEST_EFFORT 发布（最新帧语义）；
+    // 订阅端用 BEST_EFFORT 才兼容（RELIABLE 订阅会静默收不到，LL-005/LL-104）。
     js_sub_ = create_subscription<sensor_msgs::msg::JointState>(
-      "/joint_states", 10,
+      js_topic, rclcpp::QoS(10).best_effort(),
       [this](sensor_msgs::msg::JointState::SharedPtr msg) {
         const double now = now_seconds();
         js_stamps_.push_back(now);

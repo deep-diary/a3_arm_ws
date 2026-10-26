@@ -33,6 +33,7 @@ from builtin_interfaces.msg import Duration
 from control_msgs.action import FollowJointTrajectory, GripperCommand
 from controller_manager_msgs.srv import ListControllers, SetHardwareComponentState, SwitchController
 from lifecycle_msgs.msg import State as LifecycleState
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.action import ActionClient
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -1103,6 +1104,9 @@ class ArmController(Node):
         # 若用默认 MutuallyExclusiveCallbackGroup，回调阻塞期间 client 响应回调无法
         # 并发执行，导致 init/enable/disable/teach 全部死锁超时。
         self._cb_group = ReentrantCallbackGroup()
+        # 高频镜像订阅独立互斥组：与服务/客户端（Reentrant）解耦，避免 200 Hz
+        # 消息与长阻塞服务回调在同一可重入组里互相抢线程/GIL（实测约 70% 单核）。
+        self._js_cb_group = MutuallyExclusiveCallbackGroup()
         # 夹爪 action 独立互斥回调组：L7 时序步进高频抢占 goal（50Hz），若与其它
         # 可重入回调并发，rclpy ActionClient 的 _goal_handles 清理会竞态抛 KeyError
         # 打崩编排节点。单独互斥组让夹爪 goal 的 execute/result 串行化，消除竞态。
@@ -1388,6 +1392,16 @@ class ArmController(Node):
         self._pd_feedback: List[float] = [0.0] * self._n_joints
         self._command_torque: List[float] = [0.0] * self._n_joints
         self._last_js_stamp = None  # F48: /joint_states 新鲜度检查（LL-020）
+        # 200 Hz 回调热路径缓存：name→index 映射只在关节顺序变化时重建；
+        # 消息到达时间用单调钟记录，_publish_status（10 Hz）再折算成 ROS 时间。
+        self._js_sig = None
+        self._js_name_map: List[Tuple[int, int]] = []
+        self._js_rx_mono = 0.0
+        self._js_stamp_mono = 0.0
+        self._tc_sig = None
+        self._tc_name_map: List[Tuple[int, int]] = []
+        self._torque_stats_max_nm = float(
+            self.get_parameter("torque_stats_max_nm").value)
         # F81: 硬件反馈看门狗锁存（任一电机反馈超时即 true，插件侧整臂 freeze-hold）
         self._feedback_stale = False
         # jog（滑动条直驱）进行中标志：区分 TRAJ 是 jog 还是 goto/playback
@@ -1476,6 +1490,16 @@ class ArmController(Node):
                 + ", ".join(f"{n}={v:g}" for n, v in self._joint_vel_limits.items())
             )
 
+        # 高频回调参数缓存（50 Hz × N）：运行时 ros2 param set 仍生效（回调刷新）
+        self._cached_params = {
+            k: self.get_parameter(k).value for k in (
+                "temp_protect_enabled", "temp_warn_c", "temp_protect_c",
+                "fault_mask_reset_on_fault", "unexpected_disable_guard",
+                "unexpected_disable_sustain_s",
+            )
+        }
+        self.add_on_set_parameters_callback(self._on_params_changed)
+
         # 订阅（/joint_states 为 best-effort；gate/state 为 transient_local 锁存）
         js_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         latched_qos = QoSProfile(
@@ -1485,7 +1509,7 @@ class ArmController(Node):
         )
         self.create_subscription(
             JointState, str(self.get_parameter("joint_states_topic").value), self._on_js, js_qos,
-            callback_group=self._cb_group,
+            callback_group=self._js_cb_group,
         )
         self.create_subscription(
             String, str(self.get_parameter("control_mode_topic").value), self._on_mode, 10,
@@ -1505,13 +1529,13 @@ class ArmController(Node):
         self.create_subscription(
             MotorStates, str(self.get_parameter("motor_states_topic").value),
             self._on_motor_states,
-            js_qos, callback_group=self._cb_group,
+            js_qos, callback_group=self._js_cb_group,
         )
         # F160: 力矩分量分解（前馈 + PD + 实测）；镜像进 /a3/arm_status
         self.create_subscription(
             TorqueComponents, str(self.get_parameter("torque_components_topic").value),
             self._on_torque_components,
-            js_qos, callback_group=self._cb_group,
+            js_qos, callback_group=self._js_cb_group,
         )
         # F51/LL-039: 看门狗状态（消费 UNEXPECTED_DISABLE——本节点在电机被带外失能后
         # 不得继续停在 READY/TRAJ 并保留陈旧保持目标）
@@ -1765,8 +1789,14 @@ class ArmController(Node):
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warn(f"cannot save torque stats: {exc}")
 
+    def _on_params_changed(self, params) -> SetParametersResult:
+        for prm in params:
+            if prm.name in self._cached_params:
+                self._cached_params[prm.name] = prm.value
+        return SetParametersResult(successful=True)
+
     def _update_torque_stats(self, jn: str, tau: float) -> None:
-        max_nm = float(self.get_parameter("torque_stats_max_nm").value)
+        max_nm = self._torque_stats_max_nm
         if not math.isfinite(tau) or abs(tau) > max_nm:
             return  # 超量程/非有限值：异常反馈，不污染 F43 历史峰值统计
         # 本次运行峰值（仅内存，重启清零）
@@ -2960,36 +2990,52 @@ class ArmController(Node):
     # ------------------------------------------------------------ subscriptions
 
     def _on_torque_components(self, msg: TorqueComponents) -> None:
-        name_to_idx = {n: i for i, n in enumerate(msg.joint_names)}
-        for i, jn in enumerate(self._joint_names):
-            j = name_to_idx.get(jn)
-            if j is None:
+        sig = tuple(msg.joint_names)
+        if sig != self._tc_sig:
+            self._tc_sig = sig
+            idx = {n: i for i, n in enumerate(sig)}
+            self._tc_name_map = [(i, idx.get(jn, -1)) for i, jn in enumerate(self._joint_names)]
+        gravity, coriolis = msg.gravity, msg.coriolis
+        inertia, feedforward = msg.inertia, msg.feedforward
+        pd_fb, command = msg.pd_feedback, msg.command
+        for i, j in self._tc_name_map:
+            if j < 0:
                 continue
-            if j < len(msg.gravity):
-                self._ff_gravity[i] = float(msg.gravity[j])
-            if j < len(msg.coriolis):
-                self._ff_coriolis[i] = float(msg.coriolis[j])
-            if j < len(msg.inertia):
-                self._ff_inertia[i] = float(msg.inertia[j])
-            if j < len(msg.feedforward):
-                self._ff_total[i] = float(msg.feedforward[j])
-            if j < len(msg.pd_feedback):
-                self._pd_feedback[i] = float(msg.pd_feedback[j])
-            if j < len(msg.command):
-                self._command_torque[i] = float(msg.command[j])
+            if j < len(gravity):
+                self._ff_gravity[i] = float(gravity[j])
+            if j < len(coriolis):
+                self._ff_coriolis[i] = float(coriolis[j])
+            if j < len(inertia):
+                self._ff_inertia[i] = float(inertia[j])
+            if j < len(feedforward):
+                self._ff_total[i] = float(feedforward[j])
+            if j < len(pd_fb):
+                self._pd_feedback[i] = float(pd_fb[j])
+            if j < len(command):
+                self._command_torque[i] = float(command[j])
 
     def _on_js(self, msg: JointState) -> None:
-        name_to_idx = {n: i for i, n in enumerate(msg.name)}
-        for i, jn in enumerate(self._joint_names):
-            if jn in name_to_idx and name_to_idx[jn] < len(msg.position):
-                self._positions[i] = float(msg.position[name_to_idx[jn]])
-            if jn in name_to_idx and name_to_idx[jn] < len(msg.velocity):
-                self._velocities[i] = float(msg.velocity[name_to_idx[jn]])
-            if jn in name_to_idx and name_to_idx[jn] < len(msg.effort):
-                self._efforts[i] = float(msg.effort[name_to_idx[jn]])
+        # 热路径：关节顺序稳定时只做数组搬运（名称映射缓存），不再每帧建 dict
+        sig = tuple(msg.name)
+        if sig != self._js_sig:
+            self._js_sig = sig
+            idx = {n: i for i, n in enumerate(sig)}
+            self._js_name_map = [
+                (i, idx.get(jn, -1)) for i, jn in enumerate(self._joint_names)]
+        positions, velocities, efforts = msg.position, msg.velocity, msg.effort
+        for i, j in self._js_name_map:
+            if j < 0:
+                continue
+            if j < len(positions):
+                self._positions[i] = float(positions[j])
+            if j < len(velocities):
+                self._velocities[i] = float(velocities[j])
+            if j < len(efforts):
+                self._efforts[i] = float(efforts[j])
         self._have_js = True
-        # F48: 记录消息时间戳用于新鲜度检查（LL-020）
-        self._last_js_stamp = self.get_clock().now()
+        # F48: 记录消息到达（单调钟；ROS 时间在 10 Hz status tick 里折算，
+        # 避免 200 Hz 回调每帧构造 rclpy 时间对象 — LL-020 新鲜度判定不变）。
+        self._js_rx_mono = time.monotonic()
 
         # F52 档位配对自检（只告警不改行为）：执行层 /joint_states 的关节数与本节点
         # joint_names 不一致 = motor_map_*j.yaml 与 arm_controller_*j.yaml 配对错误
@@ -3047,17 +3093,17 @@ class ArmController(Node):
         self._motor_enabled = enabled
         self._motor_state_fresh = fresh
 
-        if not self.get_parameter("temp_protect_enabled").value:
+        if not self._cached_params["temp_protect_enabled"]:
             return
 
         # warn 级：仅告警 + 遥测，不动状态机
-        warn_c = float(self.get_parameter("temp_warn_c").value)
+        warn_c = float(self._cached_params["temp_warn_c"])
         self._temp_warn = any(
             fr and math.isfinite(t) and t >= warn_c for t, fr in zip(temps, fresh)
         )
 
         # protect 级：pending 标记交给 _publish_status 节拍执行（避免订阅回调长阻塞）
-        protect_c = float(self.get_parameter("temp_protect_c").value)
+        protect_c = float(self._cached_params["temp_protect_c"])
         if any(fr and math.isfinite(t) and t >= protect_c for t, fr in zip(temps, fresh)):
             if self._state in (STATE_READY, STATE_TRAJ, STATE_IDLE, STATE_DISABLED, STATE_COOLING):
                 self._temp_protect_pending = True
@@ -3070,7 +3116,7 @@ class ArmController(Node):
                 self._set_state(STATE_DISABLED, "overtemp cooled down")
 
         # 电机故障监视（fault_mask = 原始 fault_code，bit 定义见 FAULT_* 常量）
-        if self.get_parameter("fault_mask_reset_on_fault").value and self._state in (
+        if self._cached_params["fault_mask_reset_on_fault"] and self._state in (
             STATE_READY, STATE_TRAJ, STATE_IDLE,
         ):
             hard: Optional[Tuple[str, int]] = None
@@ -3102,7 +3148,7 @@ class ArmController(Node):
         # F51/LL-039 本地兜底（不依赖看门狗在跑）：READY/TRAJ/SAFE_PARK 期间整臂报告
         # 「已失能」且持续 ≥ sustain → 电机被带外失能。持续窗用于抑制本节点自身
         # park→reset 的竞态（reset 后电机先报 mode 0、状态机随后才转 DISABLED）。
-        if not self.get_parameter("unexpected_disable_guard").value:
+        if not self._cached_params["unexpected_disable_guard"]:
             return
         if self._state not in (STATE_READY, STATE_TRAJ, STATE_SAFE_PARK):
             self._all_disabled_since = 0.0
@@ -3113,7 +3159,7 @@ class ArmController(Node):
             if self._all_disabled_since == 0.0:
                 self._all_disabled_since = now
             elif now - self._all_disabled_since >= float(
-                    self.get_parameter("unexpected_disable_sustain_s").value):
+                    self._cached_params["unexpected_disable_sustain_s"]):
                 if not self._pending_unexpected_disable:
                     self._pending_unexpected_disable = (
                         f"电机带外失能（{len(fresh_motors)} 个 fresh 电机均报关闭，持续 "
@@ -3152,6 +3198,11 @@ class ArmController(Node):
     # ------------------------------------------------------------------ status
 
     def _publish_status(self) -> None:
+        # F48：把 200 Hz 回调记录的到达时刻折算成 ROS 时间（每 status tick 至多一次）
+        if self._js_rx_mono != self._js_stamp_mono:
+            self._js_stamp_mono = self._js_rx_mono
+            self._last_js_stamp = self.get_clock().now()
+
         # TRAJ 结束后自动回到 READY（Humble 无 oneshot 定时器，用时间戳判断）
         if (
             self._state == STATE_TRAJ
@@ -6902,7 +6953,7 @@ class ArmController(Node):
 def main() -> None:
     rclpy.init()
     node = ArmController()
-    executor = MultiThreadedExecutor()
+    executor = MultiThreadedExecutor(num_threads=2)
     executor.add_node(node)
     try:
         executor.spin()

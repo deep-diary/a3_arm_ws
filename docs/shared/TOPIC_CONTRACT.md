@@ -102,7 +102,8 @@ A3 Edge 与 A3 CloudEdge 必须遵守的统一消息契约。实现位置不同�
 
 | 话题 | QoS | 说明 |
 |------|-----|------|
-| `/joint_states` | 真机 SensorDataQoS（**BEST_EFFORT**）；sim_motor 为 RELIABLE | 电机反馈汇总，默认 50 Hz。消费方必须用 BEST_EFFORT 订阅（兼容两种发布端；RELIABLE 订阅在真机静默零投递，LL-005/LL-025/LL-030/LL-059） |
+| `/joint_states` | 真机 JSB 为 **RELIABLE**；sim_motor 为 RELIABLE | 控制链原始反馈，**跟随 `controller_manager.update_rate` = 200 Hz**（Humble 的 JSB 不支持 `publish_rate`，YAML 里写 100 会被静默忽略）。消费方必须用 BEST_EFFORT 订阅（兼容 RELIABLE 发布端；RELIABLE 订阅在部分链路会静默零投递，LL-005/LL-025/LL-030/LL-059） |
+| `/joint_states_lite` | **BEST_EFFORT**（depth 1） | F196 降频中转：`joint_state_relay` 把最新一帧按 50 Hz 转发，供诊断/FK/重力/看门狗等低频消费者使用；控制链（JTC/servo）仍用原始 `/joint_states` |
 | `/rebotarm/joint_states` | — | `trajectory_bridge` 镜像输出，供 reBot 消费 |
 
 ### 电源序列

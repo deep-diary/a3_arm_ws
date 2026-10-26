@@ -56,7 +56,9 @@ arm_controller:
     # constraints.goal_time (1.0), otherwise silently ignored at configure.
     cmd_timeout: 2.0
 
-    state_publish_rate: 200.0
+    # 负载优化：/arm_controller/state 实测 0 订阅者（200 Hz 纯浪费）。
+    # 保留 50 Hz 供调试/未来 Web，不影响 JTC 内部 200 Hz 控制与 action 反馈。
+    state_publish_rate: 50.0
     action_monitor_rate: 50.0
 
     constraints:

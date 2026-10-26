@@ -11,7 +11,7 @@
 3. **唯一产品入口 `ros2 launch a3_bringup a3_bringup.launch.py hardware:=mock|can ...`（F78）**：ros2_control 标准栈，mock/can 两种模式拓扑完全一致（编排层 + MQTT 桥 + MoveIt OMPL/Pilz + Servo + 夹爪 + PS4）
    - `hardware:=mock`（默认）：`mock_components/GenericSystem`，无需 CAN/电机即可起栈（仿真/开发用）；mock 栈同时启动 `sim_power_sequence_node`（同名/同话题/同锁存 QoS 对齐真机执行层 power_sequence_node，F110），故 `/power_sequence/gate_open`/`state` 行为、PS4 L3 使能与 F61 灯效（READY 绿）与真机完全一致，不会出现离线红闪
    - `hardware:=can can_interface:=can1`：`a3_hardware_interface/A3MITHardwareInterface` 直连 SocketCAN（真机先 `sudo systemctl start can-up.service`；vcan 验收 `can_interface:=vcan0`）。非法 hardware 值会被 launch 硬拒，mock 不触碰任何 CAN socket
-   - 组件开关：`use_teleop` 默认 true；**`use_mqtt` 默认 false**（2026-10-23 起，MQTT 常驻 30~57% CPU 会触发 freeze-hold，见 LL-180；需要 web 遥测时 `--mqtt` / `use_mqtt:=true`）；`use_rviz` / `use_monitor` 默认 false；`teleop_mapping:=default|simple`；`use_sw_render` 默认 **false**（走 panfrost 硬件 GL，LL-027 2026-10-16 复测；卡死时置 true 回退软件渲染）
+   - 组件开关：`use_teleop` 默认 true；**`use_mqtt` 默认 false**（2026-10-23 起，MQTT 常驻 30~57% CPU 会触发 freeze-hold，见 LL-180；需要 web 遥测时 `--mqtt` / `use_mqtt:=true`）；`use_rviz` / `use_monitor` **默认 false**；`use_demo_nodes` 默认 false（F196，`angular_cruise` 不再随 teleop 常开）；`use_joint_state_lite` 默认 true（F196，50 Hz `/joint_states_lite` 中转）；`teleop_mapping:=default|simple`；`use_sw_render` 默认 **false**（走 panfrost 硬件 GL，LL-027 2026-10-16 复测；卡死时置 true 回退软件渲染）
    - JTC 默认 **inactive 启动**，需经 `/a3/arm/enable`（或 PS4 L3）激活后才会运动
 
 #### 真机栈 启停 / 重启（手工 setsid 方式）
@@ -28,6 +28,16 @@
 > 起栈前会无侵入探测 ID 1..7（电机有 24V 即应答，与软件门禁无关）：0/7 或缺关节会提示
 > （查动力电/急停/CAN 线束）并中止，不拉起栈；5J 降级档等场景加 `--no-probe` 跳过。
 > 脚本封装了下面全部步骤（含孤儿兜底），手工指令保留用于排查与理解进程模型。
+>
+> **负载档位（F196）**：非必需节点按需启动，控制链与安全门不变。
+> ```bash
+> ./scripts/a3_stack.sh restart --light    # 待机/伺服验收：无相机/RViz/诊断/自检/黑匣子/demo
+> ./scripts/a3_stack.sh restart --vision   # 看画面：相机 + 视觉显示（RViz 单独按需开）
+> ./scripts/a3_stack.sh restart --full     # 联调：相机 + RViz + 诊断 + 自检 + 黑匣子
+> ./scripts/a3_stack.sh restart --demo     # 额外启动 angular_cruise（空转约 40% 单核）
+> ```
+> `/joint_states` 保持 200 Hz 供控制链使用；诊断/FK/重力/看门狗走
+> `/joint_states_lite`（50 Hz，C++ relay）。回退：`use_joint_state_lite:=false`。
 >
 > **不想重启栈、单独开 RViz**（另开终端）：
 > ```bash
