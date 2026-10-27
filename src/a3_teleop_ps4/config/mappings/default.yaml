@@ -1,14 +1,14 @@
-# PS4 模式化按键映射（F189）。改绑定只改本文件，不用改代码。
+# PS4 模式化按键映射（F189/F198）。改绑定只改本文件，不用改代码。
 #
 # 结构：common（固定层，所有模式生效）+ modes（每个模式可覆盖同名轴/键、可屏蔽公共轴）。
 # 选模式：**按住 Share + 方向/面键**直接点名（不循环）：
-#   Share+↑ TEACH / Share+↓ WAYPOINT / Share+← TRACK / Share+→ PIANO
-#   Share+△ DEMO / Share+○ DANCE / Share+□ NORMAL
+#   Share+↑ TEACH / Share+□ WAYPOINT / Share+← TRACK / Share+→ PIANO
+#   Share+△ DEMO / Share+○ DANCE
 # 统一退出：Options 短按 → 回 NORMAL（示教类先保存）。
 #
 # 固定层（所有模式）：
 #   Cross 长按 1s=硬急停(断电) / L3=上电+使能 / R3=软失能(safe-park) / L1+R1 长按 2s=init
-#   L1+摇杆=末端平移 / R1+摇杆=末端旋转 / R2=夹爪力控
+#   L1+摇杆=末端平移 / R1+摇杆=末端旋转 / R2=夹爪力控（WAYPOINT 内改为切规划方式）
 #
 # 详细操作手册：docs/edge/PS4_OPERATOR_GUIDE.md
 
@@ -65,12 +65,11 @@ modes:
     modifier: share
     bindings:
       dpad_up: teach
-      dpad_down: waypoint
       dpad_left: track
       dpad_right: piano
       triangle: demo
       circle: dance
-      square: normal
+      square: waypoint
   exit:
     button: options
     edge: shortpress
@@ -94,12 +93,8 @@ modes:
       triangle:
         - {fn: goto_named_pose, kwargs: {name: ready}, edge: shortpress, hold_s: 1.5}
         - {fn: playback_latest, edge: longpress, hold_s: 1.5}
-      square:
-        - {fn: save_named_pose, edge: shortpress, hold_s: 1.5}
-        - {fn: playback_waypoints_ptp, edge: longpress, hold_s: 1.5}
-      circle:
-        - {fn: arm_stop, edge: shortpress, hold_s: 1.5}
-        - {fn: playback_waypoints_lin, edge: longpress, hold_s: 1.5}
+      square: {fn: save_named_pose, edge: shortpress, hold_s: 1.5}
+      circle: {fn: arm_stop, edge: shortpress, hold_s: 1.5}
       l2: {fn: save_named_pose, edge: shortpress, hold_s: 1.5}
 
   teach:
@@ -119,11 +114,29 @@ modes:
     color: cyan
     pattern: breathe
     rumble_index: 3
-    enter: [{fn: teach_enter, kwargs: {kind: waypoint}}]
+    # F198：进模式不自动开录，由方向键明确选槽；R2 改为离散键切规划方式
+    enter: [{fn: waypoint_enter}]
     exit: [{fn: teach_leave}]
+    suppress_common_axes: [r2]
+    # ↓=录 wp1、↑=存 wp1；←=录 wp2、→=存 wp2
+    dpad:
+      - axis: dpad_y
+        pos: {fn: waypoint_record, kwargs: {slot: wp1}}
+        neg: {fn: waypoint_save, kwargs: {slot: wp1}}
+      - axis: dpad_x
+        neg: {fn: waypoint_record, kwargs: {slot: wp2}}
+        pos: {fn: waypoint_save, kwargs: {slot: wp2}}
     buttons:
-      triangle: {fn: waypoint_toggle, edge: shortpress, hold_s: 1.5}
       l2: {fn: save_pose_or_capture, edge: shortpress, hold_s: 1.5}
+      # △/○ 短按=单次播放，长按=循环；□ 停止；R2 切换规划方式
+      triangle:
+        - {fn: playback_waypoints, kwargs: {slot: wp1, loop: false}, edge: shortpress, hold_s: 1.5}
+        - {fn: playback_waypoints, kwargs: {slot: wp1, loop: true}, edge: longpress, hold_s: 1.5}
+      circle:
+        - {fn: playback_waypoints, kwargs: {slot: wp2, loop: false}, edge: shortpress, hold_s: 1.5}
+        - {fn: playback_waypoints, kwargs: {slot: wp2, loop: true}, edge: longpress, hold_s: 1.5}
+      square: {fn: arm_stop, edge: rising}
+      r2: {fn: cycle_plan_mode, edge: rising}
 
   track:
     label: TRACK
@@ -167,7 +180,9 @@ modes:
       triangle:
         - {fn: playback_stream, kwargs: {name: press}, edge: shortpress, hold_s: 1.5}
         - {fn: melodion_home, edge: longpress, hold_s: 1.5}
-      circle: {fn: playback_stream, kwargs: {name: extremes}, edge: shortpress, hold_s: 1.5}
+      circle:
+        - {fn: playback_stream, kwargs: {name: extremes}, edge: shortpress, hold_s: 1.5}
+        - {fn: playback_stream, kwargs: {name: inspection}, edge: longpress, hold_s: 1.5}
       square: {fn: playback_stream, kwargs: {name: music}, edge: shortpress, hold_s: 1.5}
       l2: {fn: save_named_pose, edge: shortpress, hold_s: 1.5}
 
@@ -217,7 +232,8 @@ modes:
       circle:
         - {fn: playback_dance, kwargs: {name: dance2, loop: false}, edge: shortpress, hold_s: 1.5}
         - {fn: playback_dance, kwargs: {name: dance2, loop: true}, edge: longpress, hold_s: 1.5}
-      square: {fn: arm_stop, edge: shortpress, hold_s: 1.5}
+      # F197: 停止用 rising（按下即停）——shortpress 要松手才触发，按住 >1.5s 会被判长按丢弃
+      square: {fn: arm_stop, edge: rising}
       # L2 短/长：把 latest 提升为舞1/舞2（DANCE 内不再占用 L2 存命名点）
       l2:
         - {fn: dance_promote, kwargs: {slot: dance1}, edge: shortpress, hold_s: 1.5}

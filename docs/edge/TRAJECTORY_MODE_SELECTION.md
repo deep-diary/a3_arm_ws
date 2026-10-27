@@ -1,7 +1,12 @@
-# 轨迹规划模式选型指南（F165 / F166）
+# 轨迹规划模式选型指南（F165 / F166 / F198）
 
 本指南回答一个问题：**给定一条轨迹，该怎么选规划模式，做到「又快又稳」？**
 配套工具：离线推荐器 `scripts/traj_mode_recommend.py`；离线 auto 规划器 `scripts/traj_plan_auto.py`（F166）。
+
+> **F198 运行时选择**：WAYPOINT 模式的路点任务也可在**播放时**用 `R2` 循环选择下表 8 种模式
+> （`circ` 需辅助点，不在路点列表内）。服务端把路点转成段模型后复用 `_execute_segment`：
+> `ptp`/`lin_exact` 拆成逐腿停，其余 6 种合成一条 `via + target`。规划方式显示在
+> 画面右上角（`waypoint · PTP` 等），详见 F198 需求文档。
 
 ## 1. 九种轨迹模式（F166 统一注册表 `arm_controller.TRAJ_MODES`）
 

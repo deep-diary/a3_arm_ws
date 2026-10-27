@@ -14,9 +14,10 @@ trajectories/melodion/
 │   ├── press.yaml    # 演奏顺序
 │   └── extremes.yaml # 4 极限键：white1 → white19 → black13 → black1
 └── streams/          # 按键流（kind: stream）
-    ├── press.yaml    # 由 press.yaml 生成
-    ├── extremes.yaml # 由 extremes.yaml 生成
-    └── music.yaml    # 极限键坐标 + 曲谱生成
+    ├── press.yaml     # 由 press.yaml 生成
+    ├── extremes.yaml  # 由 extremes.yaml 生成
+    ├── inspection.yaml # 由 extremes.yaml 反推布局的全键检测流（白1→白19→黑13→黑1）
+    └── music.yaml     # 极限键坐标 + 曲谱生成
 ```
 
 `/a3/arm/playback {type: stream}` 的查找顺序新增最高优先级：
@@ -29,10 +30,11 @@ trajectories/melodion/
 |---|---|---|
 | `↓` | `/a3/arm/melodion/record_press` | 开始演奏路点示教 |
 | `←` | `/a3/arm/melodion/record_extremes` | 开始 4 极限键录制 |
-| `→` | `/a3/arm/stop_teach` | 结束示教、保存到当前槽位（+ 时间戳备份），**并生成该槽位 stream**（press→`press.yaml` / extremes→`extremes.yaml`） |
+| `→` | `/a3/arm/stop_teach` | 结束示教、保存到当前槽位（+ 时间戳备份），**并生成该槽位 stream**（press→`press.yaml` / extremes→`extremes.yaml` + `inspection.yaml`） |
 | `↑` | `/a3/arm/melodion/gen_streams` | 结束示教（若有）后生成**演奏** stream（`press.yaml`）；extreme 流由 `→` 自动生成，二者不互相连带 |
 | `△` 短按 | `playback {type: stream, name: press}` | 播放演奏按键流 |
 | `○` 短按 | `playback {type: stream, name: extremes}` | 播放 4 极限键流 |
+| `○` 长按 1.5s | `playback {type: stream, name: inspection}` | 播放 32 键全键检测流（白1→白19→黑13→黑1） |
 | `□` 短按 | `playback {type: stream, name: music}` | 播放曲谱乐曲线 |
 
 ## 按键轨迹编排（`a3_arm_controller/melodion_stream.py`）
@@ -57,6 +59,20 @@ trajectories/melodion/
 
 `d` 很小时（相邻键 ~19 mm）按 20 mm 下限抬升；`d` 很大时 β·d 会到几百 mm，
 **必须夹紧**，否则越过工作空间。
+
+## 全键检测流（`streams/inspection.yaml`）
+
+极限键保存成功后自动派生，坐标全部来自实测 `extremes.yaml`（`app_melodion.key_layout`）：
+
+1. `build_layout` 反推键盘轴向 `u`、实测跨度、黑键后退、白/黑键首末 z 与姿态（slerp）；
+2. `inspection_order` = 白键 1→19（沿 `u` 正向）+ 黑键 13→1（反向）；
+3. `inspection_waypoints` 逐键求按下位姿（每键 `sleep=0.2s`）；
+4. 复用 `build_press_stream`：同样的 α/β 抬升、进场/离场 `exact` 悬停、末段回 `home`，
+   共 32 个按键段 + 1 个末段。
+
+- `inspection` **只认** `trajectories/melodion/streams/inspection.yaml`，不会回退到包内静态
+  `app_melodion/config/streams/inspection.yaml`（后者基于旧 `base_pose`，与实际键盘高度不符）。
+- 播放前若文件缺失或比 `extremes.yaml` 旧，会按需重生成；4 点不全/跨度异常时报错并保留旧文件。
 
 ## 曲谱 → 乐曲线（`scripts/melodion_score_stream.py`）
 
@@ -86,12 +102,14 @@ pilz PTP 的 blend 是**笛卡尔过渡窗**（内部对采样位姿求 IK）。
 
 - [ ] PIANO 模式 `↓/←/→/↑` 分别完成演奏路点、极限键录制、结束保存、生成 stream；
 - [ ] `trajectories/melodion/waypoints/{press,extremes}.yaml` 与
-      `streams/{press,extremes}.yaml` 按预期落盘，互不覆盖；
+      `streams/{press,extremes,inspection}.yaml` 按预期落盘，互不覆盖；
+      `→` 保存极限键时同轮生成 `inspection.yaml`（32 键按序）；
 - [ ] 生成流每段首末精确、键间 3 个 via blend；进场/离场 `exact` 停稳（无斜插/斜拔）；
       目标键上方默认 blend 不压键边/邻键（必要时加 `--target-exact`）；
 - [ ] 末段回到 `home`；口风琴未被横拖；
-- [ ] `△/○/□` 分别播放 press/extremes/music，且 `music.yaml` 可由极限键 + 曲谱离线生成；
-- [ ] 真机试跑 4 极限键与一首短曲，无碰撞/超限/明显冲击。
+- [ ] `△/○/□` 分别播放 press/extremes/music；`○` 长按播放 32 键检测
+      （白1→白19→黑13→黑1，每键有声），且 `music.yaml` 可由极限键 + 曲谱离线生成；
+- [ ] 真机试跑 4 极限键、全键检测与一首短曲，无碰撞/超限/明显冲击。
 
 ## 关联文件
 

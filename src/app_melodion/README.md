@@ -39,7 +39,7 @@
 | `config/streams/*.yaml` | 生成的轨迹流配置（软件编排产物，版本控制） |
 | `app_melodion/key_config.py` | 键位 + 几何 → 每键 up/down 笛卡尔位姿 + `transition_via_pose` 键间过点（dict，无 ROS） |
 | `app_melodion/score.py` | 曲谱解析 |
-| `app_melodion/key_layout.py` | 4 极限键路点 → 键盘布局（轴向/跨度/黑键后退）→ 任意键按下位姿 + 曲谱→路点 |
+| `app_melodion/key_layout.py` | 4 极限键路点 → 键盘布局（轴向/跨度/黑键后退）→ 任意键按下位姿 + 曲谱→路点 + 全键检测序列 `inspection_waypoints` |
 | `app_melodion/melodion_score2stream.py` | 离线脚本：曲谱 → stream 配置 |
 
 ## 用法

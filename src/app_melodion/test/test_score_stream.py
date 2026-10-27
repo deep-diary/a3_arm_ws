@@ -9,8 +9,15 @@ if _PKG not in sys.path:
     sys.path.insert(0, _PKG)
 
 from app_melodion.key_config import MelodionConfig  # noqa: E402
+from app_melodion import key_layout  # noqa: E402
 from app_melodion.melodion_score2stream import build_stream  # noqa: E402
 from app_melodion.score import REST, load_score  # noqa: E402
+
+_WS = os.path.dirname(os.path.dirname(_PKG))
+_CTRL = os.path.join(_WS, "src", "a3_arm_controller", "a3_arm_controller")
+if _CTRL not in sys.path:
+    sys.path.insert(0, _CTRL)
+from melodion_stream import build_press_stream  # noqa: E402
 
 KEYS = os.path.join(_PKG, "config", "melodion_keys.json")
 GEO = os.path.join(_PKG, "config", "playing_geometry.yaml")
@@ -84,3 +91,57 @@ def test_build_stream_qinghuaci_rest():
     assert len(doc["segments"]) == len(real) + 1
     # 休止符累加到上一段 sleep（按键位停顿）
     assert any(seg["sleep"] > 0 for seg in doc["segments"])
+
+
+def _fake_extremes(cfg: MelodionConfig) -> dict:
+    """用静态几何伪造 4 极限键路点（顺序 white1/white19/black13/black1）."""
+    names = ("F3", "C6", "A#5", "F#3")
+    return {
+        "kind": "waypoint",
+        "joint_names": ["L1_joint", "L2_joint", "L3_joint",
+                        "L4_joint", "L5_joint", "L6_joint"],
+        "waypoints": [{"pose": cfg.key_down_pose(cfg.get_key(n))} for n in names],
+    }
+
+
+def test_inspection_order_and_count():
+    keys = key_layout.load_keys(KEYS)
+    order = key_layout.inspection_order(keys)
+    assert len(order) == 32
+    assert [k["type"] for k in order[:19]] == ["white"] * 19
+    assert [k["type"] for k in order[19:]] == ["black"] * 13
+    assert order[0]["name"] == "F3" and order[18]["name"] == "C6"
+    assert order[19]["name"] == "A#5" and order[-1]["name"] == "F#3"
+
+
+def test_inspection_waypoints_from_extremes():
+    cfg = MelodionConfig(KEYS, GEO)
+    keys = key_layout.load_keys(KEYS)
+    layout = key_layout.build_layout(_fake_extremes(cfg), keys)
+    wps = key_layout.inspection_waypoints(layout, keys, dwell_s=0.2)
+    assert len(wps) == 32
+
+    pos = [wp["pose"]["position"] for wp in wps]
+    u = layout["u"]
+    # 白键 1→19 沿键盘正向单调；黑键 13→1 反向单调
+    def along(a, b):
+        return (b["x"] - a["x"]) * u[0] + (b["y"] - a["y"]) * u[1]
+
+    assert all(along(pos[i], pos[i + 1]) > 0 for i in range(18))
+    assert all(along(pos[i], pos[i + 1]) < 0 for i in range(19, 31))
+    # 所有按下点 z 落在 4 个极限点 z 的区间内（按类型插值，不外推）
+    zs = [wp["pose"]["position"]["z"] for wp in _fake_extremes(cfg)["waypoints"]]
+    assert all(min(zs) - 1e-9 <= p["z"] <= max(zs) + 1e-9 for p in pos)
+    # 每键按住时长透传
+    assert all(abs(wp["sleep"] - 0.2) < 1e-9 for wp in wps)
+
+
+def test_build_press_stream_inspection_segments():
+    cfg = MelodionConfig(KEYS, GEO)
+    keys = key_layout.load_keys(KEYS)
+    layout = key_layout.build_layout(_fake_extremes(cfg), keys)
+    wps = key_layout.inspection_waypoints(layout, keys)
+    doc = build_press_stream(wps, joint_names=["L1_joint"], home_positions=None)
+    # 32 个按键段 + 1 个末段抬离
+    assert len(doc["segments"]) == 33
+    assert doc["segments"][0]["target"]["pose"]["position"]["x"] == wps[0]["pose"]["position"]["x"]

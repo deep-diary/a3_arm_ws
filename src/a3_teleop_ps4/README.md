@@ -15,7 +15,7 @@
 | **L1+R1 同按** | 长按 2 s | init（设零；**不带使能**） | `/a3/arm/init` |
 | **L1** | 按住 | **平移死人开关**：仅放行平移轴 | servo_lin_x/y/z（gates l1） |
 | **R1** | 按住 | **旋转死人开关**：偏航/俯仰/滚转 | servo_ang_x/y/z（gates r1） |
-| **R2** | 模拟 | 夹爪力控（不需要 L1/R1），松开全开 | gripper_force |
+| **R2** | 模拟 | 夹爪力控（不需要 L1/R1），松开全开；**WAYPOINT 内改为切规划方式**（F198） | gripper_force |
 | **Share 按住** | 修饰 | 进入"选模式"窗口，屏蔽摇杆/其它键 | — |
 | **Options** | 短按 | 退出当前模式 → NORMAL（示教类先保存） | `/a3/arm/stop` |
 
@@ -24,20 +24,19 @@
 | 组合 | 模式 | 说明 |
 |---|---|---|
 | Share + ↑ | TEACH | 进模式即准备拖动（未使能会自动上电+使能，READY 后自动开录） |
-| Share + ↓ | WAYPOINT | 路点示教（L2/△ 打点） |
+| Share + □ | WAYPOINT | 路点双槽位录制/播放；R2 切规划方式（默认 PTP+B） |
 | Share + ← | TRACK | 人脸跟踪（自动 enable；4 根摇杆轴被屏蔽，R2 保留） |
 | Share + → | PIANO | 口风琴定位点 |
 | Share + △ | DEMO | home 五向巡游 / 随机巡游 |
 | Share + ○ | DANCE | 录/播舞1、舞2 双槽位（循环播放） |
-| Share + □ | NORMAL | 手动/通用回放 |
 
 ## 各模式按键
 
 | 模式 | 按键 → 动作 |
 |---|---|
-| **NORMAL** | ↑=home、↓=idle、←=前（normal_slot_left）、→=后（normal_slot_right）；△短=ready、△长=回放 latest；□短=存点、□长=路点 PTP；○短=停止、○长=路点 LIN；L2=存点 |
+| **NORMAL** | ↑=home、↓=idle、←=前（normal_slot_left）、→=后（normal_slot_right）；△短=ready、△长=回放 latest；□短=存点；○短=停止；L2=存点 |
 | **TEACH** | 进入即开录；△=开/停录制（停即保存）；L2=存点 |
-| **WAYPOINT** | 进入即开路点录制；△=开始/打点；L2=打点 |
+| **WAYPOINT** | ↓=录 wp1、↑=存 wp1；←=录 wp2、→=存 wp2；L2=打点；△/○ 短=播 wp1/wp2、长=循环；□=停止；**R2=切规划方式**（8 种，剔除 circ，默认 `ptp_blend`；进入不自动开录） |
 | **TRACK** | △短=跟踪开/关、△长(2s)=重载雅可比；**○短=网格点/网格线/人脸框开关**、**○长=水平+前后目标标定**；□短=状态查询、**□长=前后（深度）标定**；L2=存点 |
 | **PIANO** | D-pad 四向=口风琴四点；△=回放 stream `latest`；○/□=首/末键；L2=存点 |
 | **DEMO** | 进入先回 home；△短=只平移 X→Y→Z、△长=只平移随机连续（30s/越界自停）；○短=只旋转 X→Y→Z、○长=只旋转随机轴；□=随机命名点巡游；Options=停止退出；D-pad 不绑定 |

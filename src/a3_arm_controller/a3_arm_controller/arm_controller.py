@@ -457,6 +457,19 @@ def resolve_traj_mode(name: str) -> Optional[TrajModeSpec]:
     return TRAJ_MODES.get(_MODE_ALIAS.get(key, ""))
 
 
+# F198: 路点任务可用的规划方式（circ 需辅助点，路点序列没有该语义，故剔除）
+WAYPOINT_PLAN_MODES: Tuple[str, ...] = (
+    "ptp",
+    "ptp_blend",
+    "lin_exact",
+    "lin_blend",
+    "jnt_g64_quintic",
+    "jnt_g64_trapezoid",
+    "jnt_spline_bell",
+    "jnt_spline_approx",
+)
+
+
 def mode_exact_ok(spec: TrajModeSpec, need_exact_pattern: List[bool]) -> bool:
     """F166: 给定内部点的 exact 需求模式，判断该模式是否可行。
 
@@ -1261,6 +1274,9 @@ class ArmController(Node):
         self.declare_parameter("waypoint_use_sequence", True)
         # 单段规划/执行超时（s）；0 = 复用 moveit_goto_timeout_s
         self.declare_parameter("waypoint_segment_timeout_s", 0.0)
+        # F198: 路点循环轮间间隔；停止/新回放请求等待旧循环退出的上限（s）
+        self.declare_parameter("waypoint_loop_gap_s", 0.2)
+        self.declare_parameter("waypoint_loop_cancel_timeout_s", 30.0)
         # F134: 拐角 blend 半径（pilz Sequence；0 = 每点到位即停精确过点；
         # 默认 0.02m 圆滑过弯，轨迹在该圆盘内偏离中间点）
         self.declare_parameter("waypoint_blend_radius_m", 0.02)
@@ -1362,6 +1378,8 @@ class ArmController(Node):
         self.declare_parameter("dance_loop_seam_s", 0.8)
         self.declare_parameter("dance_loop_closed_tol_rad", 0.05)
         self.declare_parameter("dance_loop_l7_tol_rad", 0.05)
+        # 轨迹过短（静态录制被 retime 收敛成 1 点）不循环，避免每 0.2 s 空转下发
+        self.declare_parameter("dance_loop_min_duration_s", 0.5)
 
         self._joint_names: List[str] = list(
             self.get_parameter("joint_names").get_parameter_value().string_array_value
@@ -1470,6 +1488,9 @@ class ArmController(Node):
         self._l7_last_cmd_t = 0.0
         # F197: 舞蹈循环上下文（复用已 retime 轨迹；None=未循环）
         self._dance_loop: Optional[Dict[str, Any]] = None
+        # F198: 路点循环取消事件（/a3/arm/stop 在另一执行器线程置位）
+        self._wp_loop_stop = threading.Event()
+        self._wp_loop_active = False
 
         # 轨迹持久化目录
         self._traj_dir = self._resolve_trajectories_dir()
@@ -1488,7 +1509,8 @@ class ArmController(Node):
         self._dance_bak_dir = os.path.join(self._dance_dir, "backup")
         for _d in (self._dance_dir, self._dance_bak_dir):
             os.makedirs(_d, exist_ok=True)
-        # 路点录制槽位：None=通用 waypoints/latest.yaml；"press"/"extremes"=口风琴槽
+        # 路点录制槽位：None=通用 waypoints/latest.yaml；"press"/"extremes"=口风琴槽；
+        # "wp1"/"wp2"=WAYPOINT 模式双槽位（F198）
         self._waypoint_slot: Optional[str] = None
         # 连续录制槽位：None=通用 latest.yaml；"dance1"/"dance2"=舞蹈槽
         self._teach_slot: Optional[str] = None
@@ -1635,6 +1657,13 @@ class ArmController(Node):
             callback_group=self._cb_group)
         self.create_service(
             Trigger, "/a3/arm/dance/promote2", self._dance_promote2_cb,
+            callback_group=self._cb_group)
+        # F198: WAYPOINT 模式——路点双槽位录制（wp1/wp2）
+        self.create_service(
+            Trigger, "/a3/arm/waypoint/record1", self._wp_record1_cb,
+            callback_group=self._cb_group)
+        self.create_service(
+            Trigger, "/a3/arm/waypoint/record2", self._wp_record2_cb,
             callback_group=self._cb_group)
         self.create_service(
             SaveTrajectory, "/a3/arm/save_trajectory", self._save_cb,
@@ -3025,8 +3054,19 @@ class ArmController(Node):
 
     def _make_dance_loop(
         self, traj: JointTrajectory, l7_traj: Optional[JointTrajectory], label: str
-    ) -> Dict[str, Any]:
-        """F197: 由已 retime 的轨迹建循环上下文（闭环无缝 / 非闭环追加回归段）."""
+    ) -> Optional[Dict[str, Any]]:
+        """F197: 由已 retime 的轨迹建循环上下文（闭环无缝 / 非闭环追加回归段）.
+
+        轨迹不足 2 点或时长 < ``dance_loop_min_duration_s`` 时返回 None（不循环）：
+        静态录制会被 retime 收敛成 1 点/0 s，若照常循环会每 0.2 s 空转下发一次。
+        """
+        min_dur = float(self.get_parameter("dance_loop_min_duration_s").value)
+        duration = self._traj_duration(traj)
+        if len(traj.points) < 2 or duration < min_dur:
+            self.get_logger().warn(
+                f"[F197] {label}: 轨迹过短（{len(traj.points)} pts, {duration:.2f}s "
+                f"< {min_dur:.2f}s），不循环")
+            return None
         tol = float(self.get_parameter("dance_loop_closed_tol_rad").value)
         seam_s = max(0.0, float(self.get_parameter("dance_loop_seam_s").value))
         gap_s = max(0.0, float(self.get_parameter("dance_loop_gap_s").value))
@@ -3040,9 +3080,11 @@ class ArmController(Node):
                 f"[F197] {label}: 首末差 > {tol:.3f} rad 且 seam=0，循环接缝会有位姿跳变")
             loop_traj = traj
         else:
-            loop_traj = self._append_seam(traj, seam_s)
+            # 回归段放在**每轮开头**：首轮播 body（结束在末点）；次轮从末点→首点→body。
+            # 若放在结尾，次轮会直接从末点跳到 body 首点（首轮→次轮跳变）。
+            loop_traj = self._prepend_seam(traj, seam_s)
             self.get_logger().info(
-                f"[F197] {label}: 非闭环，追加 {seam_s:.2f}s 尾→首回归段")
+                f"[F197] {label}: 非闭环，每轮开头插入 {seam_s:.2f}s 尾→首回归段")
         if l7_traj is not None and l7_traj.points:
             tol7 = float(self.get_parameter("dance_loop_l7_tol_rad").value)
             d7 = abs(float(l7_traj.points[-1].positions[0])
@@ -3063,27 +3105,31 @@ class ArmController(Node):
             "closed": closed,
         }
 
-    def _append_seam(self, traj: JointTrajectory, seam_s: float) -> JointTrajectory:
-        """F197: 轨迹尾追加「末点→首点」线性回归段（位置连续；速度不保证）."""
+    def _prepend_seam(self, traj: JointTrajectory, seam_s: float) -> JointTrajectory:
+        """F197: 轨迹前插「末点→首点」线性回归段（循环接缝，位置连续；速度不保证）.
+
+        ``loop_traj = [seam 中间点…] + [body 整体后移 seam_s]``。
+        每次重下发时机械臂正停在 body 末点，seam 从该点插值回 body 首点，
+        因此首轮→次轮不再跳变。不含 a=1 点（由 body 首点覆盖，避免重复时间戳）。
+        """
         out = JointTrajectory()
         out.joint_names = list(traj.joint_names)
+        q0 = list(traj.points[-1].positions)
+        q1 = list(traj.points[0].positions)
+        n = max(2, int(round(seam_s / 0.05)) + 1)
+        for k in range(1, n):
+            a = float(k) / float(n)
+            pt = JointTrajectoryPoint()
+            pt.positions = [(1.0 - a) * x + a * y for x, y in zip(q0, q1)]
+            pt.time_from_start = _duration(a * seam_s)
+            out.points.append(pt)
         for p in traj.points:
             np_ = JointTrajectoryPoint()
             np_.positions = list(p.positions)
             np_.velocities = list(p.velocities)
             np_.accelerations = list(p.accelerations)
-            np_.time_from_start = p.time_from_start
+            np_.time_from_start = _duration(_tfs_seconds(p.time_from_start) + seam_s)
             out.points.append(np_)
-        t0 = _tfs_seconds(traj.points[-1].time_from_start)
-        q0 = list(traj.points[-1].positions)
-        q1 = list(traj.points[0].positions)
-        n = max(2, int(round(seam_s / 0.05)) + 1)
-        for k in range(1, n + 1):
-            a = float(k) / float(n)
-            pt = JointTrajectoryPoint()
-            pt.positions = [(1.0 - a) * x + a * y for x, y in zip(q0, q1)]
-            pt.time_from_start = _duration(t0 + a * seam_s)
-            out.points.append(pt)
         return out
 
     def _dance_loop_redispatch(self) -> bool:
@@ -4553,6 +4599,202 @@ class ArmController(Node):
             f"waypoint task '{label}' {strategy}: {n} points, "
             f"{n - 1} segments, {total:.1f}s")
         return resp
+
+    def _waypoint_segments(
+        self, parsed: List[Dict[str, Any]], mode: str
+    ) -> Tuple[Optional[List[Dict[str, Any]]], str]:
+        """F198: 路点任务 → 段模型（供 `_execute_segment` / `_lin_move` 复用）。
+
+        逐点停模式（ptp / lin_exact）拆成 n 个无 via 段（当前位 → wp1 → … → wpN）；
+        其余模式合成一条「via=wp1..wpN-1 + target=wpN」的段（与 stream 段语义一致）。
+        """
+        n = len(parsed)
+        if mode in ("ptp", "lin_exact"):
+            segs: List[Dict[str, Any]] = []
+            for i in range(0, n):
+                wp = parsed[i]
+                if mode == "ptp":
+                    segs.append(
+                        {"mode": "ptp", "target": {"positions": wp["positions"]}})
+                    continue
+                pose = wp.get("pose") or {}
+                if "position" not in pose or "orientation" not in pose:
+                    return None, (
+                        f"waypoint {i + 1}/{n} missing FK pose "
+                        "(LIN needs position+orientation); re-record")
+                segs.append({
+                    "mode": "lin_exact",
+                    "target": {"pose": pose},
+                    "gate_q": wp["positions"],
+                })
+            return segs, ""
+
+        cartesian = mode.startswith("lin")
+        via: List[Dict[str, Any]] = []
+        for i in range(0, n - 1):
+            wp = parsed[i]
+            if cartesian:
+                pose = wp.get("pose") or {}
+                if "position" not in pose or "orientation" not in pose:
+                    return None, (
+                        f"waypoint {i + 1}/{n} missing FK pose "
+                        "(LIN needs position+orientation); re-record")
+                via.append({"pose": pose})
+            else:
+                via.append({"positions": wp["positions"]})
+        last = parsed[-1]
+        if cartesian:
+            pose = last.get("pose") or {}
+            if "position" not in pose or "orientation" not in pose:
+                return None, (
+                    f"waypoint {n}/{n} missing FK pose "
+                    "(LIN needs position+orientation); re-record")
+            target: Dict[str, Any] = {"pose": pose}
+        else:
+            target = {"positions": last["positions"]}
+        return [{"mode": mode, "via": via, "target": target}], ""
+
+    def _play_waypoints_mode(
+        self, data: dict, label: str, mode: str, loop: bool,
+        stop_event: "threading.Event", resp: PlaybackTrajectory.Response,
+    ) -> PlaybackTrajectory.Response:
+        """F198: 按 8 种规划方式回放路点任务（可选循环）。
+
+        - ptp / lin_exact：逐腿执行，每点停（lin_exact 走 `_lin_move` 保静态力矩门禁）；
+        - 其余模式：整条「via+target」交给 `_execute_segment`（复用 F166 注册表）。
+        - loop=True 时整轮循环，`/a3/arm/stop` 置位 stop_event 后在下一段前退出。
+        """
+        file_joint_names = list(data.get("joint_names") or self._joint_names)
+
+        def _to_std(positions: List[float]) -> List[float]:
+            if file_joint_names == self._joint_names:
+                return [float(v) for v in positions]
+            out = []
+            for jn in self._joint_names:
+                if jn in file_joint_names:
+                    out.append(float(positions[file_joint_names.index(jn)]))
+                else:
+                    out.append(0.0)
+            return out
+
+        parsed: List[Dict[str, Any]] = []
+        for w in data.get("waypoints") or []:
+            if "positions" not in w:
+                self._publish_mode("IDLE")
+                self._set_state(STATE_READY, f"playback {label}: bad waypoint")
+                resp.success = False
+                resp.message = "waypoint entry missing positions"
+                return resp
+            parsed.append({
+                "positions": _to_std(w["positions"]),
+                "pose": w.get("pose") or {},
+            })
+
+        n = len(parsed)
+        min_count = int(self.get_parameter("waypoint_min_count").value)
+        if n < min_count:
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"playback {label}: too few")
+            resp.success = False
+            resp.message = f"need >= {min_count} waypoints, file has {n}"
+            return resp
+
+        segments, err = self._waypoint_segments(parsed, mode)
+        if segments is None:
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"playback {label}: {err}")
+            resp.success = False
+            resp.message = err
+            return resp
+
+        # 配置点不足 → 模式退化（TRAJECTORY_MODE_SELECTION.md 1.2），只提示不改模式
+        min_pts = 2 if mode in ("ptp", "lin_exact") else (
+            4 if mode == "jnt_spline_approx" else 3)
+        if n < min_pts:
+            self.get_logger().warn(
+                f"playback {label}: mode '{mode}' 建议 >= {min_pts} 个路点才能"
+                f"保持该模式特性（当前 {n}），将退化为基础规划")
+
+        per_leg = mode in ("ptp", "lin_exact")
+        seg_retries = max(0, int(self.get_parameter("waypoint_segment_retries").value))
+        gap_s = max(0.0, float(self.get_parameter("waypoint_loop_gap_s").value))
+        cycles = 0
+        total = 0.0
+        self._wp_loop_active = bool(loop)
+        try:
+            while True:
+                if stop_event.is_set():
+                    break
+                self._publish_mode("TRAJ_RUNNING")
+                self._set_state(
+                    STATE_TRAJ,
+                    f"waypoint {mode} {label}" + (f" loop#{cycles + 1}" if loop else ""))
+                self._traj_done_at = 0.0  # 循环期间不允许 FSM 定时器误回落
+                round_total = 0.0
+                for i, seg in enumerate(segments):
+                    if stop_event.is_set():
+                        break
+                    seg_label = f"waypoint {mode} {label} {i + 1}/{len(segments)}"
+                    ok = False
+                    dur = 0.0
+                    msg = ""
+                    for attempt in range(seg_retries + 1):
+                        if attempt and per_leg:
+                            self._wait_move_group_current(parsed[i]["positions"])
+                        if mode == "lin_exact":
+                            ok, dur, msg = self._lin_move(
+                                seg["target"]["pose"], seg_label,
+                                gate_q=seg.get("gate_q"))
+                        else:
+                            ok, msg, dur = self._execute_segment(seg, seg_label)
+                        if ok:
+                            break
+                        self.get_logger().warn(
+                            f"{seg_label} attempt {attempt + 1} failed: {msg}")
+                    if not ok:
+                        self._publish_mode("IDLE")
+                        self._set_state(
+                            STATE_READY, f"playback {label}: seg {i + 1} failed")
+                        resp.success = False
+                        resp.message = (
+                            f"segment {i + 1}/{len(segments)} failed after "
+                            f"{seg_retries + 1} attempt(s) (arm stopped): {msg}")
+                        return resp
+                    round_total += dur
+                    if per_leg and self._n_joints >= 7:
+                        dur7 = self._dispatch_l7_linear(parsed[i]["positions"][6])
+                        round_total += max(0.0, dur7 - dur)
+                    if i < len(segments) - 1:
+                        # LL-103: 段间等 move_group 追上实际关节，防下段 LIN IK -31
+                        self._wait_move_group_current(list(self._positions))
+                if stop_event.is_set():
+                    break
+                if not per_leg and self._n_joints >= 7:
+                    dur7 = self._dispatch_l7_linear(parsed[-1]["positions"][6])
+                    round_total = max(round_total, dur7)
+                total += round_total
+                cycles += 1
+                if not loop:
+                    break
+                if stop_event.wait(gap_s):
+                    break
+            if stop_event.is_set():
+                # 被 operator 停止（含首段前就停）：状态已由 _stop_cb 兜底
+                if cycles > 0:
+                    resp.message = (
+                        f"waypoint task '{label}' {mode}: loop stopped by operator "
+                        f"after {cycles} cycle(s)")
+                else:
+                    resp.message = f"waypoint task '{label}' {mode}: stopped before motion"
+            else:
+                resp.message = (
+                    f"waypoint task '{label}' {mode}: {n} points, {total:.1f}s"
+                    + (f", {cycles} cycles" if loop else ""))
+            resp.success = True
+            return resp
+        finally:
+            self._wp_loop_active = False
+            self._schedule_back_to_ready(0.3)
 
     def _goto_via_smooth(
         self,
@@ -6201,6 +6443,8 @@ class ArmController(Node):
         extra = ""
         # F197: 任何停止都先终止舞蹈循环（避免 hold 轨迹后又被下一轮覆盖）
         self._clear_dance_loop()
+        # F198: 路点循环同理——置取消事件，循环在下一段前退出
+        self._wp_loop_stop.set()
         if self._state in (STATE_TEACH, STATE_WAYPOINT_TEACH):
             tr = self._stop_teach_cb(Trigger.Request(), Trigger.Response())
             if not tr.success:
@@ -6292,6 +6536,18 @@ class ArmController(Node):
         """F131（Share 长按 1.5s）：路点示教——L2 打点，Options 结束保存."""
         return self._begin_waypoint_teach(None, resp)
 
+    def _wp_record1_cb(
+        self, req: Trigger.Request, resp: Trigger.Response
+    ) -> Trigger.Response:
+        """F198 WAYPOINT ↓：路点录制到 waypoints/wp1.yaml。"""
+        return self._begin_waypoint_teach("wp1", resp)
+
+    def _wp_record2_cb(
+        self, req: Trigger.Request, resp: Trigger.Response
+    ) -> Trigger.Response:
+        """F198 WAYPOINT ←：路点录制到 waypoints/wp2.yaml。"""
+        return self._begin_waypoint_teach("wp2", resp)
+
     def _melodion_record_press_cb(
         self, req: Trigger.Request, resp: Trigger.Response
     ) -> Trigger.Response:
@@ -6307,7 +6563,10 @@ class ArmController(Node):
     def _begin_waypoint_teach(
         self, slot: Optional[str], resp: Trigger.Response
     ) -> Trigger.Response:
-        """路点示教统一入口；slot 决定停止时写入哪个槽位（None=通用 latest）。"""
+        """路点示教统一入口；slot 决定停止时写入哪个槽位。
+
+        None=通用 latest；"wp1"/"wp2"=WAYPOINT 双槽位；"press"/"extremes"=口风琴槽。
+        """
         why = self._teach_guard()
         if why is not None:
             resp.success = False
@@ -6325,7 +6584,12 @@ class ArmController(Node):
         if self._using_controller_switch():
             self._publish_mode("ZERO_TORQUE")
         self._set_state(STATE_WAYPOINT_TEACH, "waypoint teaching (L2=mark)")
-        where = f"melodion/{slot}.yaml" if slot else "waypoints/latest.yaml"
+        if slot in ("wp1", "wp2"):
+            where = f"waypoints/{slot}.yaml"
+        elif slot:
+            where = f"melodion/waypoints/{slot}.yaml"
+        else:
+            where = "waypoints/latest.yaml"
         resp.success = True
         resp.message = (
             f"waypoint teach started -> {where}; L2 to capture, stop_teach/→ to finish")
@@ -6437,24 +6701,36 @@ class ArmController(Node):
         min_count = int(self.get_parameter("waypoint_min_count").value)
         slot, self._waypoint_slot = self._waypoint_slot, None
         auto_msgs: List[str] = []
+        ts = time.strftime("%Y%m%d_%H%M%S")
         if n >= min_count:
-            if slot:
+            if slot in ("wp1", "wp2"):
+                # F198: WAYPOINT 双槽位（备份带槽位名，互不覆盖）
+                save_dir = self._wp_dir
+                main = os.path.join(save_dir, f"{slot}.yaml")
+                main_label = f"waypoints/{slot}.yaml"
+                hist_name = f"teach_wp_{slot}_{ts}.yaml"
+            elif slot:
                 save_dir = self._melodion_wp_dir
                 main = os.path.join(save_dir, f"{slot}.yaml")
                 main_label = f"melodion/waypoints/{slot}.yaml"
+                hist_name = f"teach_wp_{ts}.yaml"
             else:
                 save_dir = self._wp_dir
                 main = os.path.join(save_dir, "latest.yaml")
                 main_label = "waypoints/latest.yaml"
+                hist_name = f"teach_wp_{ts}.yaml"
             if self._save_waypoints_to(main):
                 auto_msgs.append(f"auto-saved {main_label}")
-                ts = time.strftime("%Y%m%d_%H%M%S")
-                hist = os.path.join(save_dir, f"teach_wp_{ts}.yaml")
+                hist = os.path.join(save_dir, hist_name)
                 if self._save_waypoints_to(hist):
-                    auto_msgs.append(f"backup teach_wp_{ts}.yaml")
-                if slot:  # 口风琴槽：保存即生成该槽的按键 stream
+                    auto_msgs.append(f"backup {hist_name}")
+                if slot and slot not in ("wp1", "wp2"):
+                    # 口风琴槽：保存即生成该槽的按键 stream
                     _ok, gen_msg = self._generate_melodion_stream(slot)
                     auto_msgs.append(gen_msg)
+                    if slot == "extremes":  # 极限键同步派生 32 键检测流
+                        _iok, ins_msg = self._generate_melodion_inspection()
+                        auto_msgs.append(ins_msg)
             else:
                 auto_msgs.append("auto-save FAILED (see log)")
         else:
@@ -6518,6 +6794,91 @@ class ArmController(Node):
         except Exception as exc:  # noqa: BLE001
             return False, f"{slot}: 生成失败 {exc}"
         return True, f"{slot}: {len(waypoints)} 键 -> {len(doc['segments'])} 段 -> streams/{slot}.yaml"
+
+    def _melodion_keys_path(self) -> str:
+        """melodion_keys.json 路径：优先安装 share，回落仓库开发树。"""
+        candidates: List[str] = []
+        try:
+            candidates.append(os.path.join(
+                get_package_share_directory("app_melodion"),
+                "config", "melodion_keys.json"))
+        except Exception:  # noqa: BLE001
+            pass
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))))
+        candidates.append(os.path.join(
+            repo, "src", "app_melodion", "config", "melodion_keys.json"))
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        raise FileNotFoundError(f"melodion_keys.json 未找到（试过：{candidates}）")
+
+    def _generate_melodion_inspection(self) -> Tuple[bool, str]:
+        """由 4 极限键反推键盘布局，生成 32 键检测流 ``streams/inspection.yaml``。
+
+        顺序：白键 1→19（沿键盘从左到右），再黑键 13→1（从右到左）；
+        坐标全部来自 ``waypoints/extremes.yaml`` 的实测点（``app_melodion.key_layout``），
+        再复用 ``build_press_stream`` 得到与按键流同一套抬升/悬停/回 home 语义。
+        返回 (成功, 说明)；失败保留上一份文件。
+        """
+        ms = _melodion_stream
+        wp_path = os.path.join(self._melodion_wp_dir, "extremes.yaml")
+        out_path = os.path.join(self._melodion_stream_dir, "inspection.yaml")
+        if not os.path.exists(wp_path):
+            return False, "inspection: 缺 melodion/waypoints/extremes.yaml（先 ← 录制）"
+        try:
+            from app_melodion import key_layout
+
+            data = ms.load_yaml(wp_path)
+            if str(data.get("kind") or "") != "waypoint":
+                raise ValueError(f"kind={data.get('kind')!r}，需要 waypoint")
+            keys = key_layout.load_keys(self._melodion_keys_path())
+            layout = key_layout.build_layout(data, keys)
+            waypoints = key_layout.inspection_waypoints(
+                layout, keys, ms.DWELL_DEFAULT_S)
+            home = self._poses.get("home")
+            doc = ms.build_press_stream(
+                waypoints,
+                joint_names=data.get("joint_names") or self._joint_names,
+                press_mm=ms.PRESS_FLOOR_MM,
+                speed=ms.SPEED_DEFAULT,
+                dwell_s=ms.DWELL_DEFAULT_S,
+                alpha=ms.ALPHA_DEFAULT,
+                beta=ms.BETA_DEFAULT,
+                clear_min_mm=ms.CLEAR_MIN_MM,
+                clear_max_mm=ms.CLEAR_MAX_MM,
+                mode=ms.MODE_DEFAULT,
+                hold_orientation=True,
+                home_positions=home,
+                waypoints_pressed=True,
+            )
+            header = ms.header_lines(
+                source="melodion/waypoints/extremes.yaml（4 极限键反推键盘布局）",
+                press_mm=ms.PRESS_FLOOR_MM,
+                alpha=ms.ALPHA_DEFAULT,
+                beta=ms.BETA_DEFAULT,
+                clear_min_mm=ms.CLEAR_MIN_MM,
+                clear_max_mm=ms.CLEAR_MAX_MM,
+                speed=ms.SPEED_DEFAULT,
+                dwell_s=ms.DWELL_DEFAULT_S,
+                mode=ms.MODE_DEFAULT,
+                hold_orientation=True,
+                waypoints_pressed=True,
+                home_note=("回命名点 'home'" if home else "停在末键上方"),
+            )
+            span_mm = layout["scale"] * (
+                float(layout["x_high_mm"]) - float(layout["x_low_mm"]))
+            header.append("#")
+            header.append(f"# 全键检测顺序：{key_layout.INSPECTION_ORDER_NOTE}")
+            header.append(
+                f"# 实测布局：span={span_mm:.1f}mm, retreat={layout['retreat_mm']:.1f}mm")
+            ms.write_stream(out_path, doc, header)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"inspection: 生成失败 {exc}"
+        return True, (
+            f"inspection: {len(waypoints)} 键 -> {len(doc['segments'])} 段 -> "
+            f"streams/inspection.yaml（span={span_mm:.0f}mm, "
+            f"retreat={layout['retreat_mm']:.0f}mm）")
 
     def _melodion_gen_streams_cb(
         self, req: Trigger.Request, resp: Trigger.Response
@@ -6866,7 +7227,20 @@ class ArmController(Node):
         is_cp = (req.type or "").strip().lower() == "cp"
         is_dance = (req.type or "").strip().lower() == "dance"
         strategy = (req.strategy or "ptp").strip().lower()
-        if is_wp and strategy not in ("ptp", "lin"):
+        # F198: 路点规划方式（留空 = 沿用旧 strategy 链路）
+        wp_mode = (req.mode or "").strip().lower()
+        if is_wp and wp_mode:
+            if wp_mode == "circ":
+                resp.success = False
+                resp.message = ("waypoint mode 'circ' unsupported "
+                                "(needs auxiliary point); use stream/cp")
+                return None, "", "", "", strategy, resp
+            if wp_mode not in WAYPOINT_PLAN_MODES:
+                resp.success = False
+                resp.message = (f"unknown waypoint mode '{wp_mode}' "
+                                f"(have: {', '.join(WAYPOINT_PLAN_MODES)})")
+                return None, "", "", "", strategy, resp
+        elif is_wp and strategy not in ("ptp", "lin"):
             resp.success = False
             resp.message = f"unknown strategy '{strategy}' (ptp/lin)"
             return None, "", "", "", strategy, resp
@@ -6879,7 +7253,21 @@ class ArmController(Node):
         prefix = ("wp_" if is_wp else ("st_" if is_stream
                   else ("cp_" if is_cp else ("dn_" if is_dance else ""))))
         label = prefix + ("latest" if is_latest else _sanitize_name(req.name))
-        if is_stream:
+        if is_stream and _sanitize_name(req.name) == "inspection":
+            # F195: 检测流只认极限键派生的运行时产物，禁止回退到包内旧静态几何；
+            # 缺失或比 extremes.yaml 旧则按需重生成（升级前录的极限点也能直接用）。
+            path = os.path.join(self._melodion_stream_dir, "inspection.yaml")
+            wp = os.path.join(self._melodion_wp_dir, "extremes.yaml")
+            stale = (not os.path.exists(path)) or (
+                os.path.exists(wp) and os.path.getmtime(wp) > os.path.getmtime(path))
+            if stale:
+                ok_i, msg_i = self._generate_melodion_inspection()
+                if not ok_i:
+                    resp.success = False
+                    resp.message = (
+                        f"{msg_i}；先在 PIANO 模式按 ← 录 4 个极限键、按 → 保存")
+                    return None, "", "", "", strategy, resp
+        elif is_stream:
             path = self._stream_path(req.name)
         elif is_cp:
             path = self._cp_path(req.name)
@@ -6893,8 +7281,8 @@ class ArmController(Node):
             if is_latest:
                 resp.success = False
                 resp.message = (
-                    ("no latest waypoint task yet —— Share 长按进入路点示教 → "
-                     "L2 打点 → Options 保存, ") if is_wp
+                    ("no latest waypoint task yet —— Share+□ 进 WAYPOINT → "
+                     "↓/← 开始录制 → L2 打点 → ↑/→ 保存, ") if is_wp
                     else ("no latest trajectory yet —— 先 start_teach → 拖动 → "
                           "stop_teach 录制, ")
                     + "或显式指定 name")
@@ -6984,11 +7372,30 @@ class ArmController(Node):
     def _playback_cb(
         self, req: PlaybackTrajectory.Request, resp: PlaybackTrajectory.Response
     ) -> PlaybackTrajectory.Response:
+        # F198: 新回放前先终止上一轮路点循环（阻塞式回调，靠取消事件跨线程退出）
+        if self._wp_loop_active:
+            self._wp_loop_stop.set()
+            timeout = float(
+                self.get_parameter("waypoint_loop_cancel_timeout_s").value)
+            deadline = time.monotonic() + max(0.0, timeout)
+            while self._wp_loop_active and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if self._wp_loop_active:
+                resp.success = False
+                resp.message = (
+                    "previous waypoint loop still stopping; retry after /a3/arm/stop")
+                return resp
+        wp_event = threading.Event()
+        self._wp_loop_stop = wp_event
         data, label, kind, path, strategy, failed = self._prepare_playback(req, resp)
         if data is None:
             return failed
         is_dance = (req.type or "").strip().lower() == "dance"
+        wp_mode = (req.mode or "").strip().lower()
         if kind == "waypoint":
+            if wp_mode:
+                return self._play_waypoints_mode(
+                    data, label, wp_mode, bool(req.loop), wp_event, resp)
             resp = self._play_waypoints(data, label, strategy, resp)
             if is_dance and req.loop:
                 resp.message += "；路点槽不支持循环，已单次播放"
@@ -7229,9 +7636,15 @@ class ArmController(Node):
         self._duty_record(duration)
         if loop:
             # F197: 循环上下文；后续轮次由 _publish_status 的时间戳分支重下发
-            self._dance_loop = self._make_dance_loop(traj, l7_traj, label)
-            self._traj_done_at = (
-                time.monotonic() + duration + self._dance_loop["gap_s"])
+            ctx = self._make_dance_loop(traj, l7_traj, label)
+            if ctx is None:
+                loop = False
+                loop_note = "；循环降级为单次（轨迹过短）"
+                self._schedule_back_to_ready(duration + 0.3)
+            else:
+                self._dance_loop = ctx
+                self._traj_done_at = (
+                    time.monotonic() + duration + ctx["gap_s"])
         else:
             self._schedule_back_to_ready(duration + 0.3)
 

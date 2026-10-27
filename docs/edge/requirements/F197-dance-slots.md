@@ -45,7 +45,7 @@ trajectories/dance/
 | `L2` 短按 / 长按 | 把 latest 提升为舞1 / 舞2 |
 | `Options` 短按 | 停止并退出（沿用 `/a3/arm/stop`） |
 
-路点链路的用法：Share + ↓ 进 WAYPOINT 打点 → Options 保存 → 回 DANCE → `L2` 提升。
+路点链路的用法：Share + □ 进 WAYPOINT 打点 → Options 保存 → 回 DANCE → `L2` 提升（F198）。
 
 ## 循环语义
 
@@ -54,6 +54,8 @@ trajectories/dance/
   否则追加 `dance_loop_seam_s`（0.8 s）线性回归段。
 - 循环首轮若需从当前位姿回首点，必须走 MoveIt；失败则降级为单次。
 - 路点槽不支持循环（长按只播一次并提示）。
+- 轨迹不足 2 点或重定时后时长 < `dance_loop_min_duration_s`（0.5 s，静态录制会被
+  收敛成 1 点/0 s）时**降级为单次播放**并 WARN，避免每 0.2 s 空转下发。
 - 静态力矩门禁首轮全量校验；占空比/温度门禁每轮生效，累计到限自动停。
 
 ## 验收标准

@@ -14,12 +14,12 @@
 | 组合 | 模式 | 进入动作 |
 |---|---|---|
 | Share + ↑ | TEACH | 自动准备拖动（未使能先上电+使能，READY 后自动开录） |
-| Share + ↓ | WAYPOINT | 同上，但开的是路点示教 |
+| Share + ↓ | WAYPOINT | 同上，但开的是路点示教（**F198 起改绑 Share+□**） |
 | Share + ← | TRACK | `/a3/face_track/enable true`（required，失败回退 NORMAL） |
 | Share + → | PIANO | goto `melodion_white1`（optional） |
 | Share + △ | DEMO | goto `home`（改：先进工作位再演示） |
 | Share + ○ | DANCE | goto `ready`（optional） |
-| Share + □ | NORMAL | — |
+| Share + □ | NORMAL | —（**F198 删除，改绑 WAYPOINT**；退出统一用 Options） |
 
 切模式前一律先调 `/a3/arm/stop`（F190），等响应或 1 s 超时后再提交新模式，
 避免上一个模式的轨迹/示教/servo 与新模式的输入串扰。

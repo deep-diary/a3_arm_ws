@@ -8,13 +8,17 @@
 | kind | 语义 | 执行链 | 状态 |
 |---|---|---|---|
 | `continuous` | 密集录制点（手动拖动录制） | F137 几何去噪 + F68 retime + JTC 下发 | 已有 |
-| `waypoint` | 离散点序列（手动打点；blend/逐段） | pilz Sequence（blend）/ `_moveit_move`+`_lin_move` 逐段 | 已有 |
+| `waypoint` | 离散点序列（手动打点；可按 8 种方式规划，支持循环） | `mode` 为空走旧 `strategy`（pilz Sequence / 逐段）；F198 给 `mode` 时转段复用 `_execute_segment`（`ptp`/`lin_exact` 逐腿停，其余单段 via+target） | 已有 |
 | `stream` | 段序列（软件编排；每段 `mode/speed/sleep/via`） | `_execute_segment`（ptp/lin/via）逐段 | 已有 |
 | `cp` | 连续笛卡尔路径（软件编排；via 点列 + 目标一条轨迹） | `_play_cp` → `_goto_via_smooth`/`_goto_via_lin_blend` 一条 C2 轨迹 | **F163/F164 新增** |
 
 > F197：`/a3/arm/playback` 另有 `type=dance` 的**槽位**（不是新 kind）——路径固定
 > `trajectories/dance/<name>.yaml`，按文件头 `kind`（`continuous`/`waypoint`）分派；
 > 请求里的 `loop` 只对连续槽生效（复用已 retime 轨迹循环下发）。
+>
+> F198：`type=waypoint` 新增 `mode` 字段（8 种规划方式，`circ` 因需辅助点被剔除）；
+> `loop=true` 时整轮循环（轮间 `waypoint_loop_gap_s`，每轮由正常规划腿从末点回 wp1），
+> `/a3/arm/stop` 置取消事件后在下一段前退出。旧 `strategy=ptp|lin` 链路语义不变。
 
 ## 非 playback kind（不在 `/a3/arm/playback` 内）
 
@@ -45,7 +49,7 @@
 | kind | 位置 |
 |---|---|
 | `continuous` | `<ws>/trajectories/*.yaml`（根目录，`latest.yaml` 为滚动槽；运行时录制，untracked） |
-| `waypoint` | `<ws>/trajectories/waypoints/*.yaml`（`latest.yaml` 为滚动槽） |
+| `waypoint` | `<ws>/trajectories/waypoints/*.yaml`（`latest.yaml` 为滚动槽；F198 起 `wp1.yaml`/`wp2.yaml` 为 WAYPOINT 双槽位，备份 `teach_wp_<slot>_<ts>.yaml`） |
 | `stream` / `cp` | `app_melodion/config/streams/`（版本控制，脚本生成源）+ `<ws>/trajectories/streams/`（实验槽） |
 | `continuous` / `waypoint`（舞蹈槽） | `<ws>/trajectories/dance/{dance1,dance2}.yaml`（F197；`type=dance` 回放，文件头 `kind` 决定执行链） |
 

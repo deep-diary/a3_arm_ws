@@ -65,6 +65,18 @@ POINT_COLOR = (95, 140, 70)        # 暗亮绿：网格点
 SILHOUETTE_COLOR = (90, 190, 200)  # 暗金：人脸轮廓
 BOX_COLOR = (200, 150, 120)        # 灰蓝：人脸框
 DARK = (0, 0, 0)
+
+# F198: 路点规划方式 → HUD 简称（与 a3_teleop_ps4/arm_controller 的规范名对应）
+_PLAN_LABELS = {
+    "ptp": "PTP",
+    "ptp_blend": "PTP+B",
+    "lin_exact": "LIN",
+    "lin_blend": "LIN+B",
+    "jnt_g64_trapezoid": "G64-T",
+    "jnt_g64_quintic": "G64-Q",
+    "jnt_spline_bell": "SPLINE",
+    "jnt_spline_approx": "FIT",
+}
 PLATE_ALPHA = 0.45                 # 文本块底衬不透明度
 
 
@@ -109,6 +121,8 @@ class VisionDisplayMux(Node):
         self.declare_parameter("cpu_danger_pct", 80.0)   # 红：已出现掉帧/猛动的量级
         # 右下角第二行：当前操作模式（ps4_mapper 1 Hz 重发）
         self.declare_parameter("teleop_mode_topic", "/a3/teleop/mode")
+        # F198：路点规划方式（WAYPOINT 模式显示 `waypoint · PTP`）
+        self.declare_parameter("plan_mode_topic", "/a3/teleop/plan_mode")
         self.declare_parameter("qos_depth", 5)
         self.declare_parameter("draw_fps", True)
         self.declare_parameter("show_mesh", True)
@@ -144,11 +158,12 @@ class VisionDisplayMux(Node):
 
         self._overlay = None
         self._overlay_t = 0.0
-        self._mode = None          # None=未收到模式话题（按标注新鲜度决定）
+        self._mode = None          # None=未收到 /a3/vision/mode（跟踪节点未运行）
         self._ee_xyz = None
         self._ee_rpy = None
         self._ee_t = 0.0
         self._teleop_mode = ""
+        self._plan_mode = ""
         self._frames = 0
         self._out_fps = 0.0
         self._t_rate = time.monotonic()
@@ -173,6 +188,8 @@ class VisionDisplayMux(Node):
                                  self._on_ee, rel_qos)
         self.create_subscription(String, str(p("teleop_mode_topic").value),
                                  self._on_teleop_mode, rel_qos)
+        self.create_subscription(String, str(p("plan_mode_topic").value),
+                                 self._on_plan_mode, rel_qos)
         self.get_logger().info(
             f"vision_display_mux 就绪：{p('raw_topic').value} + "
             f"{p('overlay_topic').value} → {p('output_topic').value}")
@@ -213,9 +230,17 @@ class VisionDisplayMux(Node):
     def _on_teleop_mode(self, msg: String) -> None:
         self._teleop_mode = msg.data
 
+    def _on_plan_mode(self, msg: String) -> None:
+        self._plan_mode = msg.data
+
     def _tracking(self) -> bool:
-        """是否处于"跟踪开"状态；模式话题未出现时按标注新鲜度决定。"""
-        return self._mode is None or self._mode == "face_track"
+        """是否处于"跟踪开"状态——只认 `/a3/vision/mode == face_track`。
+
+        该话题由 face_track_controller 1 Hz 重发；没收到（None）说明跟踪节点
+        根本没起（`--face-track` 未开），不能按"跟踪中"处理，否则各模式
+        右上角都会误挂 `+track`。
+        """
+        return self._mode == "face_track"
 
     def _on_raw(self, msg: Image) -> None:
         # 双重保险：订阅者刚好在 1 s 轮询间隙消失时也直接短路
@@ -459,6 +484,9 @@ class VisionDisplayMux(Node):
         避免"画面在跟踪、右上角写 normal"的错觉。
         """
         mode = self._teleop_mode or (self._mode if self._mode else "-")
+        if mode == "waypoint" and self._plan_mode:
+            # F198：路点模式把规划方式拼在同一行（HUD 简称，避免过长）
+            mode = f"waypoint · {_PLAN_LABELS.get(self._plan_mode, self._plan_mode)}"
         if self._tracking() and "track" not in mode:
             mode += " +track"
         sf = scale / 0.5

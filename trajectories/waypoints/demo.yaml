@@ -1,6 +1,0 @@
-kind: waypoint
-joint_names: [L1_joint, L2_joint, L3_joint, L4_joint, L5_joint, L6_joint, L7_joint]
-waypoints:
-  - positions: [0.0, 0.785, -0.785, 0.0, 0.0, 0.0, 0.0]
-  - positions: [0.0, 1.05, -1.575, 0.0, 0.0, 0.0, 0.0]
-  - positions: [0.0, 0.1266, -0.8918, 0.7653, 0.0, 0.0, 0.0]

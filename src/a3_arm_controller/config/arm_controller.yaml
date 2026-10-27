@@ -111,6 +111,8 @@
     dance_loop_seam_s: 0.8
     dance_loop_closed_tol_rad: 0.05
     dance_loop_l7_tol_rad: 0.05
+    # 轨迹过短（静态录制被 retime 收敛成 1 点/0 s）不循环，避免 0.2 s 空转下发
+    dance_loop_min_duration_s: 0.5
 
     # ═══════════════════════════════════════════════════════════════════
     # 7. 路点示教（F131/F134：Share 长按进入，L2 打点，Options 保存）
@@ -120,6 +122,9 @@
     waypoint_segment_retries: 2             # 单段规划/执行失败重试
     waypoint_use_sequence: true             # F134: 整序列 blend 过中间点
     waypoint_segment_timeout_s: 0.0         # 0=复用 moveit_goto_timeout_s
+    # F198: 路点循环（WAYPOINT △/○ 长按）——每轮结束间隔；停止/新回放请求等待旧循环退出的上限
+    waypoint_loop_gap_s: 0.2
+    waypoint_loop_cancel_timeout_s: 30.0
     waypoint_blend_radius_m: 0.02           # 拐角 blend 半径
     sequence_move_timeout_s: 90.0           # 整序列规划+执行等待上限
     # LIN 笛卡尔速度/加速度缩放（0.2 起步实测，近奇异段抖再降）

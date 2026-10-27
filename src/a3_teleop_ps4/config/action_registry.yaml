@@ -87,7 +87,7 @@ functions:
 
   teach_enter:
     kind: discrete
-    description: 'F189 进入示教：READY 直接开录；未使能先上电+使能，READY 后自动开录（kwargs kind=teach|waypoint）'
+    description: 'F189 进入连续示教：READY 直接开录；未使能先上电+使能，READY 后自动开录'
 
   teach_leave:
     kind: discrete
@@ -96,10 +96,6 @@ functions:
   teach_toggle:
     kind: discrete
     description: 'F189 TEACH 模式 Triangle：未录制→开始；录制中→stop_teach'
-
-  waypoint_toggle:
-    kind: discrete
-    description: 'F189 WAYPOINT 模式 Triangle：未录制→开始路点示教；录制中→打点'
 
   save_pose_or_capture:
     kind: discrete
@@ -169,17 +165,25 @@ functions:
     kind: discrete
     description: 'Call /a3/arm/playback {name:""} (空名 ≡ 回放 latest)'
 
-  teach_start_waypoint:
+  waypoint_enter:
     kind: discrete
-    description: 'F131 Share 长按 1.5s: Call /a3/arm/start_waypoint_teach（零力矩拖动 + L2 打点 + Options 保存）'
+    description: 'F198 WAYPOINT 进入钩子：清槽位镜像并发布 /a3/teleop/plan_mode（不自动开录）'
 
-  playback_waypoints_ptp:
+  waypoint_record:
     kind: discrete
-    description: 'F131 Square 长按 1.5s: 路点关节空间回放 {type:"waypoint", strategy:"ptp"}（服务端 kind 门禁）'
+    description: 'F198 WAYPOINT ↓/←：开始路点录制 wp1/wp2（/a3/arm/waypoint/record1|2，未 READY 自动上电+补发）'
 
-  playback_waypoints_lin:
+  waypoint_save:
     kind: discrete
-    description: 'F131 Circle 长按 1.5s / 触摸板单击: 路点笛卡尔直线回放 {type:"waypoint", strategy:"lin"}；直线跨奇异/超限即拒，不回落 PTP'
+    description: 'F198 WAYPOINT ↑/→：结束并保存当前路点槽；播放中则停止'
+
+  playback_waypoints:
+    kind: discrete
+    description: 'F198 WAYPOINT △/○：按当前规划方式回放 {type:"waypoint", name:"wp1|wp2", mode, loop}'
+
+  cycle_plan_mode:
+    kind: discrete
+    description: 'F198 WAYPOINT R2：循环切换路点规划方式（8 种，剔除 circ）并发布 /a3/teleop/plan_mode'
 
   playback_stream:
     kind: discrete

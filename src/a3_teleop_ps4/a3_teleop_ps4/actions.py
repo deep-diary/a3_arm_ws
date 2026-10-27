@@ -49,6 +49,21 @@ FORCE_TORQUE_MIN = 0.1    # 映射下限
 FORCE_TORQUE_MAX = 1.0    # 与固件 0x700B 6 Nm 之间的会话力上限
 FORCE_TORQUE_STEP = 0.1   # 持按期间目标变化 ≥ 该值才重发
 
+# F198: 路点规划方式循环（与 arm_controller.WAYPOINT_PLAN_MODES 保持一致；
+# circ 需要辅助点，路点序列不支持，故不在列表内）
+WAYPOINT_PLAN_MODES = [
+    "ptp",
+    "ptp_blend",
+    "lin_exact",
+    "lin_blend",
+    "jnt_g64_trapezoid",
+    "jnt_g64_quintic",
+    "jnt_spline_bell",
+    "jnt_spline_approx",
+]
+# 默认规划方式：ptp_blend 过弯不停车，整体比逐腿 ptp 快（按段长自适应 blend）
+WAYPOINT_DEFAULT_PLAN_MODE = "ptp_blend"
+
 
 def _duration(sec: float) -> Duration:
     d = Duration()
@@ -130,8 +145,6 @@ class ActionExecutor:
         # F190：切模式前先停运动（编排层回收 TRAJ/TEACH/SERVO）
         self._arm_stop = node.create_client(Trigger, "/a3/arm/stop")
         self._teach_start = node.create_client(Trigger, "/a3/arm/start_teach")
-        self._teach_start_waypoint = node.create_client(
-            Trigger, "/a3/arm/start_waypoint_teach")
         self._teach_stop = node.create_client(Trigger, "/a3/arm/stop_teach")
         # F195 口风琴 PIANO：路点槽位录制（press/extremes）+ 按键 stream 生成
         self._melodion_record_press = node.create_client(
@@ -145,6 +158,9 @@ class ActionExecutor:
         self._dance_record2 = node.create_client(Trigger, "/a3/arm/dance/record2")
         self._dance_promote1 = node.create_client(Trigger, "/a3/arm/dance/promote1")
         self._dance_promote2 = node.create_client(Trigger, "/a3/arm/dance/promote2")
+        # F198 WAYPOINT：路点双槽位录制（wp1/wp2）
+        self._wp_record1 = node.create_client(Trigger, "/a3/arm/waypoint/record1")
+        self._wp_record2 = node.create_client(Trigger, "/a3/arm/waypoint/record2")
         self._playback = node.create_client(PlaybackTrajectory, "/a3/arm/playback")
         # F116: Options 长按 3s 触发随机命名点巡游（服务端仅 READY 态放行）
         self._random_tour = node.create_client(
@@ -211,6 +227,14 @@ class ActionExecutor:
         # F197: 当前正在录制的舞蹈槽（客户端镜像，用于方向校验）
         self._dance_slot: Optional[str] = None
         self._dance_slot_at = 0.0
+        # F198: 路点规划方式（R2 循环）与当前录制槽镜像；默认 ptp_blend
+        self._plan_mode = WAYPOINT_DEFAULT_PLAN_MODE
+        self._plan_mode_pub = node.create_publisher(
+            String, "/a3/teleop/plan_mode", 10)
+        self._plan_mode_t = 0.0
+        self._wp_slot: Optional[str] = None
+        self._wp_slot_at = 0.0
+        self.publish_plan_mode()
         self._teach_wait_s = float(node.declare_parameter("teach_wait_s", 10.0).value)
         self.arm_state = ""
 
@@ -277,6 +301,9 @@ class ActionExecutor:
         if self._pending_gripper is not None and now >= self._gripper_retry_at:
             self._gripper_retry_at = now + 1.0
             self._gripper_goal(*self._pending_gripper)
+        # F198: 1 Hz 重发规划方式（晚启动的 vision_display_mux 也能拿到）
+        if now - self._plan_mode_t > 1.0:
+            self.publish_plan_mode()
         self._advance_pending_teach(now)
         self._advance_face_enable(now)
         if not self._enable_pending or self._enable_called:
@@ -544,10 +571,6 @@ class ActionExecutor:
     def teach_start(self) -> None:
         self._call_trigger(self._teach_start, "arm/start_teach")
 
-    def teach_start_waypoint(self) -> None:
-        """F131: Share 长按 → 路点录制（L2 打点，Options 保存）."""
-        self._call_trigger(self._teach_start_waypoint, "arm/start_waypoint_teach")
-
     def teach_stop(self) -> None:
         self._call_trigger(self._teach_stop, "arm/stop_teach")
 
@@ -679,8 +702,8 @@ class ActionExecutor:
         self.stop_motion()
         self._n.get_logger().warn("/a3/arm/stop 不可用 → 本地零速兜底")
 
-    def teach_enter(self, kind: str = "teach") -> bool:
-        """进入示教（F189）。
+    def teach_enter(self) -> bool:
+        """进入连续示教（F189 / TEACH 模式）。
 
         之前的坑：进"示教模式"只切了按键语义，臂仍是位置闭环 → 拖不动。
         这里在进入模式时就把臂准备好：已 READY 直接开录；未使能则先上电+使能，
@@ -689,16 +712,15 @@ class ActionExecutor:
         self._pending_teach = None
         if self.arm_state in ("TEACH", "WAYPOINT_TEACH"):
             return True
-        target = "waypoint" if kind == "waypoint" else "teach"
         if self.arm_state == "READY":
-            self.teach_start_waypoint() if target == "waypoint" else self.teach_start()
+            self.teach_start()
             return True
         now = self._n.get_clock().now().nanoseconds * 1e-9
         self._n.get_logger().warn(
             f"示教需要使能（当前 {self.arm_state or '未知'}）→ 先上电+使能，"
-            f"READY 后自动开始{'路点' if target == 'waypoint' else '连续'}示教")
+            "READY 后自动开始连续示教")
         self.arm_power_enable()
-        self._pending_teach = target
+        self._pending_teach = "teach"
         self._pending_teach_since = now
         return True
 
@@ -709,6 +731,11 @@ class ActionExecutor:
             if (self.arm_state in ("DISABLED", "FAULT", "COOLING")
                     or now - self._dance_slot_at > 1.0):
                 self._dance_slot = None
+        # F198: 路点槽位镜像同理（离开 WAYPOINT_TEACH 后清掉）
+        if self._wp_slot and self.arm_state != "WAYPOINT_TEACH":
+            if (self.arm_state in ("DISABLED", "FAULT", "COOLING")
+                    or now - self._wp_slot_at > 1.0):
+                self._wp_slot = None
         if self._pending_teach is None:
             return
         if self.arm_state in ("TEACH", "WAYPOINT_TEACH"):
@@ -716,6 +743,15 @@ class ActionExecutor:
             return
         if self.arm_state == "READY":
             kind, self._pending_teach = self._pending_teach, None
+            if kind.startswith("wp_"):
+                slot = kind.split("_", 1)[1]
+                client = self._wp_record1 if slot == "wp1" else self._wp_record2
+                self._wp_slot = slot
+                self._wp_slot_at = now
+                label = f"arm/waypoint/record{slot[-1]}"
+                self._n.get_logger().info(f"已 READY → 自动开始路点 {slot} 录制")
+                self._call_trigger_report(client, label)
+                return
             if kind.startswith("melodion_"):
                 slot = kind.split("_", 1)[1]
                 client = (self._melodion_record_press if slot == "press"
@@ -731,8 +767,8 @@ class ActionExecutor:
                 self._n.get_logger().info(f"已 READY → 自动开始 {slot} 连续录制")
                 self._call_trigger_report(client, f"arm/dance/record_{slot}")
                 return
-            self._n.get_logger().info(f"已 READY → 自动开始{'路点' if kind == 'waypoint' else '连续'}示教")
-            self.teach_start_waypoint() if kind == "waypoint" else self.teach_start()
+            self._n.get_logger().info("已 READY → 自动开始连续示教")
+            self.teach_start()
             return
         if now - self._pending_teach_since > self._teach_wait_s:
             self._pending_teach = None
@@ -749,14 +785,7 @@ class ActionExecutor:
         if self.arm_state == "TEACH":
             self.teach_stop()
         else:
-            self.teach_enter("teach")
-
-    def waypoint_toggle(self) -> None:
-        """路点模式：未录制 → 开始；录制中 → 打点（服务端按状态路由）。"""
-        if self.arm_state == "WAYPOINT_TEACH":
-            self.save_named_pose()
-        else:
-            self.teach_enter("waypoint")
+            self.teach_enter()
 
     def save_pose_or_capture(self) -> None:
         """L2：WAYPOINT_TEACH 下服务端自动路由为打点，否则保存当前位姿。"""
@@ -970,25 +999,85 @@ class ActionExecutor:
             f"playback_dance -> /a3/arm/playback {{type:'dance', name:'{name}', "
             f"loop:{bool(loop)}}}")
 
-    def _play_waypoints(self, strategy: str) -> None:
-        """F131: 路点任务回放（ptp=关节空间 / lin=笛卡尔直线）；服务端 kind 门禁."""
+    # --- F198: WAYPOINT 双槽位 + 规划方式 ---
+
+    def publish_plan_mode(self) -> None:
+        """发布当前路点规划方式（vision_display_mux 右上角显示）。"""
+        msg = String()
+        msg.data = str(self._plan_mode)
+        self._plan_mode_pub.publish(msg)
+        self._plan_mode_t = self._n.get_clock().now().nanoseconds * 1e-9
+
+    def cycle_plan_mode(self) -> None:
+        """WAYPOINT R2：循环切换规划方式（运动中先停，不自动重播）。"""
+        if self.arm_state in ("TRAJ", "SERVO"):
+            self.arm_stop()
+        idx = WAYPOINT_PLAN_MODES.index(self._plan_mode)
+        self._plan_mode = WAYPOINT_PLAN_MODES[(idx + 1) % len(WAYPOINT_PLAN_MODES)]
+        self.publish_plan_mode()
+        self.notify_operator_event(f"plan_mode:{self._plan_mode}")
+        self._n.get_logger().warn(f"路点规划方式 → {self._plan_mode}")
+
+    def waypoint_enter(self) -> None:
+        """F198 WAYPOINT 进入钩子：清槽位镜像并发布当前规划方式（不自动开录）。"""
+        self._wp_slot = None
+        self.publish_plan_mode()
+
+    def waypoint_record(self, slot: str = "wp1") -> None:
+        """WAYPOINT ↓/←：开始录制 wp1/wp2；未 READY 先上电+使能，READY 后补发。"""
+        client = self._wp_record1 if slot == "wp1" else self._wp_record2
+        label = f"arm/waypoint/record{slot[-1]}"
+        now = self._n.get_clock().now().nanoseconds * 1e-9
+        if self.arm_state == "READY":
+            self._wp_slot = slot
+            self._wp_slot_at = now
+            self._call_trigger_report(client, label)
+            return
+        if self.arm_state in ("TEACH", "WAYPOINT_TEACH"):
+            self._n.get_logger().warn(
+                f"已在录制（{self.arm_state}）：先按对应方向或 □ 结束，再切换槽位")
+            return
+        if self.arm_state in ("TRAJ", "SERVO", "SAFE_PARK", "AI"):
+            self._n.get_logger().warn(
+                f"正在运动（{self.arm_state}）：先按 □ 停止再录制路点")
+            return
+        self._pending_teach = f"wp_{slot}"
+        self._pending_teach_since = now
+        self.arm_power_enable()
+        self._n.get_logger().warn(
+            f"路点 {slot} 录制需要使能（当前 {self.arm_state or '未知'}）→ "
+            "先上电+使能，READY 后自动开录")
+
+    def waypoint_save(self, slot: str = "wp1") -> None:
+        """WAYPOINT ↑/→：结束并保存对应路点槽；播放中则停止。"""
+        if self.arm_state == "TRAJ":
+            self.arm_stop()
+            return
+        if self.arm_state == "WAYPOINT_TEACH":
+            if self._wp_slot not in (None, slot):
+                self._n.get_logger().warn(
+                    f"正在录制 {self._wp_slot}：请按对应方向或 □ 保存")
+                return
+            self.teach_stop()
+            self._wp_slot = None
+            return
+        self._n.get_logger().warn(
+            f"当前没有可保存的路点录制（state={self.arm_state or '?'}）")
+
+    def playback_waypoints(self, slot: str = "wp1", loop: bool = False) -> None:
+        """WAYPOINT △/○：按当前规划方式回放 wp1/wp2；loop=True 循环到 □ 停止。"""
         if not self._playback.service_is_ready():
             self._n.get_logger().warn("arm/playback not available")
             return
         req = PlaybackTrajectory.Request()
-        req.name = ""
+        req.name = slot
         req.type = "waypoint"
-        req.strategy = strategy
+        req.mode = str(self._plan_mode)
+        req.loop = bool(loop)
         self._playback.call_async(req)
         self._n.get_logger().info(
-            f"playback_waypoints_{strategy} -> /a3/arm/playback "
-            f"{{type:'waypoint', strategy:'{strategy}'}}")
-
-    def playback_waypoints_ptp(self) -> None:
-        self._play_waypoints("ptp")
-
-    def playback_waypoints_lin(self) -> None:
-        self._play_waypoints("lin")
+            f"playback_waypoints -> /a3/arm/playback {{type:'waypoint', "
+            f"name:'{slot}', mode:'{self._plan_mode}', loop:{bool(loop)}}}")
 
     def random_pose_tour(self, count: int = 0, seed: int = 0) -> None:
         """F116: Options 长按 → 随机命名点巡游；count=0/seed=0 走服务端默认."""

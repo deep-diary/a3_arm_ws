@@ -23,6 +23,7 @@ DEFAULT_KEYS_JSON = os.path.join(
     "config", "melodion_keys.json",
 )
 EXTREME_NAMES = ("white1", "white19", "black13", "black1")
+INSPECTION_ORDER_NOTE = "白键 left→right（19 键），再黑键 right→left（13 键）"
 
 
 def _xy(p: Dict[str, float]) -> Tuple[float, float]:
@@ -147,6 +148,23 @@ def key_down_pose(layout: dict, key: Dict[str, Any]) -> Dict[str, Any]:
         "position": {"x": x, "y": y, "z": _lerp(low["z"], high["z"], t)},
         "orientation": _slerp(_quat(low["ori"]), _quat(high["ori"]), t),
     }
+
+
+def inspection_order(keys: Sequence[Dict[str, Any]] | None = None) -> List[Dict[str, Any]]:
+    """全键检测顺序：白键按配置顺序升序（1→19），再黑键倒序（13→1）。"""
+    keys = list(keys or load_keys())
+    whites = [k for k in keys if k["type"] == "white"]
+    blacks = [k for k in keys if k["type"] == "black"]
+    if len(whites) < 19 or len(blacks) < 13:
+        raise ValueError("melodion_keys.json 白键/黑键数量不足")
+    return whites + list(reversed(blacks))
+
+
+def inspection_waypoints(layout: dict, keys: Sequence[Dict[str, Any]] | None = None,
+                         dwell_s: float = 0.2) -> List[Dict[str, Any]]:
+    """布局 → 32 个「按下点」路点（直接喂给 melodion_stream.build_press_stream）。"""
+    return [{"pose": key_down_pose(layout, key), "sleep": float(dwell_s)}
+            for key in inspection_order(keys)]
 
 
 def score_to_waypoints(score: dict, layout: dict, keys: Sequence[Dict[str, Any]] | None = None,

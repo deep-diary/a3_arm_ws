@@ -312,7 +312,8 @@ def resolve_mode(mapping: Dict[str, Any], mode: str) -> Dict[str, Any]:
     """F189: 固定层 common + 当前模式覆盖 → 一份可直接展开的映射块。
 
     - axes/buttons：模式同名键覆盖 common；
-    - suppress_common_axes：进模式后禁用这些公共轴（r2 夹爪始终保留）；
+    - suppress_common_axes：进模式后禁用这些公共轴（默认仍保留 r2 夹爪；
+      F198 起允许模式显式列出 r2，WAYPOINT 用 R2 切规划方式）；
     - dpad：模式给就用模式的，否则沿用 common。
     无 `modes` 段时退回旧单层映射（向后兼容）。
     """
@@ -323,8 +324,7 @@ def resolve_mode(mapping: Dict[str, Any], mode: str) -> Dict[str, Any]:
     axes = dict(common.get("axes") or {})
     axes.update(spec.get("axes") or {})
     for name in spec.get("suppress_common_axes") or []:
-        if str(name) != "r2":
-            axes.pop(str(name), None)
+        axes.pop(str(name), None)
     buttons = dict(common.get("buttons") or {})
     buttons.update(spec.get("buttons") or {})
     return {

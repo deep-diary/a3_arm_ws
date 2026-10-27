@@ -297,6 +297,11 @@ class Ds4FeedbackNode(Node):
             self._white_until = time.monotonic() + 0.4
             self._rumble_phases = [_RumblePhase(0.0, 0.12, 0.6, 0.0)]
             self._rumble_started_at = time.monotonic()
+        elif msg.data.startswith("plan_mode:"):
+            # F198：WAYPOINT 切规划方式——短白闪 + 弱震，配合画面右上角提示
+            self._white_until = time.monotonic() + 0.15
+            self._rumble_phases = [_RumblePhase(0.0, 0.06, 0.5, 0.0)]
+            self._rumble_started_at = time.monotonic()
         elif msg.data.startswith("mode_changed:"):
             # F189：切模式震 rumble_index 次（每次 0.1s，间隔 0.12s）
             parts = msg.data.split(":")

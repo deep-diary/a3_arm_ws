@@ -4,7 +4,12 @@ string name
 string type
 # F131: 路点段策略 — "ptp"=关节空间自动规划(默认) / "lin"=TCP 笛卡尔走直线
 string strategy
-# F197: 循环播放（仅 type=dance 的连续槽生效；waypoint 槽忽略并单次播放）
+# F198: 路点规划方式（type="waypoint" 时生效；留空=沿用旧 strategy ptp/lin）
+# 允许: ptp|ptp_blend|lin_exact|lin_blend|jnt_g64_quintic|jnt_g64_trapezoid
+#       |jnt_spline_bell|jnt_spline_approx（circ 需辅助点，不支持）
+string mode
+# F197/F198: 循环播放（type=dance 的连续槽 / type=waypoint 且给了 mode 时生效；
+# 旧 type=waypoint 的 strategy 链路仍忽略 loop）
 bool loop
 ---
 bool success
