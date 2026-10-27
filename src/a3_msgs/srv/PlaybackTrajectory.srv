@@ -4,6 +4,8 @@ string name
 string type
 # F131: 路点段策略 — "ptp"=关节空间自动规划(默认) / "lin"=TCP 笛卡尔走直线
 string strategy
+# F197: 循环播放（仅 type=dance 的连续槽生效；waypoint 槽忽略并单次播放）
+bool loop
 ---
 bool success
 string message

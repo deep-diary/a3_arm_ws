@@ -32,7 +32,7 @@
 | D-pad 跟踪距离/目标中心微调 | ❌ 未实现 | TRACK 的 D-pad 留空（用 ○ 长按一次记录目标代替） |
 | F192 `generate_stream`（口风琴 stream 生成服务） | ❌ 未重建 | PIANO 的 △ 短按直接回放 `stream latest` |
 | F193 巡游（DEMO △/○ 短长按，平移与旋转严格分离） | ✅ 已实现 | `a3_bringup/angular_cruise` + `AngularCruise` srv；△短=`translate_xyz`、△长=`translate`（OU 连续，30 s/越界/姿态 15° 自停）、○短=`xyz`、○长=`random`（OU 角度游走，30 s 自停 + 姿态包络 + 关节限位守卫），`spin` 备用；mock 硬件四项全部 PASS |
-| F193 舞蹈槽位（`playback type=dance` + `/a3/arm/save_slot`） | ❌ 未重建 | DANCE 模式暂为"回放 latest / 路点 PTP" |
+| F193 舞蹈槽位（`playback type=dance` + `/a3/arm/save_slot`） | ✅ 由 F197 取代 | D-pad 直接连续录槽 + L2 提升 latest（`/a3/arm/dance/{record1,record2,promote1,promote2}`），无需 `save_slot`；详见 `docs/edge/requirements/F197-dance-slots.md` |
 | 显示：统一 `/a3/vision/display` + FaceOverlay（F194） | ✅ 已实现 | 原图 25 Hz 主底 + 最后一层叠加；网格用 mediapipe 全量 2556 条边 |
 
 ## 二、Current State Analysis（本轮新增确认）

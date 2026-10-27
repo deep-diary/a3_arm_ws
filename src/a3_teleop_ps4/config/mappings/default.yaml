@@ -201,8 +201,24 @@ modes:
     rumble_index: 7
     enter: [{fn: goto_named_pose, kwargs: {name: ready}, required: false}]
     exit: [{fn: arm_stop}]
+    # F197：↓=开始录舞1、↑=保存舞1；←=开始录舞2、→=保存舞2
+    dpad:
+      - axis: dpad_y
+        pos: {fn: dance_record, kwargs: {slot: dance1}}
+        neg: {fn: dance_save, kwargs: {slot: dance1}}
+      - axis: dpad_x
+        neg: {fn: dance_record, kwargs: {slot: dance2}}
+        pos: {fn: dance_save, kwargs: {slot: dance2}}
     buttons:
-      triangle: {fn: playback_latest, edge: shortpress, hold_s: 1.5}
-      square: {fn: playback_waypoints_ptp, edge: shortpress, hold_s: 1.5}
-      circle: {fn: arm_stop, edge: shortpress, hold_s: 1.5}
-      l2: {fn: save_named_pose, edge: shortpress, hold_s: 1.5}
+      # △/○ 短按=单次播放，长按=循环（□ 停止）
+      triangle:
+        - {fn: playback_dance, kwargs: {name: dance1, loop: false}, edge: shortpress, hold_s: 1.5}
+        - {fn: playback_dance, kwargs: {name: dance1, loop: true}, edge: longpress, hold_s: 1.5}
+      circle:
+        - {fn: playback_dance, kwargs: {name: dance2, loop: false}, edge: shortpress, hold_s: 1.5}
+        - {fn: playback_dance, kwargs: {name: dance2, loop: true}, edge: longpress, hold_s: 1.5}
+      square: {fn: arm_stop, edge: shortpress, hold_s: 1.5}
+      # L2 短/长：把 latest 提升为舞1/舞2（DANCE 内不再占用 L2 存命名点）
+      l2:
+        - {fn: dance_promote, kwargs: {slot: dance1}, edge: shortpress, hold_s: 1.5}
+        - {fn: dance_promote, kwargs: {slot: dance2}, edge: longpress, hold_s: 1.5}

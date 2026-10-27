@@ -12,6 +12,10 @@
 | `stream` | 段序列（软件编排；每段 `mode/speed/sleep/via`） | `_execute_segment`（ptp/lin/via）逐段 | 已有 |
 | `cp` | 连续笛卡尔路径（软件编排；via 点列 + 目标一条轨迹） | `_play_cp` → `_goto_via_smooth`/`_goto_via_lin_blend` 一条 C2 轨迹 | **F163/F164 新增** |
 
+> F197：`/a3/arm/playback` 另有 `type=dance` 的**槽位**（不是新 kind）——路径固定
+> `trajectories/dance/<name>.yaml`，按文件头 `kind`（`continuous`/`waypoint`）分派；
+> 请求里的 `loop` 只对连续槽生效（复用已 retime 轨迹循环下发）。
+
 ## 非 playback kind（不在 `/a3/arm/playback` 内）
 
 | 场景 | 运行时载体 | 说明 |
@@ -40,8 +44,10 @@
 
 | kind | 位置 |
 |---|---|
-| `continuous` / `waypoint` | `<ws>/trajectories/{continuous,waypoint}/`（运行时录制，untracked） |
+| `continuous` | `<ws>/trajectories/*.yaml`（根目录，`latest.yaml` 为滚动槽；运行时录制，untracked） |
+| `waypoint` | `<ws>/trajectories/waypoints/*.yaml`（`latest.yaml` 为滚动槽） |
 | `stream` / `cp` | `app_melodion/config/streams/`（版本控制，脚本生成源）+ `<ws>/trajectories/streams/`（实验槽） |
+| `continuous` / `waypoint`（舞蹈槽） | `<ws>/trajectories/dance/{dance1,dance2}.yaml`（F197；`type=dance` 回放，文件头 `kind` 决定执行链） |
 
 搜索顺序见 `arm_controller._stream_path` / `_cp_path`（仓库 trajectories → app_melodion config → 旧 `~/.a3`）。
 

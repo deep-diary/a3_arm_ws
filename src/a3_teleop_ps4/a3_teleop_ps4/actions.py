@@ -140,6 +140,11 @@ class ActionExecutor:
             Trigger, "/a3/arm/melodion/record_extremes")
         self._melodion_gen_streams = node.create_client(
             Trigger, "/a3/arm/melodion/gen_streams")
+        # F197 DANCE：连续录制双槽位 + 把 latest 提升为槽位
+        self._dance_record1 = node.create_client(Trigger, "/a3/arm/dance/record1")
+        self._dance_record2 = node.create_client(Trigger, "/a3/arm/dance/record2")
+        self._dance_promote1 = node.create_client(Trigger, "/a3/arm/dance/promote1")
+        self._dance_promote2 = node.create_client(Trigger, "/a3/arm/dance/promote2")
         self._playback = node.create_client(PlaybackTrajectory, "/a3/arm/playback")
         # F116: Options 长按 3s 触发随机命名点巡游（服务端仅 READY 态放行）
         self._random_tour = node.create_client(
@@ -201,8 +206,11 @@ class ActionExecutor:
             node.declare_parameter("power_enable_timeout_s", 5.0).value
         )
         # F189 示教挂起：进入示教模式时若臂未使能，先上电+使能，READY 后自动开录
-        self._pending_teach: Optional[str] = None   # "teach" | "waypoint"
+        self._pending_teach: Optional[str] = None   # "teach" | "waypoint" | "dance_*"
         self._pending_teach_since = 0.0
+        # F197: 当前正在录制的舞蹈槽（客户端镜像，用于方向校验）
+        self._dance_slot: Optional[str] = None
+        self._dance_slot_at = 0.0
         self._teach_wait_s = float(node.declare_parameter("teach_wait_s", 10.0).value)
         self.arm_state = ""
 
@@ -612,6 +620,55 @@ class ActionExecutor:
         """PIANO ↑：由路点生成 press/extremes 两条按键 stream（不运动）。"""
         self._call_trigger_report(self._melodion_gen_streams, "arm/melodion/gen_streams")
 
+    # --- F197 DANCE 双槽位：连续录制 / latest 提升 / 单次与循环播放 ---
+
+    def dance_record(self, slot: str = "dance1") -> None:
+        """DANCE ↓/←：开始连续录舞1/舞2；未 READY 先上电+使能，READY 后补发。"""
+        client = self._dance_record1 if slot == "dance1" else self._dance_record2
+        label = f"arm/dance/record_{slot}"
+        now = self._n.get_clock().now().nanoseconds * 1e-9
+        if self.arm_state == "READY":
+            self._dance_slot = slot
+            self._dance_slot_at = now
+            self._call_trigger_report(client, label)
+            return
+        if self.arm_state in ("TEACH", "WAYPOINT_TEACH"):
+            self._n.get_logger().warn(
+                f"已在录制（{self.arm_state}）：先按对应方向或 □ 结束，再切换槽位")
+            return
+        if self.arm_state in ("TRAJ", "SERVO", "SAFE_PARK", "AI"):
+            self._n.get_logger().warn(
+                f"正在运动（{self.arm_state}）：先按 □ 停止再录制舞蹈")
+            return
+        self._pending_teach = f"dance_{slot}"
+        self._pending_teach_since = now
+        self._dance_slot_at = now
+        self.arm_power_enable()
+        self._n.get_logger().warn(
+            f"舞蹈 {slot} 录制需要使能（当前 {self.arm_state or '未知'}）→ "
+            "先上电+使能，READY 后自动开录")
+
+    def dance_save(self, slot: str = "dance1") -> None:
+        """DANCE ↑/→：结束并保存对应舞蹈槽；播放中则停止。"""
+        if self.arm_state == "TRAJ":
+            self.arm_stop()
+            return
+        if self.arm_state == "TEACH":
+            if self._dance_slot not in (None, slot):
+                self._n.get_logger().warn(
+                    f"正在录制 {self._dance_slot}：请按对应方向或 □ 保存")
+                return
+            self.teach_stop()
+            self._dance_slot = None
+            return
+        self._n.get_logger().warn(
+            f"当前没有可保存的舞蹈录制（state={self.arm_state or '?'}）")
+
+    def dance_promote(self, slot: str = "dance1") -> None:
+        """DANCE L2 短/长：把较新的 latest（连续或路点）整文件提升为舞1/舞2。"""
+        client = self._dance_promote1 if slot == "dance1" else self._dance_promote2
+        self._call_trigger_report(client, f"arm/dance/promote_{slot}")
+
     # --- F189/F190: 模式化按键语义 ---
 
     def arm_stop(self) -> None:
@@ -646,6 +703,12 @@ class ActionExecutor:
         return True
 
     def _advance_pending_teach(self, now: float) -> None:
+        # F197: 离开 TEACH 后清掉客户端槽位镜像（服务端已按槽位保存）。
+        # READY→TEACH 有服务往返延迟，加 1 s 宽限，避免刚开录就被清掉方向校验。
+        if self._dance_slot and self.arm_state != "TEACH":
+            if (self.arm_state in ("DISABLED", "FAULT", "COOLING")
+                    or now - self._dance_slot_at > 1.0):
+                self._dance_slot = None
         if self._pending_teach is None:
             return
         if self.arm_state in ("TEACH", "WAYPOINT_TEACH"):
@@ -659,6 +722,14 @@ class ActionExecutor:
                           else self._melodion_record_extremes)
                 self._n.get_logger().info(f"已 READY → 自动开始口风琴 {slot} 路点录制")
                 self._call_trigger_report(client, f"arm/melodion/record_{slot}")
+                return
+            if kind.startswith("dance_"):
+                slot = kind.split("_", 1)[1]
+                client = self._dance_record1 if slot == "dance1" else self._dance_record2
+                self._dance_slot = slot
+                self._dance_slot_at = now
+                self._n.get_logger().info(f"已 READY → 自动开始 {slot} 连续录制")
+                self._call_trigger_report(client, f"arm/dance/record_{slot}")
                 return
             self._n.get_logger().info(f"已 READY → 自动开始{'路点' if kind == 'waypoint' else '连续'}示教")
             self.teach_start_waypoint() if kind == "waypoint" else self.teach_start()
@@ -885,6 +956,19 @@ class ActionExecutor:
         self._n.get_logger().info(
             f"playback_stream -> /a3/arm/playback {{type:'stream', name:'{name}'}}")
 
+    def playback_dance(self, name: str = "dance1", loop: bool = False) -> None:
+        """F197 DANCE △/○：回放舞蹈槽；loop=True 循环到 □ 停止（仅连续槽生效）。"""
+        if not self._playback.service_is_ready():
+            self._n.get_logger().warn("arm/playback not available")
+            return
+        req = PlaybackTrajectory.Request()
+        req.name = name
+        req.type = "dance"
+        req.loop = bool(loop)
+        self._playback.call_async(req)
+        self._n.get_logger().info(
+            f"playback_dance -> /a3/arm/playback {{type:'dance', name:'{name}', "
+            f"loop:{bool(loop)}}}")
 
     def _play_waypoints(self, strategy: str) -> None:
         """F131: 路点任务回放（ptp=关节空间 / lin=笛卡尔直线）；服务端 kind 门禁."""

@@ -1357,6 +1357,11 @@ class ArmController(Node):
         self.declare_parameter("duty_gate_enabled", True)
         self.declare_parameter("duty_window_s", 600.0)
         self.declare_parameter("duty_max_ratio", 0.8)
+        # F197: 舞蹈循环（复用已 retime 轨迹重下发；占空比/温度门禁仍生效）
+        self.declare_parameter("dance_loop_gap_s", 0.2)
+        self.declare_parameter("dance_loop_seam_s", 0.8)
+        self.declare_parameter("dance_loop_closed_tol_rad", 0.05)
+        self.declare_parameter("dance_loop_l7_tol_rad", 0.05)
 
         self._joint_names: List[str] = list(
             self.get_parameter("joint_names").get_parameter_value().string_array_value
@@ -1463,6 +1468,8 @@ class ArmController(Node):
         # L7 目标流硬限速（l7_max_velocity_rad_s）状态
         self._l7_last_cmd_pos: Optional[float] = None
         self._l7_last_cmd_t = 0.0
+        # F197: 舞蹈循环上下文（复用已 retime 轨迹；None=未循环）
+        self._dance_loop: Optional[Dict[str, Any]] = None
 
         # 轨迹持久化目录
         self._traj_dir = self._resolve_trajectories_dir()
@@ -1476,8 +1483,15 @@ class ArmController(Node):
         self._melodion_stream_dir = os.path.join(self._melodion_dir, "streams")
         for _d in (self._melodion_wp_dir, self._melodion_stream_dir):
             os.makedirs(_d, exist_ok=True)
+        # F197: 舞蹈槽位目录（连续录制 / 路点提升共用）：trajectories/dance/{,backup}
+        self._dance_dir = os.path.join(self._traj_dir, "dance")
+        self._dance_bak_dir = os.path.join(self._dance_dir, "backup")
+        for _d in (self._dance_dir, self._dance_bak_dir):
+            os.makedirs(_d, exist_ok=True)
         # 路点录制槽位：None=通用 waypoints/latest.yaml；"press"/"extremes"=口风琴槽
         self._waypoint_slot: Optional[str] = None
+        # 连续录制槽位：None=通用 latest.yaml；"dance1"/"dance2"=舞蹈槽
+        self._teach_slot: Optional[str] = None
 
         # 命名预设点
         self._poses = self._load_poses()
@@ -1608,6 +1622,19 @@ class ArmController(Node):
             callback_group=self._cb_group)
         self.create_service(
             Trigger, "/a3/arm/melodion/gen_streams", self._melodion_gen_streams_cb,
+            callback_group=self._cb_group)
+        # F197: DANCE 模式——连续录制槽位 + 把 latest 提升为槽位
+        self.create_service(
+            Trigger, "/a3/arm/dance/record1", self._dance_record1_cb,
+            callback_group=self._cb_group)
+        self.create_service(
+            Trigger, "/a3/arm/dance/record2", self._dance_record2_cb,
+            callback_group=self._cb_group)
+        self.create_service(
+            Trigger, "/a3/arm/dance/promote1", self._dance_promote1_cb,
+            callback_group=self._cb_group)
+        self.create_service(
+            Trigger, "/a3/arm/dance/promote2", self._dance_promote2_cb,
             callback_group=self._cb_group)
         self.create_service(
             SaveTrajectory, "/a3/arm/save_trajectory", self._save_cb,
@@ -2466,6 +2493,7 @@ class ArmController(Node):
     def _dispatch_trajectory(
         self, traj: JointTrajectory, duty_exempt: bool = False,
         l7_traj: Optional[JointTrajectory] = None,
+        skip_static_gate: bool = False,
     ) -> Tuple[bool, str]:
         """
         按 control_backend 下发轨迹：旧栈话题直发 / 标准栈 action.
@@ -2483,19 +2511,21 @@ class ArmController(Node):
         返回 (是否下发, 说明)。
         """
         # F107 静态力矩门禁：未覆盖关节沿用当前读数
+        # F197: skip_static_gate 仅供舞蹈循环复用同一轨迹（首轮已全量校验）
         names = list(traj.joint_names)
-        for point in traj.points:
-            if not point.positions:
-                continue
-            full = list(self._positions)
-            for jn, pos in zip(names, point.positions):
-                if jn in self._joint_names:
-                    full[self._joint_names.index(jn)] = float(pos)
-            viol = self._static_torque_violations(full)
-            if viol:
-                msg = "static torque gate rejected: " + "; ".join(viol)
-                self.get_logger().warn(msg)
-                return False, msg
+        if not skip_static_gate:
+            for point in traj.points:
+                if not point.positions:
+                    continue
+                full = list(self._positions)
+                for jn, pos in zip(names, point.positions):
+                    if jn in self._joint_names:
+                        full[self._joint_names.index(jn)] = float(pos)
+                viol = self._static_torque_violations(full)
+                if viol:
+                    msg = "static torque gate rejected: " + "; ".join(viol)
+                    self.get_logger().warn(msg)
+                    return False, msg
 
         duration = _tfs_seconds(traj.points[-1].time_from_start) if traj.points else 0.0
         if not duty_exempt:
@@ -2886,6 +2916,8 @@ class ArmController(Node):
         self._all_disabled_since = 0.0
         self._traj_done_at = 0.0
         self._jogging = False
+        # F197: 带外失能立即终止舞蹈循环
+        self._clear_dance_loop()
         self._publish_mode("IDLE")
         self._set_state(
             STATE_DISABLED,
@@ -2921,6 +2953,8 @@ class ArmController(Node):
         # 会短暂置 READY，绕过下方 SAFE_PARK 守卫，重入会对已失能控制器再 deactivate。
         if self._temp_protect_busy:
             return
+        # F197: 超温保护优先终止舞蹈循环（后续 safe park 仍按原顺序执行）
+        self._clear_dance_loop()
         self._temp_protect_busy = True
         try:
             protect_c = float(self.get_parameter("temp_protect_c").value)
@@ -2954,6 +2988,8 @@ class ArmController(Node):
     def _handle_motor_fault(self) -> None:
         """硬故障（驱动/磁编码/堵转过载）→ 紧急 reset + FAULT."""
         jn, mask = self._pending_fault
+        # F197: 硬故障立即终止舞蹈循环
+        self._clear_dance_loop()
         self.get_logger().error(f"motor fault: joint={jn} mask=0x{mask:X} -> emergency reset")
         ok, msg = self._motor_command(self._reset_cli, 2)
         if ok:
@@ -2965,6 +3001,8 @@ class ArmController(Node):
 
     def _handle_soft_fault(self, jn: str, mask: int) -> None:
         """软故障（欠压/过温/未标定）→ safe park → disable，可自恢复不 reset。"""
+        # F197: 软故障同样终止舞蹈循环
+        self._clear_dance_loop()
         self.get_logger().warn(
             f"soft motor fault: joint={jn} mask=0x{mask:X} -> safe park + disable")
         ok, msg = self._safe_park_then_disable()
@@ -2979,8 +3017,96 @@ class ArmController(Node):
     def _schedule_back_to_ready(self, delay_s: float) -> None:
         self._traj_done_at = time.monotonic() + max(delay_s, 0.1)
 
+    # ------------------------------------------------------- dance loop (F197)
+
+    def _clear_dance_loop(self) -> None:
+        """终止舞蹈循环上下文（停止/故障/回 READY 都必须调用）."""
+        self._dance_loop = None
+
+    def _make_dance_loop(
+        self, traj: JointTrajectory, l7_traj: Optional[JointTrajectory], label: str
+    ) -> Dict[str, Any]:
+        """F197: 由已 retime 的轨迹建循环上下文（闭环无缝 / 非闭环追加回归段）."""
+        tol = float(self.get_parameter("dance_loop_closed_tol_rad").value)
+        seam_s = max(0.0, float(self.get_parameter("dance_loop_seam_s").value))
+        gap_s = max(0.0, float(self.get_parameter("dance_loop_gap_s").value))
+        first = list(traj.points[0].positions)
+        last = list(traj.points[-1].positions)
+        closed = max((abs(a - b) for a, b in zip(first, last)), default=0.0) <= tol
+        if closed:
+            loop_traj = traj
+        elif seam_s <= 0.0:
+            self.get_logger().warn(
+                f"[F197] {label}: 首末差 > {tol:.3f} rad 且 seam=0，循环接缝会有位姿跳变")
+            loop_traj = traj
+        else:
+            loop_traj = self._append_seam(traj, seam_s)
+            self.get_logger().info(
+                f"[F197] {label}: 非闭环，追加 {seam_s:.2f}s 尾→首回归段")
+        if l7_traj is not None and l7_traj.points:
+            tol7 = float(self.get_parameter("dance_loop_l7_tol_rad").value)
+            d7 = abs(float(l7_traj.points[-1].positions[0])
+                     - float(l7_traj.points[0].positions[0]))
+            if d7 > tol7:
+                self.get_logger().warn(
+                    f"[F197] {label}: L7 首末差 {d7:.3f} rad > {tol7:.3f}，"
+                    "循环每轮会跳回首值")
+        self.get_logger().info(
+            f"[F197] {label}: loop start ({len(loop_traj.points)} pts, "
+            f"{self._traj_duration(loop_traj):.1f}s, gap={gap_s:.2f}s)")
+        return {
+            "traj": loop_traj,
+            "l7_traj": l7_traj,
+            "label": label,
+            "gap_s": gap_s,
+            "cycles": 0,
+            "closed": closed,
+        }
+
+    def _append_seam(self, traj: JointTrajectory, seam_s: float) -> JointTrajectory:
+        """F197: 轨迹尾追加「末点→首点」线性回归段（位置连续；速度不保证）."""
+        out = JointTrajectory()
+        out.joint_names = list(traj.joint_names)
+        for p in traj.points:
+            np_ = JointTrajectoryPoint()
+            np_.positions = list(p.positions)
+            np_.velocities = list(p.velocities)
+            np_.accelerations = list(p.accelerations)
+            np_.time_from_start = p.time_from_start
+            out.points.append(np_)
+        t0 = _tfs_seconds(traj.points[-1].time_from_start)
+        q0 = list(traj.points[-1].positions)
+        q1 = list(traj.points[0].positions)
+        n = max(2, int(round(seam_s / 0.05)) + 1)
+        for k in range(1, n + 1):
+            a = float(k) / float(n)
+            pt = JointTrajectoryPoint()
+            pt.positions = [(1.0 - a) * x + a * y for x, y in zip(q0, q1)]
+            pt.time_from_start = _duration(t0 + a * seam_s)
+            out.points.append(pt)
+        return out
+
+    def _dance_loop_redispatch(self) -> bool:
+        """F197: 下一轮复用同一轨迹下发；失败（占空比等）返回 False 让调用方回 READY."""
+        ctx = self._dance_loop
+        if ctx is None:
+            return False
+        traj = ctx["traj"]
+        ok, msg = self._dispatch_trajectory(
+            traj, l7_traj=ctx.get("l7_traj"), skip_static_gate=True)
+        if not ok:
+            self.get_logger().warn(f"[F197] {ctx['label']}: loop stop ({msg})")
+            return False
+        ctx["cycles"] = int(ctx.get("cycles", 0)) + 1
+        self._traj_done_at = (
+            time.monotonic() + self._traj_duration(traj) + float(ctx["gap_s"]))
+        self._publish_mode("TRAJ_RUNNING")
+        return True
+
     def _back_to_ready(self) -> None:
         self._jogging = False
+        # F197: 回 READY 即终止舞蹈循环（正常结束/门禁拒绝/停止都走这里）
+        self._clear_dance_loop()
         if self._state == STATE_TRAJ:
             self._set_state(STATE_READY, "trajectory finished")
             # 轨迹结束必须发回非阻塞模式：此前只发 TRAJ_RUNNING（轨迹开始），
@@ -3210,7 +3336,9 @@ class ArmController(Node):
             and time.monotonic() >= self._traj_done_at
         ):
             self._traj_done_at = 0.0
-            self._back_to_ready()
+            # F197: 舞蹈循环——同一轨迹再下发一轮；失败（占空比等）则回 READY
+            if self._dance_loop is None or not self._dance_loop_redispatch():
+                self._back_to_ready()
 
         # F51/LL-039: 电机被带外失能 → 立刻离开 READY/TRAJ，并同步 ros2_control
         # teardown（不再保留保持目标与后续指令）
@@ -6071,6 +6199,8 @@ class ArmController(Node):
         """
         old = self._state
         extra = ""
+        # F197: 任何停止都先终止舞蹈循环（避免 hold 轨迹后又被下一轮覆盖）
+        self._clear_dance_loop()
         if self._state in (STATE_TEACH, STATE_WAYPOINT_TEACH):
             tr = self._stop_teach_cb(Trigger.Request(), Trigger.Response())
             if not tr.success:
@@ -6099,6 +6229,38 @@ class ArmController(Node):
     def _start_teach_cb(
         self, req: Trigger.Request, resp: Trigger.Response
     ) -> Trigger.Response:
+        """通用连续示教（保存到 latest.yaml）."""
+        return self._begin_teach(None, resp)
+
+    def _dance_record1_cb(
+        self, req: Trigger.Request, resp: Trigger.Response
+    ) -> Trigger.Response:
+        """F197 DANCE ↓：连续录制舞1（保存到 dance/dance1.yaml）."""
+        return self._begin_teach("dance1", resp)
+
+    def _dance_record2_cb(
+        self, req: Trigger.Request, resp: Trigger.Response
+    ) -> Trigger.Response:
+        """F197 DANCE ←：连续录制舞2（保存到 dance/dance2.yaml）."""
+        return self._begin_teach("dance2", resp)
+
+    def _begin_teach(
+        self, slot: Optional[str], resp: Trigger.Response
+    ) -> Trigger.Response:
+        """连续示教统一入口；slot 决定停止时写入哪个槽位（None=通用 latest）。
+
+        F197: 幂等——同槽重复调用只回 already recording，不清空已录样本。
+        """
+        if self._state == STATE_TEACH:
+            if slot == self._teach_slot:
+                resp.success = True
+                resp.message = f"already recording {slot or 'latest'}"
+                return resp
+            resp.success = False
+            resp.message = (
+                f"正在录制 {self._teach_slot or 'latest'}，先按对应方向结束再切换槽位")
+            return resp
+
         why = self._teach_guard()
         if why is not None:
             resp.success = False
@@ -6114,12 +6276,14 @@ class ArmController(Node):
         self._record = []
         self._record_start = time.monotonic()
         self._recording = True
+        self._teach_slot = slot
         if self._using_controller_switch():
             # 回环 echo 置 _mode=ZERO_TORQUE，BLOCKED_MODES 门禁与 legacy 对齐
             self._publish_mode("ZERO_TORQUE")
         self._set_state(STATE_TEACH, "teaching (drag)")
+        where = f"dance/{slot}.yaml" if slot else "latest.yaml"
         resp.success = True
-        resp.message = "teach started"
+        resp.message = f"teach started -> {where}; stop_teach/对应方向 to finish"
         return resp
 
     def _start_waypoint_teach_cb(
@@ -6192,25 +6356,38 @@ class ArmController(Node):
         else:
             ok, msg = self._exit_freedrive()
         n = len(self._record)
+        slot, self._teach_slot = self._teach_slot, None
         # F54: 停止即自动保存 —— latest.yaml（滚动最新槽）+ 时间戳备份（防覆盖丢失）。
-        # 样本 < teach_auto_save_min_samples 时认为是误触发（start 后立刻 stop），
-        # 不写 latest、不覆盖上一条好的录制。
+        # F197: 舞蹈槽录制只写 dance/<slot>.yaml + dance/backup/，不覆盖通用 latest。
+        # 样本 < teach_auto_save_min_samples 时认为是误触发（start 后立刻 stop），不落盘。
         min_samples = int(self.get_parameter("teach_auto_save_min_samples").value)
         auto_msgs: List[str] = []
+        ts = time.strftime("%Y%m%d_%H%M%S")
         if n >= min_samples:
-            latest = _traj_path_for(self._traj_dir, "")
-            if self._save_recording_to(latest):
-                auto_msgs.append("auto-saved latest.yaml")
-                ts = time.strftime("%Y%m%d_%H%M%S")
+            if slot:
+                main = os.path.join(self._dance_dir, f"{slot}.yaml")
+                hist = os.path.join(self._dance_bak_dir, f"{slot}_{ts}.yaml")
+                main_label = f"dance/{slot}.yaml"
+                meta = {
+                    "kind": "continuous",
+                    "name": slot,
+                    "recorded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            else:
+                main = _traj_path_for(self._traj_dir, "")
                 hist = os.path.join(self._traj_dir, f"teach_{ts}.yaml")
-                if self._save_recording_to(hist):
-                    auto_msgs.append(f"backup teach_{ts}.yaml")
+                main_label = "latest.yaml"
+                meta = None
+            if self._save_recording_to(main, meta=meta):
+                auto_msgs.append(f"auto-saved {main_label}")
+                if self._save_recording_to(hist, meta=meta):
+                    auto_msgs.append(f"backup {os.path.basename(hist)}")
             else:
                 auto_msgs.append("auto-save FAILED (see log)")
         else:
             auto_msgs.append(
-                f"auto-save skipped ({n} samples < {min_samples}, keep previous latest)"
-            )
+                f"auto-save skipped ({n} samples < {min_samples}, "
+                f"keep previous {slot or 'latest'})")
         self._set_state(STATE_READY, f"teach stopped ({n} samples)")
         resp.success = True
         resp.message = f"recorded {n} samples; " + ", ".join(auto_msgs) + (
@@ -6379,6 +6556,98 @@ class ArmController(Node):
         resp.message = "；".join(msgs)
         return resp
 
+    # ---------------------------------------------------------- dance slots (F197)
+
+    def _dance_promote1_cb(
+        self, req: Trigger.Request, resp: Trigger.Response
+    ) -> Trigger.Response:
+        """F197 DANCE L2 短按：把较新的 latest（连续/路点）提升为舞1."""
+        return self._promote_dance("dance1", resp)
+
+    def _dance_promote2_cb(
+        self, req: Trigger.Request, resp: Trigger.Response
+    ) -> Trigger.Response:
+        """F197 DANCE L2 长按：把较新的 latest（连续/路点）提升为舞2."""
+        return self._promote_dance("dance2", resp)
+
+    def _promote_dance(self, slot: str, resp: Trigger.Response) -> Trigger.Response:
+        """把 ``trajectories/latest.yaml`` 或 ``waypoints/latest.yaml`` 整文件复制到 dance 槽.
+
+        两者都存在时按 mtime 取较新者（日志写明来源）；保留原 ``kind``，不做结构转换。
+        目标已存在则先备份到 ``dance/backup/<slot>_<ts>.yaml``。
+        """
+        if self._state != STATE_READY:
+            resp.success = False
+            resp.message = f"先停止当前运动/示教（state={self._state}）再提升槽位"
+            return resp
+        candidates = [
+            os.path.join(self._traj_dir, "latest.yaml"),
+            os.path.join(self._wp_dir, "latest.yaml"),
+        ]
+        existing = [p for p in candidates if os.path.isfile(p)]
+        if not existing:
+            resp.success = False
+            resp.message = (
+                "没有可提升的 latest：先用 TEACH 连续录 或 WAYPOINT 路点录，"
+                "保存后再按 L2 提升")
+            return resp
+        src = max(existing, key=os.path.getmtime)
+        try:
+            with open(src, "r", encoding="utf-8") as f:
+                data = yaml.load(f, Loader=_YamlSafeLoader)
+        except Exception as exc:  # noqa: BLE001
+            resp.success = False
+            resp.message = f"读取 {src} 失败: {exc}"
+            return resp
+        if not isinstance(data, dict):
+            resp.success = False
+            resp.message = f"{src} 不是有效轨迹文件（YAML 根不是映射）"
+            return resp
+        kind = str(data.get("kind") or "continuous")
+        if kind == "waypoint":
+            n = len(data.get("waypoints") or [])
+            if n == 0:
+                resp.success = False
+                resp.message = f"{src} 是空路点任务，未提升"
+                return resp
+        elif kind in ("continuous", ""):
+            n = len(data.get("points") or [])
+            if n == 0:
+                resp.success = False
+                resp.message = f"{src} 是空连续轨迹，未提升"
+                return resp
+        else:
+            resp.success = False
+            resp.message = f"{src} kind={kind} 不支持提升（只接受 continuous/waypoint）"
+            return resp
+        dst = os.path.join(self._dance_dir, f"{slot}.yaml")
+        if os.path.exists(dst):
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            bak = os.path.join(self._dance_bak_dir, f"{slot}_{ts}.yaml")
+            try:
+                shutil.copyfile(dst, bak)
+            except Exception as exc:  # noqa: BLE001
+                resp.success = False
+                resp.message = f"备份 {dst} 失败: {exc}"
+                return resp
+        tmp = dst + ".tmp"
+        try:
+            shutil.copyfile(src, tmp)
+            os.replace(tmp, dst)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            resp.success = False
+            resp.message = f"写入 {dst} 失败: {exc}"
+            return resp
+        where = "latest.yaml" if src == candidates[0] else "waypoints/latest.yaml"
+        resp.success = True
+        resp.message = f"promoted {where} ({kind}, {n} pts) -> dance/{slot}.yaml"
+        self.get_logger().info(f"[F197] {resp.message}")
+        return resp
+
     def _dump_recording(self) -> dict:
         """
         F54: 把当前内存录制(self._record: (t, pos) 列表)序列化为磁盘 YAML 数据.
@@ -6415,11 +6684,17 @@ class ArmController(Node):
         }
         return data
 
-    def _save_recording_to(self, path: str) -> bool:
-        """把当前录制写到 path，返回是否成功（异常已记录日志，不抛）."""
+    def _save_recording_to(self, path: str, meta: Optional[dict] = None) -> bool:
+        """把当前录制写到 path，返回是否成功（异常已记录日志，不抛）.
+
+        F197: meta 用于舞蹈槽注入 kind/name/recorded_at（通用 latest 不传）。
+        """
         try:
+            data = self._dump_recording()
+            if meta:
+                data.update(meta)
             with open(path, "w", encoding="utf-8") as f:
-                yaml.safe_dump(self._dump_recording(), f)
+                yaml.safe_dump(data, f)
             self.get_logger().info(f"trajectory saved to {path}")
             return True
         except Exception as exc:  # noqa: BLE001
@@ -6589,6 +6864,7 @@ class ArmController(Node):
         is_wp = (req.type or "").strip().lower() == "waypoint"
         is_stream = (req.type or "").strip().lower() == "stream"
         is_cp = (req.type or "").strip().lower() == "cp"
+        is_dance = (req.type or "").strip().lower() == "dance"
         strategy = (req.strategy or "ptp").strip().lower()
         if is_wp and strategy not in ("ptp", "lin"):
             resp.success = False
@@ -6596,16 +6872,20 @@ class ArmController(Node):
             return None, "", "", "", strategy, resp
         # F54: 空名 = 回放 latest 槽（分支在 sanitize 之前，_sanitize_name("")→"trajectory" 会撞纸面名）
         is_latest = not (req.name or "").strip()
-        if (is_stream or is_cp) and is_latest:
+        if (is_stream or is_cp or is_dance) and is_latest:
             resp.success = False
-            resp.message = "stream/cp requires explicit name"
+            resp.message = f"{(req.type or '').strip()} requires explicit name"
             return None, "", "", "", strategy, resp
-        prefix = "wp_" if is_wp else ("st_" if is_stream else ("cp_" if is_cp else ""))
+        prefix = ("wp_" if is_wp else ("st_" if is_stream
+                  else ("cp_" if is_cp else ("dn_" if is_dance else ""))))
         label = prefix + ("latest" if is_latest else _sanitize_name(req.name))
         if is_stream:
             path = self._stream_path(req.name)
         elif is_cp:
             path = self._cp_path(req.name)
+        elif is_dance:
+            # F197: 舞蹈槽固定目录，name 必须是 dance1/dance2（或显式文件名）
+            path = os.path.join(self._dance_dir, f"{_sanitize_name(req.name)}.yaml")
         else:
             base_dir = self._wp_dir if is_wp else self._traj_dir
             path = _traj_path_for(base_dir, req.name)
@@ -6618,6 +6898,11 @@ class ArmController(Node):
                     else ("no latest trajectory yet —— 先 start_teach → 拖动 → "
                           "stop_teach 录制, ")
                     + "或显式指定 name")
+            elif is_dance:
+                resp.success = False
+                resp.message = (
+                    f"dance 槽未录制：{path}（DANCE 模式 ↓/← 录制，"
+                    "或 L2 把 latest 提升到槽位）")
             else:
                 resp.success = False
                 resp.message = f"trajectory not found: {path}"
@@ -6627,6 +6912,8 @@ class ArmController(Node):
             resp.success = False
             resp.message = why
             return None, "", "", "", strategy, resp
+        # F197: 开始新回放前终止上一轮的舞蹈循环
+        self._clear_dance_loop()
 
         # F129: 通过门禁即发布 TRAJ_RUNNING + TRAJ 状态 → 灯带立即变色，不再等
         # YAML 解析（纯 Python loader 在满载节点内实测 3–4s）。cyan/purple 由
@@ -6675,7 +6962,16 @@ class ArmController(Node):
                 f"'{label}' is {file_kind}, not a cp task —— "
                 "连续笛卡尔路径请用 type=cp 回放")
             return None, "", "", "", strategy, resp
-        if not is_wp and not is_stream and not is_cp and file_kind in ("waypoint", "stream", "cp"):
+        if is_dance and file_kind not in ("continuous", "waypoint"):
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"playback {label}: kind gate")
+            resp.success = False
+            resp.message = (
+                f"'{label}' is {file_kind}, not a dance slot —— "
+                "dance 槽只接受 continuous/waypoint")
+            return None, "", "", "", strategy, resp
+        if (not is_wp and not is_stream and not is_cp and not is_dance
+                and file_kind in ("waypoint", "stream", "cp")):
             self._publish_mode("IDLE")
             self._set_state(STATE_READY, f"playback {label}: kind gate")
             resp.success = False
@@ -6691,18 +6987,27 @@ class ArmController(Node):
         data, label, kind, path, strategy, failed = self._prepare_playback(req, resp)
         if data is None:
             return failed
+        is_dance = (req.type or "").strip().lower() == "dance"
         if kind == "waypoint":
-            return self._play_waypoints(data, label, strategy, resp)
+            resp = self._play_waypoints(data, label, strategy, resp)
+            if is_dance and req.loop:
+                resp.message += "；路点槽不支持循环，已单次播放"
+            return resp
         if kind == "stream":
             return self._play_stream(data, label, path, resp)
         if kind == "cp":
             return self._play_cp(data, label, resp)
-        return self._play_continuous(data, label, path, resp)
+        return self._play_continuous(
+            data, label, path, resp, loop=bool(req.loop and is_dance))
 
     def _play_continuous(
-        self, data: dict, label: str, path: str, resp: PlaybackTrajectory.Response
+        self, data: dict, label: str, path: str, resp: PlaybackTrajectory.Response,
+        loop: bool = False,
     ) -> PlaybackTrajectory.Response:
-        """连续轨迹回放（F137 去噪 + F68 retime + JTC），从 _playback_cb 内联段抽出，逻辑不变。"""
+        """连续轨迹回放（F137 去噪 + F68 retime + JTC），从 _playback_cb 内联段抽出，逻辑不变。
+
+        F197: ``loop=True`` 时复用已 retime 的轨迹循环下发（首轮仍需完整门禁）。
+        """
         use_moveit = bool(self.get_parameter("playback_return_use_moveit").value)
         already_retimed = bool(data.get("retimed"))
 
@@ -6771,6 +7076,9 @@ class ArmController(Node):
             if self._have_js else 0.0
         )
         use_ramp = ramp_s > 0.05 and self._have_js and ramp_dist > 0.02
+        # F197: 循环体不能含几何 ramp（否则每轮跳回旧起点）→ 强制走 MoveIt 回首点
+        if loop and use_ramp:
+            use_moveit = True
         # F124: use_ramp 且 playback_return_use_moveit=true 时，回首点段改用 move_group
         # 轨迹规划（OMPL+TOTG，经 FJT→执行层），覆盖几何 ramp；灯带该段 cyan。MoveIt
         # 不可用/规划/执行失败 → WARN 并回落 join-ramp（与 goto 现行为一致）。
@@ -6791,6 +7099,13 @@ class ArmController(Node):
             else:
                 self.get_logger().warn(
                     f"playback return {label}: {msg} -- join-ramp fallback")
+        loop_note = ""
+        if loop and use_ramp and not moved:
+            # 几何 ramp 会进循环体 → 每轮跳回回放起点；宁可降级单次
+            self.get_logger().warn(
+                f"[F197] {label}: 回首点规划失败，循环降级为单次")
+            loop = False
+            loop_note = "；循环降级为单次（回首点规划失败）"
         ramp_in_geo = use_ramp and not moved
         geo: List[List[float]] = []
         geo_times: List[float] = []
@@ -6912,13 +7227,24 @@ class ArmController(Node):
         self._set_state(STATE_TRAJ, f"playback {label}")
         # F129: 轨迹本体时长入占空比账（回首段已在 _moveit_move 内入账），与点到点对齐
         self._duty_record(duration)
-        self._schedule_back_to_ready(duration + 0.3)
+        if loop:
+            # F197: 循环上下文；后续轮次由 _publish_status 的时间戳分支重下发
+            self._dance_loop = self._make_dance_loop(traj, l7_traj, label)
+            self._traj_done_at = (
+                time.monotonic() + duration + self._dance_loop["gap_s"])
+        else:
+            self._schedule_back_to_ready(duration + 0.3)
 
         suffix = f"retime [{retime_msg}]" if retime_msg else "legacy chain"
         resp.success = True
         resp.message = f"playback {label} ({len(traj.points)} pts, {duration:.1f}s, {suffix})"
         if moved:
             resp.message += f"; return=MoveIt {r_dur:.1f}s"
+        if loop:
+            closed = bool((self._dance_loop or {}).get("closed"))
+            resp.message += f"；loop=True ({'closed' if closed else 'seam'})"
+        if loop_note:
+            resp.message += loop_note
         return resp
 
     def _enter_ai_cb(self, req: Trigger.Request, resp: Trigger.Response) -> Trigger.Response:

@@ -104,6 +104,13 @@
     # F137: 回放前几何去噪（逐关节五次 B 样条，RMS 残差 ≈ ε rad）。0=关闭；
     # 0.005 保形、0.02 更平滑。2026-10 钢琴弹奏精度优先 → 0.005（max 偏离 ~0.03 rad≈1.7°）。
     playback_geometric_smoothing_eps: 0.002
+    # F197 舞蹈循环（DANCE △/○ 长按）：复用已 retime 轨迹重下发，不重读盘。
+    # 首末关节差 ≤ closed_tol 视为闭环无缝；否则追加 seam_s 的尾→首线性回归段。
+    # 占空比/静态力矩/温度门禁仍生效，累计到限会自动停（预期安全行为）。
+    dance_loop_gap_s: 0.2
+    dance_loop_seam_s: 0.8
+    dance_loop_closed_tol_rad: 0.05
+    dance_loop_l7_tol_rad: 0.05
 
     # ═══════════════════════════════════════════════════════════════════
     # 7. 路点示教（F131/F134：Share 长按进入，L2 打点，Options 保存）

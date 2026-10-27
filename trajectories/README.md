@@ -8,6 +8,7 @@
 | `waypoints/` | 路点任务（段序列） | 手动录制（Share 长按 + L2 打点） |
 | `streams/` | 轨迹流 / cp 路径（软件编排，运行时/实验槽） | 脚本生成；版本控制产物在 `src/app_melodion/config/streams/` |
 | `melodion/` | 口风琴应用：`waypoints/` 按键路点、`streams/` 按键流 | PS4 PIANO 示教 + `scripts/melodion_*.py` 生成 |
+| `dance/` | 舞蹈双槽位：`dance1.yaml`、`dance2.yaml`（连续或路点）+ `backup/` | PS4 DANCE 连续录制 / L2 提升 latest（F197） |
 
 编排层默认 `trajectories_dir` 指向本目录（解析工作区根 `<ws>/trajectories`），
 解析失败时回退 `~/.a3/trajectories`。`streams/` 搜索顺序：`melodion/streams/`（口风琴，命中优先）

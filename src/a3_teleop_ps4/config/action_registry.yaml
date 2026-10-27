@@ -185,6 +185,22 @@ functions:
     kind: discrete
     description: 'F176/F195: 回放口风琴 stream {type:"stream", name:"<slot>"}（trajectories/melodion/streams/ 优先）'
 
+  playback_dance:
+    kind: discrete
+    description: 'F197 DANCE △/○：回放舞蹈槽 {type:"dance", name:"dance1|dance2", loop}（loop 仅连续槽生效）'
+
+  dance_record:
+    kind: discrete
+    description: 'F197 DANCE ↓/←：开始连续录制 dance1/dance2（未 READY 自动上电+补发）'
+
+  dance_save:
+    kind: discrete
+    description: 'F197 DANCE ↑/→：结束并保存当前舞蹈槽；播放中则停止'
+
+  dance_promote:
+    kind: discrete
+    description: 'F197 DANCE L2 短/长：把较新的 latest（连续/路点）整文件提升为 dance1/dance2'
+
   melodion_record_press:
     kind: discrete
     description: 'F195 PIANO ↓: 演奏路点示教（/a3/arm/melodion/record_press，保存 melodion/waypoints/press.yaml）'
