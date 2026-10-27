@@ -70,3 +70,12 @@ candump-*.log
 
 # 预烘焙轨迹缓存（F16x：melodion_bake.py 生成 <name>.yaml.baked.yaml，可删可重烘焙）
 *.baked.yaml
+
+# 分享用导出包（html-report-presentation 插件生成，内容与 docs/architecture/ 逐字节重复）
+.trae-html-share-packages/
+
+# 舞蹈槽运行时产物（F197：连续录制体积大且带 backup/；确需入库时 git add -f）
+/trajectories/dance/
+
+# 示教槽位时间戳备份（F195/F198：滚动备份，属运行噪声）
+/trajectories/**/teach_wp_*.yaml
