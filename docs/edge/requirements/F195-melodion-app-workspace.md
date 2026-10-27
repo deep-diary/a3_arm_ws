@@ -30,7 +30,7 @@ trajectories/melodion/
 |---|---|---|
 | `↓` | `/a3/arm/melodion/record_press` | 开始演奏路点示教 |
 | `←` | `/a3/arm/melodion/record_extremes` | 开始 4 极限键录制 |
-| `→` | `/a3/arm/stop_teach` | 结束示教、保存到当前槽位（+ 时间戳备份），**并生成该槽位 stream**（press→`press.yaml` / extremes→`extremes.yaml` + `inspection.yaml`） |
+| `→` | `/a3/arm/stop_teach` | 结束示教、保存到当前槽位（+ 时间戳备份），**并生成该槽位 stream**（press→`press.yaml` / extremes→`extremes.yaml` + `inspection.yaml`，已有 `music.yaml` 时同步按新极限键重生成） |
 | `↑` | `/a3/arm/melodion/gen_streams` | 结束示教（若有）后生成**演奏** stream（`press.yaml`）；extreme 流由 `→` 自动生成，二者不互相连带 |
 | `△` 短按 | `playback {type: stream, name: press}` | 播放演奏按键流 |
 | `○` 短按 | `playback {type: stream, name: extremes}` | 播放 4 极限键流 |
@@ -74,6 +74,20 @@ trajectories/melodion/
   `app_melodion/config/streams/inspection.yaml`（后者基于旧 `base_pose`，与实际键盘高度不符）。
 - 播放前若文件缺失或比 `extremes.yaml` 旧，会按需重生成；4 点不全/跨度异常时报错并保留旧文件。
 
+## 乐曲线同步（`streams/music.yaml`）
+
+`music.yaml` 也是「极限键坐标 + 曲谱」的产物。极限键重新示教保存后，若 `music.yaml` 已存在，
+用其中的 `name` 找到同名曲谱（`app_melodion/config/scores/<name>.yaml`），
+保留原段的 `speed`/`mode`/`hold_orientation` 重新生成：
+
+- 坐标全部换为新极限键反推的布局，曲名/标题不变；
+- 最短按住 0.05s（与离线脚本一致），末段仍回 `home`；
+- 曲谱文件找不到或旧文件缺 `name` 时跳过并给出日志，**保留旧 `music.yaml`**；
+- 无 `music.yaml` 时跳过（不算失败），需要时用 `scripts/melodion_score_stream.py` 选曲生成。
+
+> `press.yaml` 来自演奏路点示教，只对当前口风琴摆放有效；移动口风琴后旧文件已无意义，
+> 需要重新 `↓` 示教演奏路点（`→` 会重新生成）。
+
 ## 曲谱 → 乐曲线（`scripts/melodion_score_stream.py`）
 
 1. 从 `extremes.yaml` 反推：键盘轴向单位向量、实测跨度（按 `melodion_keys.json` 的
@@ -103,7 +117,7 @@ pilz PTP 的 blend 是**笛卡尔过渡窗**（内部对采样位姿求 IK）。
 - [ ] PIANO 模式 `↓/←/→/↑` 分别完成演奏路点、极限键录制、结束保存、生成 stream；
 - [ ] `trajectories/melodion/waypoints/{press,extremes}.yaml` 与
       `streams/{press,extremes,inspection}.yaml` 按预期落盘，互不覆盖；
-      `→` 保存极限键时同轮生成 `inspection.yaml`（32 键按序）；
+      `→` 保存极限键时同轮生成 `inspection.yaml`（32 键按序），并同步重生成已有 `music.yaml`；
 - [ ] 生成流每段首末精确、键间 3 个 via blend；进场/离场 `exact` 停稳（无斜插/斜拔）；
       目标键上方默认 blend 不压键边/邻键（必要时加 `--target-exact`）；
 - [ ] 末段回到 `home`；口风琴未被横拖；

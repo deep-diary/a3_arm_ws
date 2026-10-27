@@ -4699,6 +4699,24 @@ class ArmController(Node):
             resp.message = f"need >= {min_count} waypoints, file has {n}"
             return resp
 
+        # F198 修复：旧录制可能含越限点（示教拖过限位）→ 提前点名，避免只报 seg failed
+        bad: List[str] = []
+        for i, wp in enumerate(parsed, start=1):
+            for jn, q in zip(self._joint_names, wp["positions"]):
+                lim = self._joint_limits.get(jn)
+                if lim and (q < lim[0] - 1e-6 or q > lim[1] + 1e-6):
+                    bad.append(
+                        f"wp{i} {jn}={q:+.4f} ∉ [{lim[0]:+.4f},{lim[1]:+.4f}]")
+        if bad:
+            msg = "路点超关节限位（示教时拖过限位？请重录或修正文件）：" + "; ".join(
+                bad[:6]) + (f" … 共 {len(bad)} 处" if len(bad) > 6 else "")
+            self._publish_mode("IDLE")
+            self._set_state(STATE_READY, f"playback {label}: joint limit")
+            resp.success = False
+            resp.message = msg
+            self.get_logger().warn(f"playback {label}: {msg}")
+            return resp
+
         segments, err = self._waypoint_segments(parsed, mode)
         if segments is None:
             self._publish_mode("IDLE")
@@ -5469,6 +5487,37 @@ class ArmController(Node):
             # LL-103: 段间等 move_group 内部状态追上实际关节（防下段 LIN IK -31）
             if i < n - 1:
                 self._wait_move_group_current(list(self._positions))
+
+        # 末段到位兜底：MoveIt Sequence 偶发返回 SUCCESS 但只执行了很短的末端轨迹
+        # （实测整曲 26 段后回 home 段仅 0.1s，臂停在最后一个键）。这里以实际关节
+        # 校验末段 joint 目标，未到则用本地关节轨迹补一段，避免静默留在琴键上。
+        last_seg = segments[-1]
+        last_positions = (last_seg.get("target") or {}).get("positions")
+        if last_positions and self._have_js:
+            names = list(data.get("joint_names") or self._joint_names)
+            tgt_q = {jn: float(v) for jn, v in zip(names, last_positions)
+                     if jn in self._joint_names}
+            if tgt_q and not self._wait_joint_arrival(tgt_q, timeout_s=1.0, eps=0.05):
+                worst = max(
+                    abs(self._positions[self._joint_names.index(jn)] - v)
+                    for jn, v in tgt_q.items())
+                self.get_logger().warn(
+                    f"playback {label}: 末段目标未到位（max err={worst:.3f} rad），"
+                    "本地补一段到目标")
+                ok_fb, msg_fb, dur_fb = self._goto_via_smooth(
+                    [], {"positions": [float(v) for v in last_positions]},
+                    last_seg.get("speed"), f"stream {label} 末段兜底", profile="l1p5")
+                if not ok_fb:
+                    self._publish_mode("IDLE")
+                    self._set_state(STATE_READY, f"playback {label}: 末段兜底失败")
+                    resp.success = False
+                    resp.message = (
+                        f"stream '{label}': 末段未到位（max err={worst:.3f} rad），"
+                        f"本地兜底失败：{msg_fb}")
+                    return resp
+                total += dur_fb
+                self.get_logger().info(
+                    f"playback {label}: 末段兜底完成（{msg_fb}）")
 
         self._schedule_back_to_ready(0.3)
         resp.success = True
@@ -6397,6 +6446,24 @@ class ArmController(Node):
             resp.message = "no /joint_states yet"
             return resp
         q = [round(float(p), 4) for p in self._positions]
+        # F198 修复：零力矩示教可把关节拖过 URDF 限位，录制下来会导致
+        # pilz "violates joint limits in goal constraints"（-16）。打点时夹回限位内，
+        # 预留 moveit_goal_tolerance_rad + 1e-3 余量。
+        tol = float(self.get_parameter("moveit_goal_tolerance_rad").value)
+        margin = tol + 1e-3
+        clamped: List[str] = []
+        for i, jn in enumerate(self._joint_names):
+            lim = self._joint_limits.get(jn)
+            if not lim or i >= len(q):
+                continue
+            lo, hi = lim[0] + margin, lim[1] - margin
+            qc = min(max(q[i], lo), hi)
+            if abs(qc - q[i]) > 1e-9:
+                clamped.append(f"{jn} {q[i]:+.4f}->{qc:+.4f}")
+                q[i] = round(qc, 4)
+        if clamped:
+            self.get_logger().warn(
+                "waypoint capture clamped to joint limits: " + ", ".join(clamped))
         min_d = float(self.get_parameter("waypoint_min_capture_delta_rad").value)
         if self._waypoints:
             last = self._waypoints[-1]["positions"]
@@ -6731,6 +6798,8 @@ class ArmController(Node):
                     if slot == "extremes":  # 极限键同步派生 32 键检测流
                         _iok, ins_msg = self._generate_melodion_inspection()
                         auto_msgs.append(ins_msg)
+                        _mok, music_msg = self._generate_melodion_music()
+                        auto_msgs.append(music_msg)
             else:
                 auto_msgs.append("auto-save FAILED (see log)")
         else:
@@ -6879,6 +6948,106 @@ class ArmController(Node):
             f"inspection: {len(waypoints)} 键 -> {len(doc['segments'])} 段 -> "
             f"streams/inspection.yaml（span={span_mm:.0f}mm, "
             f"retreat={layout['retreat_mm']:.0f}mm）")
+
+    def _melodion_score_path(self, name: str) -> str:
+        """曲谱文件路径：优先安装 share，回落仓库开发树。"""
+        fname = os.path.basename(name) + ".yaml"
+        candidates: List[str] = []
+        try:
+            candidates.append(os.path.join(
+                get_package_share_directory("app_melodion"),
+                "config", "scores", fname))
+        except Exception:  # noqa: BLE001
+            pass
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))))
+        candidates.append(os.path.join(
+            repo, "src", "app_melodion", "config", "scores", fname))
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        raise FileNotFoundError(f"曲谱 {fname} 未找到（试过：{candidates}）")
+
+    def _generate_melodion_music(self) -> Tuple[bool, str]:
+        """极限键重录后，用现有 ``music.yaml`` 的曲目与参数重新生成乐曲线。
+
+        坐标全部换为新极限键反推的布局；曲名/标题、段 speed/mode 取旧文件，
+        最短按住 0.05s（与离线脚本一致）。无 ``music.yaml`` 时跳过，不算失败。
+        返回 (成功, 说明)；失败保留旧文件。
+        """
+        ms = _melodion_stream
+        out_path = os.path.join(self._melodion_stream_dir, "music.yaml")
+        wp_path = os.path.join(self._melodion_wp_dir, "extremes.yaml")
+        if not os.path.exists(out_path):
+            return True, "music: 无现有乐曲线，跳过"
+        if not os.path.exists(wp_path):
+            return False, "music: 缺 melodion/waypoints/extremes.yaml"
+        try:
+            from app_melodion import key_layout
+            from app_melodion.score import load_score
+
+            old = ms.load_yaml(out_path) or {}
+            score_name = os.path.basename(str(old.get("name") or "").strip())
+            if not score_name:
+                return False, "music: 旧文件缺曲目名 name，跳过（请离线重生成）"
+            score_path = self._melodion_score_path(score_name)
+            score = load_score(score_path)
+
+            keys = key_layout.load_keys(self._melodion_keys_path())
+            data = ms.load_yaml(wp_path)
+            if str(data.get("kind") or "") != "waypoint":
+                raise ValueError(f"kind={data.get('kind')!r}，需要 waypoint")
+            layout = key_layout.build_layout(data, keys)
+            waypoints, _beat = key_layout.score_to_waypoints(score, layout, keys)
+            min_dwell = 0.05
+            for wp in waypoints:
+                wp["sleep"] = max(float(wp.get("sleep", 0.0)), min_dwell)
+
+            old_segs = list(old.get("segments") or [])
+            template = old_segs[0] if old_segs else {}
+            speed = float(template.get("speed", ms.SPEED_DEFAULT))
+            mode = str(template.get("mode", ms.MODE_DEFAULT))
+            hold_orientation = bool(template.get("hold_orientation", True))
+            home = self._poses.get("home")
+            doc = ms.build_press_stream(
+                waypoints,
+                joint_names=data.get("joint_names") or self._joint_names,
+                press_mm=ms.PRESS_FLOOR_MM,
+                speed=speed,
+                dwell_s=min_dwell,
+                alpha=ms.ALPHA_DEFAULT,
+                beta=ms.BETA_DEFAULT,
+                clear_min_mm=ms.CLEAR_MIN_MM,
+                clear_max_mm=ms.CLEAR_MAX_MM,
+                mode=mode,
+                hold_orientation=hold_orientation,
+                home_positions=home,
+                waypoints_pressed=True,
+            )
+            title = str(score.get("title") or score_name).strip()
+            doc["name"] = score_name
+            doc["title"] = title
+            header = ms.header_lines(
+                source=f"曲谱 {score_path} + 极限键 melodion/waypoints/extremes.yaml",
+                press_mm=ms.PRESS_FLOOR_MM,
+                alpha=ms.ALPHA_DEFAULT,
+                beta=ms.BETA_DEFAULT,
+                clear_min_mm=ms.CLEAR_MIN_MM,
+                clear_max_mm=ms.CLEAR_MAX_MM,
+                speed=speed,
+                dwell_s=min_dwell,
+                mode=mode,
+                hold_orientation=hold_orientation,
+                waypoints_pressed=True,
+                home_note=("回命名点 'home'" if home else "停在末键上方"),
+            )
+            header.insert(1, f"# 曲名：{title}（{score_name}）")
+            ms.write_stream(out_path, doc, header)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"music: 重新生成失败 {exc}"
+        return True, (
+            f"music: {len(waypoints)} 音符 -> {len(doc['segments'])} 段，"
+            "已按新极限键重生成")
 
     def _melodion_gen_streams_cb(
         self, req: Trigger.Request, resp: Trigger.Response

@@ -150,7 +150,7 @@
 |------|------|
 | **D-pad ↓** | 开始**演奏路点示教**（`melodion/waypoints/press.yaml`）；L2 在「已按下」位置打点 |
 | **D-pad ←** | 开始**4 极限键录制**（`melodion/waypoints/extremes.yaml`）；顺序：白键最左(F3) → 白键最右(C6) → 黑键最右(A#5) → 黑键最左(F#3)，每键 L2 打点 |
-| **D-pad →** | **结束示教、保存并生成**：保存到当前槽位后立即生成该槽位 stream（press 槽→`streams/press.yaml`，extremes 槽→`streams/extremes.yaml` + 检测流 `streams/inspection.yaml`） |
+| **D-pad →** | **结束示教、保存并生成**：保存到当前槽位后立即生成该槽位 stream（press 槽→`streams/press.yaml`，extremes 槽→`streams/extremes.yaml` + 检测流 `streams/inspection.yaml`，已有 `streams/music.yaml` 时同步按新极限键重生成） |
 | **D-pad ↑** | **生成演奏流**：若正在示教先保存退出，再生成 `streams/press.yaml`；不连带生成 extremes |
 | **△ 短按** | 播放 `streams/press.yaml`（演奏路点生成的按键轨迹） |
 | **△ 长按 1.5s** | **停止当前运动/示教并回 `home`**（卡在中途或轨迹失败时的退出口） |
@@ -168,6 +168,10 @@
 - **全键检测**：`←` 录 4 极限键 → `→` 保存时会同时生成 `streams/inspection.yaml`
   （白1→白19→黑13→黑1，32 键各按一次）。若文件缺失或比极限键旧，长按 `○` 播放前会自动重生成；
   4 个极限键未录/不合法时会报错提示，不会回退到旧几何的静态检测流。
+- **乐曲线同步**：若 `streams/music.yaml` 已存在，保存极限键时会用同名曲谱按新坐标重生成
+  （保留原 speed/mode）；曲谱找不到则跳过并保留旧文件。
+- **演奏流依赖摆放**：`streams/press.yaml` 由 `↓` 演奏路点示教生成，只对当前口风琴位置有效；
+  重新摆放后需重新示教（旧文件没有意义，可直接删除）。
 
 #### 4.5 舞蹈（DANCE 模式，F197）
 
